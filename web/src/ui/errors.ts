@@ -19,6 +19,8 @@ export function errorMessage(t: TFunction, e: unknown): string {
       return t("errors.cross_origin");
     case "not_found":
       return t("errors.not_found");
+    case "validation": // a validation error not tied to a form field (e.g. from a row action)
+      return validationMessage(t, e.detail) ?? t("errors.unknown");
     case "invitation_invalid":
       return t("invite.invitation_invalid");
     case "invitation_used":
@@ -29,6 +31,8 @@ export function errorMessage(t: TFunction, e: unknown): string {
       return t("invite.invitation_expired");
     case "invitation_not_found":
       return t("errors.not_found");
+    case "invalid_transition":
+      return t("runners.invalid_transition");
     default:
       return t("errors.unknown");
   }
@@ -53,6 +57,8 @@ const validationKeys = new Set([
   "project_not_found",
   "ttl_out_of_range",
   "invitation_not_pending",
+  "projects_required",
+  "token_not_pending",
 ]);
 
 /** Message for a server validation code, or undefined if unknown. */

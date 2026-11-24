@@ -29,6 +29,10 @@ import (
 	projectsdb "github.com/tr1gl1de/kindevai/internal/projects/adapters/sqlite"
 	projectsapp "github.com/tr1gl1de/kindevai/internal/projects/app"
 	projects "github.com/tr1gl1de/kindevai/internal/projects/domain"
+	runnershttp "github.com/tr1gl1de/kindevai/internal/runners/adapters/httpapi"
+	runnersdb "github.com/tr1gl1de/kindevai/internal/runners/adapters/sqlite"
+	runnersapp "github.com/tr1gl1de/kindevai/internal/runners/app"
+	runners "github.com/tr1gl1de/kindevai/internal/runners/domain"
 	"github.com/tr1gl1de/kindevai/internal/server"
 )
 
@@ -144,7 +148,8 @@ func newIdentity(ctx context.Context, inst *bootstrap.Installation, audit *audit
 	}, nil
 }
 
-// newProjects wires the projects bounded context and the identity invitations that grant its memberships.
+// newProjects wires the projects bounded context, the identity invitations that grant its memberships and the
+// runners context, whose runners are granted projects.
 func newProjects(inst *bootstrap.Installation, id *identityModule, audit *auditModule, logger *slog.Logger) []server.Module {
 	users := id.Users
 	svc := &projectsapp.Service{
@@ -171,7 +176,35 @@ func newProjects(inst *bootstrap.Installation, id *identityModule, audit *auditM
 		Limiter: ratelimit.New(ratelimit.Config{Burst: 10, Every: time.Minute, MaxKeys: 10_000}, time.Now),
 		Logger:  logger,
 	}
-	return []server.Module{&projectshttp.Handler{Service: svc, Logger: logger}, invitations}
+	runnerMgmt := &runnershttp.Handler{
+		Service: &runnersapp.Service{
+			Repo:     runnersdb.New(inst.DB),
+			Projects: runnerProjects{svc},
+			Tx:       db.Transactor{DB: inst.DB},
+			Audit:    audit.Service,
+			Rand:     rand.Reader,
+			Now:      time.Now,
+			NewID:    rand.Text,
+			Logger:   logger,
+		},
+		Limiter: ratelimit.New(ratelimit.Config{Burst: 10, Every: time.Minute, MaxKeys: 10_000}, time.Now),
+		Logger:  logger,
+	}
+	return []server.Module{&projectshttp.Handler{Service: svc, Logger: logger}, invitations, runnerMgmt}
+}
+
+// runnerProjects gives the runners context the projects context's app API, translating its errors.
+type runnerProjects struct{ svc *projectsapp.Service }
+
+func (c runnerProjects) Lookup(ctx context.Context, id string) (runnersapp.ProjectRef, error) {
+	p, err := c.svc.Lookup(ctx, id)
+	if errors.Is(err, projects.ErrNotFound) {
+		return runnersapp.ProjectRef{}, runners.ErrNotFound
+	}
+	if err != nil {
+		return runnersapp.ProjectRef{}, err
+	}
+	return runnersapp.ProjectRef{ID: p.ID, Name: string(p.Name)}, nil
 }
 
 // projectCatalog gives identity's invitations the projects context's app API, translating its errors.

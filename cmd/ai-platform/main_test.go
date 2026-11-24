@@ -3,6 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -323,5 +327,57 @@ func TestServeRejectsBadTrustedProxies(t *testing.T) {
 	err := run(t.Context(), []string{"serve", "--addr", "127.0.0.1:0", "--data-dir", t.TempDir(), "--trusted-proxies", "nope"}, io.Discard, io.Discard, nil)
 	if err == nil || !strings.Contains(err.Error(), "trusted proxy") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// A runner enrolls through the real middleware without a session; the Owner sees it pending and approves it.
+func TestRunnerEnrollmentEndToEnd(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	base, stop := startServe(t, dataDir)
+	defer stop()
+	tok, _ := os.ReadFile(filepath.Join(dataDir, "secrets", "setup-token"))
+	setup := `{"token":"` + strings.TrimSpace(string(tok)) + `","login":"owner","password":"correct horse battery","platformName":"Acme"}`
+	if code, body := call(t, "POST", base+"/api/setup", setup); code != 201 {
+		t.Fatalf("setup = %d %s", code, body)
+	}
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	owner := func(method, path, body string) (int, string) {
+		req, _ := http.NewRequestWithContext(t.Context(), method, base+path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	if code, _ := owner("POST", "/api/auth/login", `{"login":"owner","password":"correct horse battery"}`); code != 200 {
+		t.Fatalf("login = %d", code)
+	}
+	code, body := owner("POST", "/api/projects", `{"name":"Web","slug":"web"}`)
+	var project struct{ ID string }
+	if err := json.Unmarshal([]byte(body), &project); code != 201 || err != nil {
+		t.Fatalf("create project = %d %s", code, body)
+	}
+	code, body = owner("POST", "/api/runners/enrollment-tokens", "")
+	var created struct{ Token string }
+	if err := json.Unmarshal([]byte(body), &created); code != 201 || err != nil || created.Token == "" {
+		t.Fatalf("create token = %d %s", code, body)
+	}
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	enroll := `{"token":"` + created.Token + `","publicKey":"` + base64.StdEncoding.EncodeToString(pub) + `","hostname":"wsl-box","os":"linux","arch":"amd64","version":"0.1.0"}`
+	code, body = call(t, "POST", base+"/api/runners/enroll", enroll) // no session
+	var reg struct{ RunnerID, Status string }
+	if err := json.Unmarshal([]byte(body), &reg); code != 201 || err != nil || reg.Status != "pending" {
+		t.Fatalf("enroll = %d %s", code, body)
+	}
+	if code, _ := call(t, "GET", base+"/api/runners", ""); code != 401 {
+		t.Fatalf("runners list without session = %d", code)
+	}
+	if code, body := owner("POST", "/api/runners/"+reg.RunnerID+"/approve", `{"projectIds":["`+project.ID+`"]}`); code != 200 || !strings.Contains(body, `"approved"`) {
+		t.Fatalf("approve = %d %s", code, body)
 	}
 }

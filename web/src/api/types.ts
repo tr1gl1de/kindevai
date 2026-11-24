@@ -164,3 +164,45 @@ export interface AuditFilter {
   /** RFC 3339, exclusive. */
   to?: string;
 }
+
+export type RunnerStatus = "pending" | "approved" | "disabled" | "revoked";
+export type EnrollmentTokenState = "pending" | "used" | "revoked" | "expired";
+
+/** A one-time enrollment token as listed for the Owner (never the token itself). */
+export interface EnrollmentToken {
+  id: string;
+  state: EnrollmentTokenState;
+  createdAt: string;
+  expiresAt: string;
+  runnerId?: string;
+}
+
+/** POST /api/runners/enrollment-tokens: the token is shown to the Owner once. */
+export interface CreateEnrollmentTokenResult {
+  enrollmentToken: EnrollmentToken;
+  token: string;
+}
+
+/** An enrolled runner machine. The fingerprint is OpenSSH-style ("SHA256:…") of its Ed25519 public key. */
+export interface Runner {
+  id: string;
+  status: RunnerStatus;
+  fingerprint: string;
+  publicKey: string;
+  /** Reported by the machine; informational, not proof of identity. */
+  hostname: string;
+  os: string;
+  arch: string;
+  version: string;
+  enrolledAt: string;
+  approvedAt: string | null;
+  disabledAt: string | null;
+  revokedAt: string | null;
+  lastSeenAt: string | null;
+  projects: { id: string; name: string }[];
+}
+
+/** Body of approve and PUT projects: an explicit, non-empty list. */
+export interface RunnerProjectsRequest {
+  projectIds: string[];
+}

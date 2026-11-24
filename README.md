@@ -59,7 +59,7 @@ run again, including after a restart.
 
 After setup, sign in with the Owner login and password. Sessions are server-side: the browser keeps an HttpOnly,
 SameSite=Strict cookie (Secure over HTTPS), and the session ends after 12 hours of inactivity or 7 days at most,
-or on sign-out. Every API endpoint except health, setup and login requires a session; cross-origin state-changing
+or on sign-out. Every API endpoint except health, setup, login, invitation acceptance and runner enrollment requires a session; cross-origin state-changing
 requests are rejected, and login attempts are rate-limited per address and per account.
 
 ### Projects and access
@@ -68,6 +68,19 @@ The Owner creates projects and grants memberships (`project_admin` or `member`);
 manages memberships. Users see only projects they belong to — any other project answers `404`, exactly like a
 missing one. API: `GET/POST /api/projects`, `GET /api/projects/{id}`, `GET /api/projects/{id}/members`,
 `PUT/DELETE /api/projects/{id}/members/{login}`.
+
+### Runners
+
+The Owner adds a machine on the **Runners** page: **Add runner** shows a one-time enrollment token (256 bits, valid
+10 minutes, only its SHA-256 is stored) and the command to run there, `ai-runner enroll --server <URL>`, which asks
+for the token on stdin, so it never appears in argv or shell history. The runner generates an Ed25519 key pair and
+registers its public key at the public, rate-limited `POST /api/runners/enroll`; it becomes **pending** and cannot
+connect or receive work. The Owner compares the OpenSSH-style fingerprint (`SHA256:…`, the same as `ssh-keygen -lf`)
+with `ai-runner fingerprint` on the machine and approves it for an explicit list of projects; later they can change the
+projects, disable/enable or revoke it (revocation is final; re-enroll with a new key). Remote runners need HTTPS
+(the Caddy profile); plain HTTP is for a runner on the same host only. Owner API: `POST/GET /api/runners/enrollment-tokens`,
+`POST /api/runners/enrollment-tokens/{id}/revoke`, `GET /api/runners`, `GET /api/runners/{id}`,
+`POST /api/runners/{id}/{approve|disable|enable|revoke}`, `PUT /api/runners/{id}/projects`.
 
 ### Integrations and external calls
 
@@ -85,7 +98,7 @@ Security-relevant actions are recorded in an append-only audit log in the same t
 first-run setup completed; sign-in, failed sign-in (address and reason; the login only if that account exists,
 never the password; attempts refused by the rate limiter are not recorded) and sign-out; account created, disabled,
 enabled, password reset or changed; invitations created, revoked or accepted; project created and member role set or
-removed (later contexts — runners, approvals, integrations — add theirs). Records cannot be changed or deleted (database triggers
+removed; runner enrollment tokens created or revoked, runners enrolled (or rejected attempts with a known token), approved, given projects, disabled, enabled or revoked (later contexts — approvals, integrations — add theirs). Records cannot be changed or deleted (database triggers
 refuse it, and there is no API for it); values that look like passwords or tokens are stored as `[redacted]`. The
 Owner reads the log on the **Audit log** page or at `GET /api/audit?actor=&project=&kind=&from=&to=&before=&limit=`
 (newest first, `next` is the cursor for the following page); other users get `403`. No automatic retention in the MVP.

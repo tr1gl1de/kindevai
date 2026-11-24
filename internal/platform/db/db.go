@@ -1,0 +1,153 @@
+// Package db opens the Control Plane SQLite database and applies its versioned schema migrations.
+package db
+
+import (
+	"context"
+	"database/sql"
+	"embed"
+	"errors"
+	"fmt"
+	"io/fs"
+	"net/url"
+	"regexp"
+	"sort"
+	"strconv"
+	"time"
+
+	_ "modernc.org/sqlite" // pure-Go SQLite driver: static binary, no CGO toolchain on the VPS or in Docker
+)
+
+//go:embed migrations/*.sql
+var embedded embed.FS
+
+// Migrations returns the schema migrations compiled into the binary.
+func Migrations() fs.FS {
+	sub, err := fs.Sub(embedded, "migrations")
+	if err != nil {
+		panic(err) // unreachable: the directory is embedded at compile time
+	}
+	return sub
+}
+
+// ErrSchemaTooNew means the database was migrated by a newer binary; running an older one could corrupt it.
+var ErrSchemaTooNew = errors.New("database schema is newer than this ai-platform binary")
+
+// Open opens (creating if needed) the SQLite database at path with WAL, foreign keys and a busy timeout.
+// The pool has one connection: SQLite allows one writer, and the Control Plane is the only process using it.
+func Open(ctx context.Context, path string) (*sql.DB, error) {
+	q := url.Values{}
+	for _, p := range []string{"journal_mode(WAL)", "foreign_keys(ON)", "busy_timeout(5000)", "synchronous(NORMAL)"} {
+		q.Add("_pragma", p)
+	}
+	q.Set("_txlock", "immediate")
+	d, err := sql.Open("sqlite", "file:"+path+"?"+q.Encode())
+	if err != nil {
+		return nil, fmt.Errorf("opening database %s: %w", path, err)
+	}
+	d.SetMaxOpenConns(1)
+	d.SetConnMaxIdleTime(0)
+	var mode string
+	if err := d.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode); err != nil {
+		_ = d.Close()
+		return nil, fmt.Errorf("opening database %s: %w", path, err)
+	}
+	if mode != "wal" {
+		_ = d.Close()
+		return nil, fmt.Errorf("database %s: journal_mode is %q, want wal", path, mode)
+	}
+	return d, nil
+}
+
+var migrationName = regexp.MustCompile(`^(\d{4})_[a-z0-9_]+\.sql$`)
+
+type migration struct {
+	version int
+	name    string
+}
+
+func list(migrations fs.FS) ([]migration, error) {
+	entries, err := fs.ReadDir(migrations, ".")
+	if err != nil {
+		return nil, fmt.Errorf("listing migrations: %w", err)
+	}
+	var ms []migration
+	for _, e := range entries {
+		if e.IsDir() || !isSQL(e.Name()) {
+			continue
+		}
+		m := migrationName.FindStringSubmatch(e.Name())
+		if m == nil {
+			return nil, fmt.Errorf("migration %q: name must look like 0001_description.sql", e.Name())
+		}
+		v, _ := strconv.Atoi(m[1])
+		ms = append(ms, migration{version: v, name: e.Name()})
+	}
+	sort.Slice(ms, func(i, j int) bool { return ms[i].version < ms[j].version })
+	for i, m := range ms {
+		if m.version != i+1 {
+			return nil, fmt.Errorf("migration %s: expected version %04d (versions must be 1..n without gaps or duplicates)", m.name, i+1)
+		}
+	}
+	return ms, nil
+}
+
+func isSQL(name string) bool { return len(name) > 4 && name[len(name)-4:] == ".sql" }
+
+// Version returns the highest applied migration version (0 for a fresh database).
+func Version(ctx context.Context, d *sql.DB) (int, error) {
+	if _, err := d.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL) STRICT`); err != nil {
+		return 0, fmt.Errorf("preparing schema_migrations: %w", err)
+	}
+	var v int
+	if err := d.QueryRowContext(ctx, "SELECT coalesce(max(version), 0) FROM schema_migrations").Scan(&v); err != nil {
+		return 0, fmt.Errorf("reading schema version: %w", err)
+	}
+	return v, nil
+}
+
+// Migrate applies pending migrations, each in its own transaction, and returns how many ran.
+func Migrate(ctx context.Context, d *sql.DB, migrations fs.FS) (int, error) {
+	ms, err := list(migrations)
+	if err != nil {
+		return 0, err
+	}
+	current, err := Version(ctx, d)
+	if err != nil {
+		return 0, err
+	}
+	if current > len(ms) {
+		return 0, fmt.Errorf("database is at version %d, binary knows %d: %w", current, len(ms), ErrSchemaTooNew)
+	}
+	applied := 0
+	for _, m := range ms[current:] {
+		body, err := fs.ReadFile(migrations, m.name)
+		if err != nil {
+			return applied, fmt.Errorf("reading migration %s: %w", m.name, err)
+		}
+		if err := apply(ctx, d, m, string(body)); err != nil {
+			return applied, err
+		}
+		applied++
+	}
+	return applied, nil
+}
+
+func apply(ctx context.Context, d *sql.DB, m migration, body string) error {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("migration %s: %w", m.name, err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	if _, err := tx.ExecContext(ctx, body); err != nil {
+		return fmt.Errorf("migration %s: %w", m.name, err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+		m.version, m.name, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		return fmt.Errorf("migration %s: recording version: %w", m.name, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("migration %s: commit: %w", m.name, err)
+	}
+	return nil
+}

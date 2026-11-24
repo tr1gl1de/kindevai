@@ -1,8 +1,19 @@
 import { HttpResponse, http } from "msw";
 import { setupServer } from "msw/node";
-import type { Health } from "../api/types";
+import type { ApiErrorBody, Health, Me, SetupStatus } from "../api/types";
 
-/** Default API handlers; tests override them with server.use(...). */
-export const handlers = [http.get("/api/health", () => HttpResponse.json<Health>({ status: "ok", version: "test" }))];
+export const json = <T,>(body: T, status = 200) => HttpResponse.json(body as object, { status });
+export const apiError = (status: number, error: string, field?: string) =>
+  HttpResponse.json<ApiErrorBody>({ error, message: error, ...(field ? { field } : {}) }, { status });
+
+export const owner: Me = { id: "u1", login: "owner", role: "owner" };
+
+/** Default: installed platform, signed-out visitor. Tests override with server.use(...). */
+export const handlers = [
+  http.get("/api/health", () => json<Health>({ status: "ok", version: "test" })),
+  http.get("/api/setup/status", () => json<SetupStatus>({ setupRequired: false })),
+  http.get("/api/auth/me", () => apiError(401, "unauthenticated")),
+  http.get("/api/projects", () => json([])),
+];
 
 export const server = setupServer(...handlers);

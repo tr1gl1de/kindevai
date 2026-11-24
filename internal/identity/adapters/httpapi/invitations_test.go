@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	auditdb "github.com/tr1gl1de/kindevai/internal/audit/adapters/sqlite"
+	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/identity/adapters/sqlite"
 	"github.com/tr1gl1de/kindevai/internal/identity/app"
 	"github.com/tr1gl1de/kindevai/internal/identity/domain"
@@ -75,7 +77,7 @@ func invitationsStack(t *testing.T, logs *bytes.Buffer, publicBurst int) (http.H
 	}
 	invitations := &app.InvitationsService{
 		Invitations: sqlite.NewInvitationRepository(d), Accounts: users, Projects: sqlProjects{d},
-		Tx: db.Transactor{DB: d}, Hasher: hasher, Rand: rand.Reader, Now: time.Now, NewID: rand.Text, Logger: logger,
+		Tx: db.Transactor{DB: d}, Audit: &auditapp.Service{Repo: auditdb.New(d), Now: time.Now}, Hasher: hasher, Rand: rand.Reader, Now: time.Now, NewID: rand.Text, Logger: logger,
 	}
 	mux := http.NewServeMux()
 	authn.Register(mux)

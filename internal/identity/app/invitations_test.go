@@ -5,11 +5,13 @@ import (
 	"crypto/rand"
 	"errors"
 	"maps"
+	"slices"
 	"sort"
 	"sync"
 	"testing"
 	"time"
 
+	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/identity/domain"
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
 )
@@ -118,18 +120,20 @@ func (p *memProjects) Grant(_ context.Context, projectID, userID, role string) e
 
 // snapshotTx gives the in-memory fakes transaction semantics: state is restored when fn fails.
 type snapshotTx struct {
-	mu   sync.Mutex
-	accs *memAccounts
-	invs *memInvitations
-	proj *memProjects
+	mu    sync.Mutex
+	accs  *memAccounts
+	invs  *memInvitations
+	proj  *memProjects
+	audit *memAudit
 }
 
 func (s *snapshotTx) InTx(ctx context.Context, fn func(context.Context) error) error {
 	s.mu.Lock() // serialised like the single SQLite writer
 	defer s.mu.Unlock()
 	users, invs, grants := maps.Clone(s.accs.users), maps.Clone(s.invs.byID), maps.Clone(s.proj.grants)
+	entries := slices.Clone(s.audit.entries)
 	if err := fn(ctx); err != nil {
-		s.accs.users, s.invs.byID, s.proj.grants = users, invs, grants
+		s.accs.users, s.invs.byID, s.proj.grants, s.audit.entries = users, invs, grants, entries
 		return err
 	}
 	return nil
@@ -140,6 +144,7 @@ type invFixture struct {
 	accs  *memAccounts
 	invs  *memInvitations
 	proj  *memProjects
+	audit *memAudit
 	clock *clock
 	owner auth.Principal
 }
@@ -149,13 +154,15 @@ func newInvFixture() *invFixture {
 		accs:  &memAccounts{users: map[string]domain.User{"o": {ID: "o", Login: "owner", Role: domain.RoleOwner}}},
 		invs:  &memInvitations{byID: map[string]domain.Invitation{}},
 		proj:  &memProjects{names: map[string]string{"p1": "Alpha"}, grants: map[string]string{}},
+		audit: &memAudit{},
 		clock: &clock{t: time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)},
 		owner: auth.Principal{UserID: "o", Login: "owner", Owner: true},
 	}
 	n := 0
 	f.svc = &InvitationsService{
 		Invitations: f.invs, Accounts: f.accs, Projects: f.proj,
-		Tx:     &snapshotTx{accs: f.accs, invs: f.invs, proj: f.proj},
+		Tx:     &snapshotTx{accs: f.accs, invs: f.invs, proj: f.proj, audit: f.audit},
+		Audit:  f.audit,
 		Hasher: hasher{}, Rand: rand.Reader, Now: f.clock.Now,
 		NewID: func() string { n++; return "id" + string(rune('0'+n)) },
 	}
@@ -341,5 +348,82 @@ func TestRevokeAndList(t *testing.T) {
 	}
 	if _, err := f.svc.List(t.Context(), auth.Principal{UserID: "u"}); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("non-owner list: %v", err)
+	}
+}
+
+func TestInvitationLifecycleIsAudited(t *testing.T) {
+	t.Parallel()
+	f := newInvFixture()
+	ctx := t.Context()
+	v, token := f.invite(t)
+	e := f.audit.last()
+	if e.Kind != KindInvitationCreated || e.Actor != auditapp.UserActor(f.owner) || e.ProjectID != "p1" ||
+		e.Subject != "invitation:"+v.Invitation.ID || e.Details["role"] != "member" {
+		t.Fatalf("created entry = %+v", e)
+	}
+	u, err := f.svc.Accept(ctx, token, "newuser", "a long enough password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e = f.audit.last()
+	if e.Kind != KindInvitationAccepted || e.Actor != auditapp.User(u.ID, "newuser") || e.ProjectID != "p1" ||
+		e.Subject != "invitation:"+v.Invitation.ID || e.Details["userId"] != u.ID {
+		t.Fatalf("accepted entry = %+v", e)
+	}
+	v2, _ := f.invite(t)
+	if err := f.svc.Revoke(ctx, f.owner, v2.Invitation.ID); err != nil {
+		t.Fatal(err)
+	}
+	e = f.audit.last()
+	if e.Kind != KindInvitationRevoked || e.ProjectID != "p1" || e.Subject != "invitation:"+v2.Invitation.ID {
+		t.Fatalf("revoked entry = %+v", e)
+	}
+	for _, x := range f.audit.entries {
+		for _, val := range x.Details {
+			if val == token {
+				t.Fatal("an invitation token reached the audit log")
+			}
+		}
+	}
+	if got := f.audit.kinds(); !slices.Equal(got, []string{KindInvitationCreated, KindInvitationAccepted, KindInvitationCreated, KindInvitationRevoked}) {
+		t.Fatalf("kinds = %v", got)
+	}
+}
+
+func TestFailedAcceptanceIsNotAudited(t *testing.T) {
+	t.Parallel()
+	f := newInvFixture()
+	_, token := f.invite(t)
+	f.proj.grantErr = errors.New("disk full")
+	if _, err := f.svc.Accept(t.Context(), token, "newuser", "a long enough password"); err == nil {
+		t.Fatal("Accept succeeded")
+	}
+	if got := f.audit.kinds(); !slices.Equal(got, []string{KindInvitationCreated}) {
+		t.Fatalf("kinds = %v, want only the creation", got)
+	}
+}
+
+func TestInvitationAuditFailureFailsTheAction(t *testing.T) {
+	t.Parallel()
+	f := newInvFixture()
+	v, token := f.invite(t)
+	f.audit.err = errors.New("disk full")
+	if _, _, err := f.svc.Create(t.Context(), f.owner, "p1", "member", 0); err == nil {
+		t.Fatal("Create succeeded without its audit event")
+	}
+	if len(f.invs.byID) != 1 {
+		t.Fatalf("invitation kept although the audit event failed: %d stored", len(f.invs.byID))
+	}
+	if err := f.svc.Revoke(t.Context(), f.owner, v.Invitation.ID); err == nil {
+		t.Fatal("Revoke succeeded without its audit event")
+	}
+	if _, err := f.svc.Accept(t.Context(), token, "newuser", "a long enough password"); err == nil {
+		t.Fatal("Accept succeeded without its audit event")
+	}
+	if inv, _ := f.invs.ByID(t.Context(), v.Invitation.ID); inv.State(f.clock.Now()) != domain.InvitationPending {
+		t.Fatalf("invitation state = %v, want still pending", inv.State(f.clock.Now()))
+	}
+	if _, err := f.accs.ByLogin(t.Context(), "newuser"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatal("account kept although the audit event failed")
 	}
 }

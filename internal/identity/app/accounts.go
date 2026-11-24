@@ -7,6 +7,7 @@ import (
 	"io"
 	"time"
 
+	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/identity/domain"
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
 )
@@ -31,10 +32,13 @@ type PasswordHashVerifier interface {
 	Verify(ctx context.Context, encodedHash, password string) (bool, error)
 }
 
-// AccountsService implements account management (Owner) and self-service password changes.
+// AccountsService implements account management (Owner) and self-service password changes. Every change runs in
+// one transaction with its audit event.
 type AccountsService struct {
 	Accounts AccountRepository
 	Sessions SessionRevoker
+	Tx       TxRunner
+	Audit    AuditLog
 	Hasher   PasswordHashVerifier
 	Rand     io.Reader
 	Now      func() time.Time
@@ -67,7 +71,14 @@ func (s *AccountsService) CreateUser(ctx context.Context, actor auth.Principal, 
 		return domain.User{}, "", err
 	}
 	u := domain.User{ID: s.NewID(), Login: l, PasswordHash: hash, Role: domain.RoleUser, CreatedAt: s.Now(), MustChangePassword: true}
-	if err := s.Accounts.Create(ctx, u); err != nil {
+	err = s.Tx.InTx(ctx, func(ctx context.Context) error {
+		if err := s.Accounts.Create(ctx, u); err != nil {
+			return err
+		}
+		return record(ctx, s.Audit, auditapp.Entry{Actor: auditapp.UserActor(actor), Kind: KindUserCreated,
+			Subject: userSubject(u.ID), Details: map[string]string{"login": string(u.Login)}})
+	})
+	if err != nil {
 		return domain.User{}, "", err
 	}
 	return u, temp, nil
@@ -105,15 +116,22 @@ func (s *AccountsService) SetDisabled(ctx context.Context, actor auth.Principal,
 	if u.Role == domain.RoleOwner {
 		return &domain.ValidationError{Field: "user", Code: "owner_cannot_be_disabled"}
 	}
-	if err := s.Accounts.SetDisabled(ctx, userID, disabled); err != nil {
-		return fmt.Errorf("updating account: %w", err)
+	kind := KindUserEnabled
+	if disabled {
+		kind = KindUserDisabled
 	}
-	// Revoke on disable, and again on re-enable: a login that raced with the disable could have created a
-	// session after the first revocation, which must not come back to life.
-	if err := s.Sessions.DeleteByUser(ctx, userID, nil); err != nil {
-		return fmt.Errorf("revoking sessions: %w", err)
-	}
-	return nil
+	return s.Tx.InTx(ctx, func(ctx context.Context) error {
+		if err := s.Accounts.SetDisabled(ctx, userID, disabled); err != nil {
+			return fmt.Errorf("updating account: %w", err)
+		}
+		// Revoke on disable, and again on re-enable: a login that raced with the disable could have created a
+		// session after the first revocation, which must not come back to life.
+		if err := s.Sessions.DeleteByUser(ctx, userID, nil); err != nil {
+			return fmt.Errorf("revoking sessions: %w", err)
+		}
+		return record(ctx, s.Audit, auditapp.Entry{Actor: auditapp.UserActor(actor), Kind: kind,
+			Subject: userSubject(u.ID), Details: map[string]string{"login": string(u.Login)}})
+	})
 }
 
 // ResetPassword gives an account a new temporary password and ends its sessions.
@@ -133,11 +151,18 @@ func (s *AccountsService) ResetPassword(ctx context.Context, actor auth.Principa
 	if err != nil {
 		return "", err
 	}
-	if err := s.Accounts.SetPassword(ctx, userID, hash, true); err != nil {
-		return "", fmt.Errorf("updating password: %w", err)
-	}
-	if err := s.Sessions.DeleteByUser(ctx, userID, nil); err != nil {
-		return "", fmt.Errorf("revoking sessions: %w", err)
+	err = s.Tx.InTx(ctx, func(ctx context.Context) error {
+		if err := s.Accounts.SetPassword(ctx, userID, hash, true); err != nil {
+			return fmt.Errorf("updating password: %w", err)
+		}
+		if err := s.Sessions.DeleteByUser(ctx, userID, nil); err != nil {
+			return fmt.Errorf("revoking sessions: %w", err)
+		}
+		return record(ctx, s.Audit, auditapp.Entry{Actor: auditapp.UserActor(actor), Kind: KindUserPasswordReset,
+			Subject: userSubject(u.ID), Details: map[string]string{"login": string(u.Login)}})
+	})
+	if err != nil {
+		return "", err
 	}
 	return temp, nil
 }
@@ -166,11 +191,14 @@ func (s *AccountsService) ChangePassword(ctx context.Context, actor auth.Princip
 	if err != nil {
 		return fmt.Errorf("hashing password: %w", err)
 	}
-	if err := s.Accounts.SetPassword(ctx, u.ID, hash, false); err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	if err := s.Sessions.DeleteByUser(ctx, u.ID, keepSession); err != nil {
-		return fmt.Errorf("revoking other sessions: %w", err)
-	}
-	return nil
+	return s.Tx.InTx(ctx, func(ctx context.Context) error {
+		if err := s.Accounts.SetPassword(ctx, u.ID, hash, false); err != nil {
+			return fmt.Errorf("updating password: %w", err)
+		}
+		if err := s.Sessions.DeleteByUser(ctx, u.ID, keepSession); err != nil {
+			return fmt.Errorf("revoking other sessions: %w", err)
+		}
+		return record(ctx, s.Audit, auditapp.Entry{Actor: auditapp.UserActor(actor), Kind: KindUserPasswordChanged,
+			Subject: userSubject(u.ID)})
+	})
 }

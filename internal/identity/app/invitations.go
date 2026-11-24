@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/identity/domain"
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
 )
@@ -65,6 +66,7 @@ type InvitationsService struct {
 	Accounts    AccountRepository
 	Projects    Projects
 	Tx          TxRunner
+	Audit       AuditLog
 	Hasher      PasswordHasher
 	Rand        io.Reader
 	Now         func() time.Time
@@ -111,10 +113,18 @@ func (s *InvitationsService) Create(ctx context.Context, actor auth.Principal, p
 		ID: s.NewID(), TokenHash: hash, ProjectID: p.ID, Role: role, CreatedBy: actor.UserID,
 		CreatedAt: now, ExpiresAt: now.Add(ttl),
 	}
-	if err := s.Invitations.Create(ctx, inv); errors.Is(err, domain.ErrNotFound) {
-		return InvitationView{}, "", errProjectNotFound // deleted between the lookup and the insert
-	} else if err != nil {
-		return InvitationView{}, "", fmt.Errorf("saving invitation: %w", err)
+	err = s.Tx.InTx(ctx, func(ctx context.Context) error {
+		if err := s.Invitations.Create(ctx, inv); errors.Is(err, domain.ErrNotFound) {
+			return errProjectNotFound // deleted between the lookup and the insert
+		} else if err != nil {
+			return fmt.Errorf("saving invitation: %w", err)
+		}
+		return record(ctx, s.Audit, auditapp.Entry{Actor: auditapp.UserActor(actor), Kind: KindInvitationCreated,
+			ProjectID: p.ID, Subject: invitationSubject(inv.ID),
+			Details: map[string]string{"role": role, "expiresAt": inv.ExpiresAt.UTC().Format(time.RFC3339)}})
+	})
+	if err != nil {
+		return InvitationView{}, "", err
 	}
 	s.logger().Info("invitation created", "invitation", inv.ID, "project", p.ID, "role", role, "by", actor.UserID)
 	return InvitationView{Invitation: inv, ProjectName: p.Name, State: domain.InvitationPending}, plain, nil
@@ -161,12 +171,19 @@ func (s *InvitationsService) Revoke(ctx context.Context, actor auth.Principal, i
 	if err := inv.Usable(now); err != nil {
 		return &domain.ValidationError{Field: "invitation", Code: "invitation_not_pending"}
 	}
-	ok, err := s.Invitations.Revoke(ctx, id, now)
+	err = s.Tx.InTx(ctx, func(ctx context.Context) error {
+		ok, err := s.Invitations.Revoke(ctx, id, now)
+		if err != nil {
+			return fmt.Errorf("revoking invitation: %w", err)
+		}
+		if !ok { // accepted or expired between the read and the update
+			return &domain.ValidationError{Field: "invitation", Code: "invitation_not_pending"}
+		}
+		return record(ctx, s.Audit, auditapp.Entry{Actor: auditapp.UserActor(actor), Kind: KindInvitationRevoked,
+			ProjectID: inv.ProjectID, Subject: invitationSubject(id), Details: map[string]string{"role": inv.Role}})
+	})
 	if err != nil {
-		return fmt.Errorf("revoking invitation: %w", err)
-	}
-	if !ok { // accepted or expired between the read and the update
-		return &domain.ValidationError{Field: "invitation", Code: "invitation_not_pending"}
+		return err
 	}
 	s.logger().Info("invitation revoked", "invitation", id, "by", actor.UserID)
 	return nil
@@ -251,6 +268,11 @@ func (s *InvitationsService) Accept(ctx context.Context, token, login, password 
 				return domain.ErrInvitationInvalid
 			}
 			return fmt.Errorf("granting membership: %w", err)
+		}
+		if err := record(ctx, s.Audit, auditapp.Entry{Actor: auditapp.User(u.ID, string(u.Login)), Kind: KindInvitationAccepted,
+			ProjectID: inv.ProjectID, Subject: invitationSubject(inv.ID),
+			Details: map[string]string{"role": inv.Role, "userId": u.ID, "login": string(u.Login)}}); err != nil {
+			return err
 		}
 		s.logger().Info("invitation accepted", "invitation", inv.ID, "project", inv.ProjectID, "user", u.ID)
 		return nil

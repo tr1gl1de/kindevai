@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/identity/domain"
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
 )
@@ -114,18 +117,78 @@ var (
 	bobP   = auth.Principal{UserID: "u-bob", Login: "bob"}
 )
 
+// memAudit records audit entries; err makes Record fail like a broken database.
+type memAudit struct {
+	mu      sync.Mutex
+	entries []auditapp.Entry
+	err     error
+}
+
+func (m *memAudit) Record(_ context.Context, e auditapp.Entry) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return m.err
+	}
+	m.entries = append(m.entries, e)
+	return nil
+}
+
+func (m *memAudit) kinds() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.entries))
+	for _, e := range m.entries {
+		out = append(out, e.Kind)
+	}
+	return out
+}
+
+func (m *memAudit) last() auditapp.Entry {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.entries[len(m.entries)-1]
+}
+
+// accountsTx gives the account fakes transaction semantics: users, revocations and audit entries are restored
+// when fn fails.
+type accountsTx struct {
+	mu    sync.Mutex
+	repo  *memAccounts
+	rev   *revoked
+	audit *memAudit
+}
+
+func (s *accountsTx) InTx(ctx context.Context, fn func(context.Context) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	users, all, keeps, entries := maps.Clone(s.repo.users), slices.Clone(s.rev.all), slices.Clone(s.rev.keeps), slices.Clone(s.audit.entries)
+	if err := fn(ctx); err != nil {
+		s.repo.users, s.rev.all, s.rev.keeps, s.audit.entries = users, all, keeps, entries
+		return err
+	}
+	return nil
+}
+
 func accountsFixture() (*AccountsService, *memAccounts, *revoked) {
+	s, repo, rev, _ := accountsFixtureWithAudit()
+	return s, repo, rev
+}
+
+func accountsFixtureWithAudit() (*AccountsService, *memAccounts, *revoked, *memAudit) {
 	repo := &memAccounts{users: map[string]domain.User{
 		"u-owner": {ID: "u-owner", Login: "owner", Role: domain.RoleOwner, PasswordHash: "h:owner password 1"},
 		"u-bob":   {ID: "u-bob", Login: "bob", Role: domain.RoleUser, PasswordHash: "h:bob password 12"},
 	}}
 	rev := &revoked{}
+	audit := &memAudit{}
 	n := 0
 	return &AccountsService{
 		Accounts: repo, Sessions: rev, Hasher: hasher{}, Rand: rand.Reader,
+		Tx: &accountsTx{repo: repo, rev: rev, audit: audit}, Audit: audit,
 		Now:   func() time.Time { return time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC) },
 		NewID: func() string { n++; return "u-new" + strings.Repeat("x", n) },
-	}, repo, rev
+	}, repo, rev, audit
 }
 
 func TestOwnerCreatesUserWithTemporaryPassword(t *testing.T) {
@@ -246,5 +309,70 @@ func TestOwnerPasswordIsNotResetThroughAccounts(t *testing.T) {
 	var ve *domain.ValidationError
 	if _, err := s.ResetPassword(t.Context(), ownerP, "u-owner"); !errors.As(err, &ve) || ve.Code != "owner_cannot_be_reset" {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestAccountChangesAreAudited(t *testing.T) {
+	t.Parallel()
+	s, _, _, audit := accountsFixtureWithAudit()
+	ctx := t.Context()
+	u, temp, err := s.CreateUser(ctx, ownerP, "carol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := audit.last()
+	if e.Kind != KindUserCreated || e.Actor != auditapp.UserActor(ownerP) || e.Subject != "user:"+u.ID || e.Details["login"] != "carol" {
+		t.Fatalf("created entry = %+v", e)
+	}
+	for _, v := range e.Details {
+		if v == temp {
+			t.Fatal("the temporary password reached the audit log")
+		}
+	}
+	if err := s.SetDisabled(ctx, ownerP, u.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDisabled(ctx, ownerP, u.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ResetPassword(ctx, ownerP, u.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ChangePassword(ctx, bobP, "bob password 12", "new password 123", nil); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{KindUserCreated, KindUserDisabled, KindUserEnabled, KindUserPasswordReset, KindUserPasswordChanged}
+	if got := audit.kinds(); !slices.Equal(got, want) {
+		t.Fatalf("kinds = %v, want %v", got, want)
+	}
+	if e := audit.last(); e.Actor != auditapp.UserActor(bobP) || e.Subject != "user:u-bob" {
+		t.Fatalf("password change entry = %+v", e)
+	}
+	// Refused actions leave no trace.
+	_, _, _ = s.CreateUser(ctx, bobP, "eve")
+	_ = s.SetDisabled(ctx, ownerP, "u-owner", true)
+	if got := audit.kinds(); len(got) != len(want) {
+		t.Fatalf("refused actions were audited: %v", got)
+	}
+}
+
+func TestAuditFailureRollsBackTheAccountChange(t *testing.T) {
+	t.Parallel()
+	s, repo, rev, audit := accountsFixtureWithAudit()
+	audit.err = errors.New("disk full")
+	if _, _, err := s.CreateUser(t.Context(), ownerP, "carol"); err == nil {
+		t.Fatal("CreateUser succeeded without its audit event")
+	}
+	if _, err := repo.ByLogin(t.Context(), "carol"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatal("user kept although the audit event failed")
+	}
+	if err := s.SetDisabled(t.Context(), ownerP, "u-bob", true); err == nil {
+		t.Fatal("SetDisabled succeeded without its audit event")
+	}
+	if repo.users["u-bob"].Disabled || len(rev.all) != 0 {
+		t.Fatal("disable kept although the audit event failed")
+	}
+	if _, err := s.ResetPassword(t.Context(), ownerP, "u-bob"); err == nil || repo.users["u-bob"].MustChangePassword {
+		t.Fatalf("reset kept although the audit event failed: %v", err)
 	}
 }

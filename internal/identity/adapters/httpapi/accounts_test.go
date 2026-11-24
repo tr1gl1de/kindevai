@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	auditdb "github.com/tr1gl1de/kindevai/internal/audit/adapters/sqlite"
+	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/identity/adapters/sqlite"
 	"github.com/tr1gl1de/kindevai/internal/identity/app"
 	"github.com/tr1gl1de/kindevai/internal/identity/domain"
@@ -43,7 +45,8 @@ func accountsStack(t *testing.T) http.Handler {
 		Service:   &app.AuthService{Users: users, Sessions: sessions, Passwords: hasher, Now: time.Now, Rand: rand.Reader},
 		IPLimiter: lim(), LoginLimiter: lim(),
 	}
-	accounts := &app.AccountsService{Accounts: users, Sessions: sessions, Hasher: hasher, Rand: rand.Reader, Now: time.Now, NewID: rand.Text}
+	accounts := &app.AccountsService{Accounts: users, Sessions: sessions, Hasher: hasher, Rand: rand.Reader, Now: time.Now, NewID: rand.Text,
+		Tx: db.Transactor{DB: d}, Audit: &auditapp.Service{Repo: auditdb.New(d), Now: time.Now}}
 	mux := http.NewServeMux()
 	authn.Register(mux)
 	(&AccountsHandler{Service: accounts, Limiter: ratelimit.New(ratelimit.Config{Burst: 5, Every: time.Minute, MaxKeys: 100}, time.Now)}).Register(mux)

@@ -11,6 +11,9 @@ import (
 	"sync"
 	"time"
 
+	audithttp "github.com/tr1gl1de/kindevai/internal/audit/adapters/httpapi"
+	auditdb "github.com/tr1gl1de/kindevai/internal/audit/adapters/sqlite"
+	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/identity/adapters/httpapi"
 	"github.com/tr1gl1de/kindevai/internal/identity/adapters/sqlite"
 	"github.com/tr1gl1de/kindevai/internal/identity/adapters/tokenfile"
@@ -54,6 +57,17 @@ func (m *messagingModule) start(ctx context.Context) (stop func()) {
 	return func() { cancel(); wg.Wait() }
 }
 
+// auditModule is the append-only audit log. Other contexts record through Service inside their own transactions.
+type auditModule struct {
+	Service *auditapp.Service
+	HTTP    server.Module
+}
+
+func newAudit(inst *bootstrap.Installation, logger *slog.Logger) *auditModule {
+	svc := &auditapp.Service{Repo: auditdb.New(inst.DB), Now: time.Now}
+	return &auditModule{Service: svc, HTTP: &audithttp.Handler{Service: svc, Logger: logger}}
+}
+
 // identityModule is the wired identity bounded context.
 type identityModule struct {
 	Modules    []server.Module
@@ -63,7 +77,7 @@ type identityModule struct {
 }
 
 // newIdentity wires the identity bounded context and prepares setup mode.
-func newIdentity(ctx context.Context, inst *bootstrap.Installation, logger *slog.Logger) (*identityModule, error) {
+func newIdentity(ctx context.Context, inst *bootstrap.Installation, audit *auditModule, logger *slog.Logger) (*identityModule, error) {
 	hasher := password.New(password.DefaultParams)
 	tokenPath := filepath.Join(inst.Dir.Path(), "secrets", "setup-token")
 	setup := &app.SetupService{
@@ -105,6 +119,8 @@ func newIdentity(ctx context.Context, inst *bootstrap.Installation, logger *slog
 		Service: &app.AccountsService{
 			Accounts: sqlite.NewUserRepository(inst.DB),
 			Sessions: sqlite.NewSessionRepository(inst.DB),
+			Tx:       db.Transactor{DB: inst.DB},
+			Audit:    audit.Service,
 			Hasher:   hasher,
 			Rand:     rand.Reader,
 			Now:      time.Now,
@@ -126,7 +142,7 @@ func newIdentity(ctx context.Context, inst *bootstrap.Installation, logger *slog
 }
 
 // newProjects wires the projects bounded context and the identity invitations that grant its memberships.
-func newProjects(inst *bootstrap.Installation, id *identityModule, logger *slog.Logger) []server.Module {
+func newProjects(inst *bootstrap.Installation, id *identityModule, audit *auditModule, logger *slog.Logger) []server.Module {
 	users := id.Users
 	svc := &projectsapp.Service{
 		Repo:  projectsdb.New(inst.DB),
@@ -140,6 +156,7 @@ func newProjects(inst *bootstrap.Installation, id *identityModule, logger *slog.
 			Accounts:    users,
 			Projects:    projectCatalog{svc},
 			Tx:          db.Transactor{DB: inst.DB},
+			Audit:       audit.Service,
 			Hasher:      id.Hasher,
 			Rand:        rand.Reader,
 			Now:         time.Now,

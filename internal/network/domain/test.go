@@ -178,7 +178,8 @@ func IPVerdict(exp Expected, observed4, observed6 string) string {
 	if (exp.IPv4 != "" && observed4 != "" && observed4 != exp.IPv4) || (exp.IPv6 != "" && observed6 != "" && observed6 != exp.IPv6) {
 		return CodeIPMismatch
 	}
-	if (exp.IPv4 != "" || exp.IPv6 != "") && !(exp.IPv4 != "" && observed4 == exp.IPv4) && !(exp.IPv6 != "" && observed6 == exp.IPv6) {
+	verified := (exp.IPv4 != "" && observed4 == exp.IPv4) || (exp.IPv6 != "" && observed6 == exp.IPv6)
+	if (exp.IPv4 != "" || exp.IPv6 != "") && !verified {
 		return CodeIPUnverified
 	}
 	return ""

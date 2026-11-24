@@ -218,7 +218,8 @@ func ipVerdict(np protocol.NetworkProfile, r protocol.NetworkTestResult) string 
 	if (e4 != "" && o4 != "" && o4 != e4) || (e6 != "" && o6 != "" && o6 != e6) {
 		return CodeIPMismatch
 	}
-	if (e4 != "" || e6 != "") && !(e4 != "" && o4 == e4) && !(e6 != "" && o6 == e6) {
+	verified := (e4 != "" && o4 == e4) || (e6 != "" && o6 == e6)
+	if (e4 != "" || e6 != "") && !verified {
 		return CodeIPUnverified
 	}
 	return ""

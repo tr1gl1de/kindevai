@@ -2,6 +2,7 @@ package backup
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"errors"
@@ -60,6 +61,18 @@ func TestExportImportRoundTrip(t *testing.T) {
 	if st, err := os.Stat(archive); err != nil || st.Mode().Perm() != 0o600 {
 		t.Fatalf("archive %v %v", st, err)
 	}
+
+	keyBytes, err := os.ReadFile(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewrite(t, archive, func(_ *Manifest, files map[string][]byte) {
+		for name, b := range files {
+			if bytes.Contains(b, bytes.TrimSpace(keyBytes)) {
+				t.Errorf("the key is inside the archive (%s)", name)
+			}
+		}
+	})
 
 	dst := filepath.Join(t.TempDir(), "dst")
 	m, err := Import(ctx, ImportOptions{Archive: archive, Key: key, DataDir: dst})
@@ -244,7 +257,14 @@ func TestImportVerifiesTheArchive(t *testing.T) {
 			delete(f, DBName)
 			m.Files = m.Files[1:]
 		}, ErrCorrupt},
-		"missing file": {func(_ *Manifest, f map[string][]byte) { delete(f, "artifacts/t1/report.txt") }, ErrCorrupt},
+		"declared size beyond free space": {func(m *Manifest, _ map[string][]byte) { m.Files[1].Size = 1 << 49 }, ErrNoSpace},
+		"absurd size":                     {func(m *Manifest, _ map[string][]byte) { m.Files[1].Size = 1 << 60 }, ErrCorrupt},
+		"absolute path": {func(m *Manifest, f map[string][]byte) {
+			f["/etc/evil"] = []byte("x")
+			m.Files = append(m.Files, File{Path: "/etc/evil", Size: 1})
+		}, ErrCorrupt},
+		"unlisted entry": {func(_ *Manifest, f map[string][]byte) { f["artifacts/extra"] = []byte("x") }, ErrCorrupt},
+		"missing file":   {func(_ *Manifest, f map[string][]byte) { delete(f, "artifacts/t1/report.txt") }, ErrCorrupt},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

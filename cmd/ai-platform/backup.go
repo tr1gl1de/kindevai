@@ -65,6 +65,6 @@ func importCmd(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	fmt.Fprintf(stdout, "imported installation %s (exported %s by %s, schema %d) into %s\n", m.InstallationID,
 		m.CreatedAt.Format("2006-01-02 15:04:05Z07:00"), m.AppVersion, m.SchemaVersion, *dataDir)
 	fmt.Fprintln(stdout, "start the Control Plane with `ai-platform serve`; runners reconnect by themselves. If the "+
-		"export was taken in maintenance mode, switch it off in Settings once you have checked the installation.")
+		"export was taken in maintenance mode, switch it off on the Maintenance page once you have checked the installation.")
 	return nil
 }

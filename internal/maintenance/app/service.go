@@ -54,8 +54,9 @@ type Service struct {
 	Drain Drain // optional
 	Now   func() time.Time
 
-	mu   sync.RWMutex
-	mode domain.Mode
+	setMu sync.Mutex // serialises Set; mu guards only the cached mode, so readers never wait for a transaction
+	mu    sync.RWMutex
+	mode  domain.Mode
 }
 
 // Load reads the persisted mode; call it once at startup.
@@ -107,10 +108,10 @@ func (s *Service) Set(ctx context.Context, p auth.Principal, enabled bool, reaso
 		}
 		next = m
 	}
-	s.mu.Lock()
-	cur := s.mode
+	s.setMu.Lock()
+	defer s.setMu.Unlock()
+	cur := s.Mode()
 	if cur.Enabled == next.Enabled && (!enabled || cur.Reason == next.Reason) {
-		s.mu.Unlock()
 		return s.Status(ctx)
 	}
 	if enabled && cur.Enabled { // only the reason changes: keep who and since
@@ -130,12 +131,11 @@ func (s *Service) Set(ctx context.Context, p auth.Principal, enabled bool, reaso
 		return s.Audit.Record(ctx, auditapp.Entry{Actor: auditapp.UserActor(p), Kind: kind, Subject: "platform",
 			Details: details})
 	})
-	if err == nil {
-		s.mode = next
-	}
-	s.mu.Unlock()
 	if err != nil {
 		return Status{}, fmt.Errorf("switching maintenance mode: %w", err)
 	}
+	s.mu.Lock()
+	s.mode = next
+	s.mu.Unlock()
 	return s.Status(ctx)
 }

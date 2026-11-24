@@ -197,10 +197,14 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
+	var lostErr error
 	select {
 	case err := <-errc:
 		return fmt.Errorf("serving: %w", err)
 	case <-ctx.Done():
+	case <-inst.Lost(): // KIN-41: another instance owns the database now; stop writing to it
+		logger.Error("instance record lost: another Control Plane instance may be using this database; stopping")
+		lostErr = bootstrap.ErrInstanceActive
 	}
 	logger.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -215,7 +219,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	if err := <-errc; !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serving: %w", err)
 	}
-	return nil
+	return lostErr
 }
 
 // health exits non-zero unless the Control Plane answers 200 on its health endpoint.

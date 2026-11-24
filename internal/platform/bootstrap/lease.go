@@ -43,6 +43,7 @@ type leaseKeeper struct {
 	now    func() time.Time
 	stop   context.CancelFunc
 	wg     sync.WaitGroup
+	lost   chan struct{} // closed when the record was taken over or could not be renewed for ttl
 }
 
 // acquireLease takes the instance record unless another instance renewed it within ttl, and keeps renewing it
@@ -67,7 +68,9 @@ func acquireLease(ctx context.Context, d *sql.DB, ttl time.Duration, now func() 
 		return nil, fmt.Errorf("reading the instance record: %w", err)
 	default:
 		var other lease
-		if json.Unmarshal([]byte(v), &other) == nil && t.Sub(other.HeartbeatAt) < ttl {
+		// The same host's previous process: it held the lock file we hold now, so it is gone (crash, kill -9) and
+		// a restart must not wait for the record to expire.
+		if json.Unmarshal([]byte(v), &other) == nil && t.Sub(other.HeartbeatAt) < ttl && other.Host != host {
 			return nil, fmt.Errorf("%w (host %q, pid %d, last heartbeat %s); stop it first, or wait %s if it crashed",
 				ErrInstanceActive, other.Host, other.PID, other.HeartbeatAt.Format(time.RFC3339), ttl)
 		}
@@ -79,7 +82,7 @@ func acquireLease(ctx context.Context, d *sql.DB, ttl time.Duration, now func() 
 		return nil, fmt.Errorf("taking the instance record: %w", err)
 	}
 	hctx, cancel := context.WithCancel(context.Background())
-	k := &leaseKeeper{db: d, holder: mine.Holder, ttl: ttl, now: now, stop: cancel}
+	k := &leaseKeeper{db: d, holder: mine.Holder, ttl: ttl, now: now, stop: cancel, lost: make(chan struct{})}
 	k.wg.Go(func() { k.heartbeat(hctx, mine) })
 	return k, nil
 }
@@ -101,6 +104,7 @@ func putLease(ctx context.Context, x execer, l lease) error {
 }
 
 func (k *leaseKeeper) heartbeat(ctx context.Context, l lease) {
+	last := l.HeartbeatAt
 	t := time.NewTicker(k.ttl / 3)
 	defer t.Stop()
 	for {
@@ -109,14 +113,30 @@ func (k *leaseKeeper) heartbeat(ctx context.Context, l lease) {
 			return
 		case <-t.C:
 		}
-		l.HeartbeatAt = k.now().UTC()
-		// Only our own record is renewed; a failed write is retried on the next tick.
+		at := k.now().UTC()
+		l.HeartbeatAt = at
+		// Only our own record is renewed; a failed write is retried on the next tick until ttl has passed.
 		b, err := json.Marshal(l)
 		if err != nil {
 			continue
 		}
-		_, _ = k.db.ExecContext(ctx, `UPDATE meta SET value = ? WHERE key = ? AND json_extract(value, '$.holder') = ?`,
+		res, err := k.db.ExecContext(ctx, `UPDATE meta SET value = ? WHERE key = ? AND json_extract(value, '$.holder') = ?`,
 			string(b), metaInstanceLock, k.holder)
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			if n, rerr := res.RowsAffected(); rerr == nil && n == 0 {
+				close(k.lost) // another instance took the record over: we must stop writing
+				return
+			}
+			last = at
+			continue
+		}
+		if at.Sub(last) >= k.ttl {
+			close(k.lost) // others may consider the record stale and start
+			return
+		}
 	}
 }
 

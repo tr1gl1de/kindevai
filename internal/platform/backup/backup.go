@@ -33,6 +33,7 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
 	"github.com/tr1gl1de/kindevai/internal/platform/datadir"
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
+	"github.com/tr1gl1de/kindevai/internal/platform/diskusage"
 	"github.com/tr1gl1de/kindevai/internal/platform/secrets"
 )
 
@@ -46,7 +47,11 @@ const (
 	ArtifactsDir = "artifacts"
 )
 
-const maxManifestBytes = 1 << 20
+const (
+	maxManifestBytes = 1 << 20
+	maxFiles         = 100_000
+	spaceReserve     = 64 << 20 // headroom for migrations and the WAL after import
+)
 
 // Errors.
 var (
@@ -57,6 +62,7 @@ var (
 	ErrFormat       = errors.New("archive format is not supported by this ai-platform binary")
 	ErrNoInstall    = errors.New("no installation in the data directory")
 	ErrTargetExists = errors.New("output file already exists")
+	ErrNoSpace      = errors.New("not enough free space in the data directory for the archive's contents")
 )
 
 // File is one archived file.
@@ -390,7 +396,7 @@ func Import(ctx context.Context, o ImportOptions) (m Manifest, err error) {
 			_ = os.RemoveAll(filepath.Join(dir.Path(), ArtifactsDir))
 		}
 	}()
-	m, err = extract(o.Archive, staging)
+	m, err = extract(o.Archive, staging, func(total int64) error { return checkSpace(dir.Path(), total) })
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -417,7 +423,9 @@ func Import(ctx context.Context, o ImportOptions) (m Manifest, err error) {
 	if err := copyKey(o.Key, o.KeyFile); err != nil {
 		return Manifest{}, err
 	}
-	// Release the lock and bring the installation up once: migrations run and the key is checked as on serve.
+	// Release the lock and bring the installation up once: migrations run and the key is checked as on serve. In
+	// the short gap another process could take the directory; it then finds a complete installation (files and key
+	// are in place), and our Run fails with the lock error instead of corrupting anything.
 	locked = false
 	if err := dir.Close(); err != nil {
 		return Manifest{}, err
@@ -457,8 +465,22 @@ func prepare(ctx context.Context, dbFile string) error {
 	return bootstrap.ClearInstanceRecord(ctx, d)
 }
 
-// extract reads the archive into dir, checking the manifest and every file against it.
-func extract(archive, dir string) (Manifest, error) {
+// checkSpace refuses an archive whose declared contents do not fit the data directory's free space, before
+// anything is extracted (a small, highly compressed archive must not fill the disk).
+func checkSpace(dir string, total int64) error {
+	u, err := diskusage.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("checking free space: %w", err)
+	}
+	if total > u.AvailableBytes-spaceReserve {
+		return fmt.Errorf("%w: needs %d bytes, %d available", ErrNoSpace, total+spaceReserve, u.AvailableBytes)
+	}
+	return nil
+}
+
+// extract reads the archive into dir, checking the manifest and every file against it. fits is called with the
+// total declared size before any file is written.
+func extract(archive, dir string, fits func(total int64) error) (Manifest, error) {
 	f, err := os.Open(archive)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("opening archive: %w", err)
@@ -480,15 +502,23 @@ func extract(archive, dir string) (Manifest, error) {
 	if m.Format != Format {
 		return Manifest{}, fmt.Errorf("%w: format %d, this binary reads %d", ErrFormat, m.Format, Format)
 	}
+	if len(m.Files) > maxFiles {
+		return Manifest{}, fmt.Errorf("%w: more than %d files", ErrCorrupt, maxFiles)
+	}
 	want := map[string]File{}
+	var total int64
 	for _, fe := range m.Files {
-		if !validPath(fe.Path) || fe.Size < 0 {
+		if !validPath(fe.Path) || fe.Size < 0 || fe.Size > 1<<50 {
 			return Manifest{}, fmt.Errorf("%w: invalid path %q", ErrCorrupt, fe.Path)
 		}
 		if _, dup := want[fe.Path]; dup {
 			return Manifest{}, fmt.Errorf("%w: duplicate %q", ErrCorrupt, fe.Path)
 		}
 		want[fe.Path] = fe
+		total += fe.Size
+	}
+	if err := fits(total); err != nil {
+		return Manifest{}, err
 	}
 	if _, ok := want[DBName]; !ok {
 		return Manifest{}, fmt.Errorf("%w: no database", ErrCorrupt)

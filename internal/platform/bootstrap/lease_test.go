@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -108,4 +109,38 @@ func TestInstanceRecordHeartbeat(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("heartbeat not renewed")
+}
+
+// A record taken over by another instance (or not renewable within its TTL) is reported, so the Control Plane stops
+// instead of writing alongside the other instance.
+func TestLostInstanceRecordIsReported(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "data")
+	inst, err := Run(t.Context(), Options{DataDir: dir, LeaseTTL: 60 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = inst.Close() })
+	now := time.Now()
+	writeLease(t, dir, lease{Holder: "other", Host: "elsewhere", PID: 1, StartedAt: now, HeartbeatAt: now})
+	select {
+	case <-inst.Lost():
+	case <-time.After(5 * time.Second):
+		t.Fatal("lost record not reported")
+	}
+}
+
+// After a crash on the same host the lock file is free again, so the restarted process takes its own stale
+// record over at once instead of waiting for the TTL (no crash loop under a restart policy).
+func TestSameHostRecordIsTakenOverAtOnce(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "data")
+	inst := mustRun(t, dir)
+	if err := inst.Close(); err != nil {
+		t.Fatal(err)
+	}
+	host, _ := os.Hostname()
+	now := time.Now()
+	writeLease(t, dir, lease{Holder: "crashed", Host: host, PID: 1, StartedAt: now, HeartbeatAt: now})
+	mustRun(t, dir)
 }

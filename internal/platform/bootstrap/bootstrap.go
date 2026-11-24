@@ -123,6 +123,15 @@ func Run(ctx context.Context, opts Options) (inst *Installation, err error) {
 	return &Installation{Dir: dir, DB: sqldb, Box: box, ID: id, Fresh: fresh, lease: lease}, nil
 }
 
+// Lost is closed when the instance record was taken over by another instance or could not be renewed within its
+// TTL (KIN-41): the Control Plane must stop, because another instance may now be writing to the same database.
+func (i *Installation) Lost() <-chan struct{} {
+	if i.lease == nil {
+		return nil
+	}
+	return i.lease.lost
+}
+
 // Close releases the instance record, closes the database and releases the data directory.
 func (i *Installation) Close() error {
 	var lerr error

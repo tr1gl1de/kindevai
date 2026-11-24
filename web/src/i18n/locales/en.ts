@@ -1005,7 +1005,7 @@ export const en = {
   },
   maintenance: {
     title: "Maintenance mode",
-    intro: "Switch maintenance mode on before you back up or move the installation. New steps are not handed out, running steps finish (drain), runners keep reconciling, and changes in the UI and API are paused for everyone. Signing in, cancelling tasks and webhooks still work.",
+    intro: "Switch maintenance mode on before you back up or move the installation. New steps are not handed out, running steps finish (drain), runners keep reconciling, and changes in the UI and API are paused for everyone. Signing in, webhooks and safety actions still work: cancelling a task, revoking or disabling a runner, disabling a user, rejecting an approval.",
     stateOn: "On since {{date}} (by {{by}}).",
     stateOff: "Off: the platform works normally.",
     draining_one: "{{count}} step is still running.",

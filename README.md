@@ -281,12 +281,13 @@ Owner reads the log on the **Audit log** page or at `GET /api/audit?actor=&proje
 
 Automatic backups are not part of the MVP; `export`/`import` move an installation by hand. The Control Plane is a
 single instance: besides the lock file `data/ai-platform.lock` it keeps an instance record (host, pid, heartbeat) in
-the database, so a second process on the same data refuses to start — even over a network file system. After a crash
-the record expires within 30 seconds.
+the database, so a second process on the same data refuses to start — even over a network file system. A restart on the same
+host takes the record over at once; from another host it expires 30 seconds after the last heartbeat, and an instance
+that loses its record stops.
 
 1. **Maintenance mode** (Owner, *Maintenance* in the menu): no new steps are handed out, running ones finish, runners
-   keep reconciling, and changes in the UI/API are paused for everyone (signing in, cancelling tasks and webhooks still
-   work). A banner shows the reason and how many steps are still running. Wait until none are.
+   keep reconciling, and changes in the UI/API are paused for everyone (signing in, webhooks and safety actions still work:
+   cancelling a task, revoking/disabling a runner, disabling a user, rejecting an approval). A banner shows the reason and how many steps are still running. Wait until none are.
 2. **Export** (works while serving; an online, consistent SQLite snapshot):
    ```bash
    ai-platform export --data-dir ./data --out backup.tar.gz --key-out backup.key

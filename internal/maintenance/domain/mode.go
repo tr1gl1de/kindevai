@@ -41,19 +41,35 @@ func Disabled() Mode { return Mode{} }
 
 // writeAllowed are API paths (or prefixes ending in "/") that still accept changes in maintenance mode.
 var writeAllowed = []string{"/api/auth/", "/api/setup", "/api/maintenance", "/api/webhooks/", "/api/telegram/login",
-	"/api/runners/enroll"}
+	"/api/runners/enroll", "/api/invitations/preview"}
+
+// safetyActions are "/api/<collection>/{id}/<action>" changes kept in maintenance mode: they stop or reduce work
+// (and answer a security incident), never start new work.
+var safetyActions = map[string][]string{
+	"tasks":     {"cancel"},
+	"runners":   {"revoke", "disable"},
+	"users":     {"disable"},
+	"approvals": {"reject"},
+}
 
 // WriteAllowed reports whether a change request to path is accepted while maintenance mode is on: signing in and
-// out, the mode itself, inbound webhooks (they only fill the durable inbox), runner enrollment and cancelling a task.
+// out, the mode itself, inbound webhooks (they only fill the durable inbox), runner enrollment, the read-only
+// invitation preview and the safety actions (cancel a task, revoke or disable a runner, disable a user, reject an
+// approval).
 func WriteAllowed(path string) bool {
 	for _, p := range writeAllowed {
 		if path == p || strings.HasSuffix(p, "/") && strings.HasPrefix(path, p) {
 			return true
 		}
 	}
-	rest, ok := strings.CutPrefix(path, "/api/tasks/")
-	if id, ok2 := strings.CutSuffix(rest, "/cancel"); ok && ok2 && id != "" && !strings.Contains(id, "/") {
-		return true
+	parts := strings.Split(strings.TrimPrefix(path, "/api/"), "/")
+	if !strings.HasPrefix(path, "/api/") || len(parts) != 3 || parts[1] == "" {
+		return false
+	}
+	for _, a := range safetyActions[parts[0]] {
+		if parts[2] == a {
+			return true
+		}
 	}
 	return false
 }

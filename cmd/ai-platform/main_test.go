@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -243,5 +244,68 @@ func TestLoginAfterSetupEndToEnd(t *testing.T) {
 	}
 	if code := get("/api/auth/me"); code != 401 {
 		t.Fatalf("me after logout = %d", code)
+	}
+}
+
+func TestHealthCommand(t *testing.T) {
+	t.Parallel()
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/health" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{"status":"ok"}`)
+	}))
+	t.Cleanup(ok.Close)
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(bad.Close)
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr bool
+	}{
+		{"healthy", []string{"health", "--url", ok.URL + "/api/health"}, false},
+		{"unhealthy", []string{"health", "--url", bad.URL + "/api/health"}, true},
+		{"unreachable", []string{"health", "--url", "http://127.0.0.1:1/api/health", "--timeout", "1s"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := run(t.Context(), tt.args, io.Discard, io.Discard, nil)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestSetupTokenCommand(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	var out bytes.Buffer
+	if err := run(t.Context(), []string{"setup-token", "--data-dir", dataDir}, &out, io.Discard, nil); err == nil {
+		t.Fatal("want an error when no setup token exists")
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "secrets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "secrets", "setup-token"), []byte("tok-123\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(t.Context(), []string{"setup-token", "--data-dir", dataDir}, &out, io.Discard, nil); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "tok-123\n" {
+		t.Fatalf("stdout = %q", out.String())
+	}
+}
+
+func TestServeRejectsBadTrustedProxies(t *testing.T) {
+	t.Parallel()
+	err := run(t.Context(), []string{"serve", "--addr", "127.0.0.1:0", "--data-dir", t.TempDir(), "--trusted-proxies", "nope"}, io.Discard, io.Discard, nil)
+	if err == nil || !strings.Contains(err.Error(), "trusted proxy") {
+		t.Fatalf("err = %v", err)
 	}
 }

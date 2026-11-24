@@ -7,15 +7,19 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
+	"github.com/tr1gl1de/kindevai/internal/platform/httpx"
 	"github.com/tr1gl1de/kindevai/internal/server"
 	"github.com/tr1gl1de/kindevai/web"
 )
@@ -36,6 +40,8 @@ const usage = `usage: ai-platform <command> [flags]
 
 commands:
   serve     run the Control Plane (default 127.0.0.1:8080, data in ./data)
+  health    check a running Control Plane (used by the Docker HEALTHCHECK)
+  setup-token  print the one-time first-run setup token (needs access to the data directory)
   version   print the version
 `
 
@@ -48,6 +54,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, ready cha
 	switch args[0] {
 	case "serve":
 		return serve(ctx, args[1:], stderr, ready)
+	case "setup-token":
+		return setupToken(args[1:], stdout, stderr)
+	case "health":
+		return health(ctx, args[1:], stderr)
 	case "version":
 		fmt.Fprintln(stdout, version)
 		return nil
@@ -64,9 +74,15 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	fset := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fset.SetOutput(stderr)
 	addr := fset.String("addr", "127.0.0.1:8080", "listen address")
-	dataDir := fset.String("data-dir", "./data", "data directory (SQLite, keys, artifacts); created if missing")
+	dataDir := fset.String("data-dir", defaultDataDir(), "data directory (SQLite, keys, artifacts); created if missing")
 	keyFile := fset.String("key-file", "", "encryption key file (default <data-dir>/secrets/master.key)")
+	proxies := fset.String("trusted-proxies", os.Getenv("KINDEV_TRUSTED_PROXIES"),
+		"comma-separated CIDRs of reverse proxies whose X-Forwarded-For is trusted (e.g. the Caddy network)")
 	if err := fset.Parse(args); err != nil {
+		return err
+	}
+	trusted, err := httpx.ParseTrustedProxies(*proxies)
+	if err != nil {
 		return err
 	}
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
@@ -98,7 +114,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	srv := &http.Server{
 		Handler: server.New(server.Options{
 			Version: version, Assets: assets, Logger: logger, Modules: append(identity.Modules, newProjects(inst, identity.Users, logger)),
-			Middleware: identity.Middleware,
+			Middleware: func(h http.Handler) http.Handler { return trusted.Middleware(identity.Middleware(h)) },
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -133,4 +149,60 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 		return fmt.Errorf("serving: %w", err)
 	}
 	return nil
+}
+
+// health exits non-zero unless the Control Plane answers 200 on its health endpoint.
+func health(ctx context.Context, args []string, stderr io.Writer) error {
+	fset := flag.NewFlagSet("health", flag.ContinueOnError)
+	fset.SetOutput(stderr)
+	url := fset.String("url", "http://127.0.0.1:8080/api/health", "health endpoint")
+	timeout := fset.Duration("timeout", 3*time.Second, "request timeout")
+	if err := fset.Parse(args); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, *timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, *url, nil)
+	if err != nil {
+		return fmt.Errorf("health: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("health: %w", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("health: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// setupToken prints the current setup token. Reading the data directory is the trusted local channel, so this
+// works on the host (`ai-platform setup-token`) and in the distroless container (`docker compose exec cp
+// ai-platform setup-token`), which has no shell or cat.
+func setupToken(args []string, stdout, stderr io.Writer) error {
+	fset := flag.NewFlagSet("setup-token", flag.ContinueOnError)
+	fset.SetOutput(stderr)
+	dataDir := fset.String("data-dir", defaultDataDir(), "data directory")
+	if err := fset.Parse(args); err != nil {
+		return err
+	}
+	b, err := os.ReadFile(filepath.Join(*dataDir, "secrets", "setup-token"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return errors.New("no setup token: setup is completed, or the Control Plane has not started yet")
+	}
+	if err != nil {
+		return fmt.Errorf("reading setup token: %w", err)
+	}
+	_, err = fmt.Fprintln(stdout, strings.TrimSpace(string(b)))
+	return err
+}
+
+// defaultDataDir is /data inside the container image, ./data elsewhere.
+func defaultDataDir() string {
+	if v := os.Getenv("KINDEV_DATA_DIR"); v != "" {
+		return v
+	}
+	return "./data"
 }

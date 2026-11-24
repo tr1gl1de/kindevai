@@ -44,7 +44,7 @@ export const ru: Messages = {
     title: "Настройка AI Platform",
     intro: "Создайте учётную запись владельца. Одноразовый setup token лежит в файле secrets/setup-token в каталоге данных на сервере.",
     token: "Setup token",
-    tokenHint: "Прочитайте его на сервере, например cat data/secrets/setup-token. Он действует один час.",
+    tokenHint: "На сервере выполните: ai-platform setup-token (Docker: docker compose exec cp ai-platform setup-token). Действует один час.",
     login: "Логин владельца",
     loginHint: "3–64 символа: латиница a–z, цифры, точка, дефис, подчёркивание.",
     password: "Пароль",

@@ -50,7 +50,7 @@ a replacement. Only one process can use a data directory at a time.
 
 A new installation starts in setup mode. Creating the first Owner requires a one-time **setup token**, which is
 never shown in logs or over HTTP: it is written to `data/secrets/setup-token` (mode 0600; the log only prints the
-path). Read it on the host (`cat data/secrets/setup-token`, or `docker compose exec … cat /data/secrets/setup-token`),
+path). Read it on the host (`ai-platform setup-token`, or `docker compose exec cp ai-platform setup-token`),
 then enter it in the Dashboard wizard together with the Owner login, password (12+ characters) and platform name.
 The token expires after an hour and is renewed automatically; after setup it is deleted and setup can never be
 run again, including after a restart.
@@ -68,6 +68,22 @@ The Owner creates projects and grants memberships (`project_admin` or `member`);
 manages memberships. Users see only projects they belong to — any other project answers `404`, exactly like a
 missing one. API: `GET/POST /api/projects`, `GET /api/projects/{id}`, `GET /api/projects/{id}/members`,
 `PUT/DELETE /api/projects/{id}/members/{login}`.
+
+## Docker Compose
+
+```bash
+docker compose up -d                                        # one container, http://127.0.0.1:8080
+DOMAIN=ai.example.com docker compose --profile https up -d  # + Caddy with automatic HTTPS on 80/443
+docker compose exec cp ai-platform setup-token        # first-run setup token
+```
+
+No `.env` is needed. The plain-HTTP port is published on the host's loopback only; public access goes through
+the `https` profile (DNS for `DOMAIN` must point to the host). Data and the encryption key live in the `data`
+volume — back it up as a whole. The image is distroless, runs as a non-root user with a read-only root
+filesystem, and has a built-in health check (`ai-platform health`).
+Behind Caddy, per-client rate limits use `X-Forwarded-For` only from the compose network
+(`KINDEV_TRUSTED_PROXIES`, default `172.29.240.0/24`; change `KINDEV_SUBNET` if it collides). Base images are
+pinned by digest. Without `DOMAIN` the https profile serves `https://localhost` with Caddy's internal CA.
 
 ## Development
 

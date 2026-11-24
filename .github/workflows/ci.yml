@@ -26,3 +26,37 @@ jobs:
       - run: make lint
       - run: make test
       - run: make build
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose profiles
+        run: |
+          docker compose config -q
+          DOMAIN=ai.example.com docker compose --profile https config -q
+          # Only Caddy may publish non-loopback ports.
+          DOMAIN=ai.example.com docker compose --profile https config --format json \
+            | jq -e '[.services.cp.ports[] | select(.host_ip != "127.0.0.1")] | length == 0'
+          DOMAIN=ai.example.com docker compose --profile https config --format json \
+            | jq -e '[.services.caddy.ports[].target] | sort == [80, 443, 443]'
+      - name: Build Control Plane image (no push)
+        run: docker build --build-arg VERSION=ci-${GITHUB_SHA::7} -t kindevai:ci .
+      - name: Smoke test the image
+        run: |
+          docker run -d --name cp -p 127.0.0.1:8080:8080 kindevai:ci
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' cp)" = healthy ] && break
+            sleep 2
+          done
+          docker inspect -f '{{.State.Health.Status}}' cp | grep -qx healthy
+          curl -fsS 127.0.0.1:8080/api/health
+          curl -fsS 127.0.0.1:8080/ | grep -q '<div id="root">'
+          docker exec cp ai-platform setup-token | grep -qE '^[A-Za-z0-9_-]{43}$'
+          [ "$(docker inspect -f '{{.Config.User}}' cp)" = "65532:65532" ]
+      - name: Clean up
+        if: always()
+        run: docker rm -f cp || true

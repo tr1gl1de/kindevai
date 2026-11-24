@@ -8,7 +8,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 HAS_GO  := $(wildcard go.mod)
 HAS_WEB := $(wildcard web/package.json)
 
-.PHONY: help build test test-pkg test-integration lint cover dev clean web-deps
+.PHONY: help build test test-pkg test-integration lint cover dev clean web-deps docker
 
 # Installs web dependencies once per worktree (fresh worktrees have no node_modules).
 web-deps:
@@ -58,6 +58,9 @@ endif
 ifneq ($(HAS_WEB),)
 	npm --prefix web run typecheck
 endif
+
+docker: ## build the Control Plane image (ghcr.io/tr1gl1de/kindevai:local)
+	docker compose build --build-arg VERSION=$(VERSION) cp
 
 cover: ## coverage report to coverage.out
 	go test -race -count=1 -coverprofile=coverage.out $(GO_PKGS) && go tool cover -func=coverage.out | tail -1

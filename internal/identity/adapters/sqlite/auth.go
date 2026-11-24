@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/identity/domain"
+	"github.com/tr1gl1de/kindevai/internal/platform/db"
 )
 
 // tsFormat is fixed-width UTC so stored timestamps sort correctly as text in SQL comparisons.
@@ -20,12 +21,14 @@ type UserRepository struct{ db *sql.DB }
 // NewUserRepository returns a repository on d.
 func NewUserRepository(d *sql.DB) *UserRepository { return &UserRepository{db: d} }
 
-const userCols = "id, login, password_hash, platform_role, created_at, disabled_at IS NOT NULL"
+const userCols = "id, login, password_hash, platform_role, created_at, disabled_at IS NOT NULL, must_change_password"
 
-func scanUser(row *sql.Row) (domain.User, error) {
+type rowScanner interface{ Scan(dest ...any) error }
+
+func scanUser(row rowScanner) (domain.User, error) {
 	var u domain.User
 	var login, role, created string
-	err := row.Scan(&u.ID, &login, &u.PasswordHash, &role, &created, &u.Disabled)
+	err := row.Scan(&u.ID, &login, &u.PasswordHash, &role, &created, &u.Disabled, &u.MustChangePassword)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.User{}, domain.ErrNotFound
 	}
@@ -47,6 +50,62 @@ func (r *UserRepository) ByLogin(ctx context.Context, l domain.Login) (domain.Us
 // ByID finds a user by id.
 func (r *UserRepository) ByID(ctx context.Context, id string) (domain.User, error) {
 	return scanUser(r.db.QueryRowContext(ctx, "SELECT "+userCols+" FROM users WHERE id = ?", id))
+}
+
+// Create inserts an account; a duplicate login is domain.ErrLoginTaken.
+func (r *UserRepository) Create(ctx context.Context, u domain.User) error {
+	_, err := r.db.ExecContext(ctx, `INSERT INTO users(id, login, password_hash, platform_role, created_at, must_change_password)
+		VALUES (?, ?, ?, ?, ?, ?)`, u.ID, string(u.Login), u.PasswordHash, string(u.Role), u.CreatedAt.UTC().Format(tsFormat), u.MustChangePassword)
+	if db.IsUniqueViolation(err) {
+		return domain.ErrLoginTaken
+	}
+	if err != nil {
+		return fmt.Errorf("creating user: %w", err)
+	}
+	return nil
+}
+
+// List returns all accounts ordered by login.
+func (r *UserRepository) List(ctx context.Context) ([]domain.User, error) {
+	rows, err := r.db.QueryContext(ctx, "SELECT "+userCols+" FROM users ORDER BY login")
+	if err != nil {
+		return nil, fmt.Errorf("listing users: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.User
+	for rows.Next() {
+		u, err := scanUser(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+func (r *UserRepository) update(ctx context.Context, q string, args ...any) error {
+	res, err := r.db.ExecContext(ctx, q, args...)
+	if err != nil {
+		return fmt.Errorf("updating user: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
+// SetDisabled disables (now) or re-enables an account.
+func (r *UserRepository) SetDisabled(ctx context.Context, id string, disabled bool) error {
+	if disabled {
+		return r.update(ctx, "UPDATE users SET disabled_at = coalesce(disabled_at, ?) WHERE id = ?",
+			time.Now().UTC().Format(tsFormat), id)
+	}
+	return r.update(ctx, "UPDATE users SET disabled_at = NULL WHERE id = ?", id)
+}
+
+// SetPassword stores a new password hash and whether it is temporary.
+func (r *UserRepository) SetPassword(ctx context.Context, id, hash string, mustChange bool) error {
+	return r.update(ctx, "UPDATE users SET password_hash = ?, must_change_password = ? WHERE id = ?", hash, mustChange, id)
 }
 
 // SessionRepository stores login sessions.
@@ -106,6 +165,17 @@ func (r *SessionRepository) Touch(ctx context.Context, s domain.Session, at time
 func (r *SessionRepository) Delete(ctx context.Context, hash []byte) error {
 	if _, err := r.db.ExecContext(ctx, "DELETE FROM user_sessions WHERE token_hash = ?", hash); err != nil {
 		return fmt.Errorf("deleting session: %w", err)
+	}
+	return nil
+}
+
+// DeleteByUser ends all sessions of a user except the one with token hash keep (nil keeps none).
+func (r *SessionRepository) DeleteByUser(ctx context.Context, userID string, keep []byte) error {
+	if keep == nil {
+		keep = []byte{}
+	}
+	if _, err := r.db.ExecContext(ctx, "DELETE FROM user_sessions WHERE user_id = ? AND token_hash <> ?", userID, keep); err != nil {
+		return fmt.Errorf("revoking sessions: %w", err)
 	}
 	return nil
 }

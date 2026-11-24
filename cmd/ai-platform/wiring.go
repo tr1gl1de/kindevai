@@ -16,6 +16,7 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/identity/app"
 	identity "github.com/tr1gl1de/kindevai/internal/identity/domain"
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
+	"github.com/tr1gl1de/kindevai/internal/platform/db"
 	"github.com/tr1gl1de/kindevai/internal/platform/password"
 	"github.com/tr1gl1de/kindevai/internal/platform/ratelimit"
 	projectshttp "github.com/tr1gl1de/kindevai/internal/projects/adapters/httpapi"
@@ -29,7 +30,8 @@ import (
 type identityModule struct {
 	Modules    []server.Module
 	Middleware func(http.Handler) http.Handler
-	Users      app.UserRepository // read access for other contexts, via directory adapters below
+	Users      app.AccountRepository // for other contexts, via the adapters below
+	Hasher     *password.Hasher      // shared so the Argon2id concurrency cap is global
 }
 
 // newIdentity wires the identity bounded context and prepares setup mode.
@@ -91,18 +93,67 @@ func newIdentity(ctx context.Context, inst *bootstrap.Installation, logger *slog
 		},
 		Middleware: authn.Middleware,
 		Users:      sqlite.NewUserRepository(inst.DB),
+		Hasher:     hasher,
 	}, nil
 }
 
-// newProjects wires the projects bounded context.
-func newProjects(inst *bootstrap.Installation, users app.UserRepository, logger *slog.Logger) server.Module {
+// newProjects wires the projects bounded context and the identity invitations that grant its memberships.
+func newProjects(inst *bootstrap.Installation, id *identityModule, logger *slog.Logger) []server.Module {
+	users := id.Users
 	svc := &projectsapp.Service{
 		Repo:  projectsdb.New(inst.DB),
 		Users: userDirectory{users},
 		Now:   time.Now,
 		NewID: rand.Text,
 	}
-	return &projectshttp.Handler{Service: svc, Logger: logger}
+	invitations := &httpapi.InvitationsHandler{
+		Service: &app.InvitationsService{
+			Invitations: sqlite.NewInvitationRepository(inst.DB),
+			Accounts:    users,
+			Projects:    projectCatalog{svc},
+			Tx:          db.Transactor{DB: inst.DB},
+			Hasher:      id.Hasher,
+			Rand:        rand.Reader,
+			Now:         time.Now,
+			NewID:       rand.Text,
+			Logger:      logger,
+		},
+		Limiter: ratelimit.New(ratelimit.Config{Burst: 10, Every: time.Minute, MaxKeys: 10_000}, time.Now),
+		Logger:  logger,
+	}
+	return []server.Module{&projectshttp.Handler{Service: svc, Logger: logger}, invitations}
+}
+
+// projectCatalog gives identity's invitations the projects context's app API, translating its errors.
+type projectCatalog struct{ svc *projectsapp.Service }
+
+func (c projectCatalog) Lookup(ctx context.Context, id string) (app.ProjectRef, error) {
+	p, err := c.svc.Lookup(ctx, id)
+	if errors.Is(err, projects.ErrNotFound) {
+		return app.ProjectRef{}, identity.ErrNotFound
+	}
+	if err != nil {
+		return app.ProjectRef{}, err
+	}
+	return app.ProjectRef{ID: p.ID, Name: string(p.Name)}, nil
+}
+
+func (c projectCatalog) ValidateRole(role string) error {
+	var ve *projects.ValidationError
+	if err := c.svc.ValidateRole(role); errors.As(err, &ve) {
+		return &identity.ValidationError{Field: ve.Field, Code: ve.Code}
+	} else if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c projectCatalog) Grant(ctx context.Context, projectID, userID, role string) error {
+	err := c.svc.Grant(ctx, projectID, userID, role)
+	if errors.Is(err, projects.ErrNotFound) {
+		return identity.ErrNotFound
+	}
+	return err
 }
 
 // userDirectory lets the projects context resolve accounts through the identity context's port, so it never

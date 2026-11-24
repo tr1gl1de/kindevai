@@ -170,3 +170,32 @@ func TestDisabledUsers(t *testing.T) {
 		t.Fatalf("removing a disabled member = %v", err)
 	}
 }
+
+func TestTrustedLookupAndGrantForInvitations(t *testing.T) {
+	t.Parallel()
+	s := newService()
+	p, err := s.Create(t.Context(), owner, "Web App", "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Lookup(t.Context(), p.ID)
+	if err != nil || got.Name != "Web App" {
+		t.Fatalf("Lookup = %+v, %v", got, err)
+	}
+	if _, err := s.Lookup(t.Context(), "missing"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("Lookup missing = %v", err)
+	}
+	if err := s.ValidateRole("owner"); err == nil {
+		t.Fatal("owner is not a project role")
+	}
+	if err := s.Grant(t.Context(), p.ID, "u-carol", "project_admin"); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	m, ok, err := s.Repo.Membership(t.Context(), p.ID, "u-carol")
+	if err != nil || !ok || m.Role != domain.RoleProjectAdmin {
+		t.Fatalf("membership = %+v, %v, %v", m, ok, err)
+	}
+	if err := s.Grant(t.Context(), p.ID, "u-carol", "bogus"); err == nil {
+		t.Fatal("Grant must validate the role")
+	}
+}

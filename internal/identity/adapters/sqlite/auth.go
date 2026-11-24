@@ -44,17 +44,17 @@ func scanUser(row rowScanner) (domain.User, error) {
 
 // ByLogin finds a user by normalised login.
 func (r *UserRepository) ByLogin(ctx context.Context, l domain.Login) (domain.User, error) {
-	return scanUser(r.db.QueryRowContext(ctx, "SELECT "+userCols+" FROM users WHERE login = ?", string(l)))
+	return scanUser(db.Conn(ctx, r.db).QueryRowContext(ctx, "SELECT "+userCols+" FROM users WHERE login = ?", string(l)))
 }
 
 // ByID finds a user by id.
 func (r *UserRepository) ByID(ctx context.Context, id string) (domain.User, error) {
-	return scanUser(r.db.QueryRowContext(ctx, "SELECT "+userCols+" FROM users WHERE id = ?", id))
+	return scanUser(db.Conn(ctx, r.db).QueryRowContext(ctx, "SELECT "+userCols+" FROM users WHERE id = ?", id))
 }
 
 // Create inserts an account; a duplicate login is domain.ErrLoginTaken.
 func (r *UserRepository) Create(ctx context.Context, u domain.User) error {
-	_, err := r.db.ExecContext(ctx, `INSERT INTO users(id, login, password_hash, platform_role, created_at, must_change_password)
+	_, err := db.Conn(ctx, r.db).ExecContext(ctx, `INSERT INTO users(id, login, password_hash, platform_role, created_at, must_change_password)
 		VALUES (?, ?, ?, ?, ?, ?)`, u.ID, string(u.Login), u.PasswordHash, string(u.Role), u.CreatedAt.UTC().Format(tsFormat), u.MustChangePassword)
 	if db.IsUniqueViolation(err) {
 		return domain.ErrLoginTaken
@@ -67,7 +67,7 @@ func (r *UserRepository) Create(ctx context.Context, u domain.User) error {
 
 // List returns all accounts ordered by login.
 func (r *UserRepository) List(ctx context.Context) ([]domain.User, error) {
-	rows, err := r.db.QueryContext(ctx, "SELECT "+userCols+" FROM users ORDER BY login")
+	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, "SELECT "+userCols+" FROM users ORDER BY login")
 	if err != nil {
 		return nil, fmt.Errorf("listing users: %w", err)
 	}
@@ -84,7 +84,7 @@ func (r *UserRepository) List(ctx context.Context) ([]domain.User, error) {
 }
 
 func (r *UserRepository) update(ctx context.Context, q string, args ...any) error {
-	res, err := r.db.ExecContext(ctx, q, args...)
+	res, err := db.Conn(ctx, r.db).ExecContext(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("updating user: %w", err)
 	}
@@ -116,7 +116,7 @@ func NewSessionRepository(d *sql.DB) *SessionRepository { return &SessionReposit
 
 // Create stores s.
 func (r *SessionRepository) Create(ctx context.Context, s domain.Session) error {
-	_, err := r.db.ExecContext(ctx,
+	_, err := db.Conn(ctx, r.db).ExecContext(ctx,
 		"INSERT INTO user_sessions(token_hash, user_id, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?)",
 		s.TokenHash, s.UserID, s.CreatedAt.UTC().Format(tsFormat), s.LastSeenAt.UTC().Format(tsFormat),
 		s.ExpiresAt(s.LastSeenAt).UTC().Format(tsFormat))
@@ -130,7 +130,7 @@ func (r *SessionRepository) Create(ctx context.Context, s domain.Session) error 
 func (r *SessionRepository) ByTokenHash(ctx context.Context, hash []byte) (domain.Session, error) {
 	var s domain.Session
 	var created, seen string
-	err := r.db.QueryRowContext(ctx,
+	err := db.Conn(ctx, r.db).QueryRowContext(ctx,
 		"SELECT token_hash, user_id, created_at, last_seen_at FROM user_sessions WHERE token_hash = ?", hash).
 		Scan(&s.TokenHash, &s.UserID, &created, &seen)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -150,7 +150,7 @@ func (r *SessionRepository) ByTokenHash(ctx context.Context, hash []byte) (domai
 
 // Touch records activity and moves the expiry in one statement.
 func (r *SessionRepository) Touch(ctx context.Context, s domain.Session, at time.Time) error {
-	res, err := r.db.ExecContext(ctx, "UPDATE user_sessions SET last_seen_at = ?, expires_at = ? WHERE token_hash = ?",
+	res, err := db.Conn(ctx, r.db).ExecContext(ctx, "UPDATE user_sessions SET last_seen_at = ?, expires_at = ? WHERE token_hash = ?",
 		at.UTC().Format(tsFormat), s.ExpiresAt(at).UTC().Format(tsFormat), s.TokenHash)
 	if err != nil {
 		return fmt.Errorf("touching session: %w", err)
@@ -163,7 +163,7 @@ func (r *SessionRepository) Touch(ctx context.Context, s domain.Session, at time
 
 // Delete removes a session.
 func (r *SessionRepository) Delete(ctx context.Context, hash []byte) error {
-	if _, err := r.db.ExecContext(ctx, "DELETE FROM user_sessions WHERE token_hash = ?", hash); err != nil {
+	if _, err := db.Conn(ctx, r.db).ExecContext(ctx, "DELETE FROM user_sessions WHERE token_hash = ?", hash); err != nil {
 		return fmt.Errorf("deleting session: %w", err)
 	}
 	return nil
@@ -174,7 +174,7 @@ func (r *SessionRepository) DeleteByUser(ctx context.Context, userID string, kee
 	if keep == nil {
 		keep = []byte{}
 	}
-	if _, err := r.db.ExecContext(ctx, "DELETE FROM user_sessions WHERE user_id = ? AND token_hash <> ?", userID, keep); err != nil {
+	if _, err := db.Conn(ctx, r.db).ExecContext(ctx, "DELETE FROM user_sessions WHERE user_id = ? AND token_hash <> ?", userID, keep); err != nil {
 		return fmt.Errorf("revoking sessions: %w", err)
 	}
 	return nil
@@ -182,7 +182,7 @@ func (r *SessionRepository) DeleteByUser(ctx context.Context, userID string, kee
 
 // DeleteExpired removes sessions past their expiry.
 func (r *SessionRepository) DeleteExpired(ctx context.Context, now time.Time) error {
-	if _, err := r.db.ExecContext(ctx, "DELETE FROM user_sessions WHERE expires_at <= ?", now.UTC().Format(tsFormat)); err != nil {
+	if _, err := db.Conn(ctx, r.db).ExecContext(ctx, "DELETE FROM user_sessions WHERE expires_at <= ?", now.UTC().Format(tsFormat)); err != nil {
 		return fmt.Errorf("purging sessions: %w", err)
 	}
 	return nil

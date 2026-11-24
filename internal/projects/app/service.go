@@ -214,3 +214,25 @@ func (s *Service) RemoveMember(ctx context.Context, a domain.Actor, projectID, l
 	}
 	return nil
 }
+
+// Lookup loads a project without an access check. Trusted: for other contexts' use cases that authorise the caller
+// themselves (identity's invitations are issued by the Owner only).
+func (s *Service) Lookup(ctx context.Context, projectID string) (domain.Project, error) {
+	return s.Repo.ByID(ctx, projectID)
+}
+
+// ValidateRole checks that role is a project role.
+func (s *Service) ValidateRole(role string) error {
+	_, err := domain.ParseRole(role)
+	return err
+}
+
+// Grant adds a membership without an access check. Trusted: used when an Owner-issued invitation is accepted,
+// inside the acceptance transaction carried by ctx.
+func (s *Service) Grant(ctx context.Context, projectID, userID, role string) error {
+	r, err := domain.ParseRole(role)
+	if err != nil {
+		return err
+	}
+	return s.Repo.SetMember(ctx, domain.Membership{ProjectID: projectID, UserID: userID, Role: r, CreatedAt: s.Now()})
+}

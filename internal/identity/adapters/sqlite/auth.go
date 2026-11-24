@@ -117,9 +117,9 @@ func NewSessionRepository(d *sql.DB) *SessionRepository { return &SessionReposit
 // Create stores s.
 func (r *SessionRepository) Create(ctx context.Context, s domain.Session) error {
 	_, err := db.Conn(ctx, r.db).ExecContext(ctx,
-		"INSERT INTO user_sessions(token_hash, user_id, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+		"INSERT INTO user_sessions(token_hash, user_id, created_at, last_seen_at, expires_at, via) VALUES (?, ?, ?, ?, ?, ?)",
 		s.TokenHash, s.UserID, s.CreatedAt.UTC().Format(tsFormat), s.LastSeenAt.UTC().Format(tsFormat),
-		s.ExpiresAt(s.LastSeenAt).UTC().Format(tsFormat))
+		s.ExpiresAt(s.LastSeenAt).UTC().Format(tsFormat), string(via(s.Via)))
 	if err != nil {
 		return fmt.Errorf("creating session: %w", err)
 	}
@@ -129,10 +129,11 @@ func (r *SessionRepository) Create(ctx context.Context, s domain.Session) error 
 // ByTokenHash loads a session.
 func (r *SessionRepository) ByTokenHash(ctx context.Context, hash []byte) (domain.Session, error) {
 	var s domain.Session
-	var created, seen string
+	var created, seen, v string
 	err := db.Conn(ctx, r.db).QueryRowContext(ctx,
-		"SELECT token_hash, user_id, created_at, last_seen_at FROM user_sessions WHERE token_hash = ?", hash).
-		Scan(&s.TokenHash, &s.UserID, &created, &seen)
+		"SELECT token_hash, user_id, created_at, last_seen_at, via FROM user_sessions WHERE token_hash = ?", hash).
+		Scan(&s.TokenHash, &s.UserID, &created, &seen, &v)
+	s.Via = domain.SessionVia(v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Session{}, domain.ErrNotFound
 	}
@@ -178,6 +179,21 @@ func (r *SessionRepository) DeleteByUser(ctx context.Context, userID string, kee
 		return fmt.Errorf("revoking sessions: %w", err)
 	}
 	return nil
+}
+
+// DeleteByUserVia ends all sessions of a user that were opened via v.
+func (r *SessionRepository) DeleteByUserVia(ctx context.Context, userID string, v domain.SessionVia) error {
+	if _, err := db.Conn(ctx, r.db).ExecContext(ctx, "DELETE FROM user_sessions WHERE user_id = ? AND via = ?", userID, string(v)); err != nil {
+		return fmt.Errorf("revoking sessions: %w", err)
+	}
+	return nil
+}
+
+func via(v domain.SessionVia) domain.SessionVia {
+	if v == "" {
+		return domain.ViaPassword
+	}
+	return v
 }
 
 // DeleteExpired removes sessions past their expiry.

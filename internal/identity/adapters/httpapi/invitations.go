@@ -18,6 +18,8 @@ type InvitationsHandler struct {
 	Service *app.InvitationsService
 	Limiter *ratelimit.Limiter // preview/accept attempts per client address
 	Logger  *slog.Logger
+	// Telegram validates initData sent when the invitation is accepted in the Mini App (optional).
+	Telegram *app.TelegramService
 }
 
 // InvitationView is an invitation as listed for the Owner (never the token or its hash).
@@ -54,6 +56,8 @@ type AcceptInvitationRequest struct {
 	Token    string `json:"token"`
 	Login    string `json:"login"`
 	Password string `json:"password"`
+	// InitData, sent by the Mini App (startapp=invite_…), links that Telegram account to the new account.
+	InitData string `json:"initData,omitempty"`
 }
 
 // InvitationPreviewView is what the token holder sees before accepting.
@@ -89,6 +93,7 @@ func (h *InvitationsHandler) fail(w http.ResponseWriter, err error) {
 	var ve *domain.ValidationError
 	gone := func(code, msg string) { httpx.WriteError(w, http.StatusGone, code, msg) }
 	switch {
+	case writeTelegramError(w, err):
 	case errors.Is(err, domain.ErrForbidden):
 		httpx.WriteError(w, http.StatusForbidden, "forbidden", "not allowed")
 	case errors.Is(err, domain.ErrNotFound):
@@ -192,7 +197,20 @@ func (h *InvitationsHandler) accept(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	u, err := h.Service.Accept(r.Context(), in.Token, in.Login, in.Password)
+	var tg *domain.TelegramUser
+	if in.InitData != "" {
+		if h.Telegram == nil {
+			h.fail(w, domain.ErrTelegramNotConfigured)
+			return
+		}
+		u, err := h.Telegram.InviteTelegramUser(r.Context(), in.InitData)
+		if err != nil {
+			h.fail(w, err)
+			return
+		}
+		tg = &u
+	}
+	u, err := h.Service.AcceptWithTelegram(r.Context(), in.Token, in.Login, in.Password, tg)
 	if err != nil {
 		h.fail(w, err)
 		return

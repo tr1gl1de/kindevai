@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -26,6 +27,10 @@ var publicAPI = map[string]bool{
 	// Invitation holders have no account yet; both endpoints are rate limited per client address.
 	"/api/invitations/preview": true,
 	"/api/invitations/accept":  true,
+	// Mini App sign-in and the Telegram side of linking prove identity with signed initData (rate limited).
+	"/api/telegram/login":        true,
+	"/api/telegram/link/preview": true,
+	"/api/telegram/link/confirm": true,
 	// A new runner has only its one-time enrollment token (runners context; rate limited per client address).
 	"/api/runners/enroll": true,
 }
@@ -37,6 +42,9 @@ type AuthHandler struct {
 	LoginLimiter *ratelimit.Limiter // login attempts per account
 	Logger       *slog.Logger
 }
+
+// sessionKey carries the token hash of the session that authenticated the request.
+type sessionKey struct{}
 
 // LoginRequest is the body of POST /api/auth/login.
 type LoginRequest struct {
@@ -91,15 +99,23 @@ func (h *AuthHandler) Middleware(next http.Handler) http.Handler {
 			return
 		}
 		public := publicAPI[r.URL.Path]
-		if c, err := r.Cookie(SessionCookie); err == nil && c.Value != "" {
+		// The password session wins; the Mini App session is the fallback (see TelegramSessionCookie).
+	cookies:
+		for _, name := range []string{SessionCookie, TelegramSessionCookie} {
+			c, err := r.Cookie(name)
+			if err != nil || c.Value == "" {
+				continue
+			}
 			u, err := h.Service.Authenticate(r.Context(), c.Value)
 			switch {
 			case err == nil:
-				r = r.WithContext(auth.WithPrincipal(r.Context(), auth.Principal{
+				ctx := auth.WithPrincipal(r.Context(), auth.Principal{
 					UserID: u.ID, Login: string(u.Login), Owner: u.Role == domain.RoleOwner,
 					MustChangePassword: u.MustChangePassword,
-				}))
+				})
+				r = r.WithContext(context.WithValue(ctx, sessionKey{}, domain.HashSessionToken(c.Value)))
 			case errors.Is(err, domain.ErrUnauthenticated):
+				continue
 			case public: // health, setup and login keep working while the database hiccups
 				h.logger().Warn("authenticating session on a public path", "err", err)
 			default:
@@ -107,6 +123,7 @@ func (h *AuthHandler) Middleware(next http.Handler) http.Handler {
 				httpx.WriteError(w, http.StatusInternalServerError, "internal", "internal error")
 				return
 			}
+			break cookies
 		}
 		if !public {
 			p, ok := auth.FromContext(r.Context())
@@ -180,12 +197,17 @@ func (h *AuthHandler) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) logout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(SessionCookie); err == nil {
-		if err := h.Service.Logout(r.Context(), c.Value); err != nil {
-			h.logger().Error("logout", "err", err)
-			httpx.WriteError(w, http.StatusInternalServerError, "internal", "internal error")
-			return
+	for _, name := range []string{SessionCookie, TelegramSessionCookie} {
+		if c, err := r.Cookie(name); err == nil {
+			if err := h.Service.Logout(r.Context(), c.Value); err != nil {
+				h.logger().Error("logout", "err", err)
+				httpx.WriteError(w, http.StatusInternalServerError, "internal", "internal error")
+				return
+			}
 		}
+	}
+	if _, err := r.Cookie(TelegramSessionCookie); err == nil {
+		setTelegramCookie(w, r, "", -1)
 	}
 	//nolint:gosec // G124: Secure is set whenever the request is HTTPS; plain HTTP is the trusted-local profile.
 	http.SetCookie(w, &http.Cookie{

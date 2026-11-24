@@ -3,7 +3,8 @@
 #   scripts/task-worktree.sh KIN-12 runner-enrollment      -> .claude/worktrees/KIN-12, branch feature/KIN-12-runner-enrollment
 #   scripts/task-worktree.sh --remove KIN-12               -> remove the worktree (branch is kept)
 #   scripts/task-worktree.sh --prune [--dry-run]           -> remove worktrees, local branches and docker stacks of
-#                                                             tasks already merged into dev (or whose remote branch is gone)
+#                                                             tasks whose own commits are merged into dev; worktrees with
+#                                                             uncommitted/untracked changes and fresh branches are kept
 set -euo pipefail
 root=$(git rev-parse --show-toplevel)
 cd "$root"
@@ -23,20 +24,47 @@ if [ "${1:-}" = "--remove" ]; then
 fi
 
 if [ "${1:-}" = "--prune" ]; then
+  # A branch is pruned only when its work is provably on dev: a merged PR whose head is the branch tip, or a tip that
+  # is an ancestor of origin/dev AND is a commit of the branch's own (not its creation point, not a commit on dev's
+  # first-parent line — a fresh or fast-forwarded branch has nothing of its own and looks "merged" to git).
+  # A worktree with uncommitted or untracked changes is never removed, and never with --force. Git-ignored files
+  # (data/, node_modules, the copied .env, build output) count as disposable and go with a merged worktree.
   dry=${2:-}
   base=${BASE:-dev}
   git fetch --quiet --prune origin 2>/dev/null || true
-  merged=$(git branch --format='%(refname:short)' --merged "origin/$base" 2>/dev/null || true)
-  gone=$(git branch --format='%(refname:short) %(upstream:track)' | awk '$2=="[gone]"{print $1}')
-  for b in $(printf '%s\n%s\n' "$merged" "$gone" | grep -E '^feature/KIN-[0-9]+-' | sort -u); do
+  git rev-parse --verify --quiet "origin/$base" >/dev/null || { echo "origin/$base not found" >&2; exit 1; }
+  devline=$(git rev-list --first-parent "origin/$base")
+  for b in $(git branch --format='%(refname:short)' --list 'feature/KIN-*' | grep -E '^feature/KIN-[0-9]+-'); do
     id=$(sed -E 's#^feature/(KIN-[0-9]+)-.*#\1#' <<<"$b")
-    if [ "$dry" = "--dry-run" ]; then echo "would prune $b"; continue; fi
-    echo "pruning $b"
-    down_stack "$id"
-    [ -d ".claude/worktrees/$id" ] && git worktree remove --force ".claude/worktrees/$id"
+    tip=$(git rev-parse "refs/heads/$b")
+    created=$(git config --get "branch.$b.taskbase" || git reflog show --format=%H "refs/heads/$b" 2>/dev/null | tail -1 || true)
+    why=
+    if command -v gh >/dev/null &&
+      gh pr list --state merged --base "$base" --head "$b" --json headRefOid --jq '.[].headRefOid' 2>/dev/null |
+      grep -qx "$tip"; then
+      why="merged PR"
+    elif [ -n "$created" ] && [ "$tip" != "$created" ] && ! grep -qx "$tip" <<<"$devline" &&
+      git merge-base --is-ancestor "$tip" "origin/$base"; then
+      why="merged into origin/$base"
+    fi
+    if [ -z "$why" ]; then
+      [ "$dry" = "--dry-run" ] && echo "keep $b (not provably merged into $base)"
+      continue
+    fi
+    wt=$(git worktree list --porcelain | awk -v ref="refs/heads/$b" '/^worktree /{w=substr($0,10)} $0=="branch " ref{print w}')
+    if [ -n "$wt" ] && [ -d "$wt" ] && [ -n "$(git -C "$wt" status --porcelain 2>/dev/null || echo error)" ]; then
+      echo "skip $b: worktree $wt has uncommitted or untracked changes"
+      continue
+    fi
+    if [ "$dry" = "--dry-run" ]; then echo "would prune $b ($why)"; continue; fi
+    echo "pruning $b ($why)"
+    if [ -n "$wt" ] && [ -d "$wt" ]; then
+      git worktree remove "$wt" || { echo "skip $b: could not remove $wt" >&2; continue; }
+    fi
+    down_stack "$id" || echo "  docker stack of $id not removed" >&2
     git branch -D "$b" >/dev/null
   done
-  git worktree prune
+  [ "$dry" = "--dry-run" ] || git worktree prune
   exit 0
 fi
 
@@ -58,6 +86,7 @@ else
     git worktree add "$dir" "$branch"
   else
     git worktree add -b "$branch" "$dir" "$start"
+    git config "branch.$branch.taskbase" "$start" # creation point: --prune never treats it as merged work
   fi
   # Copy git-ignored local files listed in .worktreeinclude (e.g. .env for YouTrack).
   if [ -f .worktreeinclude ]; then

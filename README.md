@@ -249,7 +249,7 @@ pinned by digest. Without `DOMAIN` the https profile serves `https://localhost` 
 make help             # list targets
 make dev              # run the Control Plane on this worktree's port
 npm --prefix web run dev   # Vite dev server, proxies /api to the Control Plane
-make test             # Go tests (-race -shuffle=on) + web unit tests
+make test             # Go tests (-race -shuffle=on) + web unit tests + hook/script tests
 make lint             # go vet + TypeScript typecheck
 make clean            # remove build and test leftovers
 ```

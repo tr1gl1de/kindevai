@@ -250,7 +250,7 @@ docker compose exec cp ai-platform setup-token        # setup token для пе�
 make help             # список целей
 make dev              # запустить Control Plane на порту этого worktree
 npm --prefix web run dev   # Vite dev server, проксирует /api в Control Plane
-make test             # Go-тесты (-race -shuffle=on) + unit-тесты web
+make test             # Go-тесты (-race -shuffle=on) + unit-тесты web + тесты хуков/скриптов
 make lint             # go vet + проверка типов TypeScript
 make clean            # удалить артефакты сборки и тестов
 ```

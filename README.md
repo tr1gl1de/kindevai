@@ -55,6 +55,13 @@ then enter it in the Dashboard wizard together with the Owner login, password (1
 The token expires after an hour and is renewed automatically; after setup it is deleted and setup can never be
 run again, including after a restart.
 
+### Signing in
+
+After setup, sign in with the Owner login and password. Sessions are server-side: the browser keeps an HttpOnly,
+SameSite=Strict cookie (Secure over HTTPS), and the session ends after 12 hours of inactivity or 7 days at most,
+or on sign-out. Every API endpoint except health, setup and login requires a session; cross-origin state-changing
+requests are rejected, and login attempts are rate-limited per address and per account.
+
 ## Development
 
 ```bash

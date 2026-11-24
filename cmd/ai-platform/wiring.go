@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"time"
 
@@ -18,12 +19,19 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/server"
 )
 
+// identityModule is the wired identity bounded context.
+type identityModule struct {
+	Modules    []server.Module
+	Middleware func(http.Handler) http.Handler
+}
+
 // newIdentity wires the identity bounded context and prepares setup mode.
-func newIdentity(ctx context.Context, inst *bootstrap.Installation, logger *slog.Logger) ([]server.Module, error) {
+func newIdentity(ctx context.Context, inst *bootstrap.Installation, logger *slog.Logger) (*identityModule, error) {
+	hasher := password.New(password.DefaultParams)
 	tokenPath := filepath.Join(inst.Dir.Path(), "secrets", "setup-token")
 	setup := &app.SetupService{
 		Repo:    sqlite.NewSetupRepository(inst.DB),
-		Hasher:  password.New(password.DefaultParams),
+		Hasher:  hasher,
 		Channel: tokenfile.New(tokenPath),
 		Now:     time.Now,
 		Rand:    rand.Reader,
@@ -39,9 +47,27 @@ func newIdentity(ctx context.Context, inst *bootstrap.Installation, logger *slog
 		logger.Warn("setup required: open the dashboard and enter the one-time setup token",
 			"token_file", tokenPath, "valid_for", "1h, renewed when expired")
 	}
-	attempts := ratelimit.New(ratelimit.Config{Burst: 10, Every: time.Minute, MaxKeys: 10_000}, time.Now)
+	perMinute := func(burst int) *ratelimit.Limiter {
+		return ratelimit.New(ratelimit.Config{Burst: burst, Every: time.Minute, MaxKeys: 10_000}, time.Now)
+	}
 	status := ratelimit.New(ratelimit.Config{Burst: 30, Every: time.Second, MaxKeys: 10_000}, time.Now)
-	return []server.Module{&httpapi.SetupHandler{
-		Service: setup, Limiter: attempts, StatusLimiter: status, Logger: logger,
-	}}, nil
+	authn := &httpapi.AuthHandler{
+		Service: &app.AuthService{
+			Users:     sqlite.NewUserRepository(inst.DB),
+			Sessions:  sqlite.NewSessionRepository(inst.DB),
+			Passwords: hasher,
+			Now:       time.Now,
+			Rand:      rand.Reader,
+		},
+		IPLimiter:    perMinute(20),
+		LoginLimiter: perMinute(10),
+		Logger:       logger,
+	}
+	return &identityModule{
+		Modules: []server.Module{
+			&httpapi.SetupHandler{Service: setup, Limiter: perMinute(10), StatusLimiter: status, Logger: logger},
+			authn,
+		},
+		Middleware: authn.Middleware,
+	}, nil
 }

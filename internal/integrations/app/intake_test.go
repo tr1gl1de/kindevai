@@ -93,7 +93,7 @@ func TestDuplicateAndOutOfOrderSnapshotsAreHarmless(t *testing.T) {
 	older := issue("KIN-1", 100, "jdoe")
 	older.Summary = "Old"
 	for _, s := range []domain.IssueSnapshot{newer, newer, older} {
-		p, _ := json.Marshal(map[string]any{"issue": s, "channel": "webhook"})
+		p, _ := json.Marshal(map[string]any{"issue": s, "channel": "webhook", "taggedBy": "jdoe", "taggedTag": "kindevai"})
 		if err := e.intake.HandleIssue(t.Context(), messaging.InboundEvent{Topic: app.TopicYouTrackIssue, Payload: p}); err != nil {
 			t.Fatal(err)
 		}
@@ -115,8 +115,8 @@ func TestDuplicateAndOutOfOrderSnapshotsAreHarmless(t *testing.T) {
 }
 
 // AC: the initiator is mapped to a platform user; without the right to start AI no task is created and the reason
-// is recorded for the UI.
-func TestIssuesFromUnlinkedOrUnauthorisedReportersAreRejectedWithAReason(t *testing.T) {
+// is recorded for the UI. The fake's tag history says the reporter applied the tag; since KIN-50 the applier counts.
+func TestIssuesFromUnlinkedOrUnauthorisedTaggersAreRejectedWithAReason(t *testing.T) {
 	t.Parallel()
 	e := newIntakeEnv(t)
 	e.src.put(issue("KIN-1", 100, "stranger"))
@@ -126,7 +126,7 @@ func TestIssuesFromUnlinkedOrUnauthorisedReportersAreRejectedWithAReason(t *test
 	if len(e.tasks.titles) != 0 {
 		t.Fatalf("tasks created: %+v", e.tasks.titles)
 	}
-	for id, reason := range map[string]string{"KIN-1": domain.ReasonUnknownUser, "KIN-2": domain.ReasonNotAllowed, "KIN-3": domain.ReasonUnknownUser} {
+	for id, reason := range map[string]string{"KIN-1": domain.ReasonTagNotAllowed, "KIN-2": domain.ReasonTagNotAllowed, "KIN-3": domain.ReasonTagNotAllowed} {
 		if r := e.record(t, "p1", id); r.Outcome != domain.OutcomeRejected || r.Reason != reason {
 			t.Errorf("%s: %+v", id, r)
 		}

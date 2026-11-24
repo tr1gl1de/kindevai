@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"bytes"
+	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,12 +21,14 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
 )
 
-// fakeYouTrack serves issues like the YouTrack REST API (never a real instance).
+// fakeYouTrack serves issues like the YouTrack REST API (never a real instance). The trigger tag's history says the
+// reporter applied it, unless taggers names somebody else (KIN-50).
 type fakeYouTrack struct {
-	mu     sync.Mutex
-	issues map[string]string // id -> JSON
-	down   bool
-	reads  int
+	mu      sync.Mutex
+	issues  map[string]string // id -> JSON
+	taggers map[string]string // id -> login that applied the tag
+	down    bool
+	reads   int
 }
 
 func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -40,6 +44,18 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if id, ok := strings.CutPrefix(r.URL.Path, "/api/issues/"); ok {
+		if id, ok := strings.CutSuffix(id, "/activities"); ok {
+			var is struct {
+				Updated  int64 `json:"updated"`
+				Reporter struct {
+					Login string `json:"login"`
+				} `json:"reporter"`
+			}
+			_ = json.Unmarshal([]byte(f.issues[id]), &is)
+			login := cmp.Or(f.taggers[id], is.Reporter.Login)
+			_, _ = fmt.Fprintf(w, `[{"timestamp":%d,"author":{"login":%q},"added":[{"name":"kindevai"}],"removed":[]}]`, is.Updated, login)
+			return
+		}
 		j, found := f.issues[id]
 		if !found {
 			w.WriteHeader(http.StatusNotFound)
@@ -204,6 +220,8 @@ func TestPollingWorksEndToEndWithoutAWebhook(t *testing.T) {
 	e.yt.issues["KIN-1"] = ytIssue("KIN-1", 100, "boss", "kindevai")
 	e.yt.issues["KIN-2"] = ytIssue("KIN-2", 200, "stranger", "kindevai")
 	e.yt.issues["KIN-3"] = ytIssue("KIN-3", 300, "boss", "other")
+	e.yt.issues["KIN-4"] = ytIssue("KIN-4", 400, "boss", "kindevai") // the Owner's issue, tagged by an outsider (KIN-50)
+	e.yt.taggers = map[string]string{"KIN-4": "stranger"}
 	if err := e.intake.PollOnce(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -212,14 +230,15 @@ func TestPollingWorksEndToEndWithoutAWebhook(t *testing.T) {
 		t.Fatalf("tasks %+v", e.tasks.issues)
 	}
 	v := e.view(t, "owner")
-	if !v.Connected || v.Binding == nil || v.Binding.TriggerTag != "kindevai" || v.Status != "ok" || v.LastPolledAt == nil || len(v.Recent) != 2 {
+	if !v.Connected || v.Binding == nil || v.Binding.TriggerTag != "kindevai" || v.Status != "ok" || v.LastPolledAt == nil || len(v.Recent) != 3 {
 		t.Fatalf("view %+v", v)
 	}
 	reasons := map[string]string{}
 	for _, r := range v.Recent {
 		reasons[r.IssueID] = r.Outcome + "/" + r.Reason
 	}
-	if reasons["KIN-1"] != "created/" || reasons["KIN-2"] != "rejected/unknown_user" {
+	if reasons["KIN-1"] != "created/" || reasons["KIN-2"] != "rejected/tag_not_allowed" ||
+		reasons["KIN-4"] != "rejected/tag_not_allowed" {
 		t.Fatalf("recent %+v", v.Recent)
 	}
 	if w := e.do(t, "bob", "GET", "/api/projects/p1/youtrack", nil); w.Code != http.StatusNotFound {
@@ -276,8 +295,8 @@ func TestWebhookEndToEnd(t *testing.T) {
 	if e.tasks.issues["p1/KIN-7"] == "" {
 		t.Fatalf("tasks %+v", e.tasks.issues)
 	}
-	if e.yt.reads != 1 {
-		t.Fatalf("issue read %d times", e.yt.reads)
+	if e.yt.reads != 2 { // the issue and its tag history, once
+		t.Fatalf("YouTrack read %d times", e.yt.reads)
 	}
 }
 

@@ -12,7 +12,7 @@ import { fieldError } from "./IntegrationsPage";
 import { StateText } from "./IntakeSettingsSection";
 import { useProjectYouTrack, useRunIssue, useSaveTriggerTag, type IntakeEntry, type ProjectYouTrack } from "./intakeApi";
 
-const knownReasons = ["unknown_user", "not_allowed", "issue_not_found", "other_project", "invalid_issue", "unavailable"];
+const knownReasons = ["unknown_user", "not_allowed", "tag_not_allowed", "issue_not_found", "other_project", "invalid_issue", "unavailable"];
 
 /** The project's YouTrack intake for its members: status, "run by issue ID" and why recent issues did (not) become tasks. */
 export function ProjectYouTrackPanel({ project, isOwner }: { project: Project; isOwner: boolean }) {
@@ -180,7 +180,10 @@ function Recent({ data }: { data: ProjectYouTrack }) {
                   <td>
                     <Outcome entry={e} />
                   </td>
-                  <td>{e.initiator ?? (e.reporter ? t("intake.reporterLabel", { login: e.reporter }) : "")}</td>
+                  <td>
+                    {/* Since KIN-50 the tag's applier, not the reporter, would be the initiator: no reporter fallback for tag rejections. */}
+                    {e.initiator ?? (e.reporter && e.reason !== "tag_not_allowed" ? t("intake.reporterLabel", { login: e.reporter }) : "")}
+                  </td>
                   <td>
                     {formatDateTime(e.processedAt, i18n.language)}{" "}
                     <span className="muted">({t(`intake.channel_${e.channel}`)})</span>

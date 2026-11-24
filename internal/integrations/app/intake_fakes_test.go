@@ -253,12 +253,43 @@ func (u users) ByIDs(_ context.Context, ids []string) (map[string]app.UserRef, e
 }
 
 // source is a scripted YouTrack: issues by ID, filtered like the real query (project and tag).
+// Tag history: scripted per issue in history; without a script the reporter added the issue's tags when it was last
+// updated.
 type source struct {
-	mu      sync.Mutex
-	issues  map[string]domain.IssueSnapshot
-	err     error
-	queries []app.IssueQuery
-	reads   []string
+	mu       sync.Mutex
+	issues   map[string]domain.IssueSnapshot
+	err      error
+	queries  []app.IssueQuery
+	reads    []string
+	history  map[string][]domain.TagEvent
+	tagErr   error
+	tagReads []string
+}
+
+func (s *source) TagEvents(_ context.Context, _ string, _ domain.Secret, id string) ([]domain.TagEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tagReads = append(s.tagReads, id)
+	if err := cmp.Or(s.tagErr, s.err); err != nil {
+		return nil, err
+	}
+	if h, ok := s.history[id]; ok {
+		return h, nil
+	}
+	is, ok := s.issues[id]
+	if !ok {
+		return nil, domain.ErrIssueNotFound
+	}
+	return []domain.TagEvent{{At: is.Updated, Author: is.Reporter, Added: is.Tags}}, nil
+}
+
+func (s *source) setHistory(id string, events ...domain.TagEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.history == nil {
+		s.history = map[string][]domain.TagEvent{}
+	}
+	s.history[id] = events
 }
 
 func (s *source) UpdatedIssues(_ context.Context, _ string, token domain.Secret, q app.IssueQuery) ([]domain.IssueSnapshot, error) {

@@ -131,6 +131,7 @@ describe("project YouTrack panel", () => {
     const state = {
       v: view({
         recent: [
+          { issueId: "KIN-3", outcome: "rejected", reason: "tag_not_allowed", reporter: "alice.yt", channel: "poll", processedAt: "2026-11-24T10:30:00Z" },
           { issueId: "KIN-2", outcome: "rejected", reason: "not_allowed", reporter: "bob.yt", channel: "poll", processedAt: "2026-11-24T10:00:00Z" },
           { issueId: "KIN-1", outcome: "created", initiator: "alice", taskId: "t1", channel: "poll", processedAt: "2026-11-24T09:00:00Z" },
         ],
@@ -152,6 +153,8 @@ describe("project YouTrack panel", () => {
     const user = userEvent.setup();
     expect(await screen.findByText("Issues of YouTrack project KIN tagged “kindevai” become tasks.")).toBeInTheDocument();
     expect(screen.getByText(/Creating an issue is not the same as the right to start AI/)).toBeInTheDocument();
+    expect(screen.getByText(/Whoever applied the trigger tag is not linked to an account that may start AI/)).toBeInTheDocument();
+    expect(screen.queryByText("YouTrack: alice.yt")).not.toBeInTheDocument(); // the reporter is not who tagged it
     expect(screen.queryByLabelText("Trigger tag")).not.toBeInTheDocument(); // Owner only
     await expectAccessible(container);
 

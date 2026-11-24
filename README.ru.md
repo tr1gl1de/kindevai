@@ -163,10 +163,10 @@ associated data) и доступны только на запись: API соо�
 интеграции. **Webhook необязателен**: когда Owner задал секрет, workflow YouTrack может вызывать
 `POST /api/webhooks/youtrack` с заголовком `X-Kindevai-Webhook-Secret` и телом `{"issueId":"KIN-12","updated":<мс>}`;
 платформа сохраняет только ID задачи и перечитывает её через REST API, поэтому тело webhook ничего не решает. Задача
-выполняется от имени аккаунта, который Owner связал с логином автора в YouTrack, и только если этот аккаунт может
-запускать AI в проекте (Owner или участник проекта) — создание issue в YouTrack ничего не разрешает (тег может поставить любой, у кого есть права в YouTrack, —
-задача берётся от имени автора, но ей всё равно нужен план, а рискованному плану — одобрение Owner); иначе задача не
-создаётся, а участники видят причину на странице проекта. Участники также могут **запустить задачу по ID** (тег не
+выполняется от имени аккаунта, который Owner связал с логином в YouTrack **того, кто поставил тег-триггер** (берётся
+из истории тегов issue, а не автор), и только если этот аккаунт может запускать AI в проекте (Owner или участник
+проекта) — создание issue или тег в YouTrack сами ничего не разрешают. Если по истории нельзя точно сказать, кто
+поставил тег, задача тоже не создаётся (`tag_not_allowed`); участники видят причину на странице проекта. Участники также могут **запустить задачу по ID** (тег не
 нужен, инициатор — сам участник). API: `GET|PUT /api/integrations/youtrack/intake`,
 `PUT|DELETE /api/integrations/youtrack/webhook`, `POST /api/integrations/youtrack/users`,
 `DELETE /api/integrations/youtrack/users/{userId}`, `PUT /api/projects/{id}/integrations/youtrack/trigger` (Owner);
@@ -257,7 +257,7 @@ docker compose exec cp ai-platform setup-token        # setup token для пе�
 make help             # список целей
 make dev              # запустить Control Plane на порту этого worktree
 npm --prefix web run dev   # Vite dev server, проксирует /api в Control Plane
-make test             # Go-тесты (-race -shuffle=on) + unit-тесты web
+make test             # Go-тесты (-race -shuffle=on) + unit-тесты web + тесты хуков/скриптов
 make lint             # go vet + проверка типов TypeScript
 make clean            # удалить артефакты сборки и тестов
 ```

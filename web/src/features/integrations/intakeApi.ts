@@ -6,7 +6,7 @@ import type { SecretMeta } from "../../api/types";
 export type IntakeState = "ok" | "degraded" | "circuit_open";
 
 /** Why an issue produced no task. */
-export type IntakeReason = "unknown_user" | "not_allowed" | "issue_not_found" | "other_project" | "invalid_issue" | "unavailable";
+export type IntakeReason = "unknown_user" | "not_allowed" | "tag_not_allowed" | "issue_not_found" | "other_project" | "invalid_issue" | "unavailable";
 
 export interface IntakeEntry {
   issueId: string;

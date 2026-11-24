@@ -81,6 +81,8 @@ type User struct {
 	Role         PlatformRole
 	CreatedAt    time.Time
 	Disabled     bool
+	// MustChangePassword is set for temporary passwords (new or reset accounts) until the user picks their own.
+	MustChangePassword bool
 }
 
 // ErrNotFound is returned by repositories when an entity does not exist.

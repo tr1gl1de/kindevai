@@ -1,0 +1,2 @@
+# Git-ignored files copied into new worktrees (claude --worktree and scripts/task-worktree.sh).
+.env

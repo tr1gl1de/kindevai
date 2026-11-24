@@ -41,6 +41,7 @@ caddy_config/
 # --- Claude Code / AI tooling local state --------------------------------
 .claude/settings.local.json
 .claude/worktrees/
+.worktree.env
 
 # --- OS / editors ---------------------------------------------------------
 .DS_Store

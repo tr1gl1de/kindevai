@@ -142,6 +142,14 @@ const CancelStaleFence = "stale_fence"
 // CancelCancelled is Cancel.Reason for an attempt of a cancelled task or execution.
 const CancelCancelled = "cancelled"
 
+// CancelRunnerDisabled is Cancel.Reason for the attempts of a runner the Owner disabled (KIN-63). CancelRunnerRevoked
+// is never sent (a revoked runner never connects again): it is the reason a revoked runner stops its attempts with
+// itself, on close code 4410.
+const (
+	CancelRunnerDisabled = "runner_disabled"
+	CancelRunnerRevoked  = "runner_revoked"
+)
+
 // AssignCommandID and CancelCommandID are the deterministic command ids of an attempt's assignment and
 // cancellation: a repeated use case appends nothing, and the stale-fence cancel and a task cancel share one.
 func AssignCommandID(step string, fence int64) string {

@@ -221,3 +221,23 @@ func TestConnectorStopsOnFatalErrors(t *testing.T) {
 		t.Fatalf("revocation of a live session = %v", err)
 	}
 }
+
+// KIN-63 fail-closed: told that it was disabled (4403) or revoked (4410), on the live link or at the handshake, the
+// runner stops its attempts itself, without waiting for an execution.cancel; other closes leave them running.
+func TestDisabledOrRevokedRunnerHaltsItsAttempts(t *testing.T) {
+	t.Parallel()
+	f, ctx := newConnFixture(t,
+		dialResult{linkErr: errors.New("connection reset")},
+		dialResult{linkErr: domain.ErrNotApproved},
+		dialResult{err: domain.ErrNotApproved},
+		dialResult{err: domain.ErrRunnerRevoked})
+	var halts []string
+	f.c.Halt = func(reason string) { halts = append(halts, reason) }
+	if err := f.c.Run(ctx, f.e, f.id); !errors.Is(err, domain.ErrRunnerRevoked) {
+		t.Fatalf("run = %v", err)
+	}
+	want := []string{protocol.CancelRunnerDisabled, protocol.CancelRunnerDisabled, protocol.CancelRunnerRevoked}
+	if len(halts) != len(want) || halts[0] != want[0] || halts[1] != want[1] || halts[2] != want[2] {
+		t.Fatalf("halts = %v, want %v", halts, want)
+	}
+}

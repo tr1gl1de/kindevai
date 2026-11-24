@@ -57,6 +57,12 @@ type Connector struct {
 	// Handlers run on every authorized link (KIN-22 command/event channel); a message no handler takes closes
 	// the link as a protocol error.
 	Handlers []LinkHandler
+	// Halt stops every running attempt and returns once they ended (KIN-63, fail-closed): the Control Plane said
+	// the runner was disabled (reason runner_disabled) or revoked (runner_revoked), so its attempts were taken
+	// away; the runner does not wait for an execution.cancel it may never receive. It must return within a bound
+	// (the executor's: grace + 5 s) even if ctx ends, so a revoked runner never exits leaving processes behind.
+	// nil: nothing to stop.
+	Halt func(reason string)
 }
 
 func (c *Connector) defaults() {
@@ -113,6 +119,7 @@ func (c *Connector) Run(ctx context.Context, e domain.Enrollment, id domain.Iden
 		if ctx.Err() != nil {
 			return nil
 		}
+		c.halt(err)
 		if domain.Fatal(err) {
 			return err
 		}
@@ -121,6 +128,20 @@ func (c *Connector) Run(ctx context.Context, e domain.Enrollment, id domain.Iden
 		if c.Sleep(ctx, d) != nil {
 			return nil
 		}
+	}
+}
+
+// halt stops the attempts of a runner the Control Plane disabled or revoked.
+func (c *Connector) halt(err error) {
+	if c.Halt == nil {
+		return
+	}
+	switch {
+	case errors.Is(err, domain.ErrRunnerRevoked):
+		c.Logger.Warn("runner revoked: stopping every running attempt")
+		c.Halt(protocol.CancelRunnerRevoked)
+	case errors.Is(err, domain.ErrNotApproved):
+		c.Halt(protocol.CancelRunnerDisabled)
 	}
 }
 

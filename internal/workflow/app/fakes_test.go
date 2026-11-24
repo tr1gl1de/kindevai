@@ -166,12 +166,18 @@ func (r *memRepo) ExpiredLeaseExecutions(_ context.Context, now time.Time) ([]st
 
 // memTx serializes use cases like the single SQLite writer does. It does not roll back: tests that need atomicity
 // run against SQLite (adapters/sqlite).
+// A nested call joins the outer transaction, like db.Transactor.
 type memTx struct{ mu sync.Mutex }
 
+type memTxKey struct{}
+
 func (t *memTx) InTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	if ctx.Value(memTxKey{}) != nil {
+		return fn(ctx)
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return fn(ctx)
+	return fn(context.WithValue(ctx, memTxKey{}, true))
 }
 
 type fakeProjects map[string][]string

@@ -113,7 +113,9 @@ ai-runner fingerprint                                    # compare with the runn
   nonce bound to the connection id and its own address, the runner signs
   `kindevai-runner-auth/1\n<runner id>\n<audience>\n<nonce>\n<expiry>\n<connection id>` with its Ed25519 key, and
   only an **approved** runner is let in (pending/disabled are refused and retried, revoked stops the daemon with exit
-  code 78). Disabling or revoking a runner closes its live connection immediately. The runner reconnects with jittered
+  code 78). Disabling or revoking a runner closes its live connection immediately and, in the same transaction, fails
+  its running attempts (retried on another runner); the runner stops their processes itself as soon as it is told it
+  was disabled or revoked, without waiting for the Control Plane (KIN-63). The runner reconnects with jittered
   exponential backoff (1 s … 60 s); a TLS verification failure or a challenge for another address stops it (78).
 - Limits on the Control Plane: 64 KiB per message, 10 s to authenticate, ping every 30 s (15 s to answer), 30
   connection attempts per minute per address, 256 connections (32 still authenticating); browsers (an `Origin`

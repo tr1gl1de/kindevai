@@ -320,3 +320,49 @@ func TestHeartbeatsDoNotKeepAnUnstartedClaim(t *testing.T) {
 		t.Fatalf("step %+v", ex.Steps[0])
 	}
 }
+
+// Disabling or revoking a runner (KIN-63) fails its running attempt at once and lets the step run again on another
+// runner. A disabled runner gets execution.cancel in the same transaction; a revoked one never connects again, so
+// nothing is queued for it (it stops its processes itself).
+func TestReleaseRunnerFailsItsAttemptsAndRetriesElsewhere(t *testing.T) {
+	t.Parallel()
+	for _, reason := range []string{ReleaseDisabled, ReleaseRevoked} {
+		t.Run(reason, func(t *testing.T) {
+			t.Parallel()
+			e := newSchedEnv()
+			task := e.task(t, onlyStep())
+			e.pool.set("p1", Candidate{ID: "r1", DiskHeavyAllowed: true})
+			e.schedule(t)
+			_, ex := e.state(t, task.ID)
+			st := run(t, e, ex)
+			e.disp.take()
+			if err := e.svc.ReleaseRunner(t.Context(), "r1", reason); err != nil {
+				t.Fatal(err)
+			}
+			var want []string
+			if reason == ReleaseDisabled {
+				want = []string{fmt.Sprintf("cancel r1 %s/%d runner_disabled", st.ID, st.Fence)}
+			}
+			if c := e.disp.take(); !slices.Equal(c, want) {
+				t.Fatalf("commands %v", c)
+			}
+			_, ex = e.state(t, task.ID)
+			s := ex.Steps[0]
+			if s.State != domain.StepReady || s.RunnerID != "" || s.Attempts[0].State != domain.AttemptFailed ||
+				s.Attempts[0].Error != "runner "+reason+" by the Owner" {
+				t.Fatalf("step %+v", s)
+			}
+			e.pool.set("p1", Candidate{ID: "r2", DiskHeavyAllowed: true})
+			e.schedule(t)
+			if c := e.disp.take(); !slices.Equal(c, []string{fmt.Sprintf("assign r2 only/%d p1 api", st.Fence+1)}) {
+				t.Fatalf("retry commands %v", c)
+			}
+			if err := e.svc.ReleaseRunner(t.Context(), "r1", reason); err != nil { // nothing left: no-op
+				t.Fatal(err)
+			}
+			if c := e.disp.take(); len(c) != 0 {
+				t.Fatalf("second release queued %v", c)
+			}
+		})
+	}
+}

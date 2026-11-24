@@ -499,7 +499,7 @@ export const en = {
     disableWebhook: "Disable webhook",
     webhookDisabled: "Webhook disabled.",
     usersTitle: "YouTrack users",
-    usersHint: "An issue runs for the platform account linked to its reporter. Creating an issue in YouTrack grants nothing: the account must also be allowed to start AI in the project.",
+    usersHint: "An issue runs for the platform account linked to its reporter. Creating an issue in YouTrack grants nothing: the account must also be allowed to start AI in the project. Note: anyone who can tag an issue in YouTrack can start intake of it on behalf of its reporter; the task still needs a plan and, for risky plans, your approval.",
     noLinks: "No YouTrack logins linked yet.",
     account: "Platform login",
     youtrackLogin: "YouTrack login",

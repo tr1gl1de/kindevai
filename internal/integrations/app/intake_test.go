@@ -1,7 +1,9 @@
 package app_test
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"errors"
 	"slices"
 	"strings"
@@ -365,5 +367,70 @@ func TestOwnerIntakeSettings(t *testing.T) {
 	}
 	if strings.Contains(e.audit.dump(), ytToken) {
 		t.Fatal("token in audit")
+	}
+}
+
+// Review finding: a broken binding (e.g. its YouTrack project was deleted) must not stop the others.
+func TestAFailingBindingDoesNotBlockTheOthers(t *testing.T) {
+	t.Parallel()
+	e := newIntakeEnv(t)
+	if _, err := e.svc.BindYouTrackProject(t.Context(), owner, "p2", "AAA"); err != nil { // polled first
+		t.Fatal(err)
+	}
+	e.intake.Source = &failingFor{source: e.src, shortName: "AAA"}
+	e.src.put(issue("KIN-1", 100, "jdoe"))
+	e.poll(t)
+	if len(e.tasks.titles) != 1 || len(e.health.failures) != 0 || e.health.successes != 1 {
+		t.Fatalf("tasks %+v, failures %v", e.tasks.titles, e.health.failures)
+	}
+}
+
+type failingFor struct {
+	*source
+	shortName string
+}
+
+func (f *failingFor) UpdatedIssues(ctx context.Context, base string, tok domain.Secret, q app.IssueQuery) ([]domain.IssueSnapshot, error) {
+	if q.ShortName == f.shortName {
+		return nil, &app.StatusError{Status: 400}
+	}
+	return f.source.UpdatedIssues(ctx, base, tok, q)
+}
+
+// Review finding: more tagged issues in the coarse date window than one cycle reads must not stall the cursor.
+func TestThePollCursorDoesNotStallAtThePageCap(t *testing.T) {
+	t.Parallel()
+	e := newIntakeEnv(t)
+	e.intake.MaxPages = 1 // two issues per cycle; the fake ignores the date window like a coarse query would
+	for i := range 5 {
+		e.src.put(issue(fmt.Sprintf("KIN-%d", i+1), int64(100*(i+1)), "jdoe"))
+	}
+	for range 10 {
+		e.poll(t)
+	}
+	if len(e.tasks.titles) != 5 {
+		t.Fatalf("tasks after 10 cycles: %+v", e.tasks.titles)
+	}
+	if b, _ := e.istore.Binding(t.Context(), "p1"); b.Cursor != 500 {
+		t.Fatalf("cursor %d", b.Cursor)
+	}
+}
+
+// Review finding: a failed run by ID must not hide the task an issue already has.
+func TestAFailedRunByIDKeepsTheTaskLink(t *testing.T) {
+	t.Parallel()
+	e := newIntakeEnv(t)
+	e.src.put(issue("KIN-1", 100, "jdoe"))
+	e.poll(t)
+	e.src.err = &app.StatusError{Status: 403}
+	if _, err := e.intake.RunIssue(t.Context(), alicePrincipal, "p1", "KIN-1"); err != nil {
+		t.Fatal(err)
+	}
+	e.deliver(t)
+	if r := e.record(t, "p1", "KIN-1"); r.TaskID == "" || r.Outcome == domain.OutcomeQueued {
+		t.Fatalf("task link lost or run never settled: %+v", r)
+	}
+	if !slices.Contains(e.audit.kinds(), app.KindYouTrackIssueRejected) {
+		t.Fatal("failure not audited")
 	}
 }

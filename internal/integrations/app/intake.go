@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -8,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
@@ -154,6 +157,10 @@ type Intake struct {
 	MaxPages     int // poll requests per binding and cycle (default 10)
 	// FetchAttempts must equal the outbox's MaxAttempts (default: the messaging default).
 	FetchAttempts int
+	Tick          time.Duration // how often Run checks whether a poll is due (default 5s)
+
+	mu     sync.Mutex
+	resume map[string]int // binding/cursor -> issues already read when a poll stopped at the page cap
 }
 
 func (in *Intake) now() time.Time { return in.Integrations.Now().UTC() }
@@ -207,7 +214,8 @@ type fetchPayload struct {
 // ---- polling ----
 
 // PollOnce polls every binding once. It does nothing without a configured connection or binding, or while the
-// YouTrack circuit is open. Failures are reported to Health and returned (the cursor keeps what was received).
+// YouTrack circuit is open. A binding that fails (e.g. its YouTrack project was deleted) does not stop the others;
+// Health records a failure, and PollOnce returns an error, only when every binding failed.
 func (in *Intake) PollOnce(ctx context.Context) error {
 	settings, err := in.Integrations.YouTrackSettings(ctx)
 	if errors.Is(err, domain.ErrNotConfigured) || errors.Is(err, domain.ErrSecretNotSet) {
@@ -223,27 +231,45 @@ func (in *Intake) PollOnce(ctx context.Context) error {
 	if !in.Health.Allow(AdapterYouTrack) {
 		return nil
 	}
+	var errs []error
 	for _, b := range bindings {
 		if err := in.pollBinding(ctx, settings, b); err != nil {
-			if ctx.Err() == nil {
-				in.Health.Failure(AdapterYouTrack, err)
+			if ctx.Err() != nil {
+				return err
 			}
-			return err
+			in.logger().Warn("youtrack poll failed", "project", b.ProjectID, "youtrackProject", b.ShortName, "err", err)
+			errs = append(errs, err)
 		}
+	}
+	if len(errs) == len(bindings) {
+		err := errors.Join(errs...)
+		in.Health.Failure(AdapterYouTrack, err)
+		return err
 	}
 	in.Health.Success(AdapterYouTrack)
 	return nil
 }
 
+// pollBinding hands the binding's tagged issues updated at or after its cursor to the inbox, oldest first, and
+// advances the cursor. The YouTrack query is coarse (whole days), so older issues it returns are skipped; when a
+// cycle stops at the page cap, the next one resumes after the pages already read instead of re-reading them.
 func (in *Intake) pollBinding(ctx context.Context, settings YouTrackSettings, b domain.Binding) error {
-	cursor := b.Cursor
-	for page := range in.maxPages() {
-		q := IssueQuery{ShortName: b.ShortName, Tag: b.TriggerTag, Since: b.Cursor, Skip: page * in.pageSize(), Top: in.pageSize()}
+	key := b.ProjectID + "/" + b.ShortName + "/" + strconv.FormatInt(b.Cursor, 10)
+	in.mu.Lock()
+	skip := in.resume[key]
+	in.mu.Unlock()
+	cursor, capped := b.Cursor, true
+	for range in.maxPages() {
+		q := IssueQuery{ShortName: b.ShortName, Tag: b.TriggerTag, Since: b.Cursor, Skip: skip, Top: in.pageSize()}
 		issues, err := in.Source.UpdatedIssues(ctx, settings.BaseURL, settings.Token, q)
 		if err != nil {
 			return err // the cursor stays: what was received is deduplicated by the inbox next time
 		}
+		skip += len(issues)
 		for _, s := range issues {
+			if s.Updated < b.Cursor {
+				continue
+			}
 			if err := s.Validate(); err != nil || s.Project != b.ShortName {
 				in.logger().Warn("youtrack issue skipped", "issue", s.ID, "err", err)
 				continue
@@ -254,8 +280,21 @@ func (in *Intake) pollBinding(ctx context.Context, settings YouTrackSettings, b 
 			cursor = max(cursor, s.Updated)
 		}
 		if len(issues) < in.pageSize() {
+			capped = false
 			break
 		}
+	}
+	in.mu.Lock()
+	delete(in.resume, key)
+	if capped && cursor == b.Cursor { // nothing newer within the cap: continue from here next time
+		if in.resume == nil {
+			in.resume = map[string]int{}
+		}
+		in.resume[key] = skip
+	}
+	in.mu.Unlock()
+	if capped {
+		in.logger().Warn("youtrack poll stopped at the page cap", "youtrackProject", b.ShortName, "read", skip)
 	}
 	return in.Store.AdvanceCursor(ctx, b.ProjectID, b.ShortName, cursor, in.now())
 }
@@ -274,34 +313,44 @@ func (in *Intake) receive(ctx context.Context, p issuePayload, delivery string) 
 	return err
 }
 
-// Run polls until ctx ends: every poll interval (re-read each cycle), backing off exponentially after failures
-// up to 15 minutes and never sooner than a Retry-After from YouTrack.
+// Run polls until ctx ends. Every tick it re-reads the poll interval, so a changed interval or a new binding is
+// picked up within a tick; after failures it backs off exponentially up to 15 minutes, and never polls sooner than
+// a Retry-After from YouTrack.
 func (in *Intake) Run(ctx context.Context) {
+	tick := in.Tick
+	if tick <= 0 {
+		tick = 5 * time.Second
+	}
+	var last time.Time // zero: poll at once
 	failures := 0
-	wait := time.Duration(0)
+	var lastErr error
 	for {
-		t := time.NewTimer(wait)
+		interval := domain.DefaultIntakeSettings().PollInterval
+		if s, err := in.Store.IntakeSettings(ctx); err == nil {
+			interval = s.PollInterval
+		}
+		wait := interval
+		if failures > 0 {
+			wait = NextPoll(interval, failures, lastErr)
+		}
+		if last.IsZero() || !time.Now().Before(last.Add(wait)) {
+			last = time.Now()
+			if lastErr = in.PollOnce(ctx); ctx.Err() != nil {
+				return
+			}
+			if lastErr != nil {
+				failures++
+			} else {
+				failures = 0
+			}
+		}
+		t := time.NewTimer(tick)
 		select {
 		case <-ctx.Done():
 			t.Stop()
 			return
 		case <-t.C:
 		}
-		err := in.PollOnce(ctx)
-		if ctx.Err() != nil {
-			return
-		}
-		interval := domain.DefaultIntakeSettings().PollInterval
-		if s, serr := in.Store.IntakeSettings(ctx); serr == nil {
-			interval = s.PollInterval
-		}
-		if err == nil {
-			failures, wait = 0, interval
-			continue
-		}
-		failures++
-		in.logger().Warn("youtrack poll failed", "err", err, "failures", failures)
-		wait = NextPoll(interval, failures, err)
 	}
 }
 
@@ -415,8 +464,28 @@ func (in *Intake) HandleIssue(ctx context.Context, e messaging.InboundEvent) err
 
 func (in *Intake) reject(ctx context.Context, rec domain.IntakeRecord, reason string) error {
 	rec.Outcome, rec.Reason = domain.OutcomeRejected, reason
-	if err := in.Store.SaveIntakeRecord(ctx, rec); err != nil {
+	prev, seen, err := in.Store.IntakeRecord(ctx, rec.ProjectID, rec.IssueID)
+	if err != nil {
 		return err
+	}
+	switch {
+	case seen && prev.TaskID != "":
+		// The issue already has a task: a failed run by ID must not hide it. Only the audit log records the failure;
+		// a queued run of it is settled as "up to date".
+		if prev.Outcome == domain.OutcomeQueued {
+			prev.Outcome, prev.ProcessedAt = domain.OutcomeUnchanged, rec.ProcessedAt
+			if err := in.Store.SaveIntakeRecord(ctx, prev); err != nil {
+				return err
+			}
+		}
+	default:
+		if seen {
+			rec.IssueUpdated = max(rec.IssueUpdated, prev.IssueUpdated)
+			rec.Reporter = cmp.Or(rec.Reporter, prev.Reporter)
+		}
+		if err := in.Store.SaveIntakeRecord(ctx, rec); err != nil {
+			return err
+		}
 	}
 	return in.Integrations.record(ctx, auditapp.System(), KindYouTrackIssueRejected, rec.ProjectID,
 		"project:"+rec.ProjectID, map[string]string{"issue": rec.IssueID, "reason": reason,
@@ -459,7 +528,8 @@ func (in *Intake) ReceiveWebhook(ctx context.Context, presented string, body []b
 	if err != nil {
 		return err
 	}
-	delivery := "hook/" + id + "/" + in.Integrations.NewID()
+	// Without `updated`, calls for one issue within the same minute are one delivery (bounded re-reads).
+	delivery := fmt.Sprintf("hook/%s/m%d", id, in.now().Unix()/60)
 	if req.Updated > 0 {
 		delivery = fmt.Sprintf("%s%s/%d", "hook/", id, req.Updated)
 	}

@@ -105,3 +105,63 @@ func TestIssueAndErrors(t *testing.T) {
 		t.Error("an invalid issue ID reached the URL")
 	}
 }
+
+// KIN-50: the tag history comes from the issue's activities (TagsCategory) with the author's login.
+func TestTagEventsReadsTheTagHistory(t *testing.T) {
+	t.Parallel()
+	var query []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/issues/KIN-7/activities", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+tok {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		q := r.URL.Query()
+		query = append(query, q.Get("categories"), q.Get("fields"), q.Get("$top"), q.Get("reverse"))
+		_, _ = w.Write([]byte(`[
+			{"id":"1-1","timestamp":100,"author":{"login":"alice","$type":"User"},"added":[{"name":"kindevai","$type":"IssueTag"}],"removed":[],"$type":"TagsActivityItem"},
+			{"id":"1-2","timestamp":200,"author":null,"added":null,"removed":[{"name":"ui"}],"$type":"TagsActivityItem"}]`))
+	})
+	mux.HandleFunc("GET /api/issues/KIN-404/activities", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })
+	mux.HandleFunc("GET /api/issues/KIN-403/activities", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) })
+	mux.HandleFunc("GET /api/issues/KIN-1/activities", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"timestamp":100,"author":{"login":"alice"},"added":{"name":"kindevai"}}]`)) // not a list
+	})
+	mux.HandleFunc("GET /api/issues/KIN-2/activities", func(w http.ResponseWriter, _ *http.Request) {
+		ev := `{"timestamp":100,"author":{"login":"alice"},"added":[{"name":"kindevai"}]}`
+		_, _ = w.Write([]byte("[" + strings.Repeat(ev+",", domain.MaxTagEvents) + ev + "]")) // more than asked for
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	secret, _ := domain.NewYouTrackToken(tok)
+	c := &youtrack.Client{HTTP: srv.Client()}
+
+	events, err := c.TagEvents(t.Context(), srv.URL, secret, "KIN-7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(query) != 4 || query[0] != "TagsCategory" || !strings.Contains(query[1], "author(login)") ||
+		!strings.Contains(query[1], "added(name)") || !strings.Contains(query[1], "removed(name)") ||
+		!strings.Contains(query[1], "timestamp") || query[2] != "101" || query[3] != "true" {
+		t.Fatalf("request %q", query)
+	}
+	if len(events) != 2 || events[0].At != 100 || events[0].Author != "alice" || len(events[0].Added) != 1 ||
+		events[0].Added[0] != "kindevai" || events[1].Author != "" || len(events[1].Removed) != 1 || events[1].Removed[0] != "ui" {
+		t.Fatalf("events %+v", events)
+	}
+	if _, err := c.TagEvents(t.Context(), srv.URL, secret, "KIN-404"); !errors.Is(err, domain.ErrIssueNotFound) {
+		t.Fatalf("404: %v", err)
+	}
+	var se *app.StatusError
+	if _, err := c.TagEvents(t.Context(), srv.URL, secret, "KIN-403"); !errors.As(err, &se) || !se.Permanent() {
+		t.Fatalf("403: %v", err)
+	}
+	for _, id := range []string{"KIN-1", "KIN-2"} {
+		if _, err := c.TagEvents(t.Context(), srv.URL, secret, id); !errors.Is(err, app.ErrTagHistoryUnusable) {
+			t.Errorf("%s: %v", id, err)
+		}
+	}
+	if _, err := c.TagEvents(t.Context(), srv.URL, secret, "../admin"); err == nil {
+		t.Error("an invalid issue ID reached the URL")
+	}
+}

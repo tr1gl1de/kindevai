@@ -34,6 +34,7 @@ func (projects) Visible(_ context.Context, p auth.Principal) ([]app.ProjectRef, 
 }
 func (projects) Name(context.Context, string) (string, error)      { return "Alpha", nil }
 func (projects) Members(context.Context, string) ([]string, error) { return nil, nil }
+func (projects) Admins(context.Context, string) ([]string, error)  { return nil, nil }
 
 type approvals struct{}
 

@@ -147,6 +147,8 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	gateway := newRunnerGateway(inst, hub, tel, localPeers, audiences, logger)
 	channel := newRunnerChannel(inst, apv.Workflow, retention, logger)
 	attachRunnerChannel(gateway, channel)
+	// KIN-59: stored runner output in the Storage Overview, "output storage full" alerts.
+	reportOutputStorage(inst, msg, tel, channel, retention)
 	wireExecution(apv.Workflow, channel, gateway, tel, hub, logger)    // KIN-23 scheduler, leases, reconciliation
 	wireRunnerRelease(modules, apv.Workflow)                           // KIN-63 disable/revoke end the runner's attempts
 	netSvc, netHTTP := newNetwork(inst, audit, integ, channel, logger) // KIN-30 network profiles

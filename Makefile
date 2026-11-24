@@ -60,7 +60,7 @@ endif
 GOLANGCI_LINT ?= golangci-lint
 GOVULNCHECK   ?= go run golang.org/x/vuln/cmd/govulncheck@v1.10.0
 
-lint: web-deps ## go vet + golangci-lint + oxlint + TypeScript typecheck
+lint: web-deps ## go vet + golangci-lint + oxlint + stylelint + TypeScript typecheck
 ifneq ($(HAS_GO),)
 	go vet $(GO_PKGS)
 	@command -v $(GOLANGCI_LINT) >/dev/null || { echo "golangci-lint not installed (https://golangci-lint.run)"; exit 1; }

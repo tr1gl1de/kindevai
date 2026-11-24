@@ -111,6 +111,7 @@ func (r *memRepo) SavePreferences(_ context.Context, p domain.Preferences, _ tim
 type fakeProjects struct {
 	visible map[string][]app.ProjectRef // user id → projects
 	members map[string][]string
+	admins  map[string][]string
 }
 
 func (f fakeProjects) Visible(_ context.Context, p auth.Principal) ([]app.ProjectRef, error) {
@@ -126,6 +127,10 @@ func (f fakeProjects) Name(_ context.Context, id string) (string, error) {
 
 func (f fakeProjects) Members(_ context.Context, id string) ([]string, error) {
 	return f.members[id], nil
+}
+
+func (f fakeProjects) Admins(_ context.Context, id string) ([]string, error) {
+	return f.admins[id], nil
 }
 
 type fakePeople struct {
@@ -219,6 +224,7 @@ func newFixture() fixture {
 				"alien":  {{ID: "p2", Name: "Other", Role: app.RoleProjectAdmin}},
 			},
 			members: map[string][]string{"p1": {"admin", "member"}},
+			admins:  map[string][]string{"p1": {"admin"}},
 		},
 		People:    fakePeople{owners: []string{"owner"}, chats: map[string]int64{"owner": 100, "member": 300}},
 		Approvals: fakeApprovals{"AP1": true, "AP2": true},
@@ -385,5 +391,82 @@ func TestNotifyApprovalHonoursPreferences(t *testing.T) {
 	var ve *domain.ValidationError
 	if _, err := f.svc.SavePreferences(ctx, owner, "xx", nil); !errors.As(err, &ve) {
 		t.Fatalf("invalid language: %v", err)
+	}
+}
+
+// KIN-62 AC: a finished task notifies the Owners, the project's admins and the task's author (while still a
+// member), each linked user who wants task_finished once, in their language, with a Mini App link to the task.
+func TestNotifyTaskReachesItsAudienceOnce(t *testing.T) {
+	t.Parallel()
+	f := newFixture()
+	ctx := t.Context()
+	f.svc.People = fakePeople{owners: []string{"owner"},
+		chats: map[string]int64{"owner": 100, "admin": 200, "member": 300, "alien": 400, "gone": 500}}
+	if _, err := f.svc.SavePreferences(ctx, member, "ru", nil); err != nil {
+		t.Fatal(err)
+	}
+	ev := app.TaskFinished{TaskID: "T1", ProjectID: "p1", State: app.TaskFailed, Title: "Fix login", CreatedBy: "member"}
+	if err := f.svc.NotifyTask(ctx, ev); err != nil {
+		t.Fatal(err)
+	}
+	sent := f.out.sent(t)
+	chats := map[int64]app.SendPayload{}
+	for _, p := range sent {
+		chats[p.ChatID] = p
+	}
+	if len(sent) != 3 || len(chats) != 3 || chats[100].Text == "" || chats[200].Text == "" {
+		t.Fatalf("sent = %+v", sent)
+	}
+	ru := chats[300]
+	if ru.StartParam != "task_T1" || ru.Button != "Открыть задачу" || !strings.Contains(ru.Text, "ошибкой") ||
+		!strings.Contains(ru.Text, "Shop") || !strings.Contains(ru.Text, "Fix login") {
+		t.Fatalf("member message = %+v", ru)
+	}
+	keys := []string{}
+	for _, m := range f.out.msgs {
+		keys = append(keys, m.Key)
+	}
+	slices.Sort(keys)
+	if want := []string{"task/T1/FAILED/admin", "task/T1/FAILED/member", "task/T1/FAILED/owner"}; !slices.Equal(keys, want) {
+		t.Fatalf("keys = %v", keys)
+	}
+
+	// An author who left the project (or a stranger named as author) learns nothing about it.
+	f.out.msgs = nil
+	if err := f.svc.NotifyTask(ctx, app.TaskFinished{TaskID: "T2", ProjectID: "p1", State: app.TaskCompleted,
+		Title: "x", CreatedBy: "gone"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range f.out.sent(t) {
+		if p.ChatID == 500 || p.ChatID == 400 {
+			t.Fatalf("non-member notified: %+v", p)
+		}
+	}
+	if got := len(f.out.msgs); got != 2 {
+		t.Fatalf("messages = %d, want owner + admin", got)
+	}
+}
+
+func TestNotifyTaskHonoursPreferencesAndValidates(t *testing.T) {
+	t.Parallel()
+	f := newFixture()
+	ctx := t.Context()
+	if _, err := f.svc.SavePreferences(ctx, owner, "en", []domain.NotificationType{domain.NotifyTaskFinished}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.NotifyTask(ctx, app.TaskFinished{TaskID: "T1", ProjectID: "p1", State: app.TaskCompleted,
+		Title: "x", CreatedBy: "member"}); err != nil {
+		t.Fatal(err)
+	}
+	sent := f.out.sent(t)
+	if len(sent) != 1 || sent[0].ChatID != 300 || !strings.Contains(sent[0].Text, "completed") {
+		t.Fatalf("sent = %+v (owner opted out; admin has no Telegram)", sent)
+	}
+	var ve *domain.ValidationError
+	for _, bad := range []app.TaskFinished{{ProjectID: "p1", State: app.TaskFailed}, {TaskID: "T1", State: app.TaskFailed},
+		{TaskID: "T1", ProjectID: "p1", State: "CANCELLED"}} {
+		if err := f.svc.NotifyTask(ctx, bad); !errors.As(err, &ve) {
+			t.Fatalf("%+v: err = %v", bad, err)
+		}
 	}
 }

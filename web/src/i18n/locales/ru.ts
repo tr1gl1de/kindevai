@@ -525,6 +525,7 @@ export const ru: Messages = {
     issueId: "ID задачи",
     run: "Запустить",
     runQueued: "{{issueId}} в очереди. Появится ниже, когда YouTrack ответит.",
+    reporterLabel: "YouTrack: {{login}}",
     recentTitle: "Последние задачи",
     noRecent: "Задачи ещё не поступали.",
     issue: "Задача",

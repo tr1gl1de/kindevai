@@ -525,6 +525,7 @@ export const en = {
     issueId: "Issue ID",
     run: "Run",
     runQueued: "{{issueId}} queued. It appears below once YouTrack answers.",
+    reporterLabel: "YouTrack: {{login}}",
     recentTitle: "Recent issues",
     noRecent: "No issues taken yet.",
     issue: "Issue",

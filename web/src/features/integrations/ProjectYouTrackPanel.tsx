@@ -180,7 +180,7 @@ function Recent({ data }: { data: ProjectYouTrack }) {
                   <td>
                     <Outcome entry={e} />
                   </td>
-                  <td>{e.initiator ?? e.reporter ?? ""}</td>
+                  <td>{e.initiator ?? (e.reporter ? t("intake.reporterLabel", { login: e.reporter }) : "")}</td>
                   <td>
                     {formatDateTime(e.processedAt, i18n.language)}{" "}
                     <span className="muted">({t(`intake.channel_${e.channel}`)})</span>

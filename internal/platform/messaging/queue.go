@@ -126,21 +126,9 @@ func (q *queue) claim(ctx context.Context, limit int, blocked []string, admit fu
 		out = out[:0]
 		now := q.cfg.Now()
 		conn := db.Conn(ctx, q.d)
-		rows, err := conn.QueryContext(ctx, q.sql.candidates, ms(now), string(skip), limit*4)
+		// Over-fetch so messages of adapters that are probing (one call at a time) do not starve the others.
+		cands, err := candidates(ctx, conn, q.sql.candidates, ms(now), string(skip), limit*4)
 		if err != nil {
-			return err
-		}
-		var cands []record
-		for rows.Next() {
-			var r record
-			if err := rows.Scan(&r.id, &r.endpoint, &r.topic, &r.key, &r.payload, &r.attempts); err != nil {
-				rows.Close()
-				return err
-			}
-			cands = append(cands, r)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
 			return err
 		}
 		for _, r := range cands {
@@ -169,6 +157,23 @@ func (q *queue) claim(ctx context.Context, limit int, blocked []string, admit fu
 		return nil, fmt.Errorf("claiming messages: %w", err)
 	}
 	return out, nil
+}
+
+func candidates(ctx context.Context, conn db.Executor, query string, args ...any) ([]record, error) {
+	rows, err := conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []record
+	for rows.Next() {
+		var r record
+		if err := rows.Scan(&r.id, &r.endpoint, &r.topic, &r.key, &r.payload, &r.attempts); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // finish records the outcome of an attempt: done, a retry after the backoff, or dead. It runs even if the

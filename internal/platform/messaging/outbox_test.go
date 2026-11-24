@@ -396,6 +396,9 @@ func TestOutboxPurgeRemovesOldFinishedMessages(t *testing.T) {
 			}
 			out = append(out, k)
 		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
 		return out
 	}
 	c.Advance(7*24*time.Hour - 2*time.Hour)

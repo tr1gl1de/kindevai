@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/identity/adapters/httpapi"
@@ -17,6 +18,8 @@ import (
 	identity "github.com/tr1gl1de/kindevai/internal/identity/domain"
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
+	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
+	messaginghttp "github.com/tr1gl1de/kindevai/internal/platform/messaging/httpapi"
 	"github.com/tr1gl1de/kindevai/internal/platform/password"
 	"github.com/tr1gl1de/kindevai/internal/platform/ratelimit"
 	projectshttp "github.com/tr1gl1de/kindevai/internal/projects/adapters/httpapi"
@@ -25,6 +28,31 @@ import (
 	projects "github.com/tr1gl1de/kindevai/internal/projects/domain"
 	"github.com/tr1gl1de/kindevai/internal/server"
 )
+
+// messagingModule is the durable outbox/inbox. Bounded contexts register their handlers on Outbox/Inbox while
+// being wired, before start runs the dispatchers.
+type messagingModule struct {
+	Outbox *messaging.Outbox
+	Inbox  *messaging.Inbox
+	HTTP   server.Module
+}
+
+func newMessaging(inst *bootstrap.Installation, logger *slog.Logger) *messagingModule {
+	cfg := messaging.Config{Logger: logger}
+	m := &messagingModule{Outbox: messaging.NewOutbox(inst.DB, cfg), Inbox: messaging.NewInbox(inst.DB, cfg)}
+	m.HTTP = &messaginghttp.Handler{Outbox: m.Outbox, Inbox: m.Inbox, Logger: logger}
+	return m
+}
+
+// start runs the dispatchers until ctx ends; the returned stop cancels them and waits, so call it before the
+// database closes.
+func (m *messagingModule) start(ctx context.Context) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	wg.Go(func() { _ = m.Outbox.Run(ctx) })
+	wg.Go(func() { _ = m.Inbox.Run(ctx) })
+	return func() { cancel(); wg.Wait() }
+}
 
 // identityModule is the wired identity bounded context.
 type identityModule struct {

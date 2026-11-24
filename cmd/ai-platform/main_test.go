@@ -239,6 +239,9 @@ func TestLoginAfterSetupEndToEnd(t *testing.T) {
 	if code := get("/api/projects"); code != 200 {
 		t.Fatalf("list projects = %d", code)
 	}
+	if code := get("/api/integrations/status"); code != 200 {
+		t.Fatalf("integrations status = %d (messaging module not wired)", code)
+	}
 	if code := post("/api/auth/logout", ""); code != 204 {
 		t.Fatalf("logout = %d", code)
 	}

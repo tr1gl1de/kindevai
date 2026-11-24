@@ -106,6 +106,10 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	if err != nil {
 		return err
 	}
+	msg := newMessaging(inst, logger)
+	modules := append(identity.Modules, newProjects(inst, identity, logger)...)
+	modules = append(modules, msg.HTTP)
+	defer msg.start(ctx)() // deferred after inst.Close, so the dispatchers stop before the database closes
 
 	assets, built := web.Assets()
 	if !built {
@@ -113,7 +117,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	}
 	srv := &http.Server{
 		Handler: server.New(server.Options{
-			Version: version, Assets: assets, Logger: logger, Modules: append(identity.Modules, newProjects(inst, identity, logger)...),
+			Version: version, Assets: assets, Logger: logger, Modules: modules,
 			Middleware: func(h http.Handler) http.Handler { return trusted.Middleware(identity.Middleware(h)) },
 		}),
 		ReadHeaderTimeout: 10 * time.Second,

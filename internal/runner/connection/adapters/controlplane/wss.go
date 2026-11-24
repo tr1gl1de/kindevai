@@ -175,10 +175,20 @@ func dialError(server domain.ServerURL, resp *http.Response, err error) error {
 	return fmt.Errorf("%w: HTTP %d %s from %s", ErrUnexpected, resp.StatusCode, printable(body.Error), server)
 }
 
-// link is an authorized connection. Until KIN-20/KIN-22 the Control Plane sends nothing after runner.authorized,
-// so any message is a protocol error.
+// link is an authorized connection. Without a handler any message from the Control Plane is a protocol error.
 type link struct {
-	conn *websocket.Conn
+	conn    *websocket.Conn
+	handler func(ctx context.Context, env protocol.Envelope) error
+}
+
+var _ app.Conn = (*link)(nil)
+
+// SetHandler sets the receiver of the Control Plane's messages; call it before Wait.
+func (l *link) SetHandler(h func(ctx context.Context, env protocol.Envelope) error) { l.handler = h }
+
+// Send writes one envelope; it is safe for concurrent use.
+func (l *link) Send(ctx context.Context, typ string, payload any) error {
+	return writeEnvelope(ctx, l.conn, typ, payload)
 }
 
 func (l *link) Wait(ctx context.Context) error {
@@ -193,17 +203,31 @@ func (l *link) Wait(ctx context.Context) error {
 		}
 	}()
 	defer func() { _ = l.conn.CloseNow() }()
-	_, b, err := l.conn.Read(kctx)
-	if ctx.Err() != nil {
-		return nil
+	for {
+		typ, b, err := l.conn.Read(kctx)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil {
+			return closeError(err)
+		}
+		var env protocol.Envelope
+		if typ != websocket.MessageText || json.Unmarshal(b, &env) != nil || env.Type == "" {
+			_ = l.conn.Close(protocol.CloseProtocolError, "invalid frame")
+			return fmt.Errorf("%w: invalid frame", ErrUnexpected)
+		}
+		if l.handler == nil {
+			_ = l.conn.Close(protocol.CloseProtocolError, "unknown message type")
+			return fmt.Errorf("%w: unknown message type %q", ErrUnexpected, printable(env.Type))
+		}
+		if err := l.handler(ctx, env); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			_ = l.conn.Close(protocol.CloseProtocolError, "invalid "+printable(env.Type))
+			return fmt.Errorf("handling %s: %w", printable(env.Type), err)
+		}
 	}
-	if err != nil {
-		return closeError(err)
-	}
-	var env protocol.Envelope
-	_ = json.Unmarshal(b, &env)
-	_ = l.conn.Close(protocol.CloseProtocolError, "unknown message type")
-	return fmt.Errorf("%w: unknown message type %q", ErrUnexpected, printable(env.Type))
 }
 
 func keepalive(ctx context.Context, conn *websocket.Conn) {

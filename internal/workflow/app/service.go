@@ -45,6 +45,9 @@ type Repository interface {
 	TasksInState(ctx context.Context, s domain.TaskState) ([]string, error)
 	// ExecutionsHeldBy lists running executions with a step whose claim or unknown attempt is the runner's.
 	ExecutionsHeldBy(ctx context.Context, runnerID string) ([]string, error)
+	// HeldSteps counts, per runner id, the steps of running executions the runner holds (Step.Holding: CLAIMED,
+	// RUNNING or an unknown attempt) — the scheduler's load measure (KIN-65).
+	HeldSteps(ctx context.Context) (map[string]int, error)
 	ListTasks(ctx context.Context, projectIDs []string, limit int) ([]domain.Task, error) // newest first
 	LatestExecution(ctx context.Context, taskID string) (domain.Execution, error)         // domain.ErrNotFound
 }

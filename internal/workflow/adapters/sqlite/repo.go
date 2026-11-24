@@ -407,6 +407,31 @@ func (r *Repository) ExecutionsHeldBy(ctx context.Context, runnerID string) ([]s
 		WHERE e.state = 'RUNNING' AND s.runner_id = ? ORDER BY e.id`, runnerID)
 }
 
+// HeldSteps counts, per runner, the steps of running executions it holds: CLAIMED, RUNNING, or WAITING on a last
+// attempt whose outcome is UNKNOWN (domain.Step.Holding).
+func (r *Repository) HeldSteps(ctx context.Context) (map[string]int, error) {
+	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, `SELECT s.runner_id, COUNT(*) FROM workflow_steps s
+		JOIN executions e ON e.id = s.execution_id
+		WHERE e.state = 'RUNNING' AND s.runner_id IS NOT NULL AND s.runner_id != '' AND (s.state IN ('CLAIMED', 'RUNNING')
+			OR s.state = 'WAITING' AND (SELECT a.state FROM step_attempts a WHERE a.step_id = s.id
+				ORDER BY a.number DESC LIMIT 1) = 'UNKNOWN')
+		GROUP BY s.runner_id`)
+	if err != nil {
+		return nil, fmt.Errorf("counting held steps: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, fmt.Errorf("counting held steps: %w", err)
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}
+
 // ListTasks returns the tasks of the projects, newest first, at most limit.
 func (r *Repository) ListTasks(ctx context.Context, projectIDs []string, limit int) ([]domain.Task, error) {
 	if len(projectIDs) == 0 {

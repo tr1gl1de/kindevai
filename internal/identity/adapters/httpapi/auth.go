@@ -23,6 +23,9 @@ var publicAPI = map[string]bool{
 	"/api/setup":        true,
 	"/api/auth/login":   true,
 	"/api/auth/logout":  true,
+	// Invitation holders have no account yet; both endpoints are rate limited per client address.
+	"/api/invitations/preview": true,
+	"/api/invitations/accept":  true,
 }
 
 // AuthHandler serves login/logout/me and authenticates API requests.

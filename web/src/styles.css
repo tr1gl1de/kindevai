@@ -460,8 +460,16 @@ select[aria-invalid="true"] {
   flex-wrap: wrap;
   gap: 4px;
 }
-.secret h2:focus {
+.secret h2:focus,
+.secret h3:focus {
   outline: none;
+}
+.page-section {
+  margin-top: calc(var(--space) * 2);
+}
+.secret-value.link {
+  font-size: 0.95rem;
+  letter-spacing: 0;
 }
 .secret {
   border: 2px solid var(--accent);

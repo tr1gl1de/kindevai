@@ -14,6 +14,7 @@ export const handlers = [
   http.get("/api/setup/status", () => json<SetupStatus>({ setupRequired: false })),
   http.get("/api/auth/me", () => apiError(401, "unauthenticated")),
   http.get("/api/projects", () => json([])),
+  http.get("/api/invitations", () => json([])),
 ];
 
 export const server = setupServer(...handlers);

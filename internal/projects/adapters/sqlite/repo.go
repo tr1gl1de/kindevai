@@ -25,7 +25,7 @@ func ts(t time.Time) string { return t.UTC().Format(tsFormat) }
 
 // Create inserts a project; a duplicate slug is domain.ErrSlugTaken.
 func (r *Repository) Create(ctx context.Context, p domain.Project) error {
-	_, err := r.db.ExecContext(ctx, "INSERT INTO projects(id, slug, name, created_at) VALUES (?, ?, ?, ?)",
+	_, err := db.Conn(ctx, r.db).ExecContext(ctx, "INSERT INTO projects(id, slug, name, created_at) VALUES (?, ?, ?, ?)",
 		p.ID, string(p.Slug), string(p.Name), ts(p.CreatedAt))
 	if db.IsUniqueViolation(err) {
 		return domain.ErrSlugTaken
@@ -54,7 +54,7 @@ func scanProject(s scanner) (domain.Project, error) {
 
 // ByID loads a project.
 func (r *Repository) ByID(ctx context.Context, id string) (domain.Project, error) {
-	p, err := scanProject(r.db.QueryRowContext(ctx, "SELECT id, slug, name, created_at FROM projects WHERE id = ?", id))
+	p, err := scanProject(db.Conn(ctx, r.db).QueryRowContext(ctx, "SELECT id, slug, name, created_at FROM projects WHERE id = ?", id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Project{}, domain.ErrNotFound
 	}
@@ -65,7 +65,7 @@ func (r *Repository) ByID(ctx context.Context, id string) (domain.Project, error
 }
 
 func (r *Repository) list(ctx context.Context, q string, args ...any) ([]domain.Project, error) {
-	rows, err := r.db.QueryContext(ctx, q, args...)
+	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("listing projects: %w", err)
 	}
@@ -96,7 +96,7 @@ func (r *Repository) ForUser(ctx context.Context, userID string) ([]domain.Proje
 func (r *Repository) Membership(ctx context.Context, projectID, userID string) (domain.Membership, bool, error) {
 	m := domain.Membership{ProjectID: projectID, UserID: userID}
 	var role, created string
-	err := r.db.QueryRowContext(ctx, "SELECT role, created_at FROM project_memberships WHERE project_id = ? AND user_id = ?",
+	err := db.Conn(ctx, r.db).QueryRowContext(ctx, "SELECT role, created_at FROM project_memberships WHERE project_id = ? AND user_id = ?",
 		projectID, userID).Scan(&role, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Membership{}, false, nil
@@ -113,7 +113,7 @@ func (r *Repository) Membership(ctx context.Context, projectID, userID string) (
 
 // Members lists a project's memberships.
 func (r *Repository) Members(ctx context.Context, projectID string) ([]domain.Membership, error) {
-	rows, err := r.db.QueryContext(ctx,
+	rows, err := db.Conn(ctx, r.db).QueryContext(ctx,
 		"SELECT user_id, role, created_at FROM project_memberships WHERE project_id = ? ORDER BY created_at, user_id", projectID)
 	if err != nil {
 		return nil, fmt.Errorf("listing members: %w", err)
@@ -139,7 +139,7 @@ func (r *Repository) Members(ctx context.Context, projectID string) ([]domain.Me
 
 // SetMember inserts a membership or changes its role.
 func (r *Repository) SetMember(ctx context.Context, m domain.Membership) error {
-	_, err := r.db.ExecContext(ctx, `INSERT INTO project_memberships(project_id, user_id, role, created_at) VALUES (?, ?, ?, ?)
+	_, err := db.Conn(ctx, r.db).ExecContext(ctx, `INSERT INTO project_memberships(project_id, user_id, role, created_at) VALUES (?, ?, ?, ?)
 		ON CONFLICT(project_id, user_id) DO UPDATE SET role = excluded.role`,
 		m.ProjectID, m.UserID, string(m.Role), ts(m.CreatedAt))
 	if db.IsForeignKeyViolation(err) {
@@ -157,7 +157,7 @@ func (r *Repository) SetMember(ctx context.Context, m domain.Membership) error {
 
 // RemoveMember deletes a membership and reports whether one existed.
 func (r *Repository) RemoveMember(ctx context.Context, projectID, userID string) (bool, error) {
-	res, err := r.db.ExecContext(ctx, "DELETE FROM project_memberships WHERE project_id = ? AND user_id = ?", projectID, userID)
+	res, err := db.Conn(ctx, r.db).ExecContext(ctx, "DELETE FROM project_memberships WHERE project_id = ? AND user_id = ?", projectID, userID)
 	if err != nil {
 		return false, fmt.Errorf("removing membership: %w", err)
 	}

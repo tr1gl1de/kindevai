@@ -3,12 +3,14 @@ import { useTranslation } from "react-i18next";
 import { isApiError } from "../../api/client";
 import type { Account } from "../../api/types";
 import { ConfirmDialog } from "../../ui/ConfirmDialog";
+import { CopyButton } from "../../ui/CopyButton";
 import { TextField } from "../../ui/Field";
 import { ErrorState, FormAlert, Loading, PageHeading } from "../../ui/feedback";
 import { errorMessage, validationMessage } from "../../ui/errors";
 import { useFieldErrors } from "../../ui/form";
 import { useNotify } from "../../ui/notify";
 import { useCreateUser, useResetPassword, useSetDisabled, useUsers } from "./accountsApi";
+import { InvitationsSection } from "./InvitationsSection";
 
 type Confirm = { kind: "disable" | "reset"; user: Account } | null;
 
@@ -121,6 +123,7 @@ export function UsersPage() {
           onCancel={() => setConfirm(null)}
         />
       )}
+      <InvitationsSection />
     </>
   );
 }
@@ -180,7 +183,6 @@ function NewUser({ blocked, onCreated }: { blocked: boolean; onCreated: (login: 
 /** The one-time display of a generated password, with copy and an explicit "Done" that removes it. */
 function TemporaryPassword({ login, password, onDone }: { login: string; password: string; onDone: () => void }) {
   const { t } = useTranslation();
-  const notify = useNotify();
   const title = t("users.tempTitle", { login });
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => heading.current?.focus(), []); // announce and bring the one-time secret into view
@@ -194,23 +196,7 @@ function TemporaryPassword({ login, password, onDone }: { login: string; passwor
         <code className="secret-value">{password}</code>
       </p>
       <div className="form-actions">
-        <button
-          type="button"
-          className="button"
-          onClick={() => {
-            const clip = typeof navigator !== "undefined" ? navigator.clipboard : undefined;
-            if (!clip) {
-              notify(t("users.copyFailed"));
-              return;
-            }
-            clip.writeText(password).then(
-              () => notify(t("users.copied")),
-              () => notify(t("users.copyFailed")),
-            );
-          }}
-        >
-          {t("users.copy")}
-        </button>
+        <CopyButton text={password} failedHint={t("users.copyFailed")} />
         <button type="button" className="button primary" onClick={onDone}>
           {t("users.done")}
         </button>

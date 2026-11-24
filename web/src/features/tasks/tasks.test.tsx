@@ -2,6 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http } from "msw";
 import { describe, expect, it } from "vitest";
+import type { TelegramLaunch } from "../telegram/webapp";
 import type { Approval, Me, Project, Step, TaskDetail, TaskList, TaskListItem } from "../../api/types";
 import { apiError, json, owner, server } from "../../test/msw";
 import { expectAccessible, expectStatus, renderApp } from "../../test/render";
@@ -253,6 +254,20 @@ describe("task detail", () => {
     unmount();
     await renderApp("/tasks/nope");
     expect(await screen.findByRole("heading", { level: 1, name: "Task not found" })).toBeInTheDocument();
+  });
+});
+
+describe("Telegram deep link", () => {
+  it("opens the task page from a task notification (startapp=task_<id>)", async () => {
+    const launch: TelegramLaunch = { initData: "query_id=x&hash=abc", startParam: "task_t1", languageCode: "en" };
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/approvals", () => json([])),
+      http.get("/api/tasks/t1", () => json(detail())),
+    );
+    await renderApp("/", "en", launch);
+    expect(await screen.findByRole("heading", { level: 1, name: "Add login" })).toBeInTheDocument();
   });
 });
 

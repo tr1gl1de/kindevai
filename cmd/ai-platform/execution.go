@@ -11,8 +11,10 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	runnersgw "github.com/tr1gl1de/kindevai/internal/runners/adapters/gateway"
+	runnershttp "github.com/tr1gl1de/kindevai/internal/runners/adapters/httpapi"
 	runnersdb "github.com/tr1gl1de/kindevai/internal/runners/adapters/sqlite"
 	runnersapp "github.com/tr1gl1de/kindevai/internal/runners/app"
+	"github.com/tr1gl1de/kindevai/internal/server"
 	workflowapp "github.com/tr1gl1de/kindevai/internal/workflow/app"
 )
 
@@ -37,6 +39,16 @@ func wireExecution(wf *workflowapp.Service, ch *runnersapp.Channel, gw *runnersg
 				logger.Warn("renewing the runner's leases", "runner", s.RunnerID, "err", err)
 			}
 			return nil
+		}
+	}
+}
+
+// wireRunnerRelease lets the Owner's disable and revoke end the runner's attempts in the same transaction (KIN-63):
+// the runners management service built by newProjects gets the workflow as its Attempts port.
+func wireRunnerRelease(modules []server.Module, wf *workflowapp.Service) {
+	for _, m := range modules {
+		if h, ok := m.(*runnershttp.Handler); ok && h.Service != nil {
+			h.Service.Attempts = wf
 		}
 	}
 }

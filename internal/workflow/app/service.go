@@ -79,21 +79,36 @@ type Events interface {
 	TaskClosed(ctx context.Context, t domain.Task) error // CANCELLED or FAILED
 }
 
+// TaskNotifier is told, inside the use case's transaction, that a task finished: it entered COMPLETED or FAILED
+// (a cancellation is someone's own decision and is not announced). It runs once per state change, so the
+// notification (an outbox message, KIN-62) commits or rolls back with the task.
+type TaskNotifier interface {
+	TaskFinished(ctx context.Context, t domain.Task) error
+}
+
 // Service implements the workflow use cases.
 type Service struct {
 	Repo        Repository
 	Projects    Projects
-	Policy      RiskPolicy // required for SubmitPlan
-	Events      Events     // optional
-	Runners     RunnerPool // required for Schedule
-	Dispatcher  Dispatcher // runner commands; required for Schedule, optional otherwise
-	Access      Access     // project visibility for the task API (KIN-23)
-	Log         AttemptLog // attempt events for the task API (KIN-25); optional
+	Policy      RiskPolicy   // required for SubmitPlan
+	Events      Events       // optional
+	Notifier    TaskNotifier // optional: "task finished" notifications (KIN-62)
+	Runners     RunnerPool   // required for Schedule
+	Dispatcher  Dispatcher   // runner commands; required for Schedule, optional otherwise
+	Access      Access       // project visibility for the task API (KIN-23)
+	Log         AttemptLog   // attempt events for the task API (KIN-25); optional
 	Tx          TxRunner
 	Now         func() time.Time
 	NewID       func() string
 	LeaseTTL    time.Duration // DefaultLeaseTTL when zero
 	MaxAttempts int           // DefaultMaxAttempts when zero
+	Pause       Pause         // optional: maintenance mode (KIN-41)
+}
+
+// Pause reports whether the scheduler must not hand out new work (maintenance mode, KIN-41). Running attempts
+// continue (drain); leases still expire and runners still reconcile.
+type Pause interface {
+	SchedulingPaused(ctx context.Context) (bool, error)
 }
 
 func (s *Service) now() time.Time { return s.Now().UTC() }
@@ -166,10 +181,14 @@ func (s *Service) updateTask(ctx context.Context, id string, fn func(ctx context
 		if t, err = s.Repo.Task(ctx, id); err != nil {
 			return err
 		}
+		from := t.State
 		if err := fn(ctx, &t, s.now()); err != nil {
 			return err
 		}
-		return s.Repo.SaveTask(ctx, &t)
+		if err := s.Repo.SaveTask(ctx, &t); err != nil {
+			return err
+		}
+		return s.finished(ctx, from, t)
 	})
 	if err != nil {
 		return domain.Task{}, err
@@ -327,6 +346,7 @@ func (s *Service) syncTask(ctx context.Context, e *domain.Execution, now time.Ti
 	if err != nil {
 		return err
 	}
+	from := t.State
 	if t.State == domain.TaskBlocked && t.BlockedFrom == domain.TaskRunning {
 		if err := t.Resume(now); err != nil {
 			return err
@@ -339,9 +359,19 @@ func (s *Service) syncTask(ctx context.Context, e *domain.Execution, now time.Ti
 		return err
 	}
 	if to == domain.TaskFailed && s.Events != nil {
-		return s.Events.TaskClosed(ctx, t)
+		if err := s.Events.TaskClosed(ctx, t); err != nil {
+			return err
+		}
 	}
-	return nil
+	return s.finished(ctx, from, t)
+}
+
+// finished tells the notifier when the saved task has just entered COMPLETED or FAILED.
+func (s *Service) finished(ctx context.Context, from domain.TaskState, t domain.Task) error {
+	if s.Notifier == nil || from == t.State || (t.State != domain.TaskCompleted && t.State != domain.TaskFailed) {
+		return nil
+	}
+	return s.Notifier.TaskFinished(ctx, t)
 }
 
 // Claim gives runnerID the READY step with a new fencing token and a lease, only while the task is RUNNING (not
@@ -408,7 +438,7 @@ func (s *Service) CompleteStep(ctx context.Context, stepID, runnerID string, fen
 func (s *Service) CompleteStepAt(ctx context.Context, stepID, runnerID string, fence int64, at time.Time) error {
 	err := s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
 		if err := e.Succeed(stepID, runnerID, fence, now); err != nil {
-			return err
+			return refusedReport{err}
 		}
 		e.MarkWorkEnd(stepID, runnerID, fence, at, now)
 		return nil
@@ -425,7 +455,7 @@ func (s *Service) FailStep(ctx context.Context, stepID, runnerID string, fence i
 func (s *Service) FailStepAt(ctx context.Context, stepID, runnerID string, fence int64, msg string, at time.Time) error {
 	err := s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
 		if err := e.Fail(stepID, runnerID, fence, msg, now, s.maxAttempts()); err != nil {
-			return err
+			return refusedReport{err}
 		}
 		e.MarkWorkEnd(stepID, runnerID, fence, at, now)
 		return nil
@@ -433,10 +463,22 @@ func (s *Service) FailStepAt(ctx context.Context, stepID, runnerID string, fence
 	return s.lateWorkEnd(ctx, err, stepID, runnerID, fence, at)
 }
 
+// refusedReport marks the execution's own refusal of a terminal report (stale token, step already moved on), as
+// opposed to an error from saving or from the task's follow-up transition: only a refusal records a late end.
+type refusedReport struct{ err error }
+
+func (r refusedReport) Error() string { return r.err.Error() }
+func (r refusedReport) Unwrap() error { return r.err }
+
 // lateWorkEnd handles a terminal report the workflow refused (stale token or a step that already moved on, e.g.
 // after a cancellation or a lost-process reconciliation): the runner still says when the attempt's process ended,
 // so its agent time is closed (once) even though the step's state is not changed. The refusal err is returned.
 func (s *Service) lateWorkEnd(ctx context.Context, err error, stepID, runnerID string, fence int64, at time.Time) error {
+	var refused refusedReport
+	if !errors.As(err, &refused) {
+		return err
+	}
+	err = refused.err
 	if !errors.Is(err, domain.ErrStaleFence) && !errors.Is(err, domain.ErrInvalidTransition) {
 		return err
 	}

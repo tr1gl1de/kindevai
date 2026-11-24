@@ -29,6 +29,10 @@ var MinWorkTime = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 
 const MaxWorkSkew = 24 * time.Hour
 
+// MaxWorkPeriod bounds one attempt's work period: a longer one (a runner clock jump, or a runner reporting
+// implausible times) is not counted and makes the period incomplete.
+const MaxWorkPeriod = 24 * time.Hour
+
 var agentRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,63}$`)
 
 func usableWorkTime(at, now time.Time) bool {
@@ -97,8 +101,8 @@ func (a Attempt) Work(now time.Time) (WorkStatus, time.Duration) {
 	case a.WorkStart == nil:
 		return WorkIncomplete, 0 // a started attempt whose start was never recorded
 	case a.WorkEnd == nil && running:
-		return WorkRunning, max(0, now.Sub(*a.WorkStart))
-	case a.WorkEnd == nil, a.WorkEnd.Before(*a.WorkStart):
+		return WorkRunning, min(max(0, now.Sub(*a.WorkStart)), MaxWorkPeriod)
+	case a.WorkEnd == nil, a.WorkEnd.Before(*a.WorkStart), a.WorkEnd.Sub(*a.WorkStart) > MaxWorkPeriod:
 		return WorkIncomplete, 0
 	}
 	return WorkComplete, a.WorkEnd.Sub(*a.WorkStart)

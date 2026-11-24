@@ -545,3 +545,13 @@ func (r *Repository) LatestExecution(ctx context.Context, taskID string) (domain
 	return r.loadExecution(ctx, "SELECT "+execCols+
 		" FROM executions WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", taskID)
 }
+
+// ActiveSteps counts the steps claimed by or running on a runner (KIN-41: what maintenance mode drains).
+func (r *Repository) ActiveSteps(ctx context.Context) (int, error) {
+	var n int
+	if err := db.Conn(ctx, r.db).QueryRowContext(ctx,
+		`SELECT count(*) FROM workflow_steps WHERE state IN ('CLAIMED', 'RUNNING')`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("counting active steps: %w", err)
+	}
+	return n, nil
+}

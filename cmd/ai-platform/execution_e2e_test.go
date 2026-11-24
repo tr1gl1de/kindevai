@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -37,9 +38,11 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/runner/session/adapters/spoolevents"
 	sessionapp "github.com/tr1gl1de/kindevai/internal/runner/session/app"
 	sessiondomain "github.com/tr1gl1de/kindevai/internal/runner/session/domain"
+	runnershttp "github.com/tr1gl1de/kindevai/internal/runners/adapters/httpapi"
 	runnersdb "github.com/tr1gl1de/kindevai/internal/runners/adapters/sqlite"
 	runnersapp "github.com/tr1gl1de/kindevai/internal/runners/app"
 	runners "github.com/tr1gl1de/kindevai/internal/runners/domain"
+	"github.com/tr1gl1de/kindevai/internal/server"
 	workflowapp "github.com/tr1gl1de/kindevai/internal/workflow/app"
 	workflow "github.com/tr1gl1de/kindevai/internal/workflow/domain"
 )
@@ -83,6 +86,7 @@ type controlPlane struct {
 	addr    string
 	inst    *bootstrap.Installation
 	wf      *workflowapp.Service
+	hub     *runnersapp.Hub
 	stop    func()
 }
 
@@ -125,7 +129,7 @@ func startCP(t *testing.T, dataDir, addr string) *controlPlane {
 	srv.RegisterOnShutdown(hub.Shutdown)
 	go func() { _ = srv.Serve(ln) }()
 	stopScheduler := startScheduler(ctx, apv.Workflow, e2eSchedule, logger)
-	cp := &controlPlane{dataDir: dataDir, addr: ln.Addr().String(), inst: inst, wf: apv.Workflow}
+	cp := &controlPlane{dataDir: dataDir, addr: ln.Addr().String(), inst: inst, wf: apv.Workflow, hub: hub}
 	var once sync.Once
 	cp.stop = func() {
 		once.Do(func() {
@@ -158,9 +162,7 @@ func (cp *controlPlane) seed(t *testing.T, projects ...string) (string, ed25519.
 			t.Fatal(err)
 		}
 	}
-	svc := &runnersapp.Service{Repo: runnersdb.New(cp.inst.DB),
-		Projects: runnerProjects{&projectsapp.Service{Repo: projectsdb.New(cp.inst.DB)}}, Tx: db.Transactor{DB: cp.inst.DB},
-		Audit: &auditapp.Service{Repo: auditdb.New(cp.inst.DB), Now: time.Now}, Rand: rand.Reader, Now: time.Now, NewID: rand.Text}
+	svc := cp.runners()
 	_, tok, err := svc.CreateToken(ctx, ownerP)
 	if err != nil {
 		t.Fatal(err)
@@ -177,6 +179,18 @@ func (cp *controlPlane) seed(t *testing.T, projects ...string) (string, ed25519.
 		}
 	}
 	return res.Runner.ID, priv
+}
+
+// runners is the runners management service wired like `serve` (disable/revoke close the session and end the
+// runner's attempts, KIN-63).
+func (cp *controlPlane) runners() *runnersapp.Service {
+	svc := &runnersapp.Service{Repo: runnersdb.New(cp.inst.DB),
+		Projects: runnerProjects{&projectsapp.Service{Repo: projectsdb.New(cp.inst.DB)}}, Tx: db.Transactor{DB: cp.inst.DB},
+		Audit: &auditapp.Service{Repo: auditdb.New(cp.inst.DB), Now: time.Now}, Rand: rand.Reader, Now: time.Now, NewID: rand.Text,
+		Sessions: cp.hub}
+	h := &runnershttp.Handler{Service: svc}
+	wireRunnerRelease([]server.Module{h}, cp.wf)
+	return svc
 }
 
 // countingLauncher counts process launches (a second process for one attempt is the bug KIN-23 rules out).
@@ -199,6 +213,7 @@ type runner struct {
 	spool    *spool.Spool
 	cancel   context.CancelFunc
 	done     chan struct{}
+	err      error // what the connector returned, once done is closed
 }
 
 // startRunner starts the runner daemon's parts over dir (a restart reuses dir): the executor recovers its journal,
@@ -234,12 +249,13 @@ func startRunner(t *testing.T, dir, addr, id string, key ed25519.PrivateKey, all
 		t.Fatal(err)
 	}
 	conn := &connapp.Connector{Dialer: controlplane.New(), MinBackoff: 20 * time.Millisecond, MaxBackoff: 100 * time.Millisecond,
-		Handlers: []connapp.LinkHandler{ch, &connapp.Reporter{Probe: probe.New(dir), HeartbeatEvery: e2eHeartbeat}}}
+		Handlers: []connapp.LinkHandler{ch, &connapp.Reporter{Probe: probe.New(dir), HeartbeatEvery: e2eHeartbeat}},
+		Halt:     x.StopAll}
 	ctx, cancel := context.WithCancel(context.WithoutCancel(t.Context()))
 	r := &runner{dir: dir, id: id, key: key, launches: launches, x: x, spool: sp, cancel: cancel, done: make(chan struct{})}
 	go func() {
 		defer close(r.done)
-		_ = conn.Run(ctx, conndomain.Enrollment{Server: server, RunnerID: id}, ident)
+		r.err = conn.Run(ctx, conndomain.Enrollment{Server: server, RunnerID: id}, ident)
 	}()
 	t.Cleanup(func() { r.disconnect(); x.KillAll(); _ = sp.Close() })
 	return r
@@ -550,5 +566,81 @@ func TestControlPlaneRestartContinuesTheExecution(t *testing.T) {
 	}
 	if n := r.launches.n.Load(); n != 1 {
 		t.Fatalf("%d processes launched", n)
+	}
+}
+
+// runningPGID waits until the runner reports the attempt's process and returns its process group.
+func runningPGID(t *testing.T, r *runner) int {
+	t.Helper()
+	var pgid int
+	waitFor(t, "process reported", 5*time.Second, func() (bool, string) {
+		if a := r.x.Attempts(); len(a) == 1 {
+			pgid = a[0].PGID
+		}
+		return pgid > 0, ""
+	})
+	return pgid
+}
+
+// KIN-63: disabling the runner fails its running attempt in the same transaction (retry budget permitting) and
+// the runner, told 4403, stops the process group itself; once enabled again, the step runs again under a new token.
+func TestDisabledRunnerStopsItsAttemptAndTheStepIsRetried(t *testing.T) {
+	t.Parallel()
+	e2eSlot(t)
+	cp := startCP(t, t.TempDir(), "127.0.0.1:0")
+	id, key := cp.seed(t, "p1")
+	r := startRunner(t, t.TempDir(), cp.addr, id, key, nil, nil)
+	task := cp.mockTask(t, "p1", "hang")
+	first := cp.waitTask(t, task, 30*time.Second, stepRunning).Execution.Steps[0]
+	pgid := runningPGID(t, r)
+	svc := cp.runners()
+	if _, err := svc.Disable(t.Context(), ownerP, id); err != nil {
+		t.Fatal(err)
+	}
+	d := cp.detail(t, task) // decided in the disable's transaction, not after a lease runs out
+	if st := d.Execution.Steps[0]; st.State == workflow.StepRunning || st.Attempts[0].State != workflow.AttemptFailed ||
+		!strings.Contains(st.Attempts[0].Error, "runner disabled") {
+		t.Fatalf("after disable: %s", describe(d))
+	}
+	waitFor(t, "process group gone", 30*time.Second, func() (bool, string) { return !process.Alive(pgid, pgid), "" })
+	if _, err := svc.Enable(t.Context(), ownerP, id); err != nil {
+		t.Fatal(err)
+	}
+	d = cp.waitTask(t, task, 30*time.Second, func(d workflowapp.TaskDetail) bool {
+		return stepRunning(d) && d.Execution.Steps[0].Fence > first.Fence
+	})
+	if n := r.launches.n.Load(); n != 2 {
+		t.Fatalf("launches = %d, want 2 (%s)", n, describe(d))
+	}
+}
+
+// KIN-63: a revoked runner stops its attempt itself before the connector gives up for good (it never receives the
+// execution.cancel queued for it); the Control Plane already failed the attempt.
+func TestRevokedRunnerStopsItsAttemptBeforeExiting(t *testing.T) {
+	t.Parallel()
+	e2eSlot(t)
+	cp := startCP(t, t.TempDir(), "127.0.0.1:0")
+	id, key := cp.seed(t, "p1")
+	r := startRunner(t, t.TempDir(), cp.addr, id, key, nil, nil)
+	task := cp.mockTask(t, "p1", "hang")
+	cp.waitTask(t, task, 30*time.Second, stepRunning)
+	pgid := runningPGID(t, r)
+	if _, err := cp.runners().Revoke(t.Context(), ownerP, id); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-r.done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the revoked runner kept running")
+	}
+	if !errors.Is(r.err, conndomain.ErrRunnerRevoked) {
+		t.Fatalf("runner stopped with %v", r.err)
+	}
+	if process.Alive(pgid, pgid) {
+		t.Fatal("the revoked runner left its attempt running")
+	}
+	if st := cp.detail(t, task).Execution.Steps[0]; st.Attempts[0].State != workflow.AttemptFailed ||
+		!strings.Contains(st.Attempts[0].Error, "runner revoked") {
+		t.Fatalf("attempt after revoke: %+v", st.Attempts[0])
 	}
 }

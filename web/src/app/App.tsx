@@ -21,6 +21,7 @@ import { RunnersPage } from "../features/runners/RunnersPage";
 import { NetworkPage } from "../features/network/NetworkPage";
 import { StoragePage } from "../features/runners/StoragePage";
 import { IntegrationsPage } from "../features/integrations/IntegrationsPage";
+import { MaintenancePage } from "../features/maintenance/MaintenancePage";
 import { PageNotFound } from "./PageNotFound";
 import { ErrorState, Loading } from "../ui/feedback";
 import { NotifyProvider } from "../ui/notify";
@@ -29,7 +30,7 @@ import { TelegramContext, useTelegramLaunch } from "../features/telegram/Telegra
 import { LinkConfirmPage } from "../features/telegram/LinkConfirmPage";
 import { MiniAppSignIn } from "../features/telegram/MiniAppSignIn";
 import { TelegramSettingsPage } from "../features/telegram/TelegramSettingsPage";
-import { startTarget, type TelegramLaunch } from "../features/telegram/webapp";
+import { startPath, startTarget, type TelegramLaunch } from "../features/telegram/webapp";
 import { useEffect, useState } from "react";
 
 /**
@@ -80,8 +81,8 @@ function Gate() {
   if (setup.data?.setupRequired) return <SetupWizard />;
   if (!me.data) return tg ? <MiniAppSignIn initData={tg.initData} /> : <LoginPage />;
   if (me.data.mustChangePassword) return <ForcedPasswordChange />;
-  if (target && (target.kind === "approval" || target.kind === "alert"))
-    return <StartRedirect to={target.kind === "approval" ? `/approvals/${target.token}` : "/alerts"} onDone={() => setStartDone(true)} />;
+  const startTo = target ? startPath(target) : null;
+  if (startTo) return <StartRedirect to={startTo} onDone={() => setStartDone(true)} />;
 
   return (
     <AppShell me={me.data}>
@@ -103,6 +104,7 @@ function Gate() {
           {me.data.role === "owner" && <Route path="/network" element={<NetworkPage />} />}
           {me.data.role === "owner" && <Route path="/audit" element={<AuditPage />} />}
           {me.data.role === "owner" && <Route path="/settings/telegram" element={<TelegramSettingsPage />} />}
+          {me.data.role === "owner" && <Route path="/settings/maintenance" element={<MaintenancePage />} />}
           <Route path="*" element={<PageNotFound />} />
         </Routes>
     </AppShell>
@@ -110,7 +112,7 @@ function Gate() {
 }
 
 /**
- * A notification's Mini App link (startapp=approval_<id> / alert_<id>) opens its page once, after the Mini App
+ * A notification's Mini App link (startapp=approval_<id> / alert_<id> / task_<id>) opens its page once, after the Mini App
  * sign-in: deciding an approval always happens there, with the signed-in session, never from the chat.
  */
 function StartRedirect({ to, onDone }: { to: string; onDone: () => void }) {

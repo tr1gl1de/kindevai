@@ -164,3 +164,20 @@ func (h Handlers) ApprovalRequested(ctx context.Context, d messaging.Delivery) e
 	return permanent(h.Svc.NotifyApproval(ctx, app.ApprovalRequest{ApprovalID: p.ApprovalID, ProjectID: p.ProjectID,
 		TaskID: p.TaskID, Risk: p.Risk, Reason: p.Reason}))
 }
+
+// TaskFinished handles telegram.task_finished {taskId, projectId, state, title, createdBy} (KIN-62): the
+// task's audience is told in Telegram.
+func (h Handlers) TaskFinished(ctx context.Context, d messaging.Delivery) error {
+	var p struct {
+		TaskID    string `json:"taskId"`
+		ProjectID string `json:"projectId"`
+		State     string `json:"state"`
+		Title     string `json:"title"`
+		CreatedBy string `json:"createdBy"`
+	}
+	if err := decode(d, &p); err != nil {
+		return err
+	}
+	return permanent(h.Svc.NotifyTask(ctx, app.TaskFinished{TaskID: p.TaskID, ProjectID: p.ProjectID, State: p.State,
+		Title: p.Title, CreatedBy: p.CreatedBy}))
+}

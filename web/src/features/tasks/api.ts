@@ -97,6 +97,8 @@ export interface LogEntry {
 export const MAX_LOG_CHARS = 256 * 1024;
 /** Pause between polls while the attempt runs (a full page is followed up right away). */
 export const LOG_POLL_MS = 2000;
+/** Failed reads retried (with a growing pause) before the log shows an error. */
+const LOG_RETRIES = 3;
 
 export interface AttemptLogState {
   entries: LogEntry[];
@@ -139,12 +141,22 @@ export function useAttemptLog(taskId: string, stepId: string, fence: number, isL
     const base = `${path(taskId)}/steps/${encodeURIComponent(stepId)}/attempts/${fence}/events`;
     let after = 0;
     let size = 0;
-    let buf: LogEntry[] = [];
+    const buf: LogEntry[] = [];
     void (async () => {
       try {
         for (;;) {
           const wasLive = liveRef.current;
-          const page = await api<AttemptEventPage>("GET", `${base}?after=${after}`, undefined, ctl.signal);
+          let page: AttemptEventPage | undefined;
+          for (let failures = 0; !page; failures++) {
+            try {
+              page = await api<AttemptEventPage>("GET", `${base}?after=${after}`, undefined, ctl.signal);
+            } catch (e) {
+              // A transient failure keeps the cursor and the buffer: try again a few times before showing it.
+              if (ctl.signal.aborted || failures >= LOG_RETRIES) throw e;
+              await sleep(LOG_POLL_MS * (failures + 1), ctl.signal);
+              if (ctl.signal.aborted) return;
+            }
+          }
           if (ctl.signal.aborted) return;
           if (page.events.length > 0) {
             const add = page.events.map<LogEntry>((e) => ({
@@ -156,15 +168,15 @@ export function useAttemptLog(taskId: string, stepId: string, fence: number, isL
               bytes: e.bytes,
               omitted: e.omitted,
             }));
-            buf = buf.concat(add);
+            buf.push(...add);
             size += add.reduce((n, e) => n + e.text.length, 0);
             let cut = 0;
             while (size > MAX_LOG_CHARS && cut < buf.length - 1) size -= buf[cut++]?.text.length ?? 0;
             if (cut > 0) {
-              buf = buf.slice(cut);
+              buf.splice(0, cut);
               setTrimmed(true);
             }
-            setEntries(buf);
+            setEntries([...buf]);
           }
           setLoading(false);
           after = page.next;

@@ -217,3 +217,13 @@ func TestCloneCopiesWorkPeriods(t *testing.T) {
 		t.Fatal("clone shares the work start")
 	}
 }
+
+func TestAnImplausiblyLongPeriodIsIncomplete(t *testing.T) {
+	t.Parallel()
+	e, id, fence := runningAttempt(t)
+	e.MarkWorkStart(id, "r1", fence, "mock", t0.Add(-MaxWorkPeriod-time.Hour), t0)
+	e.MarkWorkEnd(id, "r1", fence, t0, t0)
+	if st, d := attemptWork(t, &e, id, t0); st != WorkIncomplete || d != 0 {
+		t.Fatalf("work = %s %v, want incomplete 0", st, d)
+	}
+}

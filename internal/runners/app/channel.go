@@ -68,9 +68,12 @@ type Channel struct {
 	// the stored body is sent: the stream must not stall.
 	Prepare func(ctx context.Context, runnerID string, q domain.QueuedCommand) (json.RawMessage, error)
 	Tx      TxRunner
-	Now     func() time.Time
-	NewID   func() string
-	Logger  *slog.Logger
+	// Instance identifies this Control Plane process (random per start; defaults to NewID()). It qualifies the
+	// command epoch on the wire (domain.Channel.WireEpoch), so a restored database never reuses seq numbers.
+	Instance string
+	Now      func() time.Time
+	NewID    func() string
+	Logger   *slog.Logger
 	// Window bounds unacknowledged commands in flight (default 32), AckTimeout re-sends from the last ACK when
 	// nothing was acknowledged for that long (default 30s). PollInterval is how often a session looks for commands
 	// committed by other transactions (default 1s; a Send also wakes it).
@@ -112,6 +115,9 @@ func (c *Channel) init() {
 		}
 		if c.PollInterval <= 0 {
 			c.PollInterval = time.Second
+		}
+		if c.Instance == "" {
+			c.Instance = c.NewID()
 		}
 		if c.MaxStoredOutput <= 0 {
 			c.MaxStoredOutput = domain.DefaultRetention().MaxOutputBytes
@@ -218,7 +224,7 @@ func (c *Channel) streamCommands(ctx context.Context, s Session, wake chan struc
 							body = b
 						}
 					}
-					if err := s.Send(ctx, protocol.TypeCommand, protocol.Command{Epoch: st.CommandEpoch, Seq: q.Seq,
+					if err := s.Send(ctx, protocol.TypeCommand, protocol.Command{Epoch: st.WireEpoch(c.Instance), Seq: q.Seq,
 						Base: st.CommandAcked, ID: q.ID, Kind: q.Kind, Body: body}); err != nil {
 						return err
 					}
@@ -294,7 +300,7 @@ func (c *Channel) commandAck(ctx context.Context, s Session, a protocol.Ack) err
 	if err != nil {
 		return err
 	}
-	if !ok || a.Epoch != st.CommandEpoch || a.Seq <= st.CommandAcked {
+	if !ok || a.Epoch != st.WireEpoch(c.Instance) || a.Seq <= st.CommandAcked {
 		return nil // another epoch's or an old ACK: nothing to do
 	}
 	if a.Seq > st.CommandSeq {

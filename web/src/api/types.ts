@@ -812,3 +812,12 @@ export interface AttemptEventPage {
 }
 
 export type MockScenario = "success" | "fail" | "flaky" | "crash" | "hang" | "gate";
+// Maintenance mode (KIN-41).
+export interface MaintenanceStatus {
+  enabled: boolean;
+  reason: string;
+  since: string | null;
+  by: string;
+  /** Claimed or running steps still draining. */
+  activeAttempts: number;
+}

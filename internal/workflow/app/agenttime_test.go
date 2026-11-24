@@ -216,3 +216,26 @@ func TestAttemptEventsArePagedAndScopedToTheTask(t *testing.T) {
 		}
 	}
 }
+
+// Only the execution's own refusal of a report records a late end; other errors (saving, the task's follow-up)
+// are returned unchanged and record nothing.
+func TestOnlyARefusedReportRecordsALateEnd(t *testing.T) {
+	t.Parallel()
+	e := accessEnv()
+	ctx := t.Context()
+	_, step, fence := mockRunning(t, e, "success")
+	if err := e.svc.StartStepAt(ctx, step, "r1", fence, t0, "mock"); err != nil {
+		t.Fatal(err)
+	}
+	boom := errors.New("disk full")
+	if err := e.svc.lateWorkEnd(ctx, boom, step, "r1", fence, t0.Add(time.Second)); !errors.Is(err, boom) {
+		t.Fatalf("err = %v", err)
+	}
+	if err := e.svc.lateWorkEnd(ctx, domain.ErrInvalidTransition, step, "r1", fence, t0.Add(time.Second)); !errors.Is(err, domain.ErrInvalidTransition) {
+		t.Fatalf("err = %v", err)
+	}
+	ex, _ := e.repo.ExecutionByStep(ctx, step)
+	if a := ex.Step(step).Attempts[0]; a.WorkEnd != nil {
+		t.Fatalf("an unrelated error recorded an end: %+v", a)
+	}
+}

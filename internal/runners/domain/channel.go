@@ -42,6 +42,18 @@ type Channel struct {
 	EventLast    int64
 }
 
+// WireEpoch is the command epoch a runner sees: the log's stored epoch qualified by the Control Plane instance (a
+// random id per process start, KIN-41). A database restored from a backup or imported keeps the stored epoch but
+// is necessarily opened by a new process, so the runner sees a new epoch, resets its cursor to Base and never
+// skips new commands as duplicates of seq numbers it applied before the restore (the KIN-22 limit). Unacknowledged
+// commands are re-sent after every restart and re-applied: runner handlers are idempotent by command id.
+func (c Channel) WireEpoch(instance string) string {
+	if instance == "" {
+		return c.CommandEpoch
+	}
+	return c.CommandEpoch + "." + instance
+}
+
 // Event outcomes.
 const (
 	OutcomeApplied  = "applied"

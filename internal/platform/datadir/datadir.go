@@ -13,7 +13,8 @@ import (
 // ErrLocked means another process already holds the data directory.
 var ErrLocked = errors.New("data directory is in use by another ai-platform process")
 
-const lockName = "ai-platform.lock"
+// LockName is the lock file inside the data directory.
+const LockName = "ai-platform.lock"
 
 // Dir is an opened, locked data directory. Close releases the lock.
 type Dir struct {
@@ -42,7 +43,7 @@ func Open(dir string) (*Dir, error) {
 			return nil, fmt.Errorf("restricting data dir %s to mode 0700: %w", abs, err)
 		}
 	}
-	f, err := os.OpenFile(filepath.Join(abs, lockName), os.O_RDWR|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(filepath.Join(abs, LockName), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("data dir %s is not writable: %w", abs, err)
 	}

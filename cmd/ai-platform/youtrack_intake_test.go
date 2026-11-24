@@ -28,7 +28,7 @@ func TestIntakeTasksAdapterOnTheWorkflowContext(t *testing.T) {
 	}
 	for _, q := range []string{
 		"INSERT INTO users(id, login, password_hash, platform_role, created_at) VALUES ('u1', 'owner', 'h', 'owner', 'x')",
-		"INSERT INTO projects(id, slug, name, created_at) VALUES ('p1', 'alpha', 'Alpha', 'x')",
+		"INSERT INTO projects(id, slug, name, created_at) VALUES ('p1', 'alpha', 'Alpha', '2026-11-24T00:00:00Z')",
 	} {
 		if _, err := d.ExecContext(t.Context(), q); err != nil {
 			t.Fatal(err)

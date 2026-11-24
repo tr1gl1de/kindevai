@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tr1gl1de/kindevai/internal/integrations/adapters/github"
+	integrations "github.com/tr1gl1de/kindevai/internal/integrations/domain"
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
 	"github.com/tr1gl1de/kindevai/internal/platform/httpx"
 	runnersapp "github.com/tr1gl1de/kindevai/internal/runners/app"
@@ -85,12 +87,18 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	publicURL := fset.String("public-url", os.Getenv("KINDEV_PUBLIC_URL"),
 		"comma-separated public origins of the Control Plane (e.g. https://kindevai.example.com); when set, runner "+
 			"connections for any other host are refused")
+	githubAPI := fset.String("github-api-url", envOr("KINDEV_GITHUB_API_URL", github.DefaultBaseURL),
+		"GitHub REST API base URL (GitHub Enterprise Server: https://<host>/api/v3)")
 	if err := fset.Parse(args); err != nil {
 		return err
 	}
 	audiences, err := parseAudiences(*publicURL)
 	if err != nil {
 		return err
+	}
+	ghURL, err := integrations.NewBaseURL(*githubAPI)
+	if err != nil {
+		return fmt.Errorf("--github-api-url: %w", err)
 	}
 	trusted, err := httpx.ParseTrustedProxies(*proxies)
 	if err != nil {
@@ -125,7 +133,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	msg := newMessaging(inst, logger)
 	hub := runnersapp.NewHub()
 	modules := append(identity.Modules, newProjects(inst, identity, audit, hub, logger)...)
-	modules = append(modules, msg.HTTP, audit.HTTP, newIntegrations(inst, msg, audit, logger).HTTP)
+	modules = append(modules, msg.HTTP, audit.HTTP, newIntegrations(inst, msg, audit, ghURL, logger).HTTP)
 	gateway := newRunnerGateway(inst, hub, localPeers, audiences, logger)
 	modules = append(modules, gateway)
 	defer msg.start(ctx)() // deferred after inst.Close, so the dispatchers stop before the database closes
@@ -233,4 +241,12 @@ func defaultDataDir() string {
 		return v
 	}
 	return "./data"
+}
+
+// envOr returns the environment variable, or def when it is unset or empty.
+func envOr(name, def string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return def
 }

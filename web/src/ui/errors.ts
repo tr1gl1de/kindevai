@@ -86,6 +86,11 @@ const validationKeys = new Set([
   "branch_protected",
   "base_url_https",
   "token_required_for_url",
+  "app_id_format",
+  "private_key_format",
+  "webhook_secret_short",
+  "webhook_secret_format",
+  "key_required_for_app",
 ]);
 
 /** Message for a server validation code, or undefined if unknown. */

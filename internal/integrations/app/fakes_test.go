@@ -28,6 +28,7 @@ type store struct {
 	yt       *domain.YouTrackConnection
 	bindings map[string]string // project -> short name
 	repos    map[string]domain.Repository
+	gh       *domain.GitHubApp
 }
 
 type storedSecret struct {
@@ -168,6 +169,60 @@ func (s *store) DeleteRepository(_ context.Context, projectID, id string) error 
 	}
 	delete(s.repos, id)
 	return nil
+}
+
+func (s *store) GitHubApp(context.Context) (domain.GitHubApp, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gh == nil {
+		return domain.GitHubApp{}, domain.ErrNotConfigured
+	}
+	return *s.gh, nil
+}
+
+func (s *store) SaveGitHubApp(_ context.Context, a domain.GitHubApp) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gh = &a
+	return nil
+}
+
+func (s *store) DeleteGitHubApp(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gh = nil
+	return nil
+}
+
+func (s *store) AllRepositories(context.Context) ([]domain.Repository, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []domain.Repository
+	for _, id := range slices.Sorted(maps.Keys(s.repos)) {
+		out = append(out, s.repos[id])
+	}
+	return out, nil
+}
+
+func (s *store) RepositoryByID(_ context.Context, id string) (domain.Repository, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.repos[id]
+	if !ok {
+		return domain.Repository{}, domain.ErrNotFound
+	}
+	return r, nil
+}
+
+func (s *store) RepositoryByFullName(_ context.Context, fullName string) (domain.Repository, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.repos {
+		if strings.EqualFold(r.FullName(), fullName) {
+			return r, nil
+		}
+	}
+	return domain.Repository{}, domain.ErrNotFound
 }
 
 type tx struct{}

@@ -1,0 +1,51 @@
+# --- Secrets -------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# --- Platform runtime data (SQLite WAL, encryption key, artifacts) --------
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# --- Go ------------------------------------------------------------------
+/bin/
+/ai-platform
+*.exe
+*.test
+*.out
+coverage.*
+go.work.sum
+
+# --- Frontend (React / TypeScript) ---------------------------------------
+node_modules/
+dist/
+build/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Docker / Caddy local state ------------------------------------------
+caddy_data/
+caddy_config/
+
+# --- Claude Code / AI tooling local state --------------------------------
+.claude/settings.local.json
+.claude/worktrees/
+
+# --- OS / editors ---------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

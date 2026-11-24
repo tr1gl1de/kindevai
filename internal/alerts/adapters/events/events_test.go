@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,6 +59,16 @@ func TestRunnerOutputFullGroupsAndResolves(t *testing.T) {
 	if err := h.RunnerOutputFull(t.Context(), messaging.Delivery{Topic: "alerts.runner_output_full", Key: "k",
 		Payload: []byte(`{"limitBytes":"x"}`)}); !messaging.IsPermanent(err) {
 		t.Fatalf("malformed payload: %v", err)
+	}
+	// Runner-supplied ids are clipped to what an alert may hold instead of losing the alert.
+	long := strings.Repeat("r", 300)
+	if err := h.RunnerOutputFull(t.Context(), messaging.Delivery{Topic: "alerts.runner_output_full", Key: "runner-output/full/3",
+		Payload: []byte(`{"limitBytes":1073741824,"runnerId":"` + long + `","stepId":"s\u0007x"}`)}); err != nil {
+		t.Fatalf("long runner id: %v", err)
+	}
+	if active, _ := repo.List(t.Context(), app.ListQuery{ActiveOnly: true, Platform: true, Limit: 10}); len(active) != 1 ||
+		active[0].Occurrences != 3 || len(active[0].Details["runnerId"]) > 128 || active[0].Details["stepId"] != "sx" {
+		t.Fatalf("clipped alert %+v", active)
 	}
 	if err := h.RunnerOutputRecovered(t.Context(), messaging.Delivery{Topic: "alerts.runner_output_recovered", Key: "r",
 		Payload: []byte(`{}`)}); err != nil {

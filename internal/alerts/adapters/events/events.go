@@ -9,6 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/tr1gl1de/kindevai/internal/alerts/app"
 	"github.com/tr1gl1de/kindevai/internal/alerts/domain"
@@ -121,7 +124,23 @@ func (h Handlers) RunnerOutputFull(ctx context.Context, d messaging.Delivery) er
 	return permanent(h.Svc.Raise(ctx, d.Key, domain.Occurrence{Kind: domain.KindRunnerOutputFull,
 		Severity: domain.SeverityWarning, DedupKey: runnerOutputKey, Subject: "control-plane", Details: map[string]string{
 			"limitBytes": strconv.FormatInt(p.LimitBytes, 10), "limitMiB": strconv.FormatInt(p.LimitBytes>>20, 10),
-			"runnerId": p.RunnerID, "stepId": p.StepID}}))
+			"runnerId": clipID(p.RunnerID), "stepId": clipID(p.StepID)}}))
+}
+
+// clipID keeps at most 128 bytes of the printable runes of an id the runner reported, so a malformed one never
+// costs the alert.
+func clipID(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToValidUTF8(s, "") {
+		if unicode.IsControl(r) {
+			continue
+		}
+		if b.Len()+utf8.RuneLen(r) > 128 {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // RunnerOutputRecovered handles alerts.runner_output_recovered {}: output is stored again, the alert resolves.

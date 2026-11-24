@@ -33,6 +33,8 @@ var publicAPI = map[string]bool{
 	"/api/telegram/link/confirm": true,
 	// A new runner has only its one-time enrollment token (runners context; rate limited per client address).
 	"/api/runners/enroll": true,
+	// YouTrack calls the intake webhook with its shared secret (integrations context; rate limited per address).
+	"/api/webhooks/youtrack": true,
 	// GitHub deliveries carry no session: their HMAC-SHA256 signature is verified by the integrations context.
 	"/api/webhooks/github": true,
 }

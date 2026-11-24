@@ -28,6 +28,7 @@ var ErrDuplicateIssue = errors.New("task for this YouTrack issue already exists"
 type Repository interface {
 	CreateTask(ctx context.Context, t *domain.Task) error // ErrDuplicateIssue; domain.ErrNotFound for an unknown project
 	Task(ctx context.Context, id string) (domain.Task, error)
+	TaskByIssue(ctx context.Context, projectID, youtrackIssue string) (domain.Task, error) // domain.ErrNotFound
 	SaveTask(ctx context.Context, t *domain.Task) error
 
 	CreateRevision(ctx context.Context, r domain.PlanRevision) error // revisions are never updated
@@ -115,6 +116,27 @@ func (s *Service) CreateTask(ctx context.Context, projectID, title, youtrackIssu
 // Task returns a task.
 func (s *Service) Task(ctx context.Context, id string) (domain.Task, error) {
 	return s.Repo.Task(ctx, id)
+}
+
+// TaskForIssue returns the project's task for a YouTrack issue; domain.ErrNotFound if there is none.
+func (s *Service) TaskForIssue(ctx context.Context, projectID, youtrackIssue string) (domain.Task, error) {
+	return s.Repo.TaskByIssue(ctx, projectID, youtrackIssue)
+}
+
+// RetitleTask follows a changed YouTrack summary; it reports whether the title changed (finished tasks keep theirs).
+func (s *Service) RetitleTask(ctx context.Context, taskID, title string) (bool, error) {
+	var changed bool
+	err := s.Tx.InTx(ctx, func(ctx context.Context) error {
+		t, err := s.Repo.Task(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		if changed, err = t.Retitle(title, s.now()); err != nil || !changed {
+			return err
+		}
+		return s.Repo.SaveTask(ctx, &t)
+	})
+	return changed, err
 }
 
 // Execution returns an execution with its steps and attempts.

@@ -72,3 +72,18 @@ func TestAccessPolicy(t *testing.T) {
 		})
 	}
 }
+
+func TestCanRunAIIsOwnerOrAnyProjectRole(t *testing.T) {
+	t.Parallel()
+	if !NewAccess(Actor{Owner: true}, "", false).CanRunAI() {
+		t.Error("owner")
+	}
+	for _, r := range []Role{RoleProjectAdmin, RoleMember} {
+		if !NewAccess(Actor{UserID: "u"}, r, true).CanRunAI() {
+			t.Errorf("%s", r)
+		}
+	}
+	if NewAccess(Actor{UserID: "u"}, "", false).CanRunAI() {
+		t.Error("non-member")
+	}
+}

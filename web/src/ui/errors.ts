@@ -33,6 +33,8 @@ export function errorMessage(t: TFunction, e: unknown): string {
       return t("errors.not_found");
     case "not_configured":
       return t("integrations.notConnected");
+    case "not_bound":
+      return t("intake.not_bound");
     case "invalid_transition":
       return t("runners.invalid_transition");
     case "stale_revision":
@@ -90,6 +92,12 @@ const validationKeys = new Set([
   "branch_protected",
   "base_url_https",
   "token_required_for_url",
+  "issue_format",
+  "issue_project",
+  "tag_format",
+  "youtrack_login_format",
+  "poll_interval_range",
+  "webhook_secret_range",
   "pattern_format",
   "too_many_patterns",
   "comment_required",

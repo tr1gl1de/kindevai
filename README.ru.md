@@ -146,6 +146,25 @@ associated data) и доступны только на запись: API соо�
 `PUT /api/projects/{id}/integrations/youtrack`, `POST /api/projects/{id}/repositories`,
 `PUT|DELETE /api/projects/{id}/repositories/{repoId}`.
 
+#### Приём задач из YouTrack
+
+Задачи привязанного проекта YouTrack становятся задачами платформы, если у них есть тег-триггер проекта (по
+умолчанию `kindevai`, меняется для каждого проекта). **Основной канал — опрос**: каждые 60 с (15–3600 с, задаётся на
+странице «Интеграции») Control Plane запрашивает у YouTrack задачи с тегом, изменённые после курсора проекта, кладёт
+каждую в надёжный inbox (дедупликация по задаче и `updated`) и только потом сдвигает курсор; повторы и доставки не
+по порядку безвредны, а сбои откладывают следующий опрос до 15 минут (с учётом `Retry-After`) и видны в состоянии
+интеграции. **Webhook необязателен**: когда Owner задал секрет, workflow YouTrack может вызывать
+`POST /api/webhooks/youtrack` с заголовком `X-Kindevai-Webhook-Secret` и телом `{"issueId":"KIN-12","updated":<мс>}`;
+платформа сохраняет только ID задачи и перечитывает её через REST API, поэтому тело webhook ничего не решает. Задача
+выполняется от имени аккаунта, который Owner связал с логином автора в YouTrack, и только если этот аккаунт может
+запускать AI в проекте (Owner или участник проекта) — создание issue в YouTrack ничего не разрешает (тег может поставить любой, у кого есть права в YouTrack, —
+задача берётся от имени автора, но ей всё равно нужен план, а рискованному плану — одобрение Owner); иначе задача не
+создаётся, а участники видят причину на странице проекта. Участники также могут **запустить задачу по ID** (тег не
+нужен, инициатор — сам участник). API: `GET|PUT /api/integrations/youtrack/intake`,
+`PUT|DELETE /api/integrations/youtrack/webhook`, `POST /api/integrations/youtrack/users`,
+`DELETE /api/integrations/youtrack/users/{userId}`, `PUT /api/projects/{id}/integrations/youtrack/trigger` (Owner);
+`GET /api/projects/{id}/youtrack`, `POST /api/projects/{id}/youtrack/runs` (участники).
+
 #### GitHub App
 
 Платформа работает с GitHub только как **GitHub App** (fine-grained PAT — после MVP). На странице **Интеграции**

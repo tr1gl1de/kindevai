@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import { useRef, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useParams } from "react-router";
@@ -245,7 +246,7 @@ function Decision({ d, waitsForVerification }: { d: ApprovalDetail; waitsForVeri
   );
 }
 
-function changeField(t: ReturnType<typeof useTranslation>["t"], c: PlanChange) {
+function changeField(t: TFunction, c: PlanChange) {
   const field = t(`approvals.field_${c.field}` as "approvals.field_summary");
   return c.stepKey ? `${c.stepKey} · ${field}` : field;
 }

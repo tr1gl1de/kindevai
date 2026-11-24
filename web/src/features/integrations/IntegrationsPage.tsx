@@ -12,6 +12,7 @@ import { useFieldErrors } from "../../ui/form";
 import { formatDateTime } from "../../ui/format";
 import { useNotify } from "../../ui/notify";
 import { useProjects } from "../projects/api";
+import { IntakeSettingsSection } from "./IntakeSettingsSection";
 import { useCheckYouTrack, useDisconnectYouTrack, useIntegrations, useSaveYouTrack } from "./api";
 import { GitHubSettings } from "./GitHubSettings";
 
@@ -37,6 +38,7 @@ export function IntegrationsPage() {
           <YouTrackSettings key={integrations.data.youtrack?.updatedAt ?? "none"} connection={integrations.data.youtrack} />
         )}
       </section>
+      {integrations.data?.youtrack && <IntakeSettingsSection />}
       <section aria-labelledby="github-title" className="section">
         <h2 id="github-title">{t("github.title")}</h2>
         {integrations.isSuccess && <GitHubSettings key={integrations.data.github?.updatedAt ?? "none"} app={integrations.data.github ?? null} />}

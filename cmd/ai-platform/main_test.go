@@ -213,6 +213,10 @@ func TestLoginAfterSetupEndToEnd(t *testing.T) {
 	if code, _ := call(t, "GET", base+"/api/auth/me", ""); code != 401 {
 		t.Fatalf("me without session = %d", code)
 	}
+	// The YouTrack webhook needs no session, only its secret; without a configured secret it does not exist.
+	if code, _ := call(t, "POST", base+"/api/webhooks/youtrack", `{"issueId":"KIN-1"}`); code != 404 {
+		t.Fatalf("youtrack webhook without a secret = %d, want 404", code)
+	}
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
 	post := func(path, body string) int {

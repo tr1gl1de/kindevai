@@ -178,7 +178,9 @@ func (r *Repository) SetProjectYouTrack(ctx context.Context, projectID, shortNam
 		_, err = r.conn(ctx).ExecContext(ctx, "DELETE FROM project_youtrack WHERE project_id = ?", projectID)
 	} else {
 		_, err = r.conn(ctx).ExecContext(ctx, `INSERT INTO project_youtrack(project_id, short_name, updated_at) VALUES (?, ?, ?)
-			ON CONFLICT(project_id) DO UPDATE SET short_name = excluded.short_name, updated_at = excluded.updated_at`,
+			ON CONFLICT(project_id) DO UPDATE SET short_name = excluded.short_name, updated_at = excluded.updated_at,
+			poll_cursor = CASE WHEN short_name = excluded.short_name THEN poll_cursor ELSE 0 END,
+			last_polled_at = CASE WHEN short_name = excluded.short_name THEN last_polled_at ELSE NULL END`,
 			projectID, shortName, ts(at))
 	}
 	switch {

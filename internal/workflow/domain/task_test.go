@@ -261,6 +261,31 @@ func TestRiskLevels(t *testing.T) {
 	}
 }
 
+func TestRetitleFollowsTheYouTrackSummaryUntilTheTaskIsFinished(t *testing.T) {
+	t.Parallel()
+	task, err := NewTask("t1", "p1", "Old", "KIN-7", "u1", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := t0.Add(time.Minute)
+	if changed, err := task.Retitle("  Old ", later); err != nil || changed || !task.UpdatedAt.Equal(t0) {
+		t.Fatalf("same title: changed=%v err=%v updated=%v", changed, err, task.UpdatedAt)
+	}
+	if changed, err := task.Retitle("New", later); err != nil || !changed || task.Title != "New" || !task.UpdatedAt.Equal(later) {
+		t.Fatalf("new title: changed=%v err=%v task=%+v", changed, err, task)
+	}
+	var ve *ValidationError
+	if _, err := task.Retitle("a\nb", later); !errors.As(err, &ve) || ve.Code != "title_format" {
+		t.Fatalf("bad title: %v", err)
+	}
+	if err := task.Transition(TaskCancelled, Reason{Detail: "dropped"}, later); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := task.Retitle("Newer", later); err != nil || changed || task.Title != "New" {
+		t.Fatalf("finished task renamed: changed=%v err=%v title=%q", changed, err, task.Title)
+	}
+}
+
 func TestRejectPlanReturnsTheTaskToAnalysis(t *testing.T) {
 	t.Parallel()
 	task := Task{ID: "t", State: TaskAwaitingApproval, PlanRevision: 2}

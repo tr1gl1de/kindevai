@@ -338,3 +338,31 @@ func TestReconcileStep(t *testing.T) {
 		t.Fatalf("step = %s", cur.StepByKey("backend").State)
 	}
 }
+
+func TestTaskForIssueAndRetitleTask(t *testing.T) {
+	t.Parallel()
+	e := newEnv()
+	ctx := t.Context()
+	if _, err := e.svc.TaskForIssue(ctx, "p1", "KIN-7"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing: %v", err)
+	}
+	task, err := e.svc.CreateTask(ctx, "p1", "Login", "KIN-7", "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.svc.TaskForIssue(ctx, "p1", "KIN-7")
+	if err != nil || got.ID != task.ID {
+		t.Fatalf("found %+v, %v", got, err)
+	}
+	e.clock.now = t0.Add(time.Hour)
+	changed, err := e.svc.RetitleTask(ctx, task.ID, "Login page")
+	if err != nil || !changed {
+		t.Fatalf("retitle: %v %v", changed, err)
+	}
+	if got, _ := e.repo.Task(ctx, task.ID); got.Title != "Login page" || !got.UpdatedAt.Equal(t0.Add(time.Hour)) || got.Version != 2 {
+		t.Fatalf("stored %+v", got)
+	}
+	if changed, err := e.svc.RetitleTask(ctx, task.ID, "Login page"); err != nil || changed {
+		t.Fatalf("unchanged: %v %v", changed, err)
+	}
+}

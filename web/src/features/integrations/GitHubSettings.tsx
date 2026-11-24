@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import { useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { isApiError } from "../../api/client";
@@ -28,7 +29,7 @@ const knownCodes = [
 ];
 
 /** Text of a GitHub check or repository read failure. */
-export function githubFailure(t: ReturnType<typeof useTranslation>["t"], check: ConnectionCheck): string {
+export function githubFailure(t: TFunction, check: ConnectionCheck): string {
   const code = check.code ?? "unknown";
   let text = t(`github.code_${knownCodes.includes(code) ? code : "unknown"}` as "github.code_unknown");
   if (check.detail && code !== "not_installed") text += ` (${check.detail})`;

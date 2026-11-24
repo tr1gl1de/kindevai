@@ -37,6 +37,17 @@ func (r *memRepo) CreateTask(_ context.Context, t *domain.Task) error {
 	return nil
 }
 
+func (r *memRepo) TaskByIssue(_ context.Context, projectID, issue string) (domain.Task, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, t := range r.tasks {
+		if t.ProjectID == projectID && t.YouTrackIssue == issue {
+			return t, nil
+		}
+	}
+	return domain.Task{}, domain.ErrNotFound
+}
+
 func (r *memRepo) Task(_ context.Context, id string) (domain.Task, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -5,6 +5,7 @@ import (
 	"sort"
 	"sync"
 
+	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/projects/domain"
 )
 
@@ -118,4 +119,21 @@ func (u memUsers) ByIDs(_ context.Context, ids []string) (map[string]UserRef, er
 		}
 	}
 	return out, nil
+}
+
+// directTx runs fn without a transaction: the in-memory fakes have none (rollback is covered on SQLite).
+type directTx struct{}
+
+func (directTx) InTx(ctx context.Context, fn func(context.Context) error) error { return fn(ctx) }
+
+type memAudit struct {
+	mu      sync.Mutex
+	entries []auditapp.Entry
+}
+
+func (m *memAudit) Record(_ context.Context, e auditapp.Entry) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.entries = append(m.entries, e)
+	return nil
 }

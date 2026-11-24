@@ -20,12 +20,12 @@ type fakeRepo struct {
 	name     domain.PlatformName
 }
 
-func (r *fakeRepo) InTx(ctx context.Context, fn func(SetupTx) error) error {
+func (r *fakeRepo) InTx(ctx context.Context, fn func(context.Context, SetupTx) error) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.writeTxs++
 	state, users, name := r.state, r.users, r.name
-	if err := fn(&fakeTx{r}); err != nil {
+	if err := fn(ctx, &fakeTx{r}); err != nil {
 		r.state, r.users, r.name = state, users, name
 		return err
 	}
@@ -94,7 +94,7 @@ type fixture struct {
 func newFixture() *fixture {
 	f := &fixture{repo: &fakeRepo{}, hasher: &fakeHasher{}, ch: &fakeChannel{},
 		clock: &clock{time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)}}
-	f.svc = &SetupService{Repo: f.repo, Hasher: f.hasher, Channel: f.ch, Now: f.clock.Now, Rand: rand.Reader,
+	f.svc = &SetupService{Repo: f.repo, Hasher: f.hasher, Channel: f.ch, Audit: &memAudit{}, Now: f.clock.Now, Rand: rand.Reader,
 		NewID: func() string { return "user-1" }}
 	return f
 }

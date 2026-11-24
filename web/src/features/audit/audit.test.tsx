@@ -160,4 +160,29 @@ describe("audit log (non-owner)", () => {
     expect(screen.queryByRole("link", { name: "Audit log" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { level: 1, name: "Audit log" })).not.toBeInTheDocument();
   });
+  // KIN-46: project, sign-in and setup events have names in both languages; a failed sign-in shows an anonymous actor.
+  it.each([
+    ["en", ["Project created", "Member role set", "Member removed", "Signed in", "Sign-in failed", "Signed out", "Setup completed"], "Anonymous"],
+    ["ru", ["Проект создан", "Роль участника задана", "Участник удалён", "Вход выполнен", "Неудачный вход", "Выход", "Первичная настройка завершена"], "Аноним"],
+  ] as const)("names project and sign-in events (%s)", async (lang, labels, anonymous) => {
+    const kinds = ["project.created", "project.member_set", "project.member_removed", "auth.login_succeeded",
+      "auth.login_failed", "auth.logout", "setup.completed"];
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/audit/kinds", () => json(kinds)),
+      http.get("/api/audit", () =>
+        json<AuditPage>({
+          events: kinds.map((k, i) =>
+            ev(i + 1, k, k === "auth.login_failed" ? { actor: { type: "system", id: "anonymous", label: "anonymous" } } : {}),
+          ),
+          next: null,
+        }),
+      ),
+    );
+    await renderApp("/audit", lang);
+    for (const label of labels) {
+      expect(await screen.findByRole("cell", { name: new RegExp(label) })).toBeInTheDocument();
+    }
+    expect(screen.getByRole("cell", { name: anonymous })).toBeInTheDocument();
+  });
 });

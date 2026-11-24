@@ -264,6 +264,7 @@ export const ru: Messages = {
     shown_many: "Показано {{count}} событий.",
     shown_other: "Показано {{count}} события.",
     actor_system: "Система",
+    actor_anonymous: "Аноним",
     actor_runner: "Раннер {{label}}",
     kinds: {
       user_created: "Пользователь создан",
@@ -274,6 +275,13 @@ export const ru: Messages = {
       invitation_created: "Приглашение создано",
       invitation_revoked: "Приглашение отозвано",
       invitation_accepted: "Приглашение принято",
+      project_created: "Проект создан",
+      project_member_set: "Роль участника задана",
+      project_member_removed: "Участник удалён",
+      auth_login_succeeded: "Вход выполнен",
+      auth_login_failed: "Неудачный вход",
+      auth_logout: "Выход",
+      setup_completed: "Первичная настройка завершена",
     },
   },
 };

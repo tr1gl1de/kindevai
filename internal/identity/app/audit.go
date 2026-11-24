@@ -23,6 +23,10 @@ const (
 	KindInvitationCreated   = "invitation.created"
 	KindInvitationRevoked   = "invitation.revoked"
 	KindInvitationAccepted  = "invitation.accepted"
+	KindLoginSucceeded      = "auth.login_succeeded"
+	KindLoginFailed         = "auth.login_failed"
+	KindLogout              = "auth.logout"
+	KindSetupCompleted      = "setup.completed"
 )
 
 var errNoAuditLog = errors.New("identity: audit log not configured")

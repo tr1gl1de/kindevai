@@ -72,7 +72,8 @@ func invitationsStack(t *testing.T, logs *bytes.Buffer, publicBurst int) (http.H
 		return ratelimit.New(ratelimit.Config{Burst: burst, Every: time.Minute, MaxKeys: 100}, time.Now)
 	}
 	authn := &AuthHandler{
-		Service:   &app.AuthService{Users: users, Sessions: sessions, Passwords: hasher, Now: time.Now, Rand: rand.Reader},
+		Service: &app.AuthService{Users: users, Sessions: sessions, Passwords: hasher, Now: time.Now, Rand: rand.Reader,
+			Tx: db.Transactor{DB: d}, Audit: &auditapp.Service{Repo: auditdb.New(d), Now: time.Now}},
 		IPLimiter: lim(100), LoginLimiter: lim(100), Logger: logger,
 	}
 	invitations := &app.InvitationsService{

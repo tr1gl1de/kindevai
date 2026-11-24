@@ -264,6 +264,7 @@ export const en = {
     shown_many: "{{count}} events shown.",
     shown_other: "{{count}} events shown.",
     actor_system: "System",
+    actor_anonymous: "Anonymous",
     actor_runner: "Runner {{label}}",
     kinds: {
       user_created: "User created",
@@ -274,6 +275,13 @@ export const en = {
       invitation_created: "Invitation created",
       invitation_revoked: "Invitation revoked",
       invitation_accepted: "Invitation accepted",
+      project_created: "Project created",
+      project_member_set: "Member role set",
+      project_member_removed: "Member removed",
+      auth_login_succeeded: "Signed in",
+      auth_login_failed: "Sign-in failed",
+      auth_logout: "Signed out",
+      setup_completed: "Setup completed",
     },
   },
 } as const;

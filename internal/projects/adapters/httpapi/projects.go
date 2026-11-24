@@ -70,7 +70,7 @@ func actor(w http.ResponseWriter, r *http.Request) (domain.Actor, bool) {
 		httpx.WriteError(w, http.StatusUnauthorized, "unauthenticated", "login required")
 		return domain.Actor{}, false
 	}
-	return domain.Actor{UserID: p.UserID, Owner: p.Owner}, true
+	return domain.Actor{UserID: p.UserID, Login: p.Login, Owner: p.Owner}, true
 }
 
 func (h *Handler) fail(w http.ResponseWriter, err error) {

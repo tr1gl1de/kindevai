@@ -3,12 +3,32 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/projects/domain"
 )
+
+// Audit event kinds recorded by the projects context.
+const (
+	KindProjectCreated       = "project.created"
+	KindProjectMemberSet     = "project.member_set"
+	KindProjectMemberRemoved = "project.member_removed"
+)
+
+// AuditLog is the audit context's API as projects needs it. Record must be called with the ctx of the
+// transaction that performs the change, so the event commits or rolls back with it.
+type AuditLog interface {
+	Record(ctx context.Context, e auditapp.Entry) error
+}
+
+// TxRunner runs fn in one database transaction; repositories called with fn's ctx join it.
+type TxRunner interface {
+	InTx(ctx context.Context, fn func(ctx context.Context) error) error
+}
 
 // Repository persists projects and memberships.
 type Repository interface {
@@ -40,8 +60,26 @@ type UserDirectory interface {
 type Service struct {
 	Repo  Repository
 	Users UserDirectory
+	Tx    TxRunner
+	Audit AuditLog
 	Now   func() time.Time
 	NewID func() string
+}
+
+var errNoAuditLog = errors.New("projects: audit log or transactions not configured")
+
+// change runs write and records its audit event in one transaction.
+func (s *Service) change(ctx context.Context, a domain.Actor, e auditapp.Entry, write func(ctx context.Context) error) error {
+	if s.Audit == nil || s.Tx == nil { // a wiring mistake must not silently drop the record
+		return errNoAuditLog
+	}
+	e.Actor = auditapp.User(a.UserID, a.Login)
+	return s.Tx.InTx(ctx, func(ctx context.Context) error {
+		if err := write(ctx); err != nil {
+			return err
+		}
+		return s.Audit.Record(ctx, e)
+	})
 }
 
 // ProjectView is a project as seen by an actor; MyRole is "owner" for the platform Owner.
@@ -123,7 +161,10 @@ func (s *Service) Create(ctx context.Context, a domain.Actor, name, slug string)
 		return domain.Project{}, err
 	}
 	p := domain.Project{ID: s.NewID(), Slug: sl, Name: n, CreatedAt: s.Now()}
-	if err := s.Repo.Create(ctx, p); err != nil {
+	err = s.change(ctx, a, auditapp.Entry{Kind: KindProjectCreated, ProjectID: p.ID, Subject: "project:" + p.ID,
+		Details: map[string]string{"slug": string(p.Slug), "name": string(p.Name)}},
+		func(ctx context.Context) error { return s.Repo.Create(ctx, p) })
+	if err != nil {
 		return domain.Project{}, err
 	}
 	return p, nil
@@ -186,7 +227,10 @@ func (s *Service) SetMember(ctx context.Context, a domain.Actor, projectID, logi
 		return MemberView{}, &domain.ValidationError{Field: "login", Code: "user_disabled"}
 	}
 	m := domain.Membership{ProjectID: projectID, UserID: u.ID, Role: r, CreatedAt: s.Now()}
-	if err := s.Repo.SetMember(ctx, m); err != nil {
+	err = s.change(ctx, a, auditapp.Entry{Kind: KindProjectMemberSet, ProjectID: projectID, Subject: "user:" + u.ID,
+		Details: map[string]string{"login": u.Login, "role": string(r)}},
+		func(ctx context.Context) error { return s.Repo.SetMember(ctx, m) })
+	if err != nil {
 		return MemberView{}, err
 	}
 	return MemberView{UserID: u.ID, Login: u.Login, Role: string(r)}, nil
@@ -205,14 +249,18 @@ func (s *Service) RemoveMember(ctx context.Context, a domain.Actor, projectID, l
 	if err != nil {
 		return err
 	}
-	removed, err := s.Repo.RemoveMember(ctx, projectID, u.ID)
-	if err != nil {
-		return fmt.Errorf("removing membership: %w", err)
-	}
-	if !removed {
-		return domain.ErrNotMember
-	}
-	return nil
+	return s.change(ctx, a, auditapp.Entry{Kind: KindProjectMemberRemoved, ProjectID: projectID, Subject: "user:" + u.ID,
+		Details: map[string]string{"login": u.Login}},
+		func(ctx context.Context) error {
+			removed, err := s.Repo.RemoveMember(ctx, projectID, u.ID)
+			if err != nil {
+				return fmt.Errorf("removing membership: %w", err)
+			}
+			if !removed {
+				return domain.ErrNotMember
+			}
+			return nil
+		})
 }
 
 // Lookup loads a project without an access check. Trusted: for other contexts' use cases that authorise the caller

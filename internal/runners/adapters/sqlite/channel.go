@@ -154,21 +154,27 @@ func (r *Repository) RecordEvent(ctx context.Context, e domain.AttemptEvent) err
 	return nil
 }
 
-// AddOutput counts n bytes of the attempt's output if the total stays within max.
-func (r *Repository) AddOutput(ctx context.Context, step string, fence, n, max int64) (bool, error) {
+// AddOutput counts n bytes of the attempt's output at now if they fit the attempt's and the total limit; it
+// reports which limit they would exceed otherwise. Run it in a transaction.
+func (r *Repository) AddOutput(ctx context.Context, step string, fence, n int64, l domain.OutputLimits, now time.Time) (domain.OutputVerdict, error) {
 	conn := db.Conn(ctx, r.db)
-	if n > max {
-		return false, nil
-	}
-	if _, err := conn.ExecContext(ctx, `INSERT INTO runner_attempt_output(step_id, fence, bytes) VALUES (?, ?, 0)
-		ON CONFLICT(step_id, fence) DO NOTHING`, step, fence); err != nil {
-		return false, fmt.Errorf("counting attempt output: %w", err)
-	}
-	res, err := conn.ExecContext(ctx, `UPDATE runner_attempt_output SET bytes = bytes + ?
-		WHERE step_id = ? AND fence = ? AND bytes + ? <= ?`, n, step, fence, n, max)
+	var attempt, total int64
+	err := conn.QueryRowContext(ctx, `SELECT coalesce((SELECT bytes FROM runner_attempt_output WHERE step_id = ? AND fence = ?), 0),
+		(SELECT bytes FROM runner_output_usage WHERE id = 1)`, step, fence).Scan(&attempt, &total)
 	if err != nil {
-		return false, fmt.Errorf("counting attempt output: %w", err)
+		return 0, fmt.Errorf("counting attempt output: %w", err)
 	}
-	k, _ := res.RowsAffected()
-	return k == 1, nil
+	v := l.Verdict(attempt, total, n)
+	if v != domain.OutputStored {
+		return v, nil
+	}
+	if _, err := conn.ExecContext(ctx, `INSERT INTO runner_attempt_output(step_id, fence, bytes, last_at) VALUES (?, ?, ?, ?)
+		ON CONFLICT(step_id, fence) DO UPDATE SET bytes = bytes + excluded.bytes, last_at = excluded.last_at`,
+		step, fence, n, now.UnixMilli()); err != nil {
+		return 0, fmt.Errorf("counting attempt output: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `UPDATE runner_output_usage SET bytes = bytes + ? WHERE id = 1`, n); err != nil {
+		return 0, fmt.Errorf("counting output usage: %w", err)
+	}
+	return domain.OutputStored, nil
 }

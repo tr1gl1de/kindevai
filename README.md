@@ -136,6 +136,11 @@ ai-runner fingerprint                                    # compare with the runn
   `KINDEV_RUNNER_OUTPUT_LIMIT_MB`): over the limit the oldest output of finished executions is evicted first, and if
   only running executions hold output, new output is stored without its body (`output_storage_limit`) and a
   warning is logged. The cleanup runs at start and hourly in small batches.
+- Storage (Owner): the Overview shows every machine's disk space; **Infrastructure → Storage** (`/infrastructure/storage`)
+  adds the hourly fill history for 7 or 30 days with the 75/85/95% levels, every volume with both forecasts and the
+  space consumers. A runner measures its consumers (repos, workspaces and worktrees, CLI sessions, the event spool,
+  `docker system df`) only when started with `ai-runner run --measure-space`: every 6 h, metadata only, paced to
+  2 000 entries/s, at most 1 000 000 entries and 10 min, no symlinks, one filesystem. Nothing is ever deleted.
 
 ### Integrations and external calls
 

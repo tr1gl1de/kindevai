@@ -16,6 +16,14 @@ type sink struct {
 	beats []string
 	caps  []domain.Capabilities
 	vols  [][]domain.Volume
+	cons  [][]domain.SpaceConsumer
+}
+
+func (s *sink) SpaceConsumers(_ context.Context, _, _ string, items []domain.SpaceConsumer) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cons = append(s.cons, items)
+	return nil
 }
 
 func (s *sink) Heartbeat(_ context.Context, id, _ string) error {
@@ -68,6 +76,47 @@ func TestTelemetryMessagesReachTheSinkStampedWithServerTime(t *testing.T) {
 	}
 	if got := s.vols[0][0]; got.AvailableBytes != 40 || !got.ReportedAt.Equal(now) || got.Role != domain.RoleWorkspaces {
 		t.Fatalf("volume = %+v", got)
+	}
+	if len(s.cons) != 0 {
+		t.Fatalf("a storage report without a measurement stored consumers: %+v", s.cons)
+	}
+}
+
+func TestStorageReportCarriesAnOptionalSpaceConsumerMeasurement(t *testing.T) {
+	t.Parallel()
+	s := &sink{}
+	e := newEnv(t, opts{messages: TelemetryMessages(s, time.Now, nil)})
+	e.approve(t)
+	c, _ := e.connect(t)
+	send(t, c, protocol.TypeStorage, protocol.Storage{Volumes: []protocol.Volume{{ID: "/", Role: protocol.VolumeWorkspaces,
+		Path: "/r", TotalBytes: 100, AvailableBytes: 40, FreeBytes: 45}}, Consumers: &protocol.SpaceConsumers{
+		Items: []protocol.SpaceConsumer{{Category: "spool", Bytes: 4096, Entries: 3}, {Category: "workspaces", Bytes: 9, Partial: true}}}})
+	waitFor(t, "consumers", func() bool { s.mu.Lock(); defer s.mu.Unlock(); return len(s.cons) == 1 })
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if got := s.cons[0]; len(got) != 2 || got[0] != (domain.SpaceConsumer{Category: "spool", Bytes: 4096, Entries: 3}) || !got[1].Partial {
+		t.Fatalf("consumers = %+v", got)
+	}
+}
+
+// Review finding: a measurement this Control Plane does not understand must not cost the volume report or the link.
+func TestInvalidSpaceConsumersAreDroppedKeepingVolumesAndTheConnection(t *testing.T) {
+	t.Parallel()
+	s := &sink{}
+	e := newEnv(t, opts{messages: TelemetryMessages(s, time.Now, nil)})
+	e.approve(t)
+	c, _ := e.connect(t)
+	vols := []protocol.Volume{{ID: "/", Role: protocol.VolumeWorkspaces, Path: "/r", TotalBytes: 100, AvailableBytes: 40, FreeBytes: 45}}
+	send(t, c, protocol.TypeStorage, protocol.Storage{Volumes: vols, Consumers: &protocol.SpaceConsumers{
+		Items: []protocol.SpaceConsumer{{Category: "xcode_derived_data", Bytes: 1}}}})
+	send(t, c, protocol.TypeStorage, protocol.Storage{Volumes: vols, Consumers: &protocol.SpaceConsumers{
+		Items: make([]protocol.SpaceConsumer, 9)}})
+	send(t, c, protocol.TypeHeartbeat, protocol.Heartbeat{})
+	waitFor(t, "volumes and a heartbeat after the invalid measurements", func() bool { b, _, v := s.count(); return b == 1 && v == 2 })
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.cons) != 0 {
+		t.Fatalf("invalid consumers stored: %+v", s.cons)
 	}
 }
 

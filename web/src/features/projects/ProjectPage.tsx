@@ -35,6 +35,9 @@ export function ProjectPage({ me }: { me: Me }) {
         <RoleLabel role={p.myRole} />
       </div>
       <p className="muted">{p.slug}</p>
+      <p>
+        <Link to={`/tasks?projectId=${encodeURIComponent(p.id)}`}>{t("tasks.projectLink")}</Link>
+      </p>
       <Members project={p} canManage={me.role === "owner"} />
       <ProjectYouTrackPanel project={p} isOwner={me.role === "owner"} />
       {me.role === "owner" && <ProjectIntegrationsPanel project={p} />}

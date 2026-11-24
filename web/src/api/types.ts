@@ -675,3 +675,140 @@ export interface NotificationPreferences {
   types?: NotificationType[];
   telegramLinked?: boolean;
 }
+
+// Tasks & Executions (KIN-23 API, KIN-25 UI with agent time accounting)
+export type TaskState =
+  | "CREATED"
+  | "ANALYZING"
+  | "READY"
+  | "AWAITING_APPROVAL"
+  | "RUNNING"
+  | "VERIFYING"
+  | "COMPLETED"
+  | "BLOCKED"
+  | "FAILED"
+  | "CANCELLED";
+export type WaitReason = "runner" | "network" | "approval" | "cli_limit";
+export type StepState = "PENDING" | "READY" | "CLAIMED" | "RUNNING" | "SUCCEEDED" | "WAITING" | "FAILED" | "CANCELLED";
+export type AttemptState = "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "UNKNOWN";
+/** How far agent time is known: no CLI ran, still running, recorded, or a period lacks an end or a usable time. */
+export type WorkStatus = "none" | "running" | "complete" | "incomplete";
+
+export interface Task {
+  id: string;
+  projectId: string;
+  title: string;
+  youtrackIssue?: string;
+  state: TaskState;
+  blockReason?: WaitReason;
+  reason?: string;
+  planRevision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Agent time (sum of CLI work periods) and, separately, the calendar duration of the task's executions. */
+export interface TaskTime {
+  agentMs: number;
+  agentStatus: WorkStatus;
+  calendarMs: number;
+  running: boolean;
+  started: boolean;
+}
+
+export interface AgentTime {
+  ms: number;
+  status: WorkStatus;
+}
+
+export interface TaskListItem extends Task {
+  time: TaskTime;
+}
+
+/** GET /api/tasks?projectId=&state=A,B — at most 200 tasks; total covers every task the filter selects. */
+export interface TaskList {
+  tasks: TaskListItem[];
+  total: AgentTime;
+}
+
+export interface Attempt {
+  number: number;
+  runnerId: string;
+  fence: number;
+  state: AttemptState;
+  error?: string;
+  startedAt: string;
+  finishedAt: string | null;
+  /** CLI adapter that ran the attempt, e.g. "mock". */
+  agent?: string;
+  /** Work period on the runner's clock. */
+  workStartedAt: string | null;
+  workEndedAt: string | null;
+  workStatus: WorkStatus;
+  workMs: number;
+}
+
+export interface Step {
+  id: string;
+  key: string;
+  title: string;
+  repository: string;
+  dependsOn: string[];
+  state: StepState;
+  waitReason?: WaitReason;
+  reason?: string;
+  runnerId?: string;
+  fence: number;
+  attempts: Attempt[];
+  agentTime: AgentTime;
+}
+
+export interface Execution {
+  id: string;
+  planRevision: number;
+  planHash: string;
+  state: "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+  reason?: string;
+  createdAt: string;
+  finishedAt: string | null;
+  steps: Step[];
+  agentTime: AgentTime;
+}
+
+export interface TaskRevision {
+  number: number;
+  hash: string;
+  risk: RiskLevel;
+  summary: string;
+  createdBy: string;
+  createdAt: string;
+}
+
+export interface TaskDetail {
+  task: Task;
+  revision: TaskRevision | null;
+  execution: Execution | null;
+  canManage: boolean;
+  time: TaskTime;
+}
+
+/** One recorded runner event of an attempt; data is process output (plain text, never markup). */
+export interface AttemptEvent {
+  seq: number;
+  kind: string;
+  at: string;
+  stream?: string;
+  offset?: number;
+  data?: string;
+  bytes?: number;
+  reason?: string;
+  omitted?: boolean;
+}
+
+export interface AttemptEventPage {
+  events: AttemptEvent[];
+  next: number;
+  more: boolean;
+}
+
+export type MockScenario = "success" | "fail" | "flaky" | "crash" | "hang" | "gate";

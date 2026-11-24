@@ -1,0 +1,80 @@
+/* Tasks & Executions (KIN-25) */
+.task-filters {
+  display: grid;
+  gap: var(--space);
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  margin: var(--space) 0;
+}
+.task-total {
+  margin-top: var(--space);
+}
+.task-total-value {
+  font-size: 1.4rem;
+  margin: 0 0 8px;
+}
+.agent-time .badge,
+.time-incomplete {
+  margin-left: 8px;
+}
+.time-incomplete {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+}
+.task-state.task-FAILED,
+.task-state.step-FAILED,
+.task-state.attempt-FAILED {
+  border-color: var(--danger);
+}
+.task-state.task-BLOCKED,
+.task-state.step-WAITING,
+.task-state.attempt-UNKNOWN {
+  border-color: var(--warn-border);
+}
+.task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space);
+  align-items: flex-start;
+}
+.stages {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: var(--space);
+}
+.stages h3 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+.step-card h4 {
+  margin: 0;
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+.attempt-details {
+  margin-top: 8px;
+}
+.attempt-details summary {
+  min-height: var(--tap);
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+.log {
+  max-height: 24rem;
+  overflow: auto;
+  padding: 8px;
+  margin: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.log-stderr {
+  color: var(--danger);
+}
+.log-event {
+  color: var(--muted);
+}

@@ -13,17 +13,20 @@ import (
 var t0 = time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
 
 type env struct {
-	svc   *Service
-	repo  *memRepo
-	clock *clock
+	svc    *Service
+	repo   *memRepo
+	clock  *clock
+	policy *fakePolicy
+	events *fakeEvents
 }
 
 func newEnv() env {
 	repo, c := newMemRepo(), &clock{now: t0}
 	var n atomic.Int64
-	svc := &Service{Repo: repo, Projects: fakeProjects{"p1": {"api", "web"}}, Tx: &memTx{}, Now: c.Now,
-		NewID: func() string { return fmt.Sprintf("id%d", n.Add(1)) }}
-	return env{svc: svc, repo: repo, clock: c}
+	pol, ev := &fakePolicy{}, &fakeEvents{}
+	svc := &Service{Repo: repo, Projects: fakeProjects{"p1": {"api", "web"}}, Policy: pol, Events: ev, Tx: &memTx{},
+		Now: c.Now, NewID: func() string { return fmt.Sprintf("id%d", n.Add(1)) }}
+	return env{svc: svc, repo: repo, clock: c, policy: pol, events: ev}
 }
 
 func plan(risk domain.Risk) domain.Plan {
@@ -44,7 +47,7 @@ func (e env) readyTask(t *testing.T) domain.Task {
 	if _, err := e.svc.StartAnalysis(ctx, task.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.SubmitPlan(ctx, task.ID, plan(domain.RiskL1), domain.RiskL1, "planner"); err != nil {
+	if _, err := e.svc.SubmitPlan(ctx, task.ID, plan(domain.RiskL1), "planner"); err != nil {
 		t.Fatal(err)
 	}
 	task, _ = e.repo.Task(ctx, task.ID)
@@ -79,14 +82,14 @@ func TestSubmitPlanValidatesTheDAGAgainstTheProjectsRepositories(t *testing.T) {
 	e := newEnv()
 	ctx := t.Context()
 	task, _ := e.svc.CreateTask(ctx, "p1", "Login", "", "u1")
-	if _, err := e.svc.SubmitPlan(ctx, task.ID, plan(domain.RiskL1), domain.RiskL1, "planner"); !errors.Is(err, domain.ErrInvalidTransition) {
+	if _, err := e.svc.SubmitPlan(ctx, task.ID, plan(domain.RiskL1), "planner"); !errors.Is(err, domain.ErrInvalidTransition) {
 		t.Fatalf("plan before analysis = %v", err)
 	}
 	_, _ = e.svc.StartAnalysis(ctx, task.ID)
 	foreign := plan(domain.RiskL1)
 	foreign.Steps[1].Repository = "someone-elses"
 	var ve *domain.ValidationError
-	if _, err := e.svc.SubmitPlan(ctx, task.ID, foreign, domain.RiskL1, "planner"); !errors.As(err, &ve) || ve.Code != "repository_not_in_project" {
+	if _, err := e.svc.SubmitPlan(ctx, task.ID, foreign, "planner"); !errors.As(err, &ve) || ve.Code != "repository_not_in_project" {
 		t.Fatalf("foreign repository = %v", err)
 	}
 	if _, err := e.repo.Revision(ctx, task.ID, 1); !errors.Is(err, domain.ErrNotFound) {
@@ -103,7 +106,8 @@ func TestPlanRevisionsRouteByRiskAndStayImmutable(t *testing.T) {
 	ctx := t.Context()
 	task, _ := e.svc.CreateTask(ctx, "p1", "Login", "", "u1")
 	_, _ = e.svc.StartAnalysis(ctx, task.ID)
-	r1, err := e.svc.SubmitPlan(ctx, task.ID, plan(domain.RiskL1), domain.RiskL2, "planner") // policy raised the risk
+	e.policy.raise = domain.RiskL2
+	r1, err := e.svc.SubmitPlan(ctx, task.ID, plan(domain.RiskL1), "planner") // policy raised the risk
 	if err != nil || r1.Number() != 1 || r1.Risk() != domain.RiskL2 {
 		t.Fatalf("revision 1 = %+v, %v", r1, err)
 	}
@@ -113,7 +117,8 @@ func TestPlanRevisionsRouteByRiskAndStayImmutable(t *testing.T) {
 	// The plan chat produces revision 2; revision 1 is kept as it was and is no longer current.
 	p2 := plan(domain.RiskL0)
 	p2.Summary = "smaller"
-	r2, err := e.svc.SubmitPlan(ctx, task.ID, p2, domain.RiskL0, "chat")
+	e.policy.raise = ""
+	r2, err := e.svc.SubmitPlan(ctx, task.ID, p2, "chat")
 	if err != nil || r2.Number() != 2 || r2.Hash() == r1.Hash() {
 		t.Fatalf("revision 2 = %+v, %v", r2, err)
 	}

@@ -218,8 +218,8 @@ func (t *Task) AcceptPlan(revision int, risk Risk, now time.Time) error {
 	if !risk.Valid() {
 		return invalid("risk", "risk_level")
 	}
-	if t.State != TaskAnalyzing && t.State != TaskReady && t.State != TaskAwaitingApproval {
-		return fmt.Errorf("task %s: accept plan in %s: %w", t.ID, t.State, ErrInvalidTransition)
+	if err := t.CanAcceptPlan(); err != nil {
+		return err
 	}
 	if revision <= t.PlanRevision {
 		return ErrStaleRevision
@@ -237,6 +237,15 @@ func (t *Task) AcceptPlan(revision int, risk Risk, now time.Time) error {
 	return nil
 }
 
+// CanAcceptPlan reports whether a new plan revision may replace the current one (ANALYZING, READY or
+// AWAITING_APPROVAL; a running task is cancelled first).
+func (t *Task) CanAcceptPlan() error {
+	if t.State != TaskAnalyzing && t.State != TaskReady && t.State != TaskAwaitingApproval {
+		return fmt.Errorf("task %s: accept plan in %s: %w", t.ID, t.State, ErrInvalidTransition)
+	}
+	return nil
+}
+
 // Approve records the Owner's approval of the current plan revision: AWAITING_APPROVAL -> READY. The approval
 // binds to the revision; an older one is ErrStaleRevision (KIN-A-11).
 func (t *Task) Approve(revision int, now time.Time) error {
@@ -247,4 +256,16 @@ func (t *Task) Approve(revision int, now time.Time) error {
 		return ErrStaleRevision
 	}
 	return t.Transition(TaskReady, Reason{}, now)
+}
+
+// RejectPlan records the Owner's rejection of the current plan revision: AWAITING_APPROVAL -> ANALYZING, where the
+// planner or the plan chat (KIN-43) produces a new revision.
+func (t *Task) RejectPlan(revision int, now time.Time) error {
+	if t.State != TaskAwaitingApproval {
+		return fmt.Errorf("task %s: reject plan in %s: %w", t.ID, t.State, ErrInvalidTransition)
+	}
+	if revision != t.PlanRevision {
+		return ErrStaleRevision
+	}
+	return t.Transition(TaskAnalyzing, Reason{}, now)
 }

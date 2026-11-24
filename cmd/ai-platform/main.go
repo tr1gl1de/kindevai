@@ -133,7 +133,8 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	msg := newMessaging(inst, logger)
 	hub := runnersapp.NewHub()
 	modules := append(identity.Modules, newProjects(inst, identity, audit, hub, logger)...)
-	modules = append(modules, msg.HTTP, audit.HTTP, newIntegrations(inst, msg, audit, ghURL, logger).HTTP)
+	integ := newIntegrations(inst, msg, audit, ghURL, logger)
+	modules = append(modules, msg.HTTP, audit.HTTP, integ.HTTP, newApprovals(inst, msg, audit, integ, logger).HTTP)
 	gateway := newRunnerGateway(inst, hub, localPeers, audiences, logger)
 	modules = append(modules, gateway)
 	defer msg.start(ctx)() // deferred after inst.Close, so the dispatchers stop before the database closes

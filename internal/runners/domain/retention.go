@@ -98,3 +98,61 @@ type EventRef struct {
 	Step       string
 	ReceivedAt time.Time
 }
+
+// Stored runner output in the Storage Overview (KIN-59).
+
+// OutputDropsWindow is how far back the overview reports output dropped for the total limit;
+// OutputDroppingWindow is how recent a drop must be for the storage to count as full (output is being dropped).
+const (
+	OutputDropsWindow    = 24 * time.Hour
+	OutputDroppingWindow = 15 * time.Minute
+)
+
+// OutputStorageState summarizes stored runner output: ok, high (≥ 90% of the limit: the retention evicts the
+// oldest finished output) or full (new output was dropped within OutputDroppingWindow).
+type OutputStorageState string
+
+// Output storage states.
+const (
+	OutputStorageOK   OutputStorageState = "ok"
+	OutputStorageHigh OutputStorageState = "high"
+	OutputStorageFull OutputStorageState = "full"
+)
+
+// OutputDrop is one attempt whose output bodies were dropped because the output storage was full.
+type OutputDrop struct {
+	RunnerID string
+	Step     string
+	Fence    int64
+	Events   int64
+	LastAt   time.Time
+}
+
+// OutputStorage is the Control Plane's stored runner output against its limit, with the recent drops.
+type OutputStorage struct {
+	UsedBytes     int64
+	LimitBytes    int64
+	Policy        RetentionPolicy
+	DroppedEvents int64        // output events stored without body for the total limit within OutputDropsWindow
+	LastDropAt    *time.Time   // the latest of them; nil when none
+	Drops         []OutputDrop // per attempt, newest first (bounded)
+}
+
+// UsedPercent is the share of the limit in use (0 without a limit).
+func (s OutputStorage) UsedPercent() float64 {
+	if s.LimitBytes <= 0 {
+		return 0
+	}
+	return float64(s.UsedBytes) * 100 / float64(s.LimitBytes)
+}
+
+// State summarizes the output storage at now.
+func (s OutputStorage) State(now time.Time) OutputStorageState {
+	switch {
+	case s.LastDropAt != nil && now.Sub(*s.LastDropAt) < OutputDroppingWindow:
+		return OutputStorageFull
+	case s.LimitBytes > 0 && s.UsedBytes*10 >= s.LimitBytes*9:
+		return OutputStorageHigh
+	}
+	return OutputStorageOK
+}

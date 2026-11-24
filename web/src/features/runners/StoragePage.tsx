@@ -8,6 +8,7 @@ import { formatBytes, formatDateTime } from "../../ui/format";
 import { useStorageMachine, useStorageOverview } from "./api";
 import { AvailabilityBadge } from "./AvailabilityBadge";
 import { HistoryChart } from "./HistoryChart";
+import { OutputStorageSection } from "./OutputStorage";
 
 type Days = 7 | 30;
 
@@ -26,10 +27,13 @@ export function StoragePage() {
       ) : q.isPending ? (
         <Loading />
       ) : !machines.some((m) => m.volumes.length > 0) ? (
-        <EmptyState title={t("storagePage.emptyTitle")}>
-          <p>{t("storage.empty")}</p>
-          <Link to="/runners">{t("storagePage.openRunners")}</Link>
-        </EmptyState>
+        <>
+          <EmptyState title={t("storagePage.emptyTitle")}>
+            <p>{t("storage.empty")}</p>
+            <Link to="/runners">{t("storagePage.openRunners")}</Link>
+          </EmptyState>
+          {q.data.runnerOutput && <OutputStorageSection o={q.data.runnerOutput} machines={machines} />}
+        </>
       ) : (
         <>
           <fieldset className="segmented">
@@ -44,6 +48,7 @@ export function StoragePage() {
           {machines.map((m) => (
             <MachineSection key={m.id} m={m} days={days} />
           ))}
+          {q.data.runnerOutput && <OutputStorageSection o={q.data.runnerOutput} machines={machines} />}
         </>
       )}
     </>

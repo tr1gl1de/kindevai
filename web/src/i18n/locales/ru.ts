@@ -227,6 +227,8 @@ export const ru: Messages = {
     linkWarning: "Продолжайте, только если вы сами начали привязку на сайте.",
     linkConfirm: "Привязать к {{login}}",
     codeTitle: "Введите этот код на сайте",
+    codeThen: "Когда введёте код, продолжите вход здесь.",
+    codeEntered: "Код введён — продолжить",
     codeText: "Введите его на странице «Учётная запись», где вы начали привязку ({{login}}). Действует до {{date}}.",
     settingsTitle: "Telegram",
     settingsIntro: "Через этого бота пользователи входят в Telegram Mini App. Создайте бота в @BotFather, затем Mini App командой /newapp с HTTPS-адресом этого сайта.",

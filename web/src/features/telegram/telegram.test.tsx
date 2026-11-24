@@ -86,6 +86,9 @@ describe("Link Telegram — Mini App side", () => {
     expect(screen.getByText("123456")).toBeInTheDocument();
     expect(calls).toEqual(["preview", `confirm ${JSON.stringify({ initData: INIT })}`]);
     await expectAccessible(container);
+    server.use(http.post("/api/telegram/login", () => json({ user: alice })));
+    await userEvent.setup().click(screen.getByRole("button", { name: "I entered the code — continue" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "Overview" })).toBeInTheDocument();
   });
 
   it("explains a link already opened by someone else", async () => {

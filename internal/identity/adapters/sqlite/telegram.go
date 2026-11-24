@@ -56,7 +56,7 @@ func (r *TelegramRepository) CreateIdentity(ctx context.Context, id domain.Teleg
 	switch {
 	case err == nil:
 		return nil
-	case db.IsUniqueViolation(err) && strings.Contains(err.Error(), "telegram_id"):
+	case db.IsUniqueViolation(err) && strings.Contains(err.Error(), "telegram_identities.telegram_id"):
 		return domain.ErrTelegramTaken
 	case db.IsUniqueViolation(err):
 		return domain.ErrUserHasTelegram
@@ -173,6 +173,14 @@ func (r *TelegramRepository) CancelOpenLinkRequests(ctx context.Context, userID 
 	if _, err := db.Conn(ctx, r.db).ExecContext(ctx, `UPDATE telegram_link_requests SET cancelled_at = ?
 		WHERE user_id = ? AND consumed_at IS NULL AND cancelled_at IS NULL`, ts(now), userID); err != nil {
 		return fmt.Errorf("cancelling link requests: %w", err)
+	}
+	return nil
+}
+
+// DeleteLinkRequestsBefore removes requests that expired before cutoff (they keep Telegram names).
+func (r *TelegramRepository) DeleteLinkRequestsBefore(ctx context.Context, cutoff time.Time) error {
+	if _, err := db.Conn(ctx, r.db).ExecContext(ctx, "DELETE FROM telegram_link_requests WHERE expires_at < ?", ts(cutoff)); err != nil {
+		return fmt.Errorf("purging link requests: %w", err)
 	}
 	return nil
 }

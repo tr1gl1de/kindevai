@@ -227,6 +227,8 @@ export const en = {
     linkWarning: "Continue only if you started linking on the website yourself.",
     linkConfirm: "Link to {{login}}",
     codeTitle: "Enter this code on the website",
+    codeThen: "After you have entered it, continue to sign in here.",
+    codeEntered: "I entered the code — continue",
     codeText: "Type it on the Account page where you started linking ({{login}}). Valid until {{date}}.",
     settingsTitle: "Telegram",
     settingsIntro: "Users sign in to the Telegram Mini App with this bot. Create the bot with @BotFather, then the Mini App with /newapp and this site’s HTTPS address.",

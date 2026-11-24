@@ -7,7 +7,7 @@ import { AuthLayout } from "../identity/AuthLayout";
 import { useConfirmLink, useLinkPreview } from "./api";
 
 /** Mini App side of "Link Telegram": shows the target account, confirms, then shows the code for the website. */
-export function LinkConfirmPage({ initData }: { initData: string }) {
+export function LinkConfirmPage({ initData, onDone }: { initData: string; onDone: () => void }) {
   const { t, i18n } = useTranslation();
   const preview = useLinkPreview(initData);
   const confirm = useConfirmLink();
@@ -43,6 +43,12 @@ export function LinkConfirmPage({ initData }: { initData: string }) {
             {code}
           </p>
           <p>{t("telegram.codeText", { login: confirm.data.login, date: formatDateTime(confirm.data.expiresAt, i18n.language) })}</p>
+          <p className="muted">{t("telegram.codeThen")}</p>
+          <div className="form-actions">
+            <button type="button" className="button" onClick={onDone}>
+              {t("telegram.codeEntered")}
+            </button>
+          </div>
         </section>
       )}
     </AuthLayout>

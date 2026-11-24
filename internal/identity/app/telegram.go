@@ -30,6 +30,8 @@ type TelegramRepository interface {
 	SaveLinkRequest(ctx context.Context, r domain.LinkRequest) error
 	// CancelOpenLinkRequests cancels the user's requests that are neither used nor cancelled.
 	CancelOpenLinkRequests(ctx context.Context, userID string, now time.Time) error
+	// DeleteLinkRequestsBefore purges requests that expired before cutoff.
+	DeleteLinkRequestsBefore(ctx context.Context, cutoff time.Time) error
 
 	Settings(ctx context.Context) (domain.BotSettings, time.Time, error) // domain.ErrNotFound
 	SaveSettings(ctx context.Context, s domain.BotSettings, now time.Time) error
@@ -178,6 +180,9 @@ func (s *TelegramService) validate(ctx context.Context, initData string) (domain
 	return domain.ValidateInitData(initData, token, s.Now())
 }
 
+// linkRequestRetention keeps finished link requests this long (for the web status) before they are purged.
+const linkRequestRetention = 24 * time.Hour
+
 // Telegram sign-in failure reasons recorded with auth.login_failed.
 const (
 	failTelegramNotLinked = "telegram_not_linked"
@@ -299,6 +304,10 @@ func (s *TelegramService) StartLink(ctx context.Context, actor auth.Principal, s
 	err = s.Tx.InTx(ctx, func(ctx context.Context) error {
 		if err := s.Repo.CancelOpenLinkRequests(ctx, actor.UserID, now); err != nil {
 			return fmt.Errorf("cancelling previous link requests: %w", err)
+		}
+		// Housekeeping: old requests hold Telegram names and have no further use.
+		if err := s.Repo.DeleteLinkRequestsBefore(ctx, now.Add(-linkRequestRetention)); err != nil {
+			return err
 		}
 		if err := s.Repo.CreateLinkRequest(ctx, r); err != nil {
 			return fmt.Errorf("saving link request: %w", err)
@@ -466,6 +475,9 @@ func (s *TelegramService) Unlink(ctx context.Context, actor auth.Principal) erro
 		}
 		if _, err := s.Repo.DeleteIdentity(ctx, actor.UserID); err != nil {
 			return fmt.Errorf("unlinking Telegram: %w", err)
+		}
+		if err := s.Repo.CancelOpenLinkRequests(ctx, actor.UserID, s.Now()); err != nil {
+			return err
 		}
 		if err := s.Sessions.DeleteByUserVia(ctx, actor.UserID, domain.ViaTelegram); err != nil {
 			return err

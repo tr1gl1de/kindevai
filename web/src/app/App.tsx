@@ -52,7 +52,7 @@ function Gate() {
   if (location.pathname === "/invite") return <AcceptInvitePage />;
   if (tg && target?.kind === "invite")
     return <AcceptInvitePage telegramToken={target.token} onDone={() => setStartDone(true)} />;
-  if (tg && target?.kind === "link") return <LinkConfirmPage initData={tg.initData} />;
+  if (tg && target?.kind === "link") return <LinkConfirmPage initData={tg.initData} onDone={() => setStartDone(true)} />;
 
   if (setup.isPending || (setup.data?.setupRequired === false && me.isPending)) {
     return (

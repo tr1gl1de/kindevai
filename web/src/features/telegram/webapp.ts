@@ -27,7 +27,7 @@ export function parseLaunch(hash: string): TelegramLaunch | null {
   } catch {
     // unsigned display data only; ignore malformed input
   }
-  return { initData, startParam: data.get("start_param") ?? params.get("tgWebAppStartParam") ?? "", languageCode };
+  return { initData, startParam: data.get("start_param") ?? "", languageCode };
 }
 
 function session(): Storage | null {

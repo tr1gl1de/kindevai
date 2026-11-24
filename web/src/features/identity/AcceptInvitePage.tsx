@@ -61,6 +61,8 @@ export function AcceptInvitePage() {
     }
     try {
       const r = await accept.mutateAsync({ token, login: values.login.trim(), password: values.password });
+      accept.reset();
+      setValues({ login: "", password: "", passwordRepeat: "" });
       setCreated(r.user.login);
     } catch (err) {
       if (isApiError(err, "login_taken")) show({ login: t("users.loginTaken") });
@@ -80,7 +82,7 @@ export function AcceptInvitePage() {
       <PageHeading>{t("invite.title")}</PageHeading>
       {!token && <ErrorState message={t("invite.invitation_invalid")} />}
       {token && preview.isPending && <Loading />}
-      {token && preview.isError && <ErrorState message={errorMessage(t, preview.error)} />}
+      {token && preview.isError && !created && <ErrorState message={errorMessage(t, preview.error)} />}
       {created && (
         <section className="card secret" aria-labelledby="invite-done">
           <h2 id="invite-done" ref={doneHeading} tabIndex={-1}>

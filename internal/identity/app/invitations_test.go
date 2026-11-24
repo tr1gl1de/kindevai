@@ -15,18 +15,22 @@ import (
 )
 
 type memInvitations struct {
-	mu   sync.Mutex
-	byID map[string]domain.Invitation
+	mu        sync.Mutex
+	byID      map[string]domain.Invitation
+	createErr error
 }
 
 func (m *memInvitations) Create(_ context.Context, inv domain.Invitation) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.createErr != nil {
+		return m.createErr
+	}
 	m.byID[inv.ID] = inv
 	return nil
 }
 
-func (m *memInvitations) List(_ context.Context, limit int) ([]domain.Invitation, error) {
+func (m *memInvitations) List(_ context.Context, limit int, _ time.Time) ([]domain.Invitation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]domain.Invitation, 0, len(m.byID))
@@ -330,6 +334,10 @@ func TestRevokeAndList(t *testing.T) {
 	list, err := f.svc.List(t.Context(), f.owner)
 	if err != nil || len(list) != 1 || list[0].State != domain.InvitationRevoked || list[0].ProjectName != "Alpha" {
 		t.Fatalf("List = %+v, %v", list, err)
+	}
+	f.invs.createErr = domain.ErrNotFound
+	if _, _, err := f.svc.Create(t.Context(), f.owner, "p1", "member", 0); validationCode(err) != "project_not_found" {
+		t.Fatalf("project deleted during create: %v", err)
 	}
 	if _, err := f.svc.List(t.Context(), auth.Principal{UserID: "u"}); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("non-owner list: %v", err)

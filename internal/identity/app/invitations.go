@@ -15,8 +15,9 @@ import (
 // InvitationRepository stores invitations.
 type InvitationRepository interface {
 	Create(ctx context.Context, inv domain.Invitation) error
-	List(ctx context.Context, limit int) ([]domain.Invitation, error) // newest first
-	ByID(ctx context.Context, id string) (domain.Invitation, error)   // domain.ErrNotFound
+	// List returns every invitation still pending at now plus the newest limit others, newest first.
+	List(ctx context.Context, limit int, now time.Time) ([]domain.Invitation, error)
+	ByID(ctx context.Context, id string) (domain.Invitation, error) // domain.ErrNotFound
 	ByTokenHash(ctx context.Context, hash []byte) (domain.Invitation, error)
 	// MarkConsumed sets consumed_at/by only if the invitation is still pending at now; false if it was not.
 	MarkConsumed(ctx context.Context, id, userID string, now time.Time) (bool, error)
@@ -110,7 +111,9 @@ func (s *InvitationsService) Create(ctx context.Context, actor auth.Principal, p
 		ID: s.NewID(), TokenHash: hash, ProjectID: p.ID, Role: role, CreatedBy: actor.UserID,
 		CreatedAt: now, ExpiresAt: now.Add(ttl),
 	}
-	if err := s.Invitations.Create(ctx, inv); err != nil {
+	if err := s.Invitations.Create(ctx, inv); errors.Is(err, domain.ErrNotFound) {
+		return InvitationView{}, "", errProjectNotFound // deleted between the lookup and the insert
+	} else if err != nil {
 		return InvitationView{}, "", fmt.Errorf("saving invitation: %w", err)
 	}
 	s.logger().Info("invitation created", "invitation", inv.ID, "project", p.ID, "role", role, "by", actor.UserID)
@@ -122,11 +125,11 @@ func (s *InvitationsService) List(ctx context.Context, actor auth.Principal) ([]
 	if err := ownerOnly(actor); err != nil {
 		return nil, err
 	}
-	invs, err := s.Invitations.List(ctx, invitationListLimit)
+	now := s.Now()
+	invs, err := s.Invitations.List(ctx, invitationListLimit, now)
 	if err != nil {
 		return nil, fmt.Errorf("listing invitations: %w", err)
 	}
-	now := s.Now()
 	names := map[string]string{}
 	out := make([]InvitationView, 0, len(invs))
 	for _, inv := range invs {

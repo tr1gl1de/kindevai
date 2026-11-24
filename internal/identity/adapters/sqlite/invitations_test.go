@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -67,9 +68,27 @@ func TestInvitationRepository(t *testing.T) {
 	if got.State(now) != domain.InvitationRevoked {
 		t.Fatalf("state = %s", got.State(now))
 	}
-	list, err := r.List(ctx, 10)
+	list, err := r.List(ctx, 10, now)
 	if err != nil || len(list) != 1 {
 		t.Fatalf("List = %v, %v", list, err)
+	}
+	// An old pending invitation stays listed (and revocable) however many newer ones exist.
+	old := inv
+	old.ID, old.TokenHash, old.CreatedAt, old.ExpiresAt = "old", domain.HashInvitationToken("old"), now.Add(-time.Hour), now.Add(time.Hour)
+	if err := r.Create(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		n := inv
+		n.ID, n.TokenHash, n.CreatedAt = fmt.Sprint("n", i), domain.HashInvitationToken(fmt.Sprint("n", i)), now.Add(time.Duration(i+1)*time.Minute)
+		n.ExpiresAt = now // already expired
+		if err := r.Create(ctx, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list, err = r.List(ctx, 2, now)
+	if err != nil || len(list) != 3 || list[2].ID != "old" {
+		t.Fatalf("List(limit 2) = %d items, %v; want the 2 newest plus the pending old one", len(list), err)
 	}
 }
 

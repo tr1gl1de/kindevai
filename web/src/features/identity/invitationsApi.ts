@@ -39,6 +39,11 @@ export function useInvitationPreview(token: string) {
     enabled: token !== "",
     gcTime: 0,
     retry: false,
+    // Checked once: refetching would re-send the token, spend the shared rate limit and, after acceptance,
+    // turn into "already used".
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     queryFn: ({ signal }) => api<InvitationPreview>("POST", "/api/invitations/preview", { token }, signal),
   });
 }
@@ -46,6 +51,7 @@ export function useInvitationPreview(token: string) {
 export function useAcceptInvitation() {
   return useMutation({
     mutationFn: (req: AcceptInvitationRequest) => api<LoginResult>("POST", "/api/invitations/accept", req),
+    gcTime: 0, // the variables hold the token and the new password
   });
 }
 

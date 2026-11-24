@@ -62,7 +62,7 @@ func (r *InvitationRepository) Create(ctx context.Context, inv domain.Invitation
 	_, err := db.Conn(ctx, r.db).ExecContext(ctx, `INSERT INTO invitations(id, token_hash, project_id, role, created_by, created_at, expires_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`, inv.ID, inv.TokenHash, inv.ProjectID, inv.Role, inv.CreatedBy, ts(inv.CreatedAt), ts(inv.ExpiresAt))
 	if db.IsForeignKeyViolation(err) {
-		return domain.ErrNotFound // the project was deleted after the lookup
+		return domain.ErrNotFound // the project (or creator) was deleted after the lookup
 	}
 	if err != nil {
 		return fmt.Errorf("creating invitation: %w", err)
@@ -70,9 +70,10 @@ func (r *InvitationRepository) Create(ctx context.Context, inv domain.Invitation
 	return nil
 }
 
-// List returns up to limit invitations, newest first.
-func (r *InvitationRepository) List(ctx context.Context, limit int) ([]domain.Invitation, error) {
-	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, "SELECT "+invitationCols+" FROM invitations ORDER BY created_at DESC, id LIMIT ?", limit)
+// List returns every invitation pending at now (so the Owner can always revoke it) plus the newest limit others.
+func (r *InvitationRepository) List(ctx context.Context, limit int, now time.Time) ([]domain.Invitation, error) {
+	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, "SELECT "+invitationCols+" FROM invitations WHERE ("+pendingAt+
+		") OR id IN (SELECT id FROM invitations ORDER BY created_at DESC, id LIMIT ?) ORDER BY created_at DESC, id", ts(now), limit)
 	if err != nil {
 		return nil, fmt.Errorf("listing invitations: %w", err)
 	}

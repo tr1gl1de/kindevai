@@ -5,7 +5,7 @@ CREATE TABLE invitations (
   token_hash  BLOB NOT NULL UNIQUE CHECK (length(token_hash) = 32),
   project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   role        TEXT NOT NULL,
-  created_by  TEXT NOT NULL REFERENCES users(id),
+  created_by  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, -- a deleted creator's invitations die with them
   created_at  TEXT NOT NULL,
   expires_at  TEXT NOT NULL,
   consumed_at TEXT,

@@ -71,8 +71,12 @@ describe("invitations (owner)", () => {
 describe("accept invitation page", () => {
   it("shows the offer and creates the account without a session", async () => {
     let accepted: unknown;
+    let previews = 0;
     server.use(
-      http.post("/api/invitations/preview", () => json({ projectName: "Alpha", role: "member", expiresAt: "2026-11-27T10:00:00Z" })),
+      http.post("/api/invitations/preview", () => {
+        previews++;
+        return json({ projectName: "Alpha", role: "member", expiresAt: "2026-11-27T10:00:00Z" });
+      }),
       http.post("/api/invitations/accept", async ({ request }) => {
         accepted = await request.json();
         const { login } = accepted as { login: string };
@@ -80,7 +84,7 @@ describe("accept invitation page", () => {
         return json({ user: { id: "u9", login, role: "user", mustChangePassword: false } }, 201);
       }),
     );
-    const { container } = await renderApp(`/invite#token=${TOKEN}`);
+    const { container, client } = await renderApp(`/invite#token=${TOKEN}`);
     const user = userEvent.setup();
     expect(await screen.findByText(/You are invited to Alpha as Member/)).toBeInTheDocument();
     await expectAccessible(container);
@@ -100,6 +104,10 @@ describe("accept invitation page", () => {
     await user.click(screen.getByRole("button", { name: "Create account" }));
     expect(await screen.findByRole("heading", { name: "Account created" })).toHaveFocus();
     expect(accepted).toEqual({ token: TOKEN, login: "dave", password: "dave's long password" });
+    window.dispatchEvent(new Event("focus")); // coming back to the tab must not re-send the token
+    window.dispatchEvent(new Event("visibilitychange"));
+    expect(previews).toBe(1);
+    expect(JSON.stringify(client.getMutationCache().getAll().map((m) => m.state.variables))).not.toContain(TOKEN);
     await user.click(screen.getByRole("button", { name: "Go to sign in" }));
     expect(await screen.findByRole("heading", { level: 1, name: "Sign in" })).toBeInTheDocument();
   });

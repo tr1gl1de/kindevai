@@ -159,3 +159,69 @@ func TestLaunchFailsForAMissingProgram(t *testing.T) {
 		t.Fatal("launched a missing program")
 	}
 }
+
+// KIN-64: the launched process's start time is recorded, and it is stable for the life of the process.
+func TestStartTimeIdentifiesTheProcess(t *testing.T) {
+	t.Parallel()
+	p, _, _ := start(t, launcher(t), "hang", 1)
+	st := p.StartTime()
+	if st == "" {
+		t.Fatal("no start time recorded")
+	}
+	if again, err := StartTime(p.PID()); err != nil || again != st {
+		t.Fatalf("start time now %q (%v), at launch %q", again, err, st)
+	}
+	if !strings.Contains(st, ":") { // boot id : ticks (Linux) or seconds.microseconds (macOS)
+		if _, err := os.Stat("/proc/self/stat"); err == nil {
+			t.Fatalf("start time %q has no boot id", st)
+		}
+	}
+	if own, err := StartTime(os.Getpid()); err != nil || own == "" || own == st {
+		t.Fatalf("own start time %q (%v) vs child %q", own, err, st)
+	}
+	if _, err := StartTime(1 << 30); err == nil {
+		t.Fatal("start time of a missing process")
+	}
+}
+
+// KIN-64: a recorded pid that now belongs to another process (its start time differs) is not adopted: the attempt
+// counts as ended, and a cancel never signals the stranger's process group.
+func TestAdoptRejectsAReusedPID(t *testing.T) {
+	t.Parallel()
+	l := launcher(t)
+	stranger, _, out := start(t, l, "hang", 1)
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(out.String(), "hanging") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	rec := domain.Record{Step: "s", Fence: 1, PID: stranger.PID(), PGID: stranger.PGID(), Start: "1"} // our process started at tick 1
+	a := l.Adopt(rec, t.TempDir())
+	if a.StartTime() != "1" {
+		t.Fatalf("adopted start time %q", a.StartTime())
+	}
+	if err := a.Signal(true); err != nil {
+		t.Fatal(err)
+	}
+	if e := a.Wait(); !e.Lost {
+		t.Fatalf("reused pid adopted: %+v", e)
+	}
+	if !Alive(stranger.PID(), stranger.PGID()) {
+		t.Fatal("the stranger's process group was signalled")
+	}
+	// The real process (its start time matches) is adopted as before.
+	same := l.Adopt(domain.Record{Step: "s", Fence: 2, PID: stranger.PID(), PGID: stranger.PGID(), Start: stranger.StartTime()}, t.TempDir())
+	done := make(chan domain.Exit, 1)
+	go func() { done <- same.Wait() }()
+	select {
+	case e := <-done:
+		t.Fatalf("own process not adopted: %+v", e)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := same.Signal(true); err != nil {
+		t.Fatal(err)
+	}
+	stranger.Wait()
+	if e := <-done; !e.Lost {
+		t.Fatalf("killed adopted process: %+v", e)
+	}
+}

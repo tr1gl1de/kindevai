@@ -33,6 +33,9 @@ type LaunchSpec struct {
 type Process interface {
 	PID() int
 	PGID() int
+	// StartTime identifies the process together with PID (the kernel's start time; "" when unknown), so a reused
+	// pid is never taken for it after a restart (KIN-64).
+	StartTime() string
 	// Wait blocks until the process ended.
 	Wait() domain.Exit
 	// Signal sends SIGTERM (kill=false) or SIGKILL (kill=true) to the whole process group.
@@ -260,7 +263,11 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 		return x.Journal.Finish(a.Step, a.Fence)
 	}
 	r.proc = proc
-	if err := r.save(x.Journal, func(rec *domain.Record) { rec.PID, rec.PGID = proc.PID(), proc.PGID() }); err != nil {
+	if proc.StartTime() == "" {
+		x.logger().Warn("process start time unknown: after a restart a reused pid cannot be told apart", "step", a.Step,
+			"pid", proc.PID())
+	}
+	if err := r.save(x.Journal, func(rec *domain.Record) { rec.PID, rec.PGID, rec.Start = proc.PID(), proc.PGID(), proc.StartTime() }); err != nil {
 		x.logger().Error("recording the attempt's process", "step", a.Step, "err", err)
 	}
 	x.runs[k] = r

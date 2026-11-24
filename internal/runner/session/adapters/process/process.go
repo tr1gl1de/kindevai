@@ -50,14 +50,18 @@ func (l *Launcher) Launch(_ context.Context, s app.LaunchSpec) (app.Process, err
 		return nil, fmt.Errorf("starting %s: %w", l.Program, err)
 	}
 	p := &attached{cmd: cmd, done: make(chan struct{})}
+	// Read before anyone waits for the child: until it is reaped its pid cannot be reused. On failure the record has
+	// no start time and adoption falls back to the process group check (the executor logs a warning).
+	p.start, _ = StartTime(cmd.Process.Pid)
 	go p.wait()
 	return p, nil
 }
 
 type attached struct {
-	cmd  *exec.Cmd
-	done chan struct{}
-	exit domain.Exit
+	cmd   *exec.Cmd
+	start string
+	done  chan struct{}
+	exit  domain.Exit
 }
 
 func (p *attached) wait() {
@@ -79,6 +83,7 @@ func (p *attached) wait() {
 
 func (p *attached) PID() int          { return p.cmd.Process.Pid }
 func (p *attached) PGID() int         { return p.cmd.Process.Pid }
+func (p *attached) StartTime() string { return p.start }
 func (p *attached) Wait() domain.Exit { <-p.done; return p.exit }
 func (p *attached) Signal(kill bool) error {
 	return signalGroup(p.cmd.Process.Pid, kill)
@@ -98,18 +103,20 @@ func signalGroup(pgid int, kill bool) error {
 	return nil
 }
 
-// Adopt watches a recorded process again. It is the same process only while the pid still leads the recorded
-// process group (a reused pid would not), and a zombie counts as ended.
+// Adopt watches a recorded process again. It is the same process only while the pid has the recorded start time
+// (KIN-64: a reused pid has another) and still leads the recorded process group, and a zombie counts as ended. A
+// record without a start time (written before KIN-64) relies on the process group check alone.
 func (l *Launcher) Adopt(r domain.Record, dir string) app.Process {
 	poll := l.Poll
 	if poll <= 0 {
 		poll = 200 * time.Millisecond
 	}
-	return &adopted{pid: r.PID, pgid: r.PGID, dir: dir, poll: poll}
+	return &adopted{pid: r.PID, pgid: r.PGID, start: r.Start, dir: dir, poll: poll}
 }
 
 type adopted struct {
 	pid, pgid int
+	start     string
 	dir       string
 	poll      time.Duration
 	once      sync.Once
@@ -136,12 +143,29 @@ func Alive(pid, pgid int) bool {
 // groupAlive reports a process group with at least one member.
 func groupAlive(pgid int) bool { return pgid > 1 && syscall.Kill(-pgid, 0) == nil }
 
-func (p *adopted) PID() int  { return p.pid }
-func (p *adopted) PGID() int { return p.pgid }
+// reused reports that the recorded pid now belongs to another process (its start time differs). Linux and XNU do
+// not hand out a pid while a process group of that id exists, so then the recorded group is gone too and any group
+// with that id is a stranger's. When the pid does not exist (StartTime fails) the group check decides: by the same
+// guarantee a live group with that id can only be the recorded one.
+func (p *adopted) reused() bool {
+	if p.start == "" {
+		return false
+	}
+	st, err := StartTime(p.pid)
+	return err == nil && st != p.start
+}
+
+// running reports that the attempt still runs: its leader or any process of its group (children of an exited CLI).
+func (p *adopted) running() bool {
+	return !p.reused() && (Alive(p.pid, p.pgid) || groupAlive(p.pgid))
+}
+
+func (p *adopted) PID() int          { return p.pid }
+func (p *adopted) PGID() int         { return p.pgid }
+func (p *adopted) StartTime() string { return p.start }
 func (p *adopted) Wait() domain.Exit {
 	p.once.Do(func() {
-		// The attempt runs while its leader or any process of its group does (children of an exited CLI).
-		for Alive(p.pid, p.pgid) || groupAlive(p.pgid) {
+		for p.running() {
 			time.Sleep(p.poll)
 		}
 		if code, ok := mockagent.ReadResult(p.dir); ok {
@@ -153,8 +177,8 @@ func (p *adopted) Wait() domain.Exit {
 	return p.exit
 }
 func (p *adopted) Signal(kill bool) error {
-	if !Alive(p.pid, p.pgid) && !groupAlive(p.pgid) {
-		return nil
+	if !p.running() {
+		return nil // never signal a stranger's group
 	}
 	return signalGroup(p.pgid, kill)
 }

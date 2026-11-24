@@ -106,7 +106,11 @@ ai-runner fingerprint                                    # сверьте с к�
   `repos/ workspaces/ sessions/ events/ proxy/`, все с правами 0700; одновременно — только один процесс (lock-файл).
 - Сервисы: `deploy/runner/kindevai-runner.service` (системный сервис systemd под отдельным пользователем),
   `kindevai-runner-user.service` (пользовательский сервис systemd, например в WSL2, чтобы AI CLI использовали ваши
-  логины) и `io.kindevai.runner.plist` (агент launchd для macOS); шаги установки — в каждом файле.
+  логины) и `io.kindevai.runner.plist` (агент launchd для macOS); шаги установки — в каждом файле. Остановка или
+  перезапуск сервиса останавливает только демон (`KillMode=process`, в launchd `AbandonProcessGroup`): идущие попытки
+  продолжаются, и следующий запуск их подхватывает, узнавая процесс по pid и времени старта, поэтому переиспользованный
+  pid никогда не принимается за него. Чтобы остановить и попытки, отключите раннер в Dashboard или используйте
+  `systemctl kill` (KIN-64).
 - `ai-runner run` держит исходящий WebSocket к `wss://<сервер>/runner/connect` (`ws://` — только для Control Plane на
   loopback). Каждое подключение проходит challenge-response: Control Plane присылает одноразовый 32-байтный nonce,
   привязанный к id соединения и своему адресу, раннер подписывает

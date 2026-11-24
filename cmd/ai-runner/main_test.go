@@ -399,3 +399,23 @@ func TestRunConnectsAfterApprovalAndStopsWhenRevoked(t *testing.T) {
 		t.Fatal("daemon did not stop after revocation")
 	}
 }
+
+// KIN-64: a restart or stop of the runner service stops only the daemon; the attempts' process groups keep running
+// and the next start adopts them (systemd KillMode=process, launchd AbandonProcessGroup).
+func TestServiceTemplatesLeaveAttemptsRunning(t *testing.T) {
+	t.Parallel()
+	for name, want := range map[string]string{
+		"kindevai-runner.service":      "\nKillMode=process\n",
+		"kindevai-runner-user.service": "\nKillMode=process\n",
+		"io.kindevai.runner.plist":     "<key>AbandonProcessGroup</key>\n  <true/>",
+	} {
+		b, err := os.ReadFile(filepath.Join("..", "..", "deploy", "runner", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s := string(b); !strings.Contains(s, want) || strings.Contains(s, "KillMode=mixed") ||
+			strings.Contains(s, "KillMode=control-group") {
+			t.Errorf("%s: want %q and no cgroup-wide kill", name, strings.TrimSpace(want))
+		}
+	}
+}

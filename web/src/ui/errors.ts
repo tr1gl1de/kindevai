@@ -35,6 +35,10 @@ export function errorMessage(t: TFunction, e: unknown): string {
       return t("integrations.notConnected");
     case "invalid_transition":
       return t("runners.invalid_transition");
+    case "stale_revision":
+    case "already_decided":
+    case "not_ready":
+      return t(`approvals.err_${e.code}`);
     case "telegram_not_configured":
     case "telegram_auth_invalid":
     case "telegram_auth_expired":
@@ -86,6 +90,10 @@ const validationKeys = new Set([
   "branch_protected",
   "base_url_https",
   "token_required_for_url",
+  "pattern_format",
+  "too_many_patterns",
+  "comment_required",
+  "comment_format",
 ]);
 
 /** Message for a server validation code, or undefined if unknown. */

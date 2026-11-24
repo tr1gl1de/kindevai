@@ -12,6 +12,8 @@ import { ForcedPasswordChange } from "../features/identity/ForcedPasswordChange"
 import { UsersPage } from "../features/identity/UsersPage";
 import { AuditPage } from "../features/audit/AuditPage";
 import { RunnerPage } from "../features/runners/RunnerPage";
+import { ApprovalPage } from "../features/approvals/ApprovalPage";
+import { ApprovalsPage } from "../features/approvals/ApprovalsPage";
 import { RunnersPage } from "../features/runners/RunnersPage";
 import { IntegrationsPage } from "../features/integrations/IntegrationsPage";
 import { PageNotFound } from "./PageNotFound";
@@ -80,6 +82,8 @@ function Gate() {
           <Route path="/" element={<OverviewPage />} />
           <Route path="/projects" element={<ProjectsPage me={me.data} />} />
           <Route path="/projects/:id" element={<ProjectPage me={me.data} />} />
+          <Route path="/approvals" element={<ApprovalsPage />} />
+          <Route path="/approvals/:id" element={<ApprovalPage />} />
           <Route path="/account/password" element={<AccountPage />} />
           {me.data.role === "owner" && <Route path="/users" element={<UsersPage />} />}
           {me.data.role === "owner" && <Route path="/runners" element={<RunnersPage />} />}

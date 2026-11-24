@@ -11,6 +11,7 @@ import { useFieldErrors } from "../../ui/form";
 import { useNotify } from "../../ui/notify";
 import { useMembers, useProject, useRemoveMember, useSetMember } from "./api";
 import { ProjectIntegrationsPanel } from "../integrations/ProjectIntegrationsPanel";
+import { RiskPolicyPanel } from "../approvals/RiskPolicyPanel";
 import { NotFoundPage } from "./NotFoundPage";
 import { RoleLabel } from "./RoleLabel";
 
@@ -35,6 +36,9 @@ export function ProjectPage({ me }: { me: Me }) {
       <p className="muted">{p.slug}</p>
       <Members project={p} canManage={me.role === "owner"} />
       {me.role === "owner" && <ProjectIntegrationsPanel project={p} />}
+      {(me.role === "owner" || p.myRole === "project_admin") && (
+        <RiskPolicyPanel projectId={p.id} canEdit={me.role === "owner"} />
+      )}
     </>
   );
 }

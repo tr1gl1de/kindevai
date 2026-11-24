@@ -321,3 +321,100 @@ export interface RepositoryRequest {
   name: string;
   integrationBranch: string;
 }
+
+// Approval Center (KIN-24)
+export type RiskLevel = "L0" | "L1" | "L2" | "L3";
+export type ApprovalScope = "execute" | "integrate_dev";
+export type ApprovalReason = "plan" | "scope_exceeded";
+export type ApprovalState = "pending" | "approved" | "rejected" | "superseded";
+export type RiskCategory = "paths" | "migrations" | "security" | "db_schema";
+
+/** A policy rule that matched a path of the plan (or a changed file). */
+export interface RiskFinding {
+  category: RiskCategory;
+  risk: RiskLevel;
+  pattern: string;
+  repository: string;
+  path: string;
+}
+
+export interface Approval {
+  id: string;
+  projectId: string;
+  projectName?: string;
+  taskId: string;
+  taskTitle: string;
+  planRevision: number;
+  planHash: string;
+  scope: ApprovalScope;
+  reason: ApprovalReason;
+  stepKey?: string;
+  /** Files beyond the approved scope (reason scope_exceeded). */
+  paths: string[];
+  risk: RiskLevel;
+  proposedRisk?: RiskLevel;
+  findings: RiskFinding[];
+  state: ApprovalState;
+  /** Login of the Owner, or "policy" for an automatic L0/L1 integrate_dev grant. */
+  approver?: string;
+  comment?: string;
+  requestedAt: string;
+  decidedAt: string | null;
+}
+
+export interface PlanStep {
+  key: string;
+  title: string;
+  repository: string;
+  scope: string[];
+  dependsOn: string[];
+  capabilities: string[];
+}
+
+export interface PlanRevision {
+  number: number;
+  hash: string;
+  /** Effective risk after the policy. */
+  risk: RiskLevel;
+  createdBy: string;
+  createdAt: string;
+  plan: { summary: string; risk: RiskLevel; maxParallel: number; steps: PlanStep[] };
+}
+
+export interface PlanChange {
+  kind: "added" | "removed" | "modified";
+  stepKey?: string;
+  field: string;
+  before: string;
+  after: string;
+}
+
+/** GET /api/approvals/{id} */
+export interface ApprovalDetail {
+  approval: Approval;
+  task: { id: string; title: string; state: string; planRevision: number };
+  revision: PlanRevision;
+  previous: PlanRevision | null;
+  changes: PlanChange[];
+  related: Approval[];
+  canDecide: boolean;
+}
+
+/** POST /api/approvals/{id}/approve|reject: the revision and hash the Owner reviewed. */
+export interface DecisionRequest {
+  planRevision: number;
+  planHash: string;
+  comment: string;
+}
+
+export interface RiskRule {
+  category: RiskCategory;
+  risk: RiskLevel;
+  patterns: string[];
+}
+
+/** GET/PUT /api/projects/{id}/risk-policy; custom is false while the default policy applies. */
+export interface RiskPolicy {
+  custom: boolean;
+  rules: RiskRule[];
+}

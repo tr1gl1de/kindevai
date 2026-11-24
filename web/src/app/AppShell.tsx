@@ -20,6 +20,7 @@ export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
             {t("nav.overview")}
           </NavLink>
           <NavLink to="/projects">{t("nav.projects")}</NavLink>
+          <NavLink to="/approvals">{t("nav.approvals")}</NavLink>
           {me.role === "owner" && <NavLink to="/users">{t("nav.users")}</NavLink>}
           {me.role === "owner" && <NavLink to="/runners">{t("nav.runners")}</NavLink>}
           {me.role === "owner" && <NavLink to="/integrations">{t("nav.integrations")}</NavLink>}

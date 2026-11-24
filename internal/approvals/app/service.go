@@ -217,23 +217,21 @@ func (s *Service) notify(ctx context.Context, a domain.Approval) error {
 	return nil
 }
 
-func (s *Service) request(ctx context.Context, r domain.Request, now time.Time, notify bool) (domain.Approval, error) {
+func (s *Service) request(ctx context.Context, r domain.Request, now time.Time, notify bool) error {
 	a, err := domain.NewRequest(r, now)
 	if err != nil {
-		return domain.Approval{}, err
+		return err
 	}
 	if err := s.Repo.Create(ctx, a); err != nil {
-		return domain.Approval{}, fmt.Errorf("creating approval: %w", err)
+		return fmt.Errorf("creating approval: %w", err)
 	}
 	if err := s.record(ctx, auditapp.System(), KindRequested, a, map[string]string{"reason": string(a.Reason)}); err != nil {
-		return domain.Approval{}, err
+		return err
 	}
 	if notify {
-		if err := s.notify(ctx, a); err != nil {
-			return domain.Approval{}, err
-		}
+		return s.notify(ctx, a)
 	}
-	return a, nil
+	return nil
 }
 
 // supersede retires the task's pending approvals that keep(a) selects.
@@ -286,13 +284,12 @@ func (s *Service) PlanAccepted(ctx context.Context, ev PlanEvent) error {
 	}
 	exec := base
 	exec.ID, exec.Scope = s.NewID(), domain.ScopeExecute
-	if _, err := s.request(ctx, exec, now, true); err != nil {
+	if err := s.request(ctx, exec, now, true); err != nil {
 		return err
 	}
 	integ := base
 	integ.ID, integ.Scope = s.NewID(), domain.ScopeIntegrateDev
-	_, err = s.request(ctx, integ, now, false) // actionable only after verification (KIN-37 notifies then)
-	return err
+	return s.request(ctx, integ, now, false) // actionable only after verification (KIN-37 notifies then)
 }
 
 // TaskClosed runs in the workflow's transaction when a task is cancelled or failed: its pending approvals are moot.
@@ -373,10 +370,9 @@ func (s *Service) CheckChanges(ctx context.Context, ch StepChanges) (domain.Viol
 		if err := s.Workflow.HoldStep(ctx, ch.StepID, ch.RunnerID, ch.Fence, "changes beyond the approved scope"); err != nil {
 			return err
 		}
-		_, err = s.request(ctx, domain.Request{ID: s.NewID(), ProjectID: t.ProjectID, TaskID: t.ID, TaskTitle: t.Title,
+		return s.request(ctx, domain.Request{ID: s.NewID(), ProjectID: t.ProjectID, TaskID: t.ID, TaskTitle: t.Title,
 			Revision: st.Revision, PlanHash: st.PlanHash, Scope: domain.ScopeExecute, Reason: domain.ReasonScopeExceeded,
 			StepKey: st.Key, StepID: st.StepID, Paths: v.Paths(), Risk: st.Risk, Findings: v.Sensitive}, s.now(), true)
-		return err
 	})
 	return v, err
 }

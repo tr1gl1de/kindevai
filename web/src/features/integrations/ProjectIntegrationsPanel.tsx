@@ -8,7 +8,8 @@ import { ErrorState, FormAlert, Loading } from "../../ui/feedback";
 import { errorMessage } from "../../ui/errors";
 import { useFieldErrors } from "../../ui/form";
 import { useNotify } from "../../ui/notify";
-import { useAddRepository, useBindYouTrackProject, useProjectIntegrations, useRemoveRepository, useUpdateRepository } from "./api";
+import { useAddRepository, useBindYouTrackProject, useProjectIntegrations, useRemoveRepository, useSyncRepository, useUpdateRepository } from "./api";
+import { githubFailure } from "./GitHubSettings";
 import { fieldError } from "./IntegrationsPage";
 
 /** Owner-only part of the project page: YouTrack project link and the repository registry. */
@@ -137,7 +138,10 @@ function Repositories({ project, repositories }: { project: Project; repositorie
                   ) : (
                     <>
                       <td>{r.integrationBranch}</td>
-                      <td>{r.protectedBranches.join(", ")}</td>
+                      <td className="repo-cell">
+                        {r.protectedBranches.join(", ")}
+                        <RepoGitHubState project={project} repo={r} onError={setError} />
+                      </td>
                       <td className="row-actions">
                         <button
                           type="button"
@@ -176,6 +180,46 @@ function Repositories({ project, repositories }: { project: Project; repositorie
         />
       )}
     </>
+  );
+}
+
+/** What the GitHub App read about the repository, the main/master protection warning and "Refresh". */
+function RepoGitHubState({ project, repo, onError }: { project: Project; repo: ProjectRepository; onError: (msg?: string) => void }) {
+  const { t } = useTranslation();
+  const sync = useSyncRepository(project.id);
+  const gh = repo.github;
+  let state: string;
+  if (!gh || gh.sync.status === "none") state = t("github.repoNotRead");
+  else if (gh.sync.status === "pending") state = t("github.repoReading");
+  else if (gh.sync.status === "failed") state = githubFailure(t, gh.sync);
+  else state = t("github.repoInstalled", { branch: gh.defaultBranch });
+
+  async function refresh() {
+    onError(undefined);
+    try {
+      await sync.mutateAsync(repo.id);
+    } catch (err) {
+      onError(errorMessage(t, err));
+    }
+  }
+
+  return (
+    <div className="repo-github" aria-live="polite" aria-busy={gh?.sync.status === "pending"}>
+      <p className="muted">{state}</p>
+      {gh?.protection === "unprotected" && (
+        <p className="warning">{t("github.unprotected", { branches: gh.unprotected.join(", ") })}</p>
+      )}
+      {gh?.protection === "protected" && <p className="muted">{t("github.protected")}</p>}
+      <button
+        type="button"
+        className="button subtle"
+        aria-label={t("github.refreshLabel", { repo: repo.fullName })}
+        disabled={sync.isPending || gh?.sync.status === "pending"}
+        onClick={() => void refresh()}
+      >
+        {t("github.refresh")}
+      </button>
+    </div>
   );
 }
 

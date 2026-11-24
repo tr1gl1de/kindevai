@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/integrations/domain"
@@ -191,31 +192,57 @@ func (r *Repository) SetProjectYouTrack(ctx context.Context, projectID, shortNam
 	return nil
 }
 
-const repoCols = "id, project_id, owner, name, integration_branch, created_at, updated_at"
+const repoCols = `id, project_id, owner, name, integration_branch, created_at, updated_at, gh_installation_id,
+	gh_default_branch, gh_protection, gh_unprotected, gh_sync_status, gh_sync_id, gh_sync_code, gh_sync_detail,
+	gh_sync_requested_at, gh_synced_at`
 
 type scanner interface{ Scan(dest ...any) error }
 
 func scanRepo(row scanner) (domain.Repository, error) {
 	var r domain.Repository
-	var created, updated string
-	err := row.Scan(&r.ID, &r.ProjectID, &r.Owner, &r.Name, &r.IntegrationBranch, &created, &updated)
+	var created, updated, protection, unprotected, syncStatus string
+	var requested, synced sql.NullString
+	g := &r.GitHub
+	err := row.Scan(&r.ID, &r.ProjectID, &r.Owner, &r.Name, &r.IntegrationBranch, &created, &updated, &g.InstallationID,
+		&g.DefaultBranch, &protection, &unprotected, &syncStatus, &g.Sync.ID, &g.Sync.Code, &g.Sync.Detail, &requested, &synced)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, domain.ErrNotFound
 	}
 	if err == nil {
 		if r.CreatedAt, err = parseTS(created); err == nil {
-			r.UpdatedAt, err = parseTS(updated)
+			if r.UpdatedAt, err = parseTS(updated); err == nil {
+				if g.Sync.RequestedAt, err = parseNullTS(requested); err == nil {
+					g.Sync.CheckedAt, err = parseNullTS(synced)
+				}
+			}
 		}
 	}
 	if err != nil {
 		return r, fmt.Errorf("reading repository: %w", err)
 	}
+	g.Protection, g.Sync.Status = domain.ProtectionStatus(protection), domain.CheckStatus(syncStatus)
+	if unprotected != "" {
+		g.Unprotected = strings.Split(unprotected, ",")
+	}
 	return r, nil
 }
 
-// Repositories lists a project's repositories by full name.
-func (r *Repository) Repositories(ctx context.Context, projectID string) ([]domain.Repository, error) {
-	rows, err := r.conn(ctx).QueryContext(ctx, "SELECT "+repoCols+" FROM project_repositories WHERE project_id = ? ORDER BY owner, name", projectID)
+func repoArgs(repo domain.Repository) []any {
+	g := repo.GitHub
+	protection, status := g.Protection, g.Sync.Status
+	if protection == "" {
+		protection = domain.ProtectionUnknown
+	}
+	if status == "" {
+		status = domain.CheckNone
+	}
+	return []any{repo.ID, repo.ProjectID, repo.Owner, repo.Name, repo.IntegrationBranch, ts(repo.CreatedAt), ts(repo.UpdatedAt),
+		g.InstallationID, g.DefaultBranch, string(protection), strings.Join(g.Unprotected, ","), string(status), g.Sync.ID,
+		g.Sync.Code, g.Sync.Detail, nullTS(g.Sync.RequestedAt), nullTS(g.Sync.CheckedAt)}
+}
+
+func (r *Repository) listRepos(ctx context.Context, where string, args ...any) ([]domain.Repository, error) {
+	rows, err := r.conn(ctx).QueryContext(ctx, "SELECT "+repoCols+" FROM project_repositories "+where+" ORDER BY owner, name", args...)
 	if err != nil {
 		return nil, fmt.Errorf("listing repositories: %w", err)
 	}
@@ -234,6 +261,30 @@ func (r *Repository) Repositories(ctx context.Context, projectID string) ([]doma
 	return out, nil
 }
 
+// Repositories lists a project's repositories by full name.
+func (r *Repository) Repositories(ctx context.Context, projectID string) ([]domain.Repository, error) {
+	return r.listRepos(ctx, "WHERE project_id = ?", projectID)
+}
+
+// AllRepositories lists every registered repository.
+func (r *Repository) AllRepositories(ctx context.Context) ([]domain.Repository, error) {
+	return r.listRepos(ctx, "")
+}
+
+// RepositoryByID loads a repository of any project; domain.ErrNotFound otherwise.
+func (r *Repository) RepositoryByID(ctx context.Context, id string) (domain.Repository, error) {
+	return scanRepo(r.conn(ctx).QueryRowContext(ctx, "SELECT "+repoCols+" FROM project_repositories WHERE id = ?", id))
+}
+
+// RepositoryByFullName finds a repository by "owner/name" (case-insensitive, like GitHub); domain.ErrNotFound otherwise.
+func (r *Repository) RepositoryByFullName(ctx context.Context, fullName string) (domain.Repository, error) {
+	owner, name, ok := strings.Cut(fullName, "/")
+	if !ok {
+		return domain.Repository{}, domain.ErrNotFound
+	}
+	return scanRepo(r.conn(ctx).QueryRowContext(ctx, "SELECT "+repoCols+" FROM project_repositories WHERE owner = ? AND name = ?", owner, name))
+}
+
 // Repository loads one of the project's repositories; domain.ErrNotFound otherwise.
 func (r *Repository) Repository(ctx context.Context, projectID, id string) (domain.Repository, error) {
 	return scanRepo(r.conn(ctx).QueryRowContext(ctx, "SELECT "+repoCols+" FROM project_repositories WHERE id = ? AND project_id = ?", id, projectID))
@@ -241,8 +292,8 @@ func (r *Repository) Repository(ctx context.Context, projectID, id string) (doma
 
 // CreateRepository inserts a repository.
 func (r *Repository) CreateRepository(ctx context.Context, repo domain.Repository) error {
-	_, err := r.conn(ctx).ExecContext(ctx, "INSERT INTO project_repositories("+repoCols+") VALUES (?, ?, ?, ?, ?, ?, ?)",
-		repo.ID, repo.ProjectID, repo.Owner, repo.Name, repo.IntegrationBranch, ts(repo.CreatedAt), ts(repo.UpdatedAt))
+	_, err := r.conn(ctx).ExecContext(ctx, "INSERT INTO project_repositories("+repoCols+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, repoArgs(repo)...)
 	switch {
 	case db.IsUniqueViolation(err):
 		return domain.ErrRepositoryExists
@@ -254,10 +305,13 @@ func (r *Repository) CreateRepository(ctx context.Context, repo domain.Repositor
 	return nil
 }
 
-// SaveRepository updates a repository's integration branch.
+// SaveRepository updates a repository's integration branch and GitHub state.
 func (r *Repository) SaveRepository(ctx context.Context, repo domain.Repository) error {
-	res, err := r.conn(ctx).ExecContext(ctx, "UPDATE project_repositories SET integration_branch = ?, updated_at = ? WHERE id = ? AND project_id = ?",
-		repo.IntegrationBranch, ts(repo.UpdatedAt), repo.ID, repo.ProjectID)
+	a := repoArgs(repo)
+	res, err := r.conn(ctx).ExecContext(ctx, `UPDATE project_repositories SET integration_branch = ?, updated_at = ?,
+		gh_installation_id = ?, gh_default_branch = ?, gh_protection = ?, gh_unprotected = ?, gh_sync_status = ?, gh_sync_id = ?,
+		gh_sync_code = ?, gh_sync_detail = ?, gh_sync_requested_at = ?, gh_synced_at = ? WHERE id = ? AND project_id = ?`,
+		append(append([]any{a[4], a[6]}, a[7:]...), repo.ID, repo.ProjectID)...)
 	if err != nil {
 		return fmt.Errorf("saving repository: %w", err)
 	}
@@ -275,6 +329,62 @@ func (r *Repository) DeleteRepository(ctx context.Context, projectID, id string)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return domain.ErrNotFound
+	}
+	return nil
+}
+
+// GitHubApp loads the App connection; domain.ErrNotConfigured when there is none.
+func (r *Repository) GitHubApp(ctx context.Context) (domain.GitHubApp, error) {
+	var a domain.GitHubApp
+	var updated, status string
+	var requested, checked, delivered sql.NullString
+	err := r.conn(ctx).QueryRowContext(ctx, `SELECT app_id, updated_at, check_status, check_id, check_code, check_detail,
+		check_requested_at, checked_at, last_delivery_at, last_event FROM github_app WHERE id = 1`).Scan(&a.AppID, &updated, &status,
+		&a.Check.ID, &a.Check.Code, &a.Check.Detail, &requested, &checked, &delivered, &a.LastEvent)
+	if errors.Is(err, sql.ErrNoRows) {
+		return a, domain.ErrNotConfigured
+	}
+	if err != nil {
+		return a, fmt.Errorf("reading github app: %w", err)
+	}
+	a.Check.Status = domain.CheckStatus(status)
+	if a.UpdatedAt, err = parseTS(updated); err == nil {
+		if a.Check.RequestedAt, err = parseNullTS(requested); err == nil {
+			if a.Check.CheckedAt, err = parseNullTS(checked); err == nil {
+				a.LastDeliveryAt, err = parseNullTS(delivered)
+			}
+		}
+	}
+	if err != nil {
+		return a, fmt.Errorf("reading github app: %w", err)
+	}
+	return a, nil
+}
+
+// SaveGitHubApp inserts or replaces the App connection.
+func (r *Repository) SaveGitHubApp(ctx context.Context, a domain.GitHubApp) error {
+	status := a.Check.Status
+	if status == "" {
+		status = domain.CheckNone
+	}
+	_, err := r.conn(ctx).ExecContext(ctx, `INSERT INTO github_app(id, app_id, updated_at, check_status, check_id, check_code,
+		check_detail, check_requested_at, checked_at, last_delivery_at, last_event) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET app_id = excluded.app_id, updated_at = excluded.updated_at,
+		check_status = excluded.check_status, check_id = excluded.check_id, check_code = excluded.check_code,
+		check_detail = excluded.check_detail, check_requested_at = excluded.check_requested_at, checked_at = excluded.checked_at,
+		last_delivery_at = excluded.last_delivery_at, last_event = excluded.last_event`,
+		a.AppID, ts(a.UpdatedAt), string(status), a.Check.ID, a.Check.Code, a.Check.Detail,
+		nullTS(a.Check.RequestedAt), nullTS(a.Check.CheckedAt), nullTS(a.LastDeliveryAt), a.LastEvent)
+	if err != nil {
+		return fmt.Errorf("saving github app: %w", err)
+	}
+	return nil
+}
+
+// DeleteGitHubApp removes the App connection.
+func (r *Repository) DeleteGitHubApp(ctx context.Context) error {
+	if _, err := r.conn(ctx).ExecContext(ctx, "DELETE FROM github_app"); err != nil {
+		return fmt.Errorf("deleting github app: %w", err)
 	}
 	return nil
 }

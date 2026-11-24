@@ -45,6 +45,8 @@ commands:
   serve     run the Control Plane (default 127.0.0.1:8080, data in ./data)
   health    check a running Control Plane (used by the Docker HEALTHCHECK)
   setup-token  print the one-time first-run setup token (needs access to the data directory)
+  export    write a consistent backup archive of the installation (works while serving)
+  import    restore a backup archive into an empty data directory
   version   print the version
 `
 
@@ -61,6 +63,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, ready cha
 		return setupToken(args[1:], stdout, stderr)
 	case "health":
 		return health(ctx, args[1:], stderr)
+	case "export":
+		return exportCmd(ctx, args[1:], stdout, stderr)
+	case "import":
+		return importCmd(ctx, args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintln(stdout, version)
 		return nil
@@ -151,6 +157,11 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	netSvc, netHTTP := newNetwork(inst, audit, integ, channel, logger) // KIN-30 network profiles
 	attachNetwork(gateway, netSvc, logger)
 	modules = append(modules, netHTTP)
+	maint, err := newMaintenance(ctx, inst, audit, apv.Workflow, logger) // KIN-41 maintenance mode
+	if err != nil {
+		return err
+	}
+	modules = append(modules, maint)
 	modules = append(modules, gateway)
 	defer msg.start(ctx)()    // deferred after inst.Close, so the dispatchers stop before the database closes
 	defer intake.start(ctx)() // the YouTrack poller stops first
@@ -165,7 +176,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	srv := &http.Server{
 		Handler: server.New(server.Options{
 			Version: version, Assets: assets, Logger: logger, Modules: modules,
-			Middleware: func(h http.Handler) http.Handler { return trusted.Middleware(identity.Middleware(h)) },
+			Middleware: func(h http.Handler) http.Handler { return trusted.Middleware(identity.Middleware(maint.ReadOnly(h))) },
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,

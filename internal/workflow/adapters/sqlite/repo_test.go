@@ -480,3 +480,30 @@ func TestSchedulingAndListingQueries(t *testing.T) {
 		t.Fatalf("latest of a task without executions: %v", err)
 	}
 }
+
+// KIN-41: maintenance mode shows how many claimed or running steps still have to drain.
+func TestActiveStepsCountsClaimedAndRunning(t *testing.T) {
+	t.Parallel()
+	d, _ := testDB(t)
+	svc := service(d, fixed)
+	ctx := t.Context()
+	repo := sqlite.New(d)
+	if n, err := repo.ActiveSteps(ctx); err != nil || n != 0 {
+		t.Fatalf("empty: %d %v", n, err)
+	}
+	_, e := running(t, svc)
+	id := e.StepByKey("backend").ID
+	l, err := svc.Claim(ctx, id, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := repo.ActiveSteps(ctx); n != 1 {
+		t.Fatalf("claimed: %d", n)
+	}
+	_ = svc.StartStep(ctx, id, "r1", l.Fence)
+	lint := e.StepByKey("lint").ID
+	_, _ = svc.Claim(ctx, lint, "r2")
+	if n, _ := repo.ActiveSteps(ctx); n != 2 {
+		t.Fatalf("running+claimed: %d", n)
+	}
+}

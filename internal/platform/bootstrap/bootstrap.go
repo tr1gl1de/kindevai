@@ -29,6 +29,8 @@ type Options struct {
 	DataDir string
 	KeyFile string // optional; defaults to KeyPath(DataDir). Lets operators keep the key off the data volume.
 	Now     func() time.Time
+	// LeaseTTL is the instance record's validity without a heartbeat (DefaultLeaseTTL when zero, KIN-41).
+	LeaseTTL time.Duration
 }
 
 // Installation is a running installation's storage. Close releases the database and the data dir lock.
@@ -38,6 +40,8 @@ type Installation struct {
 	Box   *secrets.Box
 	ID    string
 	Fresh bool // true when this run created the database
+
+	lease *leaseKeeper
 }
 
 // DBPath is the SQLite location inside a data directory.
@@ -107,13 +111,74 @@ func Run(ctx context.Context, opts Options) (inst *Installation, err error) {
 	if err != nil {
 		return nil, err
 	}
+	ttl := opts.LeaseTTL
+	if ttl <= 0 {
+		ttl = DefaultLeaseTTL
+	}
+	lease, err := acquireLease(ctx, sqldb, ttl, opts.Now)
+	if err != nil {
+		return nil, err
+	}
 	fresh := !established
-	return &Installation{Dir: dir, DB: sqldb, Box: box, ID: id, Fresh: fresh}, nil
+	return &Installation{Dir: dir, DB: sqldb, Box: box, ID: id, Fresh: fresh, lease: lease}, nil
 }
 
-// Close closes the database and releases the data directory.
+// Close releases the instance record, closes the database and releases the data directory.
 func (i *Installation) Close() error {
-	return errors.Join(i.DB.Close(), i.Dir.Close())
+	var lerr error
+	if i.lease != nil {
+		lerr = i.lease.release()
+		i.lease = nil
+	}
+	return errors.Join(lerr, i.DB.Close(), i.Dir.Close())
+}
+
+// ErrNotInstallation means the database has no key check: it is not an established installation.
+var ErrNotInstallation = errors.New("database is not an established ai-platform installation (no key check)")
+
+// VerifyKey checks box's key against the database's key check without writing (KIN-41 export and import).
+func VerifyKey(ctx context.Context, d *sql.DB, box *secrets.Box) error {
+	ok, err := hasKeyCheck(ctx, d)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNotInstallation
+	}
+	var check string
+	if err := d.QueryRowContext(ctx, "SELECT value FROM meta WHERE key = ?", metaKeyCheck).Scan(&check); err != nil {
+		return fmt.Errorf("reading key check: %w", err)
+	}
+	ct, err := base64.StdEncoding.DecodeString(check)
+	if err != nil {
+		return fmt.Errorf("key check is corrupted: %w", err)
+	}
+	if pt, err := box.Open(ct, metaKeyCheck); err != nil || string(pt) != keyCheckPlaintext {
+		return ErrWrongKey
+	}
+	return nil
+}
+
+// InstallationID reads the installation id without writing ("" when there is none).
+func InstallationID(ctx context.Context, d *sql.DB) (string, error) {
+	var id string
+	err := d.QueryRowContext(ctx, "SELECT value FROM meta WHERE key = ?", metaInstallationID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading installation id: %w", err)
+	}
+	return id, nil
+}
+
+// ClearInstanceRecord removes the instance record a copied database carries from the instance it was taken
+// from (KIN-41 import: the snapshot of a running Control Plane holds that instance's live record).
+func ClearInstanceRecord(ctx context.Context, d *sql.DB) error {
+	if _, err := d.ExecContext(ctx, "DELETE FROM meta WHERE key = ?", metaInstanceLock); err != nil {
+		return fmt.Errorf("clearing the instance record: %w", err)
+	}
+	return nil
 }
 
 // hasKeyCheck reports whether the database already records a key check. It only reads.

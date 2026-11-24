@@ -936,3 +936,26 @@ table.compact td {
   align-items: center;
   cursor: pointer;
 }
+
+.maintenance-banner {
+  margin-bottom: var(--space);
+  padding: 12px var(--space);
+  border: 1px solid var(--warn-border);
+  border-left-width: 4px;
+  border-radius: var(--radius);
+  background: var(--warn-bg);
+  color: #16181d; /* fixed dark text: --warn-bg is light in every theme */
+}
+.maintenance-banner h2 {
+  margin: 0 0 4px;
+  font-size: 1rem;
+}
+.maintenance-banner p {
+  margin: 4px 0;
+}
+.maintenance-banner .muted {
+  color: #4a505c;
+}
+.maintenance-banner a {
+  color: #1a56c4;
+}

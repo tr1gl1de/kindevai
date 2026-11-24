@@ -19,6 +19,7 @@ import { RunnersPage } from "../features/runners/RunnersPage";
 import { NetworkPage } from "../features/network/NetworkPage";
 import { StoragePage } from "../features/runners/StoragePage";
 import { IntegrationsPage } from "../features/integrations/IntegrationsPage";
+import { MaintenancePage } from "../features/maintenance/MaintenancePage";
 import { PageNotFound } from "./PageNotFound";
 import { ErrorState, Loading } from "../ui/feedback";
 import { NotifyProvider } from "../ui/notify";
@@ -99,6 +100,7 @@ function Gate() {
           {me.data.role === "owner" && <Route path="/network" element={<NetworkPage />} />}
           {me.data.role === "owner" && <Route path="/audit" element={<AuditPage />} />}
           {me.data.role === "owner" && <Route path="/settings/telegram" element={<TelegramSettingsPage />} />}
+          {me.data.role === "owner" && <Route path="/settings/maintenance" element={<MaintenancePage />} />}
           <Route path="*" element={<PageNotFound />} />
         </Routes>
     </AppShell>

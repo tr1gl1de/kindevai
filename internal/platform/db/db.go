@@ -131,24 +131,43 @@ func history(ctx context.Context, d *sql.DB) ([]migration, error) {
 	return hist, rows.Err()
 }
 
-// Migrate checks the applied history against the binary's migrations, then applies pending ones, each in
-// its own transaction, and returns how many ran.
-func Migrate(ctx context.Context, d *sql.DB, migrations fs.FS) (int, error) {
-	ms, err := list(migrations)
+// Check compares the applied history with the binary's migrations without writing and returns how many are
+// pending (ErrSchemaTooNew, ErrSchemaMismatch otherwise). Import uses it before adopting a database (KIN-41).
+func Check(ctx context.Context, d *sql.DB, migrations fs.FS) (int, error) {
+	ms, hist, err := compare(ctx, d, migrations)
 	if err != nil {
 		return 0, err
 	}
-	hist, err := history(ctx, d)
+	return len(ms) - len(hist), nil
+}
+
+func compare(ctx context.Context, d *sql.DB, migrations fs.FS) (ms, hist []migration, err error) {
+	ms, err = list(migrations)
 	if err != nil {
-		return 0, err
+		return nil, nil, err
+	}
+	hist, err = history(ctx, d)
+	if err != nil {
+		return nil, nil, err
 	}
 	if len(hist) > len(ms) {
-		return 0, fmt.Errorf("database has %d migrations, binary knows %d: %w", len(hist), len(ms), ErrSchemaTooNew)
+		return nil, nil, fmt.Errorf("database has %d migrations, binary knows %d: %w", len(hist), len(ms), ErrSchemaTooNew)
 	}
 	for i, h := range hist {
 		if h != ms[i] {
-			return 0, fmt.Errorf("applied %04d %s, binary has %04d %s: %w", h.version, h.name, ms[i].version, ms[i].name, ErrSchemaMismatch)
+			return nil, nil, fmt.Errorf("applied %04d %s, binary has %04d %s: %w", h.version, h.name, ms[i].version, ms[i].name,
+				ErrSchemaMismatch)
 		}
+	}
+	return ms, hist, nil
+}
+
+// Migrate checks the applied history against the binary's migrations, then applies pending ones, each in
+// its own transaction, and returns how many ran.
+func Migrate(ctx context.Context, d *sql.DB, migrations fs.FS) (int, error) {
+	ms, hist, err := compare(ctx, d, migrations)
+	if err != nil {
+		return 0, err
 	}
 	if len(hist) == len(ms) {
 		return 0, nil

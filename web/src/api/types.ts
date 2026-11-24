@@ -202,6 +202,71 @@ export interface Runner {
   revokedAt: string | null;
   lastSeenAt: string | null;
   projects: { id: string; name: string }[];
+  /** KIN-20: liveness from heartbeats (unreachable after 3 missed) and the runner's last capability report. */
+  availability: RunnerAvailability;
+  lastHeartbeatAt: string | null;
+  capabilities: RunnerCapabilities | null;
+}
+
+export type RunnerAvailability = "never_connected" | "online" | "unreachable";
+
+/** Self-reported by the runner; informational. */
+export interface RunnerCapabilities {
+  os: string;
+  arch: string;
+  wsl: boolean;
+  strictEgress: boolean;
+  tools: { name: string; version: string }[];
+  reportedAt: string;
+}
+
+// Storage Overview (GET /api/storage/overview, KIN-20; metrics per KB KIN-A-26).
+
+export type StorageLevel = "ok" | "warning" | "high" | "critical";
+export type VolumeRole = "workspaces" | "windows_host" | "data";
+
+/** Fill-up forecast from the median daily growth; days are null unless state is "ok" (0 = already reached). */
+export interface StorageForecast {
+  state: "insufficient_data" | "not_needed" | "ok";
+  windowDays: number;
+  growthBytesPerDay: number;
+  daysTo85: number | null;
+  daysTo90: number | null;
+}
+
+export interface StorageVolume {
+  role: VolumeRole;
+  mountOrVolumeId: string;
+  path: string;
+  totalBytes: number;
+  availableBytes: number;
+  freeBytes: number;
+  usedPercent: number;
+  level: StorageLevel;
+  diskHeavyAllowed: boolean;
+  /** The machine is offline or the report is older than 15 minutes. */
+  stale: boolean;
+  lastReportedAt: string;
+  forecast7d: StorageForecast;
+  forecast30d: StorageForecast;
+}
+
+export interface StorageMachine {
+  id: string;
+  kind: "control_plane" | "runner";
+  /** The runner's hostname; empty for the Control Plane. */
+  name: string;
+  status?: RunnerStatus;
+  availability: RunnerAvailability;
+  lastHeartbeatAt: string | null;
+  diskHeavyAllowed: boolean;
+  volumes: StorageVolume[];
+}
+
+export interface StorageOverview {
+  generatedAt: string;
+  thresholds: { warningPercent: number; highPercent: number; criticalPercent: number; minHeadroomBytes: number };
+  machines: StorageMachine[];
 }
 
 /** Body of approve and PUT projects: an explicit, non-empty list. */

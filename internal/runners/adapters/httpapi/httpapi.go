@@ -25,6 +25,8 @@ type Handler struct {
 	Service *app.Service
 	Limiter *ratelimit.Limiter // enrollment attempts per client address
 	Logger  *slog.Logger
+	// Telemetry adds liveness and capabilities to runner views and serves the Storage Overview (KIN-20).
+	Telemetry *app.Telemetry
 }
 
 // TokenView is an enrollment token as listed for the Owner (never the token or its hash).
@@ -64,6 +66,10 @@ type RunnerView struct {
 	RevokedAt   *time.Time   `json:"revokedAt"`
 	LastSeenAt  *time.Time   `json:"lastSeenAt"`
 	Projects    []ProjectRef `json:"projects"`
+	// KIN-20 telemetry: never_connected, online or unreachable (3 missed heartbeats); capabilities as reported.
+	Availability    string            `json:"availability"`
+	LastHeartbeatAt *time.Time        `json:"lastHeartbeatAt"`
+	Capabilities    *CapabilitiesView `json:"capabilities"`
 }
 
 // ProjectsRequest is the body of approve and PUT projects: the explicit, non-empty list of project ids.
@@ -90,6 +96,9 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/runners/{id}/disable", h.action(h.Service.Disable))
 	mux.HandleFunc("POST /api/runners/{id}/enable", h.action(h.Service.Enable))
 	mux.HandleFunc("POST /api/runners/{id}/revoke", h.action(h.Service.Revoke))
+	if h.Telemetry != nil {
+		mux.HandleFunc("GET /api/storage/overview", h.storageOverview)
+	}
 }
 
 func (h *Handler) logger() *slog.Logger {
@@ -208,8 +217,9 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]RunnerView, 0, len(vs))
+	pr := h.presence(r.Context())
 	for _, v := range vs {
-		out = append(out, runnerView(v))
+		out = append(out, withPresence(runnerView(v), pr))
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
@@ -224,7 +234,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, runnerView(v))
+	httpx.WriteJSON(w, http.StatusOK, withPresence(runnerView(v), h.presence(r.Context())))
 }
 
 type (
@@ -251,7 +261,7 @@ func (h *Handler) withProjects(op projectsOp) http.HandlerFunc {
 			h.fail(w, err)
 			return
 		}
-		httpx.WriteJSON(w, http.StatusOK, runnerView(v))
+		httpx.WriteJSON(w, http.StatusOK, withPresence(runnerView(v), h.presence(r.Context())))
 	}
 }
 
@@ -266,7 +276,7 @@ func (h *Handler) action(op runnerOp) http.HandlerFunc {
 			h.fail(w, err)
 			return
 		}
-		httpx.WriteJSON(w, http.StatusOK, runnerView(v))
+		httpx.WriteJSON(w, http.StatusOK, withPresence(runnerView(v), h.presence(r.Context())))
 	}
 }
 

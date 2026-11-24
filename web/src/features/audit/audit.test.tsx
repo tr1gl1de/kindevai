@@ -185,4 +185,23 @@ describe("audit log (non-owner)", () => {
     }
     expect(screen.getByRole("cell", { name: anonymous })).toBeInTheDocument();
   });
+
+  // KIN-48: runner, integration and Telegram events have names in both languages; an unknown kind shows its identifier.
+  it.each([
+    ["en", ["Runner enrolled", "Runner revoked", "YouTrack connected", "Repository added", "Telegram account linked"]],
+    ["ru", ["Раннер зарегистрирован", "Раннер отозван", "YouTrack подключён", "Репозиторий добавлен", "Telegram-аккаунт привязан"]],
+  ] as const)("names runner and integration events (%s)", async (lang, labels) => {
+    const kinds = ["runner.enrolled", "runner.revoked", "integration.youtrack_configured", "integration.repository_added",
+      "telegram.linked", "future.something_new"];
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/audit/kinds", () => json(kinds)),
+      http.get("/api/audit", () => json<AuditPage>({ events: kinds.map((k, i) => ev(i + 1, k)), next: null })),
+    );
+    await renderApp("/audit", lang);
+    for (const label of labels) {
+      expect(await screen.findByRole("cell", { name: new RegExp(label) })).toBeInTheDocument();
+    }
+    expect(screen.getByRole("cell", { name: "future.something_new" })).toBeInTheDocument();
+  });
 });

@@ -111,12 +111,18 @@ func (r *Repository) Task(ctx context.Context, id string) (domain.Task, error) {
 	return scanTask(db.Conn(ctx, r.db).QueryRowContext(ctx, "SELECT "+taskCols+" FROM tasks WHERE id = ?", id))
 }
 
+// TaskByIssue loads the project's task for a YouTrack issue.
+func (r *Repository) TaskByIssue(ctx context.Context, projectID, youtrackIssue string) (domain.Task, error) {
+	return scanTask(db.Conn(ctx, r.db).QueryRowContext(ctx, "SELECT "+taskCols+
+		" FROM tasks WHERE project_id = ? AND youtrack_issue = ?", projectID, youtrackIssue))
+}
+
 // SaveTask writes the task's mutable fields if its version is unchanged and increments the version.
 func (r *Repository) SaveTask(ctx context.Context, t *domain.Task) error {
-	res, err := db.Conn(ctx, r.db).ExecContext(ctx, `UPDATE tasks SET state = ?, block_reason = ?, blocked_from = ?,
+	res, err := db.Conn(ctx, r.db).ExecContext(ctx, `UPDATE tasks SET title = ?, state = ?, block_reason = ?, blocked_from = ?,
 		reason = ?, plan_revision = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?`,
-		t.State, nullStr(t.BlockReason), nullStr(t.BlockedFrom), t.Reason.Detail, t.PlanRevision, ts(t.UpdatedAt),
-		t.ID, t.Version)
+		t.Title, t.State, nullStr(t.BlockReason), nullStr(t.BlockedFrom), t.Reason.Detail, t.PlanRevision,
+		ts(t.UpdatedAt), t.ID, t.Version)
 	if err := oneRow(res, err, "saving task"); err != nil {
 		return err
 	}

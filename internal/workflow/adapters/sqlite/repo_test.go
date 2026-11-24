@@ -129,6 +129,33 @@ func TestTaskRoundTripWithTheYouTrackReference(t *testing.T) {
 	}
 }
 
+func TestTaskByIssueAndSavedTitle(t *testing.T) {
+	t.Parallel()
+	d, _ := testDB(t)
+	r := sqlite.New(d)
+	ctx := t.Context()
+	if _, err := r.TaskByIssue(ctx, "p1", "KIN-7"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing: %v", err)
+	}
+	task, err := domain.NewTask("t1", "p1", "Login", "KIN-7", "u1", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.CreateTask(ctx, &task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := task.Retitle("Login page", t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SaveTask(ctx, &task); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.TaskByIssue(ctx, "p1", "KIN-7")
+	if err != nil || got.ID != "t1" || got.Title != "Login page" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
 func TestSaveTaskDetectsConcurrentChanges(t *testing.T) {
 	t.Parallel()
 	d, _ := testDB(t)

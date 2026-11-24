@@ -185,6 +185,20 @@ func NewTask(id, projectID, title, youtrackIssue, createdBy string, now time.Tim
 		CreatedBy: createdBy, CreatedAt: now, UpdatedAt: now}, nil
 }
 
+// Retitle replaces the title (e.g. the linked YouTrack issue's summary changed) and reports whether it changed. A
+// finished task keeps its title.
+func (t *Task) Retitle(title string, now time.Time) (bool, error) {
+	title = strings.TrimSpace(title)
+	if title == "" || strings.ContainsAny(title, "\n\t") || !printable(title, MaxTitleLen) {
+		return false, invalid("title", "title_format")
+	}
+	if title == t.Title || t.State.Terminal() {
+		return false, nil
+	}
+	t.Title, t.UpdatedAt = title, now
+	return true, nil
+}
+
 // Transition moves the task along the FSM with the reason the target state needs.
 func (t *Task) Transition(to TaskState, r Reason, now time.Time) error {
 	if !TaskTransitionAllowed(t.State, to) {

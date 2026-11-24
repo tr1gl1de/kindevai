@@ -117,6 +117,12 @@ func (a Access) CanView() bool { return a.actor.Owner || a.isMember }
 // CanManageMembers: only the Owner grants or changes memberships in the MVP (KIN-A-21).
 func (a Access) CanManageMembers() bool { return a.actor.Owner }
 
+// CanRunAI: the Owner and every project role may start AI work in the project (KIN-27 decision; a future
+// read-only role would not). Creating a YouTrack issue alone grants nothing.
+func (a Access) CanRunAI() bool {
+	return a.actor.Owner || (a.isMember && (a.role == RoleProjectAdmin || a.role == RoleMember))
+}
+
 // Role is the actor's project role, if a member.
 func (a Access) Role() (Role, bool) { return a.role, a.isMember }
 

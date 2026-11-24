@@ -201,3 +201,33 @@ func TestTrustedLookupAndGrantForInvitations(t *testing.T) {
 		t.Fatal("Grant must validate the role")
 	}
 }
+
+// KIN-27: who may start AI work in a project (a YouTrack issue's reporter, or "run by issue ID").
+func TestCanRunAI(t *testing.T) {
+	t.Parallel()
+	s, web, api := seeded(t)
+	ctx := t.Context()
+	for _, c := range []struct {
+		name, project, user string
+		want                bool
+	}{
+		{"owner anywhere", api.ID, "u-owner", true},
+		{"project admin of the project", web.ID, "u-alice", true},
+		{"member of the project", api.ID, "u-bob", true},
+		{"member of another project", web.ID, "u-bob", false},
+		{"unknown user", web.ID, "u-ghost", false},
+		{"unknown project", "missing", "u-owner", false},
+	} {
+		got, err := s.CanRunAI(ctx, c.project, c.user)
+		if err != nil || got != c.want {
+			t.Errorf("%s: CanRunAI = %v, %v; want %v", c.name, got, err, c.want)
+		}
+	}
+	users := s.Users.(memUsers)
+	a := users["alice"]
+	a.Disabled = true
+	users["alice"] = a
+	if ok, err := s.CanRunAI(ctx, web.ID, "u-alice"); err != nil || ok {
+		t.Fatalf("disabled member: %v, %v", ok, err)
+	}
+}

@@ -269,6 +269,30 @@ func (s *Service) Lookup(ctx context.Context, projectID string) (domain.Project,
 	return s.Repo.ByID(ctx, projectID)
 }
 
+// CanRunAI reports whether an account may start AI work in a project. Trusted: for other contexts (YouTrack
+// intake) that act on behalf of a user they resolved themselves. Unknown or disabled accounts and unknown projects
+// may not.
+func (s *Service) CanRunAI(ctx context.Context, projectID, userID string) (bool, error) {
+	if _, err := s.Repo.ByID(ctx, projectID); errors.Is(err, domain.ErrNotFound) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	us, err := s.Users.ByIDs(ctx, []string{userID})
+	if err != nil {
+		return false, fmt.Errorf("loading account: %w", err)
+	}
+	u, ok := us[userID]
+	if !ok || u.Disabled {
+		return false, nil
+	}
+	m, member, err := s.Repo.Membership(ctx, projectID, userID)
+	if err != nil {
+		return false, fmt.Errorf("loading membership: %w", err)
+	}
+	return domain.NewAccess(domain.Actor{UserID: u.ID, Login: u.Login, Owner: u.Owner}, m.Role, member).CanRunAI(), nil
+}
+
 // ValidateRole checks that role is a project role.
 func (s *Service) ValidateRole(role string) error {
 	_, err := domain.ParseRole(role)

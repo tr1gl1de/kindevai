@@ -19,6 +19,16 @@ export function errorMessage(t: TFunction, e: unknown): string {
       return t("errors.cross_origin");
     case "not_found":
       return t("errors.not_found");
+    case "invitation_invalid":
+      return t("invite.invitation_invalid");
+    case "invitation_used":
+      return t("invite.invitation_used");
+    case "invitation_revoked":
+      return t("invite.invitation_revoked");
+    case "invitation_expired":
+      return t("invite.invitation_expired");
+    case "invitation_not_found":
+      return t("errors.not_found");
     default:
       return t("errors.unknown");
   }
@@ -40,6 +50,9 @@ const validationKeys = new Set([
   "password_reused",
   "owner_cannot_be_disabled",
   "owner_cannot_be_reset",
+  "project_not_found",
+  "ttl_out_of_range",
+  "invitation_not_pending",
 ]);
 
 /** Message for a server validation code, or undefined if unknown. */

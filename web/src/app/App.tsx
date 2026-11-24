@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
-import { Route, Routes } from "react-router";
+import { Route, Routes, useLocation } from "react-router";
+import { AcceptInvitePage } from "../features/identity/AcceptInvitePage";
 import { LoginPage } from "../features/identity/LoginPage";
 import { SetupWizard } from "../features/identity/SetupWizard";
 import { useMe, useSetupStatus } from "../features/identity/api";
@@ -27,6 +28,10 @@ function Gate() {
   const { t } = useTranslation();
   const setup = useSetupStatus();
   const me = useMe(setup.data?.setupRequired === false);
+  const location = useLocation();
+
+  // Invitation links are for people without an account: no setup or session checks apply.
+  if (location.pathname === "/invite") return <AcceptInvitePage />;
 
   if (setup.isPending || (setup.data?.setupRequired === false && me.isPending)) {
     return (

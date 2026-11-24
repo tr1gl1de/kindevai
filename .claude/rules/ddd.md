@@ -21,6 +21,9 @@ internal/<context>/
 - Dependencies point inward: adapters → app → domain. `domain` imports only the stdlib (no `database/sql`,
   `net/http`, other contexts' adapters). Enforce invariants in constructors/methods, not in handlers.
 - Contexts talk through the other context's `app` API or domain events — never through its tables or adapters.
+- A use case that must change several contexts atomically (e.g. accepting an invitation creates an identity user
+  and a projects membership) runs in `db.Transactor.InTx`; repositories always execute via `db.Conn(ctx, d)`, so
+  the other context's app call joins the same transaction without touching its tables.
 - Aggregates are the transaction boundary; repositories load and save whole aggregates.
 - Shared kernel (`internal/platform/...`): DB, clock, ids, crypto, HTTP helpers — infrastructure only, no business rules.
 - External API calls happen in adapters fed by the durable outbox, never inline in HTTP handlers.

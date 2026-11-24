@@ -89,3 +89,41 @@ export interface Member {
 export interface SetMemberRequest {
   role: ProjectRole;
 }
+
+export type InvitationState = "pending" | "used" | "revoked" | "expired";
+
+export interface Invitation {
+  id: string;
+  projectId: string;
+  /** Empty when the project was deleted. */
+  projectName: string;
+  role: ProjectRole;
+  state: InvitationState;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface CreateInvitationRequest {
+  projectId: string;
+  role: ProjectRole;
+  /** 1–168; omitted = 72. */
+  ttlHours?: number;
+}
+
+/** The token is shown to the Owner once; the invite link carries it in the URL fragment. */
+export interface CreateInvitationResult {
+  invitation: Invitation;
+  token: string;
+}
+
+export interface InvitationPreview {
+  projectName: string;
+  role: ProjectRole;
+  expiresAt: string;
+}
+
+export interface AcceptInvitationRequest {
+  token: string;
+  login: string;
+  password: string;
+}

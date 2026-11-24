@@ -109,7 +109,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	}
 	msg := newMessaging(inst, logger)
 	modules := append(identity.Modules, newProjects(inst, identity, audit, logger)...)
-	modules = append(modules, msg.HTTP, audit.HTTP)
+	modules = append(modules, msg.HTTP, audit.HTTP, newIntegrations(inst, msg, audit, logger).HTTP)
 	defer msg.start(ctx)() // deferred after inst.Close, so the dispatchers stop before the database closes
 
 	assets, built := web.Assets()

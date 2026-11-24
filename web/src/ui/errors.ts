@@ -31,6 +31,8 @@ export function errorMessage(t: TFunction, e: unknown): string {
       return t("invite.invitation_expired");
     case "invitation_not_found":
       return t("errors.not_found");
+    case "not_configured":
+      return t("integrations.notConnected");
     case "invalid_transition":
       return t("runners.invalid_transition");
     default:
@@ -59,6 +61,17 @@ const validationKeys = new Set([
   "invitation_not_pending",
   "projects_required",
   "token_not_pending",
+  "base_url_format",
+  "base_url_scheme",
+  "base_url_credentials",
+  "token_format",
+  "short_name_format",
+  "owner_format",
+  "repo_name_format",
+  "branch_format",
+  "branch_protected",
+  "base_url_https",
+  "token_required_for_url",
 ]);
 
 /** Message for a server validation code, or undefined if unknown. */

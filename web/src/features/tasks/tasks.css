@@ -78,3 +78,9 @@
 .log-event {
   color: var(--muted);
 }
+/* grid items default to min-width: auto; the attempts table must scroll inside its card, not widen the page */
+.stages > li,
+.stages .card-list,
+.step-card {
+  min-width: 0;
+}

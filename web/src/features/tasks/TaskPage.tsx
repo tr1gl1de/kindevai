@@ -257,7 +257,7 @@ function StepsSection({ d, isOwner }: { d: TaskDetail; isOwner: boolean }) {
       ) : (
         <>
           <p>
-            {t("tasks.execution")}: {t("tasks.executionValue", { state: e.state, revision: e.planRevision })} ·{" "}
+            {t("tasks.execution")}: {t("tasks.executionValue", { state: t(`tasks.step_${e.state}`), revision: e.planRevision })} ·{" "}
             {t("tasks.agentTime")}: <AgentTimeValue ms={e.agentTime.ms} status={e.agentTime.status} />
           </p>
           {e.reason && <p className="muted">{e.reason}</p>}

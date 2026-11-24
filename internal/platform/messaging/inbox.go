@@ -16,7 +16,7 @@ type InboundEvent struct {
 	Source     string // sender: "github", "youtrack", "telegram", "runner"
 	DeliveryID string // the sender's delivery/event id (e.g. X-GitHub-Delivery); duplicates are dropped
 	Topic      string // selects the handler registered with Inbox.Handle, e.g. "github.push"
-	Payload    []byte // JSON, at most MaxPayloadBytes; secret-looking fields are redacted before storage
+	Payload    []byte // JSON, at most MaxPayloadBytes; secret-looking fields and values are redacted before storage
 	Attempt    int    // 1 for the first processing attempt
 }
 
@@ -103,7 +103,7 @@ func (in *Inbox) process(ctx context.Context, r record) error {
 	dead, err := in.q.finish(ctx, r, cause)
 	if dead {
 		in.q.cfg.Logger.Warn("inbox event dead", "id", r.id, "source", r.endpoint, "topic", r.topic,
-			"attempts", r.attempts, "err", truncate(cause.Error()))
+			"attempts", r.attempts, "err", errorText(cause))
 	}
 	return err
 }

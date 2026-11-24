@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/tr1gl1de/kindevai/internal/platform/redact"
 )
 
 // State is an adapter's integration state.
@@ -82,7 +84,7 @@ func (h *Health) Failure(adapter string, err error) {
 	a := h.get(adapter)
 	now := h.cfg.Now()
 	a.failures++
-	a.lastError = truncate(err.Error())
+	a.lastError = errorText(err)
 	a.lastFailure = now
 	if a.probing || a.failures >= h.cfg.BreakerThreshold {
 		a.openUntil = now.Add(h.cfg.BreakerCooldown)
@@ -157,6 +159,10 @@ func (h *Health) Snapshot() []AdapterStatus {
 	slices.SortFunc(out, func(a, b AdapterStatus) int { return strings.Compare(a.Adapter, b.Adapter) })
 	return out
 }
+
+// errorText is the stored and logged form of an error: credentials masked (redact.Text), then cut to
+// MaxErrorBytes. Masking comes first so truncation cannot leave a fragment of a secret unrecognised.
+func errorText(err error) string { return truncate(redact.Text(err.Error())) }
 
 // truncate bounds an error text to MaxErrorBytes on a UTF-8 boundary.
 func truncate(s string) string {

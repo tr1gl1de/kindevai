@@ -17,9 +17,10 @@
 //     circuit is open the adapter is not called (one probe after the cooldown). Pollers report via
 //     Health.Success/Failure.
 //
-// Payloads are JSON without secrets (the outbox rejects secret-looking fields, the inbox redacts them) and are
-// deleted after the retention period by Purge (Run calls it hourly). Handlers must not put secrets in errors:
-// error texts are stored (truncated) and shown to Owners.
+// Payloads are JSON without secrets (the outbox rejects secret-named fields and credential-shaped values, the inbox
+// redacts them) and are deleted after the retention period by Purge (Run calls it hourly). Handlers must not put
+// secrets in errors: error texts are stored and shown to Owners; credentials in them are masked as a safety net
+// and the text is truncated.
 package messaging
 
 import (
@@ -102,7 +103,7 @@ func (c Config) Backoff(attempt int) time.Duration {
 }
 
 // ErrInvalidMessage rejects a message that cannot be stored (missing fields, non-JSON or oversized payload,
-// secret-looking fields in an outbox payload).
+// secret-looking fields or values in an outbox payload).
 var ErrInvalidMessage = errors.New("invalid message")
 
 // ErrNotFound means no dead message has the given id.

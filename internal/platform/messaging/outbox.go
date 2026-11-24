@@ -117,7 +117,7 @@ func (o *Outbox) deliver(ctx context.Context, r record) error {
 	dead, ferr := o.q.finish(ctx, r, err)
 	if dead {
 		o.q.cfg.Logger.Warn("outbox message dead", "id", r.id, "adapter", r.endpoint, "topic", r.topic,
-			"attempts", r.attempts, "err", truncate(err.Error()))
+			"attempts", r.attempts, "err", errorText(err))
 	}
 	return ferr
 }

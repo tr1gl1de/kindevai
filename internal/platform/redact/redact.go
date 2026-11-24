@@ -46,6 +46,11 @@ const minRandomLen = 24
 // token, a Telegram bot token, a PEM private key, a URL with an embedded password, or a long random-looking
 // string mixing lower case, upper case and digits (ids, hex hashes and commit SHAs are single-case and pass).
 func SecretValue(v string) bool {
+	return knownSecretValue(v) || randomLooking(strings.TrimSpace(v))
+}
+
+// knownSecretValue is SecretValue without the randomness guess: only shapes that are credentials by construction.
+func knownSecretValue(v string) bool {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return false
@@ -56,7 +61,7 @@ func SecretValue(v string) bool {
 	}
 	// "Basic <base64>" / "token <value>" headers; prose such as "token expired" or "Token Service" passes.
 	for _, scheme := range []string{"basic ", "token "} {
-		if len(v) > len(scheme) && strings.EqualFold(v[:len(scheme)], scheme) && credentialWord(strings.TrimSpace(v[len(scheme):])) {
+		if len(v) > len(scheme) && strings.EqualFold(v[:len(scheme)], scheme) && credentialWord(strings.TrimSpace(v[len(scheme):]), false) {
 			return true
 		}
 	}
@@ -64,7 +69,10 @@ func SecretValue(v string) bool {
 		return true
 	}
 	for _, p := range tokenPrefixes {
-		if strings.HasPrefix(lower, p) && len(v) >= len(p)+8 {
+		// Generated tokens carry digits or mixed case after the prefix; "sk-learn-pipeline" or "perm-admin-role" do not.
+		if strings.HasPrefix(lower, p) && len(v) >= len(p)+8 && strings.ContainsFunc(v[len(p):], func(r rune) bool {
+			return (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		}) {
 			return true
 		}
 	}
@@ -78,7 +86,7 @@ func SecretValue(v string) bool {
 			}
 		}
 	}
-	return randomLooking(v)
+	return false
 }
 
 func randomLooking(v string) bool {
@@ -113,12 +121,17 @@ func randomLooking(v string) bool {
 	return h >= 4.0
 }
 
-// credentialWord reports a single word long enough to be a credential after an auth scheme.
-func credentialWord(w string) bool {
+// credentialWord reports a single word long enough to be a credential after an auth scheme. In strict mode
+// length alone is not enough ("token authentication-failed" is prose): the word must look generated.
+func credentialWord(w string, strict bool) bool {
 	if w == "" || strings.ContainsAny(w, " \t\n") {
 		return false
 	}
-	if len(w) >= minCredentialLen || SecretValue(w) {
+	if strict {
+		if knownSecretValue(w) {
+			return true
+		}
+	} else if len(w) >= minCredentialLen || SecretValue(w) {
 		return true
 	}
 	// Short base64 ("dXNlcjpwYXNz") has upper case inside the word or digits/padding; words do not.
@@ -147,30 +160,97 @@ func wordSeparated(v string) bool {
 	return true
 }
 
-// Text redacts credentials inside free text word by word: secret-shaped words, values of key=value or key: value
-// pairs whose key names a secret, and the word after "Bearer"/"Basic".
-func Text(s string) string {
+// Text redacts credentials inside free text word by word: secret-shaped words (including long random-looking
+// ones), values of key=value, key: value, URL query and quoted JSON pairs whose key names a secret, and the word
+// after "Bearer"/"Basic". Use it for error texts and logs, where masking an id by mistake is harmless.
+func Text(s string) string { return scrub(s, SecretValue, false) }
+
+// Credentials is Text limited to unambiguous credential shapes: auth headers, well-known token prefixes, JWTs,
+// PEM keys, URLs with a password and secret-named parameters. It does not guess by randomness, so opaque ids
+// (GitHub node ids, base64 cursors) in webhook payloads survive.
+func Credentials(s string) string { return scrub(s, knownSecretValue, true) }
+
+var (
+	// paramRe matches key=value in query strings and free text; the value stops at a separator or a quote.
+	paramRe = regexp.MustCompile(`([A-Za-z0-9_.-]+)=([^\s&;#"',)]+)`)
+	// pemRe matches a PEM private key block, possibly cut off by truncation.
+	pemRe = regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----(?s:.*?)(?:-----END [A-Z ]*PRIVATE KEY-----|\z)`)
+	// jsonPairRe matches a quoted JSON string pair, as found in upstream error bodies.
+	jsonPairRe = regexp.MustCompile(`"([A-Za-z0-9_.-]+)"\s*:\s*"((?:[^"\\]|\\.)*)"`)
+)
+
+// maskPairs replaces PEM private keys and the values of secret-named key=value and "key":"value" pairs.
+func maskPairs(s string) string {
+	if strings.Contains(s, "PRIVATE KEY-----") {
+		s = pemRe.ReplaceAllString(s, Placeholder)
+	}
+	if !strings.ContainsAny(s, "=:") {
+		return s
+	}
+	s = paramRe.ReplaceAllStringFunc(s, func(m string) string {
+		k, _, _ := strings.Cut(m, "=")
+		if SecretKey(k) {
+			return k + "=" + Placeholder
+		}
+		return m
+	})
+	return jsonPairRe.ReplaceAllStringFunc(s, func(m string) string {
+		sub := jsonPairRe.FindStringSubmatch(m)
+		if SecretKey(sub[1]) {
+			return `"` + sub[1] + `":"` + Placeholder + `"`
+		}
+		return m
+	})
+}
+
+// scrub masks secrets in s. strict (Credentials) needs a generated-looking word after an auth scheme and does not
+// treat "key: value" with a space as a pair, so prose in payloads ("Reset password: steps below") passes.
+func scrub(s string, secret func(string) bool, strict bool) string {
 	if !strings.ContainsFunc(s, func(r rune) bool { return r > ' ' }) {
 		return s
 	}
-	words := strings.Fields(s)
-	changed := false
+	masked := maskPairs(s)
+	words := strings.Fields(masked)
+	changed := masked != s
+	// maskNext masks the word after i (and the one after it when that word is an auth scheme).
+	var maskNext func(i int, needCredential bool) int
+	maskNext = func(i int, needCredential bool) int {
+		if i+1 >= len(words) || strings.HasPrefix(words[i+1], Placeholder) {
+			return i
+		}
+		if isScheme(words[i+1]) {
+			return maskNext(i+1, needCredential)
+		}
+		if needCredential && !credentialWord(words[i+1], strict) {
+			return i
+		}
+		words[i+1] = Placeholder
+		changed = true
+		return i + 1
+	}
 	for i := 0; i < len(words); i++ {
 		w := words[i]
-		switch lw := strings.ToLower(w); {
-		case lw == "bearer" || lw == "basic" || lw == "token":
-			if i+1 < len(words) && (lw == "bearer" || credentialWord(words[i+1])) {
-				words[i+1] = Placeholder
-				i++
-				changed = true
-			}
-		case SecretValue(w):
-			words[i] = Placeholder
+		core := strings.TrimRight(strings.TrimLeft(w, "\"'(<[{"), "\"')>]},;.")
+		switch {
+		case isScheme(w):
+			i = maskNext(i, strict || !strings.EqualFold(w, "bearer"))
+		case core != "" && secret(core):
+			words[i] = strings.Replace(w, core, Placeholder, 1)
 			changed = true
 		default:
-			if k, _, ok := cutPair(w); ok && SecretKey(k) {
+			k, v, ok := cutPair(w)
+			key := strings.Trim(k, "\"'{")
+			switch {
+			case ok && SecretKey(key) && isScheme(v): // Authorization:Bearer <token>
 				words[i] = w[:len(k)+1] + Placeholder
 				changed = true
+				i = maskNext(i, strict)
+			case ok && SecretKey(key) && !strings.HasPrefix(strings.TrimLeft(v, "\""), Placeholder):
+				words[i] = w[:len(k)+1] + Placeholder
+				changed = true
+			case !strict && len(w) > 1 && strings.ContainsAny(w[len(w)-1:], ":=") &&
+				SecretKey(strings.Trim(w[:len(w)-1], "\"'{")): // "password: hunter2", "password": 12345
+				i = maskNext(i, false)
 			}
 		}
 	}
@@ -178,6 +258,10 @@ func Text(s string) string {
 		return s
 	}
 	return strings.Join(words, " ")
+}
+
+func isScheme(w string) bool {
+	return strings.EqualFold(w, "bearer") || strings.EqualFold(w, "basic") || strings.EqualFold(w, "token")
 }
 
 func cutPair(w string) (key, value string, ok bool) {

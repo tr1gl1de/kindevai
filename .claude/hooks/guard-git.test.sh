@@ -44,6 +44,9 @@ run block dev 'gh api repos/o/r/merges -f base=main -f head=x'
 
 # existing rules keep working
 run block dev 'git push origin main'
+run block dev 'git push origin HEAD:refs/heads/main'
+run block dev 'git status && git push origin master'
+run allow dev 'git push -u origin feature/x && gh pr create --base dev --title "keep main owner-only"'
 run block dev 'gh pr create --title x'
 run block dev 'gh pr create --base main --title x'
 run allow dev 'gh pr create --base dev --title x'

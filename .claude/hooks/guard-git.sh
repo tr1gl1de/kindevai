@@ -9,7 +9,9 @@ protected='(main|master)'
 
 # git push ... main | HEAD:main | --force to protected, or pushing while checked out on main
 if grep -Eq '(^|[;&|[:space:]])git[[:space:]]+push' <<<"$cmd"; then
-  grep -Eq "git[[:space:]]+push.*([[:space:]:]|refs/heads/)${protected}([[:space:]]|$)" <<<"$cmd" && block "push to main/master"
+  # Only the push's own arguments count (up to the next ; & | or newline), so later text such as a PR title
+  # mentioning main does not block a legitimate push.
+  grep -Eq "git[[:space:]]+push[^;&|]*([[:space:]:]|refs/heads/)${protected}([[:space:]]|$|[;&|])" <<<"$cmd" && block "push to main/master"
   branch=$(git branch --show-current 2>/dev/null)
   [[ "$branch" =~ ^(main|master)$ ]] && block "push from checked-out $branch"
 fi

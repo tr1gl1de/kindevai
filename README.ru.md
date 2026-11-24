@@ -98,6 +98,17 @@ make clean            # удалить артефакты сборки и тес
 
 Ветки создаются от `dev` как `feature/KIN-<n>-<slug>`; pull request — только в `dev`. `main` — только для владельца.
 
+## CI и релизы
+
+| Событие | Что выполняется |
+|---|---|
+| PR в `dev`, push в `dev` | `make lint` (go vet, golangci-lint, oxlint, tsc), тесты с покрытием, `make vuln` (govulncheck, npm audit), `make build`, проверка конфига GoReleaser, actionlint, сборка Docker-образа и смоук-тест |
+| Зелёный push в `dev` | **Dev pre-release** `dev`: бинарники linux/darwin × amd64/arm64 + `SHA256SUMS`; образ `ghcr.io/tr1gl1de/kindevai:dev` |
+| Тег `v*` на коммите `main` (только владелец) | **Prod-релиз**: проверка, что тег на `main`, тесты, GitHub Release (changelog, checksums, provenance) и образ `:X.Y.Z`, `:X.Y`, `:latest` через защищённый environment `production` |
+
+Автоматизация никогда не пушит в `main` и не создаёт PR в `main`. Dependabot еженедельно предлагает обновления в `dev`.
+Локально: `make lint vuln build`, `make release-snapshot` (нужен GoReleaser).
+
 ## Лицензия
 
 См. [LICENSE](LICENSE).

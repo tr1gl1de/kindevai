@@ -260,18 +260,82 @@ func (r *memRepo) HeldSteps(context.Context) (map[string]int, error) {
 	return out, nil
 }
 
-func (r *memRepo) ListTasks(_ context.Context, projectIDs []string, limit int) ([]domain.Task, error) {
+func (f TaskFilter) matches(t domain.Task) bool {
+	return (len(f.ProjectIDs) > 0 || len(f.TaskIDs) > 0) &&
+		(len(f.ProjectIDs) == 0 || slices.Contains(f.ProjectIDs, t.ProjectID)) &&
+		(len(f.States) == 0 || slices.Contains(f.States, t.State)) &&
+		(len(f.TaskIDs) == 0 || slices.Contains(f.TaskIDs, t.ID))
+}
+
+func (r *memRepo) ListTasks(_ context.Context, f TaskFilter, limit int) ([]domain.Task, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var out []domain.Task
 	for _, t := range r.tasks {
-		if slices.Contains(projectIDs, t.ProjectID) {
+		if f.matches(t) {
 			out = append(out, t)
 		}
 	}
 	slices.SortFunc(out, func(a, b domain.Task) int { return b.CreatedAt.Compare(a.CreatedAt) })
 	if len(out) > limit {
 		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (r *memRepo) EachAttempt(_ context.Context, f TaskFilter, fn func(string, domain.Attempt) error) error {
+	r.mu.Lock()
+	var all []struct {
+		task string
+		a    domain.Attempt
+	}
+	for _, e := range r.execs {
+		if !f.matches(r.tasks[e.TaskID]) {
+			continue
+		}
+		for _, s := range e.Clone().Steps {
+			for _, a := range s.Attempts {
+				all = append(all, struct {
+					task string
+					a    domain.Attempt
+				}{e.TaskID, a})
+			}
+		}
+	}
+	r.mu.Unlock()
+	for _, x := range all {
+		if err := fn(x.task, x.a); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *memRepo) ExecutionSpans(_ context.Context, taskIDs []string) (map[string]ExecutionSpan, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := map[string]ExecutionSpan{}
+	running := map[string]bool{}
+	for _, e := range r.execs {
+		if !slices.Contains(taskIDs, e.TaskID) {
+			continue
+		}
+		sp, ok := out[e.TaskID]
+		if !ok || e.CreatedAt.Before(sp.Start) {
+			sp.Start = e.CreatedAt
+		}
+		if e.FinishedAt == nil {
+			running[e.TaskID] = true
+		} else if sp.End == nil || e.FinishedAt.After(*sp.End) {
+			f := *e.FinishedAt
+			sp.End = &f
+		}
+		out[e.TaskID] = sp
+	}
+	for id := range running {
+		sp := out[id]
+		sp.End = nil
+		out[id] = sp
 	}
 	return out, nil
 }

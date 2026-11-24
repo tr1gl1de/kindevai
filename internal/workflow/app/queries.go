@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
@@ -49,20 +50,64 @@ func (s *Service) mayManage(ctx context.Context, p auth.Principal, projectID str
 	return ErrForbidden
 }
 
-// ListTasks returns the tasks p may see, newest first; projectID narrows it to one project.
-func (s *Service) ListTasks(ctx context.Context, p auth.Principal, projectID string) ([]domain.Task, error) {
-	v, err := s.visible(ctx, p)
-	if err != nil {
-		return nil, err
-	}
-	ids := make([]string, 0, len(v))
-	for id := range v {
-		if projectID == "" || id == projectID {
-			ids = append(ids, id)
+// TaskQuery filters the task list: one project (empty: every visible one) and states (empty: all).
+type TaskQuery struct {
+	ProjectID string
+	States    []domain.TaskState
+}
+
+// TaskListItem is a task in the list with its time.
+type TaskListItem struct {
+	Task domain.Task
+	Time TaskTime
+}
+
+// TaskList is the task list: at most MaxTaskList tasks, newest first, and the agent time of every task the query
+// selects (also beyond the limit).
+type TaskList struct {
+	Tasks []TaskListItem
+	Total domain.AgentTime
+}
+
+// ListTasks returns the tasks p may see, newest first, with their agent time and the total for the query.
+func (s *Service) ListTasks(ctx context.Context, p auth.Principal, q TaskQuery) (TaskList, error) {
+	for _, st := range q.States {
+		if !st.Valid() {
+			return TaskList{}, &domain.ValidationError{Field: "state", Code: "state_unknown"}
 		}
 	}
-	slices.Sort(ids)
-	return s.Repo.ListTasks(ctx, ids, MaxTaskList)
+	v, err := s.visible(ctx, p)
+	if err != nil {
+		return TaskList{}, err
+	}
+	f := TaskFilter{States: q.States}
+	for id := range v {
+		if q.ProjectID == "" || id == q.ProjectID {
+			f.ProjectIDs = append(f.ProjectIDs, id)
+		}
+	}
+	out := TaskList{Tasks: []TaskListItem{}, Total: domain.AgentTime{Status: domain.WorkNone}}
+	if len(f.ProjectIDs) == 0 {
+		return out, nil
+	}
+	slices.Sort(f.ProjectIDs)
+	ts, err := s.Repo.ListTasks(ctx, f, MaxTaskList)
+	if err != nil {
+		return TaskList{}, err
+	}
+	ids := make([]string, 0, len(ts))
+	for _, t := range ts {
+		ids = append(ids, t.ID)
+	}
+	times, total, err := s.taskTimes(ctx, f, ids)
+	if err != nil {
+		return TaskList{}, err
+	}
+	for _, t := range ts {
+		out.Tasks = append(out.Tasks, TaskListItem{Task: t, Time: times[t.ID]})
+	}
+	out.Total = total
+	return out, nil
 }
 
 // TaskDetail is a task with its current plan revision and latest execution (nil when there is none).
@@ -71,6 +116,7 @@ type TaskDetail struct {
 	Revision  *domain.PlanRevision
 	Execution *domain.Execution
 	CanManage bool
+	Time      TaskTime // over all the task's executions
 }
 
 // TaskDetail returns a task p may see (domain.ErrNotFound otherwise).
@@ -102,6 +148,11 @@ func (s *Service) TaskDetail(ctx context.Context, p auth.Principal, id string) (
 	case !errors.Is(err, domain.ErrNotFound):
 		return TaskDetail{}, err
 	}
+	times, _, err := s.taskTimes(ctx, TaskFilter{TaskIDs: []string{t.ID}}, []string{t.ID})
+	if err != nil {
+		return TaskDetail{}, err
+	}
+	d.Time = times[t.ID]
 	return d, nil
 }
 
@@ -123,4 +174,34 @@ func (s *Service) CancelTaskAs(ctx context.Context, p auth.Principal, taskID, re
 		return domain.Task{}, err
 	}
 	return s.CancelTask(ctx, taskID, reason)
+}
+
+// RetryTask plans a FAILED task again (Owner or project admin): its current plan becomes the next revision, which
+// the Policy Evaluator checks again (L2/L3 need a new approval), and the scheduler runs it like any new plan.
+func (s *Service) RetryTask(ctx context.Context, p auth.Principal, taskID string) (domain.Task, error) {
+	t, err := s.Repo.Task(ctx, taskID)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if err := s.mayManage(ctx, p, t.ProjectID); err != nil {
+		return domain.Task{}, err
+	}
+	if t.State != domain.TaskFailed || t.PlanRevision == 0 {
+		return domain.Task{}, fmt.Errorf("task %s is %s: retry: %w", t.ID, t.State, domain.ErrInvalidTransition)
+	}
+	err = s.Tx.InTx(ctx, func(ctx context.Context) error {
+		rev, err := s.Repo.Revision(ctx, t.ID, t.PlanRevision)
+		if err != nil {
+			return err
+		}
+		if _, err := s.StartAnalysis(ctx, t.ID); err != nil {
+			return err
+		}
+		_, err = s.SubmitPlan(ctx, t.ID, rev.Plan(), p.UserID)
+		return err
+	})
+	if err != nil {
+		return domain.Task{}, err
+	}
+	return s.Repo.Task(ctx, taskID)
 }

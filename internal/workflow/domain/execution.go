@@ -73,6 +73,12 @@ type Attempt struct {
 	Error      string
 	StartedAt  time.Time
 	FinishedAt *time.Time
+	// Agent time (KIN-25): the CLI adapter that ran the attempt and its process's work period on the runner's
+	// clock; WorkIncomplete when a time could not be recorded.
+	Agent          string
+	WorkStart      *time.Time
+	WorkEnd        *time.Time
+	WorkIncomplete bool
 }
 
 // Lease is a runner's claim on a step. Every later report must carry Fence; a newer claim makes it stale.
@@ -206,10 +212,8 @@ func (e Execution) Clone() Execution {
 		}
 		s.Attempts = slices.Clone(s.Attempts)
 		for j, a := range s.Attempts {
-			if a.FinishedAt != nil {
-				f := *a.FinishedAt
-				s.Attempts[j].FinishedAt = &f
-			}
+			s.Attempts[j].FinishedAt = clonePtr(a.FinishedAt)
+			s.Attempts[j].WorkStart, s.Attempts[j].WorkEnd = clonePtr(a.WorkStart), clonePtr(a.WorkEnd)
 		}
 		c.Steps[i] = s
 	}

@@ -60,7 +60,7 @@ var taskTable = map[TaskState][]TaskState{
 	TaskVerifying:        {TaskRunning, TaskCompleted, TaskBlocked, TaskFailed, TaskCancelled},
 	TaskBlocked:          {TaskFailed, TaskCancelled},
 	TaskCompleted:        nil,
-	TaskFailed:           nil,
+	TaskFailed:           {TaskAnalyzing}, // retry (KIN-25): plan again; the new revision passes policy and approvals again
 	TaskCancelled:        nil,
 }
 
@@ -159,7 +159,7 @@ func TestTaskFSMRandomWalk(t *testing.T) {
 			case !allowed && task.State != from:
 				t.Fatalf("walk %d: rejected %s -> %s changed state", walk, from, to)
 			}
-			if from.Terminal() && task.State != from {
+			if from.Terminal() && task.State != from && (from != TaskFailed || task.State != TaskAnalyzing) { // retry
 				t.Fatalf("walk %d: left terminal state %s", walk, from)
 			}
 			hasReason := task.Reason != (Reason{})

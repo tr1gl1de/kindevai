@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -155,5 +156,107 @@ func TestTaskAPI(t *testing.T) {
 	}
 	if c := call(t, srv, "owner", "POST", "/api/tasks/"+id+"/mock-run", `{"scenario":"success"}`, nil); c != http.StatusConflict {
 		t.Fatalf("mock run of a cancelled task %d", c)
+	}
+}
+
+type logOf []app.AttemptEvent
+
+func (l logOf) AttemptEvents(_ context.Context, _ string, _, after int64, limit int) ([]app.AttemptEvent, error) {
+	var out []app.AttemptEvent
+	for _, e := range l {
+		if e.Seq > after && len(out) < limit {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+type onePool struct{}
+
+func (onePool) Candidates(context.Context, string) ([]app.Candidate, error) {
+	return []app.Candidate{{ID: "r1", DiskHeavyAllowed: true}}, nil
+}
+
+// The list filters by state and carries agent time per task and in total; the details carry the attempt's agent,
+// work period and status, the step's and task's agent time and the calendar duration; the events endpoint pages an
+// attempt's events; retry plans a failed task again (KIN-25).
+func TestTaskTimeEventsAndRetryAPI(t *testing.T) {
+	t.Parallel()
+	srv, svc := newServer(t)
+	svc.Runners = onePool{}
+	svc.Log = logOf{{Seq: 1, Kind: "execution.started"}, {Seq: 2, Kind: "execution.output", Stream: "stdout", Data: "<b>hi</b>"},
+		{Seq: 3, Kind: "execution.failed", Reason: "exit 1"}}
+	ctx := t.Context()
+	var d DetailView
+	call(t, srv, "owner", "POST", "/api/tasks", `{"projectId":"p1","title":"Timed"}`, &d)
+	id := d.Task.ID
+	call(t, srv, "owner", "POST", "/api/tasks/"+id+"/mock-run", `{"scenario":"fail"}`, nil)
+	at := time.Now().UTC().Add(-time.Minute).Truncate(time.Millisecond)
+	for i := range 2 {
+		if err := svc.Schedule(ctx); err != nil {
+			t.Fatal(err)
+		}
+		call(t, srv, "member", "GET", "/api/tasks/"+id, "", &d)
+		s := d.Execution.Steps[0]
+		if err := svc.StartStepAt(ctx, s.ID, "r1", s.Fence, at, "mock"); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			if c := call(t, srv, "member", "GET", "/api/tasks?state=RUNNING", "", &struct{}{}); c != http.StatusOK {
+				t.Fatalf("filter %d", c)
+			}
+		}
+		if err := svc.FailStepAt(ctx, s.ID, "r1", s.Fence, "exit 1", at.Add(1500*time.Millisecond)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c := call(t, srv, "member", "GET", "/api/tasks/"+id, "", &d); c != http.StatusOK || d.Task.State != "FAILED" {
+		t.Fatalf("detail %d %+v", c, d.Task)
+	}
+	a := d.Execution.Steps[0].Attempts[1]
+	if a.Agent != "mock" || a.WorkStatus != "complete" || a.WorkMs != 1500 || a.WorkStartedAt == nil || !a.WorkStartedAt.Equal(at) {
+		t.Fatalf("attempt %+v", a)
+	}
+	if st := d.Execution.Steps[0].AgentTime; st.Ms != 3000 || st.Status != "complete" {
+		t.Fatalf("step time %+v", st)
+	}
+	if d.Time.AgentMs != 3000 || d.Time.AgentStatus != "complete" || !d.Time.Started || d.Time.Running {
+		t.Fatalf("task time %+v", d.Time)
+	}
+	var l ListView
+	if c := call(t, srv, "member", "GET", "/api/tasks?projectId=p1&state=FAILED,CANCELLED", "", &l); c != http.StatusOK ||
+		len(l.Tasks) != 1 || l.Tasks[0].Time.AgentMs != 3000 || l.Total.Ms != 3000 || l.Total.Status != "complete" {
+		t.Fatalf("list %d %+v", c, l)
+	}
+	if c := call(t, srv, "member", "GET", "/api/tasks?state=READY", "", &l); c != http.StatusOK || len(l.Tasks) != 0 || l.Total.Status != "none" {
+		t.Fatalf("empty filter %d %+v", c, l)
+	}
+	var e map[string]string
+	if c := call(t, srv, "member", "GET", "/api/tasks?state=bogus", "", &e); c != http.StatusUnprocessableEntity || e["field"] != "state" {
+		t.Fatalf("bad state %d %v", c, e)
+	}
+	s := d.Execution.Steps[0]
+	path := "/api/tasks/" + id + "/steps/" + s.ID + "/attempts/" + strconv.FormatInt(a.Fence, 10) + "/events"
+	var p EventPageView
+	if c := call(t, srv, "member", "GET", path+"?after=1", "", &p); c != http.StatusOK || len(p.Events) != 2 ||
+		p.Events[0].Data != "<b>hi</b>" || p.Events[1].Reason != "exit 1" || p.Next != 3 || p.More {
+		t.Fatalf("events %d %+v", c, p)
+	}
+	for _, bad := range []string{path + "?after=-1", path + "?after=x", "/api/tasks/" + id + "/steps/" + s.ID + "/attempts/x/events"} {
+		if c := call(t, srv, "member", "GET", bad, "", nil); c != http.StatusUnprocessableEntity {
+			t.Errorf("%s: %d", bad, c)
+		}
+	}
+	if c := call(t, srv, "stranger", "GET", path, "", nil); c != http.StatusNotFound {
+		t.Fatalf("stranger events %d", c)
+	}
+	if c := call(t, srv, "member", "POST", "/api/tasks/"+id+"/retry", `{}`, nil); c != http.StatusForbidden {
+		t.Fatalf("member retry %d", c)
+	}
+	if c := call(t, srv, "owner", "POST", "/api/tasks/"+id+"/retry", `{}`, &d); c != http.StatusOK || d.Task.State != "READY" || d.Task.PlanRevision != 2 {
+		t.Fatalf("retry %d %+v", c, d.Task)
+	}
+	if c := call(t, srv, "owner", "POST", "/api/tasks/"+id+"/retry", `{}`, nil); c != http.StatusConflict {
+		t.Fatalf("retry of a ready task %d", c)
 	}
 }

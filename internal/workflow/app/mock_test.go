@@ -89,13 +89,13 @@ func TestTaskAPIAccess(t *testing.T) {
 	if _, err := e.svc.RunMock(ctx, owner, t2.ID, "success"); !errors.As(err, &ve) || ve.Code != "repository_required" {
 		t.Fatalf("no repository: %v", err)
 	}
-	if l, err := e.svc.ListTasks(ctx, member, ""); err != nil || len(l) != 1 {
-		t.Fatalf("member list %d, %v", len(l), err)
+	if l, err := e.svc.ListTasks(ctx, member, TaskQuery{}); err != nil || len(l.Tasks) != 1 {
+		t.Fatalf("member list %d, %v", len(l.Tasks), err)
 	}
-	if l, _ := e.svc.ListTasks(ctx, owner, "p2"); len(l) != 1 || l[0].ID != t2.ID {
+	if l, _ := e.svc.ListTasks(ctx, owner, TaskQuery{ProjectID: "p2"}); len(l.Tasks) != 1 || l.Tasks[0].Task.ID != t2.ID {
 		t.Fatalf("owner list p2 %+v", l)
 	}
-	if l, _ := e.svc.ListTasks(ctx, other, ""); len(l) != 0 {
+	if l, _ := e.svc.ListTasks(ctx, other, TaskQuery{}); len(l.Tasks) != 0 {
 		t.Fatalf("outsider list %+v", l)
 	}
 	if _, err := e.svc.CancelTaskAs(ctx, member, task.ID, "x"); !errors.Is(err, ErrForbidden) {

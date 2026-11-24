@@ -48,8 +48,12 @@ type Repository interface {
 	// HeldSteps counts, per runner id, the steps of running executions the runner holds (Step.Holding: CLAIMED,
 	// RUNNING or an unknown attempt) — the scheduler's load measure (KIN-65).
 	HeldSteps(ctx context.Context) (map[string]int, error)
-	ListTasks(ctx context.Context, projectIDs []string, limit int) ([]domain.Task, error) // newest first
-	LatestExecution(ctx context.Context, taskID string) (domain.Execution, error)         // domain.ErrNotFound
+	ListTasks(ctx context.Context, f TaskFilter, limit int) ([]domain.Task, error) // newest first
+	LatestExecution(ctx context.Context, taskID string) (domain.Execution, error)  // domain.ErrNotFound
+	// EachAttempt calls fn for every step attempt of the tasks f selects (agent time, KIN-25).
+	EachAttempt(ctx context.Context, f TaskFilter, fn func(taskID string, a domain.Attempt) error) error
+	// ExecutionSpans returns, per task, when its first execution started and its last one ended.
+	ExecutionSpans(ctx context.Context, taskIDs []string) (map[string]ExecutionSpan, error)
 }
 
 // TxRunner runs fn in one database transaction; repositories called with fn's ctx join it.
@@ -95,6 +99,7 @@ type Service struct {
 	Runners     RunnerPool   // required for Schedule
 	Dispatcher  Dispatcher   // runner commands; required for Schedule, optional otherwise
 	Access      Access       // project visibility for the task API (KIN-23)
+	Log         AttemptLog   // attempt events for the task API (KIN-25); optional
 	Tx          TxRunner
 	Now         func() time.Time
 	NewID       func() string
@@ -314,7 +319,8 @@ func attemptsEqual(a, b domain.Execution) bool {
 			return false
 		}
 		for j := range x.Attempts {
-			if x.Attempts[j].State != y.Attempts[j].State {
+			if a, b := x.Attempts[j], y.Attempts[j]; a.State != b.State || a.Agent != b.Agent ||
+				a.WorkIncomplete != b.WorkIncomplete || !ptrTimeEqual(a.WorkStart, b.WorkStart) || !ptrTimeEqual(a.WorkEnd, b.WorkEnd) {
 				return false
 			}
 		}
@@ -398,10 +404,20 @@ func (s *Service) ReconcileStep(ctx context.Context, stepID string, p domain.Pro
 	})
 }
 
-// StartStep records that the runner launched the claimed step.
+// StartStep records that the runner launched the claimed step (at the Control Plane's time; see StartStepAt).
 func (s *Service) StartStep(ctx context.Context, stepID, runnerID string, fence int64) error {
+	return s.StartStepAt(ctx, stepID, runnerID, fence, s.now(), "")
+}
+
+// StartStepAt records that the runner launched the claimed step: at is the execution.started event's time on the
+// runner's clock and agent the CLI adapter running it; both start the attempt's agent time (KIN-25).
+func (s *Service) StartStepAt(ctx context.Context, stepID, runnerID string, fence int64, at time.Time, agent string) error {
 	return s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
-		return e.Start(stepID, runnerID, fence, now, s.leaseTTL())
+		if err := e.Start(stepID, runnerID, fence, now, s.leaseTTL()); err != nil {
+			return err
+		}
+		e.MarkWorkStart(stepID, runnerID, fence, agent, at, now)
+		return nil
 	})
 }
 
@@ -416,18 +432,76 @@ func (s *Service) RenewLease(ctx context.Context, stepID, runnerID string, fence
 	return exp, err
 }
 
-// CompleteStep records the step's success and promotes its dependents.
+// CompleteStep records the step's success and promotes its dependents (see CompleteStepAt).
 func (s *Service) CompleteStep(ctx context.Context, stepID, runnerID string, fence int64) error {
-	return s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
-		return e.Succeed(stepID, runnerID, fence, now)
+	return s.CompleteStepAt(ctx, stepID, runnerID, fence, s.now())
+}
+
+// CompleteStepAt is CompleteStep with the event's time on the runner's clock, which ends the attempt's agent time.
+func (s *Service) CompleteStepAt(ctx context.Context, stepID, runnerID string, fence int64, at time.Time) error {
+	err := s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
+		if err := e.Succeed(stepID, runnerID, fence, now); err != nil {
+			return refusedReport{err}
+		}
+		e.MarkWorkEnd(stepID, runnerID, fence, at, now)
+		return nil
 	})
+	return s.lateWorkEnd(ctx, err, stepID, runnerID, fence, at)
 }
 
 // FailStep records a failed attempt; the step is retried within the attempt budget, else the task fails.
 func (s *Service) FailStep(ctx context.Context, stepID, runnerID string, fence int64, msg string) error {
-	return s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
-		return e.Fail(stepID, runnerID, fence, msg, now, s.maxAttempts())
+	return s.FailStepAt(ctx, stepID, runnerID, fence, msg, s.now())
+}
+
+// FailStepAt is FailStep with the event's time on the runner's clock, which ends the attempt's agent time.
+func (s *Service) FailStepAt(ctx context.Context, stepID, runnerID string, fence int64, msg string, at time.Time) error {
+	err := s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
+		if err := e.Fail(stepID, runnerID, fence, msg, now, s.maxAttempts()); err != nil {
+			return refusedReport{err}
+		}
+		e.MarkWorkEnd(stepID, runnerID, fence, at, now)
+		return nil
 	})
+	return s.lateWorkEnd(ctx, err, stepID, runnerID, fence, at)
+}
+
+// refusedReport marks the execution's own refusal of a terminal report (stale token, step already moved on), as
+// opposed to an error from saving or from the task's follow-up transition: only a refusal records a late end.
+type refusedReport struct{ err error }
+
+func (r refusedReport) Error() string { return r.err.Error() }
+func (r refusedReport) Unwrap() error { return r.err }
+
+// lateWorkEnd handles a terminal report the workflow refused (stale token or a step that already moved on, e.g.
+// after a cancellation or a lost-process reconciliation): the runner still says when the attempt's process ended,
+// so its agent time is closed (once) even though the step's state is not changed. The refusal err is returned.
+func (s *Service) lateWorkEnd(ctx context.Context, err error, stepID, runnerID string, fence int64, at time.Time) error {
+	var refused refusedReport
+	if !errors.As(err, &refused) {
+		return err
+	}
+	err = refused.err
+	if !errors.Is(err, domain.ErrStaleFence) && !errors.Is(err, domain.ErrInvalidTransition) {
+		return err
+	}
+	lerr := s.Tx.InTx(ctx, func(ctx context.Context) error {
+		e, err := s.Repo.ExecutionByStep(ctx, stepID)
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !e.MarkWorkEnd(stepID, runnerID, fence, at, s.now()) {
+			return nil
+		}
+		return s.Repo.SaveExecution(ctx, &e)
+	})
+	if lerr != nil {
+		return fmt.Errorf("recording the attempt's end: %w", lerr)
+	}
+	return err
 }
 
 // ExpireLeases handles every lease that ran out (one transaction per execution) and returns how many steps changed.

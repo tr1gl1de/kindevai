@@ -62,6 +62,7 @@ type Filter struct {
 	AllProjects bool
 	ProjectIDs  []string
 	States      []domain.State // empty = all
+	TaskID      string         // empty = all
 	Limit       int
 }
 
@@ -412,6 +413,7 @@ func (s *Service) visible(ctx context.Context, p auth.Principal) (map[string]Pro
 // ListQuery filters the Approval Center list.
 type ListQuery struct {
 	States []domain.State
+	TaskID string // one task's approvals (KIN-25); empty = all
 }
 
 // ListItem is an approval with its project's name.
@@ -432,7 +434,7 @@ func (s *Service) List(ctx context.Context, p auth.Principal, q ListQuery) ([]Li
 	if len(vis) == 0 {
 		return []ListItem{}, nil
 	}
-	f := Filter{AllProjects: p.Owner, States: q.States, Limit: MaxList}
+	f := Filter{AllProjects: p.Owner, States: q.States, TaskID: q.TaskID, Limit: MaxList}
 	for id := range vis {
 		f.ProjectIDs = append(f.ProjectIDs, id)
 	}

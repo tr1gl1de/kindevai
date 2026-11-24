@@ -69,7 +69,7 @@ func newIntegrations(inst *bootstrap.Installation, msg *messagingModule, audit *
 
 // workflowRepositories implements the workflow context's port Projects.Repositories (KIN-21 plan validation) with
 // the integrations repository registry: a project's repositories as "owner/name", workflow's ErrNotFound for an
-// unknown project. Wire it into workflowapp.Service.Projects when the workflow context is served.
+// unknown project. The served workflow context uses it (newApprovals).
 type workflowRepositories struct {
 	projects *projectsapp.Service
 	repos    *integrationsapp.Service

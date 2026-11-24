@@ -7,6 +7,7 @@ import type { ReactElement } from "react";
 import { App } from "../app/App";
 import { createQueryClient } from "../app/queryClient";
 import { createI18n, type Locale } from "../i18n";
+import type { TelegramLaunch } from "../features/telegram/webapp";
 
 /** Renders ui inside an isolated i18n instance with a fixed locale. */
 export async function renderWithI18n(ui: ReactElement, locale: Locale = "en") {
@@ -15,14 +16,14 @@ export async function renderWithI18n(ui: ReactElement, locale: Locale = "en") {
 }
 
 /** Renders the whole app at a route with fresh query cache and i18n. */
-export async function renderApp(route = "/", locale: Locale = "en") {
+export async function renderApp(route = "/", locale: Locale = "en", telegram: TelegramLaunch | null = null) {
   const client = createQueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const i18n = await createI18n({ lng: locale });
   const result = render(
     <QueryClientProvider client={client}>
       <I18nextProvider i18n={i18n}>
         <MemoryRouter initialEntries={[route]}>
-          <App />
+          <App telegram={telegram} />
         </MemoryRouter>
       </I18nextProvider>
     </QueryClientProvider>,

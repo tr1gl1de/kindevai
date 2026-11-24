@@ -126,6 +126,8 @@ export interface AcceptInvitationRequest {
   token: string;
   login: string;
   password: string;
+  /** Raw Telegram initData when accepted inside the Mini App: links that Telegram account to the new one. */
+  initData?: string;
 }
 
 export interface AuditActor {
@@ -205,4 +207,55 @@ export interface Runner {
 /** Body of approve and PUT projects: an explicit, non-empty list. */
 export interface RunnerProjectsRequest {
   projectIds: string[];
+}
+
+// Telegram Mini App sign-in and account linking (internal/identity/adapters/httpapi/telegram.go).
+
+export interface TelegramInitDataRequest {
+  initData: string;
+}
+
+export interface TelegramSettings {
+  configured: boolean;
+  botUsername: string;
+  appShortName: string;
+  /** The bot token is write-only: only whether it is stored. */
+  tokenSet: boolean;
+  updatedAt: string | null;
+}
+
+export interface TelegramSettingsRequest {
+  botUsername: string;
+  appShortName: string;
+  /** Empty keeps the stored token. */
+  botToken: string;
+}
+
+export interface TelegramIdentity {
+  telegramId: string;
+  username: string;
+  linkedAt: string;
+}
+
+export type TelegramLinkState = "awaiting_telegram" | "awaiting_code" | "linked" | "cancelled" | "expired";
+
+export interface TelegramLinkRequest {
+  state: TelegramLinkState;
+  expiresAt: string;
+  telegramName?: string;
+  /** Only in the response that created the request. */
+  url?: string;
+}
+
+export interface TelegramLinkStatus {
+  configured: boolean;
+  identity: TelegramIdentity | null;
+  request: TelegramLinkRequest | null;
+}
+
+export interface TelegramLinkPreview {
+  login: string;
+  expiresAt: string;
+  /** Only from confirm: the code to enter on the website. */
+  code?: string;
 }

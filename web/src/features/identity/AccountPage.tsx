@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { PageHeading } from "../../ui/feedback";
 import { useNotify } from "../../ui/notify";
 import { ChangePasswordForm } from "./ChangePasswordForm";
+import { TelegramLinkSection } from "../telegram/TelegramLinkSection";
 
 export function AccountPage() {
   const { t } = useTranslation();
@@ -10,7 +11,8 @@ export function AccountPage() {
   const [round, setRound] = useState(0); // remount the form to clear the fields after a change
   return (
     <div className="narrow">
-      <PageHeading>{t("account.title")}</PageHeading>
+      <PageHeading>{t("account.pageTitle")}</PageHeading>
+      <h2>{t("account.title")}</h2>
       <ChangePasswordForm
         key={round}
         temporary={false}
@@ -19,6 +21,7 @@ export function AccountPage() {
           setRound((r) => r + 1);
         }}
       />
+      <TelegramLinkSection />
     </div>
   );
 }

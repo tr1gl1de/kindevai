@@ -595,3 +595,10 @@ legend {
   width: 20px;
   height: 20px;
 }
+
+/* Telegram link confirmation code: large, spaced digits that are easy to copy by eye. */
+.tg-code {
+  font-size: 2rem;
+  letter-spacing: 0.3em;
+  font-variant-numeric: tabular-nums;
+}

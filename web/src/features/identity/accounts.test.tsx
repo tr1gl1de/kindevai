@@ -130,8 +130,8 @@ describe("change password from the menu", () => {
     );
     await renderApp("/");
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("link", { name: "Change password" }));
-    expect(await screen.findByRole("heading", { level: 1, name: "Change password" })).toBeInTheDocument();
+    await user.click(await screen.findByRole("link", { name: "Account" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "Account" })).toBeInTheDocument();
     await user.type(screen.getByLabelText("Current password"), "correct horse battery");
     await user.type(screen.getByLabelText("New password"), "an even better phrase");
     await user.type(screen.getByLabelText("Repeat new password"), "an even better phrase");

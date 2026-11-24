@@ -20,7 +20,21 @@ if grep -Eq 'gh[[:space:]]+pr[[:space:]]+create' <<<"$cmd"; then
   grep -Eq -- '(--base|-B)[[:space:]=]+' <<<"$cmd" || block "gh pr create without --base (defaults to main)"
 fi
 
-# gh pr merge / gh api merges are owner decisions for main; allow dev merges only via explicit policy
+# gh pr merge: the agent may merge PRs into dev (owner decision, KIN-12); anything else is owner-only.
+# Fail closed: one plain command, PR given first, base looked up on GitHub and required to be dev.
+if grep -Eq 'gh[[:space:]]+pr[[:space:]]+merge' <<<"$cmd"; then
+  grep -Eq '[;&|`$()<>]|\\' <<<"$cmd" || [ "$(wc -l <<<"$cmd")" -gt 1 ] && \
+    block "gh pr merge must be a single plain command (no chaining or substitution)"
+  grep -Eq -- '(^|[[:space:]])(-R|--repo)([[:space:]=]|$)' <<<"$cmd" && block "gh pr merge --repo cannot be policy-checked"
+  pr=$(sed -E 's/^[[:space:]]*gh[[:space:]]+pr[[:space:]]+merge[[:space:]]+([^-[:space:]][^[:space:]]*).*$/\1/;t;s/.*//' <<<"$cmd")
+  [ -n "$pr" ] || block "gh pr merge needs the PR number or URL as its first argument"
+  base=$(gh pr view "$pr" --json baseRefName --jq .baseRefName 2>/dev/null)
+  [ "$base" = dev ] || block "gh pr merge of a PR whose base is '${base:-unknown}' (only dev is allowed)"
+fi
+
+# Raw API merges bypass the checks above.
+grep -Eq 'gh[[:space:]]+api.*(/pulls/[^[:space:]]*/merge|/merges)([[:space:]?]|$)' <<<"$cmd" && block "merge via gh api"
+
 grep -Eq "gh[[:space:]]+pr[[:space:]]+edit.*--base[[:space:]=]+${protected}" <<<"$cmd" && block "retarget PR to main/master"
 grep -Eq "git[[:space:]]+(checkout|switch)[[:space:]].*&&.*git[[:space:]]+merge" <<<"$cmd" && \
   grep -Eq "(checkout|switch)[[:space:]]+${protected}([[:space:]]|$)" <<<"$cmd" && block "merge into main/master"

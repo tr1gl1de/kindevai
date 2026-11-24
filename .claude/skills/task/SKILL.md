@@ -49,6 +49,7 @@ production/infra secrets, deleting YouTrack data, or a genuine spec contradictio
 - Final issue comment: what changed, PR link, how verified, spent vs estimate. Then `YT issue command "Stage Review" <ID>`.
 - Never target `main`/`master`.
 
-## 7. After merge into dev
+## 7. Merge into dev
+- When CI is green and review findings are fixed: `gh pr merge <n> --merge` (plain command; stacked PRs in order).
 - `YT issue command "Stage Done" <ID>` if not moved automatically.
 - From the main checkout: `./scripts/task-worktree.sh --prune` (removes merged worktrees, branches, docker stacks).

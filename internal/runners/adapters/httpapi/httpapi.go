@@ -98,6 +98,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/runners/{id}/revoke", h.action(h.Service.Revoke))
 	if h.Telemetry != nil {
 		mux.HandleFunc("GET /api/storage/overview", h.storageOverview)
+		mux.HandleFunc("GET /api/storage/machines/{id}", h.storageMachine)
 	}
 }
 

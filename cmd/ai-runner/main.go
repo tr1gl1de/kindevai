@@ -251,6 +251,8 @@ func fingerprint(ctx context.Context, args []string, e *env) error {
 // Control Plane (challenge-response, reconnect with backoff) until shutdown or a fatal error such as revocation.
 func daemon(ctx context.Context, args []string, e *env) error {
 	fs, dataDir := flags("run", e)
+	measureSpace := fs.Bool("measure-space", false,
+		"allow measuring what takes space in the data dir and docker (I/O-limited, every 6 h; KIN-55)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -275,8 +277,11 @@ func daemon(ctx context.Context, args []string, e *env) error {
 		return err
 	}
 	defer closeSpool()
-	conn := &app.Connector{Dialer: controlplane.New(), Logger: logger, Handlers: []app.LinkHandler{ch,
-		&app.Reporter{Probe: probe.New(d.Path())}}} // KIN-20 heartbeat, capabilities, storage
+	rep := &app.Reporter{Probe: probe.New(d.Path())} // KIN-20 heartbeat, capabilities, storage
+	if *measureSpace {                               // KIN-55: only with the operator's explicit permission
+		rep.Meter = probe.NewSpaceMeter(d.Path()).Measure
+	}
+	conn := &app.Connector{Dialer: controlplane.New(), Logger: logger, Handlers: []app.LinkHandler{ch, rep}}
 	return conn.Run(ctx, en, id)
 }
 

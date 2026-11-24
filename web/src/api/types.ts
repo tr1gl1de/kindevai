@@ -269,6 +269,33 @@ export interface StorageOverview {
   machines: StorageMachine[];
 }
 
+// Infrastructure → Storage (GET /api/storage/machines/{id}?days=7|30, KIN-55).
+
+/** One hourly point of the storage history (the last report of the hour). */
+export interface StorageSample {
+  at: string;
+  totalBytes: number;
+  usedBytes: number;
+}
+
+export type SpaceConsumerCategory = "repos" | "workspaces" | "sessions" | "spool" | "container_cache";
+
+/** Size of one category; partial: the I/O-limited walk stopped early, so bytes is a lower bound. */
+export interface SpaceConsumer {
+  category: SpaceConsumerCategory;
+  bytes: number;
+  entries: number;
+  partial: boolean;
+}
+
+export interface StorageMachineDetail extends StorageMachine {
+  days: 7 | 30;
+  /** Volume role → hourly samples, oldest first. */
+  history: Partial<Record<VolumeRole, StorageSample[]>>;
+  /** The runner's last measurement; null when it never measured (it needs ai-runner run --measure-space). */
+  consumers: { measuredAt: string; items: SpaceConsumer[] } | null;
+}
+
 /** Body of approve and PUT projects: an explicit, non-empty list. */
 export interface RunnerProjectsRequest {
   projectIds: string[];

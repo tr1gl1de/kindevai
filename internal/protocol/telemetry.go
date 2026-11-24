@@ -62,7 +62,36 @@ type Volume struct {
 	FreeBytes      int64  `json:"freeBytes"`
 }
 
-// Storage is the payload of runner.storage.
+// Space-consumer categories (KIN-55, KB KIN-A-26): what takes space on a runner, measured only when the runner's
+// operator allowed it (ai-runner run --measure-space) and with I/O limits.
+const (
+	ConsumerRepos          = "repos"           // runner-data/repos: git mirrors
+	ConsumerWorkspaces     = "workspaces"      // runner-data/workspaces: workspaces and git worktrees
+	ConsumerSessions       = "sessions"        // runner-data/sessions: CLI session storage
+	ConsumerSpool          = "spool"           // runner-data/events: the event spool
+	ConsumerContainerCache = "container_cache" // images, build cache and volumes reported by `docker system df`
+)
+
+// MaxConsumers bounds a measurement.
+const MaxConsumers = 8
+
+// SpaceConsumer is the size of one category; Partial means the walk stopped at its entry or time limit (Bytes is a
+// lower bound).
+type SpaceConsumer struct {
+	Category string `json:"category"`
+	Bytes    int64  `json:"bytes"`
+	Entries  int64  `json:"entries"`
+	Partial  bool   `json:"partial,omitempty"`
+}
+
+// SpaceConsumers is one measurement; the runner attaches it to the first runner.storage after it finished.
+type SpaceConsumers struct {
+	Items []SpaceConsumer `json:"items"`
+}
+
+// Storage is the payload of runner.storage. Consumers is optional (KIN-55); a Control Plane that predates it
+// ignores the field.
 type Storage struct {
-	Volumes []Volume `json:"volumes"`
+	Volumes   []Volume        `json:"volumes"`
+	Consumers *SpaceConsumers `json:"consumers,omitempty"`
 }

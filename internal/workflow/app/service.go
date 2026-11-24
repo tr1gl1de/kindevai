@@ -89,6 +89,13 @@ type Service struct {
 	NewID       func() string
 	LeaseTTL    time.Duration // DefaultLeaseTTL when zero
 	MaxAttempts int           // DefaultMaxAttempts when zero
+	Pause       Pause         // optional: maintenance mode (KIN-41)
+}
+
+// Pause reports whether the scheduler must not hand out new work (maintenance mode, KIN-41). Running attempts
+// continue (drain); leases still expire and runners still reconcile.
+type Pause interface {
+	SchedulingPaused(ctx context.Context) (bool, error)
 }
 
 func (s *Service) now() time.Time { return s.Now().UTC() }

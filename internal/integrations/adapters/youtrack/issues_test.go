@@ -165,3 +165,63 @@ func TestTagEventsReadsTheTagHistory(t *testing.T) {
 		t.Error("an invalid issue ID reached the URL")
 	}
 }
+
+// KIN-53: responses captured from a live YouTrack Cloud (2026-11) for the exact request TagEvents sends
+// (categories=TagsCategory, reverse=true); logins redacted. A tag set in the body of POST /api/issues is recorded
+// as a TagsActivityItem by the reporter a few ms after the issue's `created`, so creation-time tags need no
+// fallback. reverse=true returns the newest change first, and a removal is its own item.
+const (
+	// The issue was created with the tag in the creation request (created = 1795552509701).
+	liveTagAtCreation = `[{"removed":[],"added":[{"name":"kindevai","$type":"Tag"}],"author":{"login":"alice","$type":"User"},"id":"0-0.14-1243","timestamp":1795552509717,"$type":"TagsActivityItem"}]`
+	// The same issue after the tag was removed and applied again by command.
+	liveTagRemovedAndReapplied = `[{"removed":[],"added":[{"name":"kindevai","$type":"Tag"}],"author":{"login":"alice","$type":"User"},"id":"0-0.14-1247","timestamp":1795552523343,"$type":"TagsActivityItem"},` +
+		`{"removed":[{"name":"kindevai","$type":"Tag"}],"added":[],"author":{"login":"alice","$type":"User"},"id":"0-0.14-1246","timestamp":1795552522385,"$type":"TagsActivityItem"},` +
+		`{"removed":[],"added":[{"name":"kindevai","$type":"Tag"}],"author":{"login":"alice","$type":"User"},"id":"0-0.14-1243","timestamp":1795552509717,"$type":"TagsActivityItem"}]`
+	// While the tag was off: the newest change is the removal.
+	liveTagRemoved = `[{"removed":[{"name":"kindevai","$type":"Tag"}],"added":[],"author":{"login":"alice","$type":"User"},"id":"0-0.14-1246","timestamp":1795552522385,"$type":"TagsActivityItem"},` +
+		`{"removed":[],"added":[{"name":"kindevai","$type":"Tag"}],"author":{"login":"alice","$type":"User"},"id":"0-0.14-1243","timestamp":1795552509717,"$type":"TagsActivityItem"}]`
+)
+
+func TestTagEventsContractWithLiveYouTrackResponses(t *testing.T) {
+	t.Parallel()
+	bodies := map[string]string{"KIN-1": liveTagAtCreation, "KIN-2": liveTagRemovedAndReapplied, "KIN-3": liveTagRemoved}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer "+tok ||
+			q.Get("categories") != "TagsCategory" || q.Get("reverse") != "true" {
+			w.WriteHeader(http.StatusBadRequest) // not the request the responses were captured for
+			return
+		}
+		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/issues/"), "/activities")
+		_, _ = w.Write([]byte(bodies[id]))
+	}))
+	t.Cleanup(srv.Close)
+	secret, _ := domain.NewYouTrackToken(tok)
+	c := &youtrack.Client{HTTP: srv.Client()}
+	cases := []struct {
+		id, want string
+		events   int
+	}{
+		{"KIN-1", "alice", 1}, // tag applied at creation is in the history
+		{"KIN-2", "alice", 3}, // newest re-add wins
+		{"KIN-3", "", 2},      // removed: no applier (fail closed)
+	}
+	for _, tc := range cases {
+		events, err := c.TagEvents(t.Context(), srv.URL, secret, tc.id)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.id, err)
+		}
+		if len(events) != tc.events {
+			t.Fatalf("%s: events %+v, want %d", tc.id, events, tc.events)
+		}
+		for i := 1; i < len(events); i++ {
+			if events[i-1].At <= events[i].At {
+				t.Fatalf("%s: events %+v, want newest first (server order kept)", tc.id, events)
+			}
+		}
+		got, ok := domain.TagApplier(events, "kindevai")
+		if got != tc.want || ok != (tc.want != "") {
+			t.Errorf("%s: applier %q %v, want %q", tc.id, got, ok, tc.want)
+		}
+	}
+}

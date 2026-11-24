@@ -53,3 +53,42 @@ func TestRenderApproval(t *testing.T) {
 		t.Fatalf("ru = %q", ru)
 	}
 }
+
+// KIN-62: a finished task's message names the outcome, the task and the project, in the user's language.
+func TestRenderTaskFinished(t *testing.T) {
+	t.Parallel()
+	done := domain.TaskNotice{TaskID: "t1", Title: "Fix login", Project: "Shop", Failed: false}
+	failed := domain.TaskNotice{TaskID: "t1", Title: "Fix login", Project: "Shop", Failed: true}
+	en, ru := domain.RenderTask(domain.LangEN, done), domain.RenderTask(domain.LangRU, done)
+	if !strings.Contains(en, "completed") || !strings.Contains(en, "Fix login") || !strings.Contains(en, "Shop") {
+		t.Fatalf("en = %q", en)
+	}
+	if !strings.Contains(ru, "выполнена") || !strings.Contains(ru, "Fix login") {
+		t.Fatalf("ru = %q", ru)
+	}
+	if got := domain.RenderTask(domain.LangEN, failed); !strings.Contains(got, "failed") {
+		t.Fatalf("failed en = %q", got)
+	}
+	if got := domain.RenderTask(domain.LangRU, failed); !strings.Contains(got, "ошибкой") {
+		t.Fatalf("failed ru = %q", got)
+	}
+	long := domain.RenderTask(domain.LangEN, domain.TaskNotice{TaskID: "t1", Title: strings.Repeat("x", 10_000) + "\n\x00"})
+	if len([]rune(long)) > 400 || strings.ContainsRune(long, 0) {
+		t.Fatalf("title not clipped: %d runes", len([]rune(long)))
+	}
+	en, ru = domain.ButtonLabel(domain.LangEN, domain.NotifyTaskFinished), domain.ButtonLabel(domain.LangRU, domain.NotifyTaskFinished)
+	if en != "Open task" || ru != "Открыть задачу" {
+		t.Fatalf("buttons = %q / %q", en, ru)
+	}
+}
+
+// KIN-59: the runner output storage alert in both languages.
+func TestRenderRunnerOutputFull(t *testing.T) {
+	t.Parallel()
+	a, _ := domain.NewAlert("a1", domain.Occurrence{Kind: domain.KindRunnerOutputFull, Severity: domain.SeverityWarning,
+		DedupKey: "runner-output/full", Subject: "control-plane", Details: map[string]string{"limitBytes": "1073741824", "limitMiB": "1024"}}, t0)
+	en, ru := domain.RenderAlert(domain.LangEN, a), domain.RenderAlert(domain.LangRU, a)
+	if !strings.Contains(en, "Runner output storage is full (1024 MiB)") || !strings.Contains(ru, "Хранилище вывода раннеров заполнено (1024 МиБ)") {
+		t.Fatalf("en = %q, ru = %q", en, ru)
+	}
+}

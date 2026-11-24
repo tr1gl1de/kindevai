@@ -62,6 +62,12 @@ func RenderAlert(l Language, a Alert) string {
 			LangEN: fmt.Sprintf("Disk %s is %s%% full.", a.Subject, pct),
 			LangRU: fmt.Sprintf("Диск %s заполнен на %s%%.", a.Subject, pct),
 		}[l]
+	case KindRunnerOutputFull:
+		mib := clip(a.Details["limitMiB"])
+		body = map[Language]string{
+			LangEN: fmt.Sprintf("Runner output storage is full (%s MiB): new output of running executions is dropped until the retention frees space.", mib),
+			LangRU: fmt.Sprintf("Хранилище вывода раннеров заполнено (%s МиБ): новый вывод идущих исполнений отбрасывается, пока очистка не освободит место.", mib),
+		}[l]
 	default:
 		body = map[Language]string{
 			LangEN: fmt.Sprintf("New alert: %s (%s).", a.Kind, subject),
@@ -87,6 +93,34 @@ func RenderApproval(l Language, n ApprovalNotice) string {
 		project, n.TaskID, n.Risk, n.Reason)
 }
 
+// TaskNotice is what a "task finished" notification says (KIN-62).
+type TaskNotice struct {
+	TaskID, Title, Project string
+	Failed                 bool // FAILED, else COMPLETED
+}
+
+// RenderTask is the text of a finished task's notification. The failure reason is not included (it may quote
+// CLI output); the task page shows it.
+func RenderTask(l Language, n TaskNotice) string {
+	title, project := clip(n.Title), clip(n.Project)
+	if title == "" {
+		title = clip(n.TaskID)
+	}
+	if project == "" {
+		project = "—"
+	}
+	switch {
+	case lang(l) == LangRU && n.Failed:
+		return fmt.Sprintf("Задача завершилась с ошибкой: %s\nПроект: %s\nОткройте её в приложении, чтобы узнать причину.", title, project)
+	case lang(l) == LangRU:
+		return fmt.Sprintf("Задача выполнена: %s\nПроект: %s\nОткройте её в приложении, чтобы посмотреть результат.", title, project)
+	case n.Failed:
+		return fmt.Sprintf("Task failed: %s\nProject: %s\nOpen it in the app to see why.", title, project)
+	default:
+		return fmt.Sprintf("Task completed: %s\nProject: %s\nOpen it in the app to see the result.", title, project)
+	}
+}
+
 // ButtonLabel is the label of the button that opens the notification's subject in the Mini App.
 func ButtonLabel(l Language, t NotificationType) string {
 	ru := lang(l) == LangRU
@@ -95,6 +129,10 @@ func ButtonLabel(l Language, t NotificationType) string {
 		return "Открыть одобрение"
 	case t == NotifyApprovalRequested:
 		return "Open approval"
+	case t == NotifyTaskFinished && ru:
+		return "Открыть задачу"
+	case t == NotifyTaskFinished:
+		return "Open task"
 	case ru:
 		return "Открыть алерты"
 	default:

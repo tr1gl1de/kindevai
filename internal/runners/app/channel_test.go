@@ -25,6 +25,8 @@ type memChannelRepo struct {
 	commands map[string][]domain.QueuedCommand
 	events   map[string]domain.AttemptEvent
 	output   map[string]int64
+	// recordErr fails RecordEvent (the event's transaction rolls back).
+	recordErr error
 }
 
 func newMemChannelRepo() *memChannelRepo {
@@ -107,6 +109,9 @@ func (r *memChannelRepo) EventSeen(_ context.Context, runnerID, step string, fen
 func (r *memChannelRepo) RecordEvent(_ context.Context, e domain.AttemptEvent) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.recordErr != nil {
+		return r.recordErr
+	}
 	k := evKey(e.Step, e.Fence, e.AttemptSeq)
 	if _, ok := r.events[k]; ok {
 		return errors.New("duplicate event row")
@@ -669,5 +674,119 @@ func TestCommandsPreparedBeforeSending(t *testing.T) {
 	}
 	if !strings.Contains(string(e.commands("r1")[0].Body), "stored") {
 		t.Fatal("the command log was changed")
+	}
+}
+
+// KIN-59: dropping output for the total limit raises a Control Plane alert through the outbox (at most once a
+// minute, grouped by the Alert Center); the first output stored afterwards resolves it.
+func TestOutputStorageFullAlertsAndRecovers(t *testing.T) {
+	t.Parallel()
+	e := newChannelEnv()
+	ob := &memOutbox{}
+	e.ch.Outbox = ob
+	e.ch.MaxStoredOutput = domain.MaxAttemptOutput
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	e.ch.Now = func() time.Time { return now }
+	e.wf.fence["s1"], e.wf.state["s1"] = 1, "running"
+	sess, _ := newSession("r1")
+	seq := int64(0)
+	output := func(data string) {
+		t.Helper()
+		seq++
+		body, _ := json.Marshal(protocol.Output{Stream: "stdout", Data: data})
+		ev := protocol.Event{Epoch: "sp", Seq: seq, Step: "s1", Fence: 1, AttemptSeq: seq, Kind: protocol.EventOutput, At: 1, Body: body}
+		if err := handle(t, e.ch, sess, protocol.TypeEvent, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.repo.output["old/1"] = domain.MaxAttemptOutput - 5
+	output("more than five bytes")
+	output("more than five bytes") // same minute: grouped, not enqueued again
+	now = now.Add(time.Minute)
+	output("more than five bytes")
+	if got := ob.topics(); !slices.Equal(got, []string{TopicRunnerOutputFull, TopicRunnerOutputFull}) {
+		t.Fatalf("topics while full = %v", got)
+	}
+	var p struct {
+		LimitBytes int64  `json:"limitBytes"`
+		RunnerID   string `json:"runnerId"`
+		StepID     string `json:"stepId"`
+	}
+	if err := json.Unmarshal(ob.msgs[0].Payload, &p); err != nil || p.LimitBytes != domain.MaxAttemptOutput || p.RunnerID != "r1" ||
+		p.StepID != "s1" || ob.msgs[0].Adapter != AdapterAlerts {
+		t.Fatalf("payload %s %+v %v", ob.msgs[0].Payload, p, err)
+	}
+	e.repo.mu.Lock()
+	delete(e.repo.output, "old/1") // the retention evicted the oldest finished output
+	e.repo.mu.Unlock()
+	now = now.Add(time.Minute) // a minute without drops
+	output("fits")
+	output("fits again")
+	if got := ob.topics(); !slices.Equal(got, []string{TopicRunnerOutputFull, TopicRunnerOutputFull, TopicRunnerOutputRecovered}) {
+		t.Fatalf("topics after space was freed = %v", got)
+	}
+}
+
+// Review of KIN-59: the alert state changes only after the event's transaction commits, so an alert rolled back
+// with its event is raised again when the runner re-sends the event.
+func TestOutputStorageAlertSurvivesRollback(t *testing.T) {
+	t.Parallel()
+	e := newChannelEnv()
+	ob := &memOutbox{}
+	e.ch.Outbox = ob
+	e.ch.MaxStoredOutput = domain.MaxAttemptOutput
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	e.ch.Now = func() time.Time { return now }
+	e.wf.fence["s1"], e.wf.state["s1"] = 1, "running"
+	e.repo.output["old/1"] = domain.MaxAttemptOutput - 5
+	sess, f := newSession("r1")
+	body, _ := json.Marshal(protocol.Output{Stream: "stdout", Data: "more than five bytes"})
+	ev := protocol.Event{Epoch: "sp", Seq: 1, Step: "s1", Fence: 1, AttemptSeq: 1, Kind: protocol.EventOutput, At: 1, Body: body}
+	e.repo.recordErr = errors.New("database is locked")
+	_ = handle(t, e.ch, sess, protocol.TypeEvent, ev)
+	ob.msgs = nil // rolled back with the event
+	e.repo.recordErr = nil
+	now = now.Add(time.Second)
+	_ = handle(t, e.ch, sess, protocol.TypeEvent, ev)
+	if got := ob.topics(); !slices.Equal(got, []string{TopicRunnerOutputFull}) || !slices.Equal(acks(f), []int64{1}) {
+		t.Fatalf("topics after the re-sent event = %v, acks %v", got, acks(f))
+	}
+}
+
+// Review of KIN-59: while the storage is nearly full, a small chunk that still fits does not resolve the alert;
+// output is stored again only after a minute without drops.
+func TestOutputStorageFlappingDoesNotResolve(t *testing.T) {
+	t.Parallel()
+	e := newChannelEnv()
+	ob := &memOutbox{}
+	e.ch.Outbox = ob
+	e.ch.MaxStoredOutput = domain.MaxAttemptOutput
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	e.ch.Now = func() time.Time { return now }
+	e.wf.fence["s1"], e.wf.state["s1"] = 1, "running"
+	e.repo.output["old/1"] = domain.MaxAttemptOutput - 200
+	sess, _ := newSession("r1")
+	seq := int64(0)
+	output := func(n int) {
+		t.Helper()
+		seq++
+		body, _ := json.Marshal(protocol.Output{Stream: "stdout", Data: strings.Repeat("x", n)})
+		ev := protocol.Event{Epoch: "sp", Seq: seq, Step: "s1", Fence: 1, AttemptSeq: seq, Kind: protocol.EventOutput, At: 1, Body: body}
+		if err := handle(t, e.ch, sess, protocol.TypeEvent, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	output(500) // dropped
+	now = now.Add(10 * time.Second)
+	output(1) // fits, but the storage is still full
+	now = now.Add(10 * time.Second)
+	output(500) // dropped again
+	if got := ob.topics(); !slices.Equal(got, []string{TopicRunnerOutputFull}) {
+		t.Fatalf("topics while flapping = %v", got)
+	}
+	now = now.Add(time.Minute)
+	output(1)
+	if got := ob.topics(); !slices.Equal(got, []string{TopicRunnerOutputFull, TopicRunnerOutputRecovered}) {
+		t.Fatalf("topics after a quiet minute = %v", got)
 	}
 }

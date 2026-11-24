@@ -51,6 +51,8 @@ export function useAlertText() {
         return t("alerts.kind_runner_unreachable", { subject: a.subject });
       case "storage_level":
         return t("alerts.kind_storage_level", { subject: a.subject, usedPercent: a.details.usedPercent ?? "?" });
+      case "runner_output_full":
+        return t("alerts.kind_runner_output_full");
       default:
         return t("alerts.kind_other", { kind: a.kind, subject: a.subject });
     }

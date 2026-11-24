@@ -61,6 +61,7 @@ type Kind string
 const (
 	KindRunnerUnreachable Kind = "runner_unreachable"
 	KindStorageLevel      Kind = "storage_level"
+	KindRunnerOutputFull  Kind = "runner_output_full" // KIN-59: runner output is dropped, the Control Plane's output storage is full
 )
 
 // Limits of stored alert fields.

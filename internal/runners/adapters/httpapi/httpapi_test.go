@@ -79,7 +79,8 @@ func newEnv(t *testing.T, burst int) *env {
 		},
 		Limiter: ratelimit.New(ratelimit.Config{Burst: burst, Every: time.Hour, MaxKeys: 100}, time.Now),
 		Telemetry: &app.Telemetry{Repo: sqlite.New(d), Runners: sqlite.New(d), Tx: db.Transactor{DB: d},
-			Outbox: messaging.NewOutbox(d, messaging.Config{}), Now: clock},
+			Outbox: messaging.NewOutbox(d, messaging.Config{}), Now: clock,
+			Output: sqlite.New(d), OutputPolicy: domain.RetentionPolicy{Output: 3 * domain.Day, Events: 7 * domain.Day, MaxOutputBytes: 100 << 20}},
 	}
 	e.tel = h.Telemetry
 	mux := http.NewServeMux()

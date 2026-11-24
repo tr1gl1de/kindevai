@@ -111,9 +111,47 @@ type ThresholdsView struct {
 
 // StorageOverview is GET /api/storage/overview.
 type StorageOverview struct {
-	GeneratedAt time.Time      `json:"generatedAt"`
-	Thresholds  ThresholdsView `json:"thresholds"`
-	Machines    []MachineView  `json:"machines"`
+	GeneratedAt  time.Time         `json:"generatedAt"`
+	Thresholds   ThresholdsView    `json:"thresholds"`
+	Machines     []MachineView     `json:"machines"`
+	RunnerOutput *RunnerOutputView `json:"runnerOutput,omitempty"`
+}
+
+// RunnerOutputView is the runner output stored in the Control Plane's database against its limit (KIN-52, KIN-59).
+type RunnerOutputView struct {
+	UsedBytes           int64            `json:"usedBytes"`
+	LimitBytes          int64            `json:"limitBytes"`
+	UsedPercent         float64          `json:"usedPercent"`
+	State               string           `json:"state"` // ok, high (≥ 90%) or full (new output is being dropped)
+	OutputRetentionDays int              `json:"outputRetentionDays"`
+	EventRetentionDays  int              `json:"eventRetentionDays"`
+	DropsWindowHours    int              `json:"dropsWindowHours"`
+	DroppedEvents       int64            `json:"droppedEvents"`
+	LastDroppedAt       *time.Time       `json:"lastDroppedAt"`
+	Drops               []OutputDropView `json:"drops"`
+}
+
+// OutputDropView is one attempt whose output was dropped because the output storage was full.
+type OutputDropView struct {
+	RunnerID string    `json:"runnerId"`
+	StepID   string    `json:"stepId"`
+	Fence    int64     `json:"fence"`
+	Events   int64     `json:"events"`
+	LastAt   time.Time `json:"lastAt"`
+}
+
+func runnerOutputView(o *domain.OutputStorage, now time.Time) *RunnerOutputView {
+	if o == nil {
+		return nil
+	}
+	v := &RunnerOutputView{UsedBytes: o.UsedBytes, LimitBytes: o.LimitBytes, UsedPercent: o.UsedPercent(),
+		State: string(o.State(now)), OutputRetentionDays: int(o.Policy.Output / domain.Day),
+		EventRetentionDays: int(o.Policy.Events / domain.Day), DropsWindowHours: int(domain.OutputDropsWindow / time.Hour),
+		DroppedEvents: o.DroppedEvents, LastDroppedAt: o.LastDropAt, Drops: make([]OutputDropView, 0, len(o.Drops))}
+	for _, d := range o.Drops {
+		v.Drops = append(v.Drops, OutputDropView{RunnerID: d.RunnerID, StepID: d.Step, Fence: d.Fence, Events: d.Events, LastAt: d.LastAt})
+	}
+	return v
 }
 
 func forecastView(f domain.Forecast) ForecastView {
@@ -132,6 +170,7 @@ func (h *Handler) storageOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := StorageOverview{GeneratedAt: ov.GeneratedAt, Machines: make([]MachineView, 0, len(ov.Machines)),
+		RunnerOutput: runnerOutputView(ov.Output, ov.GeneratedAt),
 		Thresholds: ThresholdsView{WarningPercent: domain.WarningPercent, HighPercent: domain.HighPercent,
 			CriticalPercent: domain.CriticalPercent, MinHeadroomBytes: domain.MinHeadroomBytes}}
 	for _, m := range ov.Machines {

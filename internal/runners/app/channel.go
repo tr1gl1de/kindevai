@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runners/domain"
 )
@@ -76,11 +78,19 @@ type Channel struct {
 	// MaxStoredOutput bounds all stored output (default domain.DefaultRetention().MaxOutputBytes); output beyond
 	// it is acknowledged and recorded without its body until the retention frees space (KIN-52).
 	MaxStoredOutput int64
+	// Outbox, if set, raises the Control Plane alert alerts.runner_output_full while output is dropped for that
+	// limit (at most once a minute) and alerts.runner_output_recovered when output is stored again (KIN-59).
+	Outbox Enqueuer
 
-	once     sync.Once
-	fullWarn time.Time // last "output storage full" warning (at most one per minute)
-	mu       sync.Mutex
-	wakes    map[string]chan struct{} // runnerID → the live session's sender
+	once sync.Once
+	// Output storage state (KIN-59), changed only after the event's transaction committed.
+	fullWarn time.Time // last "output storage full" warning/alert (at most one per minute)
+	lastDrop time.Time // last output dropped for the total limit
+	// spaceKnown: no recovery is pending (output was stored again after the last drop). A fresh Control Plane does
+	// not know whether an earlier run left the alert open; its first stored output resolves it (a no-op if none).
+	spaceKnown bool
+	mu         sync.Mutex
+	wakes      map[string]chan struct{} // runnerID → the live session's sender
 }
 
 // commandBatch: commands loaded per read; with ≤64 KiB per command it bounds a sender's memory to ~256 KiB.
@@ -299,7 +309,9 @@ func (c *Channel) commandAck(ctx context.Context, s Session, a protocol.Ack) err
 // once per attempt event, checks the fencing token and acknowledges only after the commit.
 func (c *Channel) event(ctx context.Context, s Session, e protocol.Event) error {
 	var ack int64 = -1
+	var sig storageSignal
 	err := c.Tx.InTx(ctx, func(ctx context.Context) error {
+		sig = storageSignal{}
 		st, _, err := c.Repo.Channel(ctx, s.RunnerID)
 		if err != nil {
 			return err
@@ -310,7 +322,7 @@ func (c *Channel) event(ctx context.Context, s Session, e protocol.Event) error 
 			return fmt.Errorf("%w: event seq", protocol.ErrChannelField)
 		}
 		if v == protocol.Apply {
-			if err := c.applyEvent(ctx, s.RunnerID, e); err != nil {
+			if err := c.applyEvent(ctx, s.RunnerID, e, &sig); err != nil {
 				return err
 			}
 		}
@@ -334,13 +346,14 @@ func (c *Channel) event(ctx context.Context, s Session, e protocol.Event) error 
 		c.Logger.Warn("runner event not recorded; the runner will send it again", "runner", s.RunnerID, "seq", e.Seq, "err", err)
 		return nil
 	}
+	c.committed(sig)
 	if ack > 0 {
 		return s.Send(ctx, protocol.TypeEventAck, protocol.Ack{Epoch: e.Epoch, Seq: ack})
 	}
 	return nil
 }
 
-func (c *Channel) applyEvent(ctx context.Context, runnerID string, e protocol.Event) error {
+func (c *Channel) applyEvent(ctx context.Context, runnerID string, e protocol.Event, sig *storageSignal) error {
 	seen, err := c.Repo.EventSeen(ctx, runnerID, e.Step, e.Fence, e.AttemptSeq)
 	if err != nil || seen {
 		return err // seen: the same attempt event under another spool epoch
@@ -357,8 +370,15 @@ func (c *Channel) applyEvent(ctx context.Context, runnerID string, e protocol.Ev
 		if v != domain.OutputStored {
 			rec.Body, rec.Reason = nil, v.Reason()
 		}
-		if v == domain.OutputOverTotal {
-			c.warnFull(runnerID, e.Step, rec.ReceivedAt)
+		switch v {
+		case domain.OutputOverTotal:
+			if err := c.storageFull(ctx, runnerID, e.Step, rec.ReceivedAt, sig); err != nil {
+				return err
+			}
+		case domain.OutputStored:
+			if err := c.storageFreed(ctx, rec.ReceivedAt, sig); err != nil {
+				return err
+			}
 		}
 	}
 	switch {
@@ -382,18 +402,84 @@ func (c *Channel) applyEvent(ctx context.Context, runnerID string, e protocol.Ev
 	return c.Repo.RecordEvent(ctx, rec)
 }
 
-// warnFull logs that output is being dropped because the output storage is full, at most once a minute.
-func (c *Channel) warnFull(runnerID, step string, now time.Time) {
+// storageSignal is what an event's transaction observed about the output storage; it is applied to the channel's
+// state only after the commit, so a rolled-back alert is raised again when the runner re-sends the event.
+type storageSignal struct {
+	at        time.Time
+	runnerID  string
+	step      string
+	dropped   bool // output was dropped for the total limit
+	alerted   bool // ... and alerts.runner_output_full was enqueued
+	recovered bool // alerts.runner_output_recovered was enqueued
+}
+
+// storageFull alerts that output is being dropped because the output storage is full, at most once a minute.
+func (c *Channel) storageFull(ctx context.Context, runnerID, step string, now time.Time, sig *storageSignal) error {
 	c.mu.Lock()
 	quiet := !c.fullWarn.IsZero() && now.Sub(c.fullWarn) < time.Minute
-	if !quiet {
-		c.fullWarn = now
+	c.mu.Unlock()
+	sig.at, sig.runnerID, sig.step, sig.dropped = now, runnerID, step, true
+	if quiet {
+		return nil
+	}
+	if c.Outbox != nil {
+		if err := c.alert(ctx, TopicRunnerOutputFull, "runner-output/full/"+strconv.FormatInt(now.UnixMilli(), 10),
+			map[string]any{"limitBytes": c.MaxStoredOutput, "runnerId": runnerID, "stepId": step}); err != nil {
+			return err
+		}
+	}
+	sig.alerted = true
+	return nil
+}
+
+// storageFreed resolves the "output storage full" alert once output is stored again and nothing was dropped for a
+// minute: while the storage is nearly full, a small chunk may fit between dropped big ones.
+func (c *Channel) storageFreed(ctx context.Context, now time.Time, sig *storageSignal) error {
+	if c.Outbox == nil {
+		return nil
+	}
+	c.mu.Lock()
+	pending := !c.spaceKnown && (c.lastDrop.IsZero() || now.Sub(c.lastDrop) >= time.Minute)
+	c.mu.Unlock()
+	if !pending {
+		return nil
+	}
+	if err := c.alert(ctx, TopicRunnerOutputRecovered, "runner-output/recovered/"+strconv.FormatInt(now.UnixMilli(), 10),
+		map[string]any{}); err != nil {
+		return err
+	}
+	sig.recovered = true
+	return nil
+}
+
+// committed applies what a committed event's transaction observed about the output storage.
+func (c *Channel) committed(sig storageSignal) {
+	c.mu.Lock()
+	if sig.dropped {
+		c.lastDrop, c.spaceKnown = sig.at, false
+	}
+	if sig.alerted {
+		c.fullWarn = sig.at
+	}
+	if sig.recovered {
+		c.spaceKnown = true
 	}
 	c.mu.Unlock()
-	if !quiet {
+	if sig.alerted {
 		c.Logger.Warn("runner output storage full: output of running attempts is dropped until retention frees space",
-			"runner", runnerID, "step", step, "limit_bytes", c.MaxStoredOutput)
+			"runner", sig.runnerID, "step", sig.step, "limit_bytes", c.MaxStoredOutput)
 	}
+}
+
+func (c *Channel) alert(ctx context.Context, topic, key string, payload map[string]any) error {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if err := c.Outbox.Enqueue(ctx, messaging.Message{Adapter: AdapterAlerts, Topic: topic, Key: key, Payload: b}); err != nil {
+		return fmt.Errorf("enqueueing %s: %w", topic, err)
+	}
+	return nil
 }
 
 func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Event) error {

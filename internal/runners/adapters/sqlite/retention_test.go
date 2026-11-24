@@ -164,3 +164,46 @@ func TestRetentionPages(t *testing.T) {
 		t.Fatalf("attempts before their last output listed: %+v", page)
 	}
 }
+
+// KIN-59: output dropped for the total limit is listed per attempt, newest first, within the window; other drops
+// (the per-attempt cap, rejected events) and older ones are not.
+func TestOutputDropsPerAttempt(t *testing.T) {
+	t.Parallel()
+	_, r := withRunner(t)
+	seq := int64(0)
+	rec := func(step, reason string, at time.Time) {
+		t.Helper()
+		seq++
+		if err := r.RecordEvent(t.Context(), domain.AttemptEvent{RunnerID: "r1", Step: step, Fence: 2, AttemptSeq: seq,
+			Kind: protocol.EventOutput, Outcome: domain.OutcomeApplied, Reason: reason, RunnerAt: at, ReceivedAt: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	since := t0.Add(-domain.OutputDropsWindow)
+	rec("a", "output_storage_limit", t0.Add(-time.Hour))
+	rec("a", "output_storage_limit", t0.Add(-30*time.Minute))
+	rec("b", "output_storage_limit", t0.Add(-10*time.Minute))
+	rec("c", "output_storage_limit", since.Add(-time.Second)) // too old
+	rec("d", "output_limit", t0)                              // the attempt's own cap
+	rec("e", "", t0)
+	drops, total, err := r.OutputDrops(t.Context(), since, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []domain.OutputDrop{
+		{RunnerID: "r1", Step: "b", Fence: 2, Events: 1, LastAt: t0.Add(-10 * time.Minute)},
+		{RunnerID: "r1", Step: "a", Fence: 2, Events: 2, LastAt: t0.Add(-30 * time.Minute)},
+	}
+	if total != 3 || len(drops) != len(want) {
+		t.Fatalf("total %d, drops %+v", total, drops)
+	}
+	for i := range want {
+		if drops[i].RunnerID != want[i].RunnerID || drops[i].Step != want[i].Step || drops[i].Fence != want[i].Fence ||
+			drops[i].Events != want[i].Events || !drops[i].LastAt.Equal(want[i].LastAt) {
+			t.Errorf("drop %d = %+v, want %+v", i, drops[i], want[i])
+		}
+	}
+	if drops, total, err := r.OutputDrops(t.Context(), since, 1); err != nil || total != 3 || len(drops) != 1 || drops[0].Step != "b" {
+		t.Errorf("limited: %+v %d %v", drops, total, err)
+	}
+}

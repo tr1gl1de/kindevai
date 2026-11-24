@@ -81,3 +81,14 @@ func TestRenderTaskFinished(t *testing.T) {
 		t.Fatalf("buttons = %q / %q", en, ru)
 	}
 }
+
+// KIN-59: the runner output storage alert in both languages.
+func TestRenderRunnerOutputFull(t *testing.T) {
+	t.Parallel()
+	a, _ := domain.NewAlert("a1", domain.Occurrence{Kind: domain.KindRunnerOutputFull, Severity: domain.SeverityWarning,
+		DedupKey: "runner-output/full", Subject: "control-plane", Details: map[string]string{"limitBytes": "1073741824", "limitMiB": "1024"}}, t0)
+	en, ru := domain.RenderAlert(domain.LangEN, a), domain.RenderAlert(domain.LangRU, a)
+	if !strings.Contains(en, "Runner output storage is full (1024 MiB)") || !strings.Contains(ru, "Хранилище вывода раннеров заполнено (1024 МиБ)") {
+		t.Fatalf("en = %q, ru = %q", en, ru)
+	}
+}

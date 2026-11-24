@@ -6,6 +6,7 @@ import { errorMessage } from "../../ui/errors";
 import { formatBytes, formatDateTime } from "../../ui/format";
 import { useStorageOverview } from "./api";
 import { AvailabilityBadge } from "./AvailabilityBadge";
+import { OutputStorageSummary } from "./OutputStorage";
 
 /** Dashboard card (KIN-20, KB KIN-A-26): disk space of the Control Plane and every runner with a fill-up forecast. */
 export function StorageOverviewCard() {
@@ -19,15 +20,18 @@ export function StorageOverviewCard() {
         <ErrorState message={errorMessage(t, q.error)} onRetry={() => void q.refetch()} />
       ) : q.isPending ? (
         <p aria-busy="true">{t("app.loading")}</p>
-      ) : !machines.some((m) => m.volumes.length > 0) ? (
-        <p>{t("storage.empty")}</p>
       ) : (
         <>
-          <ul className="machine-list">
-            {machines.map((m) => (
-              <MachineRow key={m.id} m={m} />
-            ))}
-          </ul>
+          {!machines.some((m) => m.volumes.length > 0) ? (
+            <p>{t("storage.empty")}</p>
+          ) : (
+            <ul className="machine-list">
+              {machines.map((m) => (
+                <MachineRow key={m.id} m={m} />
+              ))}
+            </ul>
+          )}
+          {q.data.runnerOutput && <OutputStorageSummary o={q.data.runnerOutput} />}
           <p>
             <Link to="/infrastructure/storage">{t("storage.openDetails")}</Link>
           </p>

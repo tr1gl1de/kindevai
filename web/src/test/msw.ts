@@ -20,6 +20,7 @@ export const handlers = [
     json({ pollIntervalSeconds: 60, webhookSecret: { set: false, updatedAt: null }, webhookPath: "/api/webhooks/youtrack",
       webhookHeader: "X-Kindevai-Webhook-Secret", links: [], health: { state: "ok", consecutiveFailures: 0, lastFailureAt: null } }),
   ),
+  http.get("/api/runners", () => json([])),
   http.get("/api/telegram/link", () => json({ configured: false, identity: null, request: null })),
   http.get("/api/storage/overview", () =>
     json({ generatedAt: "2026-11-24T12:00:00Z", machines: [],

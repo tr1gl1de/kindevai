@@ -36,6 +36,18 @@ const disk: Alert = {
 };
 
 describe("alert center", () => {
+  // KIN-59: the Control Plane's runner output storage is full.
+  it("describes the runner output storage alert in English and Russian", async () => {
+    const full: Alert = { ...runner, id: "A9", kind: "runner_output_full", subject: "control-plane",
+      details: { limitBytes: "1073741824", limitMiB: "1024" } };
+    server.use(http.get("/api/auth/me", () => json(owner)), http.get("/api/alerts", () => json([full])));
+    const { unmount } = await renderApp("/alerts");
+    expect(await screen.findByText("Runner output storage is full: new output is dropped")).toBeInTheDocument();
+    unmount();
+    await renderApp("/alerts", "ru");
+    expect(await screen.findByText("Хранилище вывода раннеров заполнено: новый вывод отбрасывается")).toBeInTheDocument();
+  });
+
   it("lists active alerts with severity and acknowledges one", async () => {
     let action = "";
     server.use(

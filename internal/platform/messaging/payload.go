@@ -37,7 +37,8 @@ func decodePayload(p []byte) (any, error) {
 	return v, nil
 }
 
-// findSecret returns the path of the first secret-looking field in v, or "".
+// findSecret returns the path of the first secret-looking field or value in v, or "". Field names are judged by
+// redact.SecretKey, string values by redact.Credentials (unambiguous credential shapes only, so ids pass).
 func findSecret(v any, path string) string {
 	switch t := v.(type) {
 	case map[string]any:
@@ -55,12 +56,17 @@ func findSecret(v any, path string) string {
 				return p
 			}
 		}
+	case string:
+		if redact.Credentials(t) != t {
+			return path
+		}
 	}
 	return ""
 }
 
-// redactSecrets replaces the values of secret-looking fields in place.
-func redactSecrets(v any) {
+// redactSecrets returns v with the values of secret-looking fields and the credentials inside string values masked;
+// maps and slices are changed in place.
+func redactSecrets(v any) any {
 	switch t := v.(type) {
 	case map[string]any:
 		for k, child := range t {
@@ -68,13 +74,16 @@ func redactSecrets(v any) {
 				t[k] = redact.Placeholder
 				continue
 			}
-			redactSecrets(child)
+			t[k] = redactSecrets(child)
 		}
 	case []any:
-		for _, child := range t {
-			redactSecrets(child)
+		for i, child := range t {
+			t[i] = redactSecrets(child)
 		}
+	case string:
+		return redact.Credentials(t)
 	}
+	return v
 }
 
 // outboxPayload validates an outgoing payload: secrets in it are a programming error, since they would be
@@ -85,8 +94,8 @@ func outboxPayload(p []byte) ([]byte, error) {
 		return nil, err
 	}
 	if f := findSecret(v, "$"); f != "" {
-		// The field name, never its value, goes into the error.
-		return nil, fmt.Errorf("%w: payload field %s looks like a secret", ErrInvalidMessage, f)
+		// The field path, never its value, goes into the error.
+		return nil, fmt.Errorf("%w: payload field %s looks like a secret or holds one", ErrInvalidMessage, f)
 	}
 	return p, nil
 }
@@ -101,8 +110,7 @@ func inboxPayload(p []byte) ([]byte, error) {
 	if findSecret(v, "$") == "" {
 		return p, nil
 	}
-	redactSecrets(v)
-	out, err := json.Marshal(v)
+	out, err := json.Marshal(redactSecrets(v))
 	if err != nil {
 		return nil, fmt.Errorf("re-encoding redacted payload: %w", err)
 	}

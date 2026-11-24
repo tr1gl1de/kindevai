@@ -216,9 +216,9 @@ func (q *queue) finish(ctx context.Context, r record, cause error) (dead bool, e
 		res, err = conn.ExecContext(ctx, q.sql.done, ms(now), r.id)
 	case isPermanent(cause) || r.attempts >= q.cfg.MaxAttempts:
 		dead = true
-		res, err = conn.ExecContext(ctx, q.sql.dead, truncate(cause.Error()), ms(now), r.id)
+		res, err = conn.ExecContext(ctx, q.sql.dead, errorText(cause), ms(now), r.id)
 	default:
-		res, err = conn.ExecContext(ctx, q.sql.reschedule, ms(now.Add(q.cfg.Backoff(r.attempts))), truncate(cause.Error()), ms(now), r.id)
+		res, err = conn.ExecContext(ctx, q.sql.reschedule, ms(now.Add(q.cfg.Backoff(r.attempts))), errorText(cause), ms(now), r.id)
 	}
 	if err == nil {
 		var n int64

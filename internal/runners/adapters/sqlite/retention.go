@@ -68,9 +68,15 @@ func (r *Repository) DeleteAttemptOutput(ctx context.Context, step string, fence
 			} else if err != nil {
 				return err
 			}
-		} else if _, err := conn.ExecContext(ctx, `UPDATE runner_attempt_output SET bytes = max(bytes - ?, 0)
-				WHERE step_id = ? AND fence = ?`, freed, step, fence); err != nil {
-			return err
+		} else {
+			res, err := conn.ExecContext(ctx, `UPDATE runner_attempt_output SET bytes = max(bytes - ?, 0)
+				WHERE step_id = ? AND fence = ?`, freed, step, fence)
+			if err != nil {
+				return err
+			}
+			if k, _ := res.RowsAffected(); k == 0 {
+				freed = 0 // no counter: nothing of it was counted in the total
+			}
 		}
 		_, err = conn.ExecContext(ctx, `UPDATE runner_output_usage SET bytes = max(bytes - ?, 0) WHERE id = 1`, freed)
 		return err

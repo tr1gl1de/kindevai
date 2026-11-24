@@ -21,7 +21,13 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
 	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
 	runnersapp "github.com/tr1gl1de/kindevai/internal/runners/app"
+	workflownotify "github.com/tr1gl1de/kindevai/internal/workflow/adapters/notify"
+	workflow "github.com/tr1gl1de/kindevai/internal/workflow/domain"
 )
+
+func workflowTask(id, project, title, author, state string) workflow.Task {
+	return workflow.Task{ID: id, ProjectID: project, Title: title, CreatedBy: author, State: workflow.TaskState(state)}
+}
 
 // fakeBotAPI records sendMessage calls; no real Telegram call is made.
 type fakeBotAPI struct {
@@ -133,5 +139,95 @@ func TestAlertCenterDrainsDeadEventsIntoAlertsAndTelegram(t *testing.T) {
 		if strings.Contains(b, "AAH-test-token") {
 			t.Fatal("token in a message body")
 		}
+	}
+}
+
+// KIN-62 AC: the workflow enqueues telegram.task_finished in the task's transaction; the Alert Center turns it
+// into a Telegram message to the Owner, the project's admin and the task's author (a plain member), each once,
+// with a Mini App link to the task; a member who is not the author is not told.
+func TestTaskFinishedReachesTheAudienceInTelegram(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	inst, err := bootstrap.Run(ctx, bootstrap.Options{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = inst.Close() })
+	for _, q := range []string{
+		"INSERT INTO users(id, login, password_hash, platform_role, created_at) VALUES ('u1', 'owner', 'h', 'owner', '2026-11-25T10:00:00Z')",
+		"INSERT INTO users(id, login, password_hash, platform_role, created_at) VALUES ('u2', 'admin', 'h', 'user', '2026-11-25T10:00:00Z')",
+		"INSERT INTO users(id, login, password_hash, platform_role, created_at) VALUES ('u3', 'author', 'h', 'user', '2026-11-25T10:00:00Z')",
+		"INSERT INTO users(id, login, password_hash, platform_role, created_at) VALUES ('u4', 'other', 'h', 'user', '2026-11-25T10:00:00Z')",
+		"INSERT INTO projects(id, slug, name, created_at) VALUES ('p1', 'alpha', 'Alpha', '2026-11-25T10:00:00Z')",
+		"INSERT INTO project_memberships(project_id, user_id, role, created_at) VALUES ('p1', 'u2', 'project_admin', '2026-11-25T10:00:00Z'), ('p1', 'u3', 'member', '2026-11-25T10:00:00Z'), ('p1', 'u4', 'member', '2026-11-25T10:00:00Z')",
+	} {
+		if _, err := inst.DB.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tg := identitydb.NewTelegramRepository(inst.DB)
+	for i, u := range []string{"u1", "u2", "u3", "u4"} {
+		if err := tg.CreateIdentity(ctx, identity.TelegramIdentity{UserID: u, TelegramID: int64(100 + i), LinkedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tg.SaveSettings(ctx, identity.BotSettings{BotUsername: "kin_bot", AppShortName: "app"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	vault := botTokenVault{&integrationsapp.Vault{Store: integrationsdb.New(inst.DB), Cipher: inst.Box, Now: time.Now}}
+	if err := vault.SetBotToken(ctx, "123456:AAH-test-token", "u1"); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.DiscardHandler)
+	msg := newMessaging(inst, logger)
+	api := &fakeBotAPI{}
+	srv := httptest.NewServer(api)
+	t.Cleanup(srv.Close)
+	newAlerts(inst, msg, newAudit(inst, logger), identitydb.NewUserRepository(inst.DB), srv.URL, logger)
+
+	task := workflowTask("T1", "p1", "Fix login", "u3", "FAILED")
+	n := workflownotify.Notifier{Outbox: msg.Outbox}
+	for range 2 { // a repeated state change event is one message per user
+		if err := n.TaskFinished(ctx, task); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 10 {
+		if n, err := msg.Outbox.Poll(ctx); err != nil {
+			t.Fatal(err)
+		} else if n == 0 {
+			break
+		}
+	}
+	if dead, _ := msg.Outbox.Dead(ctx, 10); len(dead) != 0 {
+		t.Fatalf("dead: %+v", dead)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	all := strings.Join(api.bodies, "\n")
+	if len(api.bodies) != 3 || strings.Contains(all, `"chat_id":103`) {
+		t.Fatalf("telegram calls = %d: %s", len(api.bodies), all)
+	}
+	for _, want := range []string{`"chat_id":100`, `"chat_id":101`, `"chat_id":102`, "startapp=task_T1", "Fix login", "Alpha"} {
+		if !strings.Contains(all, want) {
+			t.Fatalf("missing %q in %s", want, all)
+		}
+	}
+}
+
+// KIN-62: the served workflow announces finished tasks through the outbox.
+func TestServedWorkflowHasTheTaskNotifier(t *testing.T) {
+	t.Parallel()
+	inst, err := bootstrap.Run(t.Context(), bootstrap.Options{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = inst.Close() })
+	logger := slog.New(slog.DiscardHandler)
+	msg := newMessaging(inst, logger)
+	audit := newAudit(inst, logger)
+	apv := newApprovals(inst, msg, audit, newIntegrations(inst, msg, audit, "", logger), logger)
+	if _, ok := apv.Workflow.Notifier.(workflownotify.Notifier); !ok {
+		t.Fatalf("notifier = %T", apv.Workflow.Notifier)
 	}
 }

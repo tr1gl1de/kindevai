@@ -20,8 +20,15 @@ type AttemptLogRepo interface {
 // checked by the caller (the workflow's task API).
 type AttemptLog struct{ Repo AttemptLogRepo }
 
-// Events returns at most min(limit, MaxAttemptLogPage) events of the attempt after the cursor.
+// Events returns at most min(limit, MaxAttemptLogPage) events of the attempt after the cursor. Output and failure
+// reasons are redacted again (KIN-77): ingest already masked them, this covers events stored before that.
 func (l AttemptLog) Events(ctx context.Context, step string, fence, after int64, limit int) ([]domain.AttemptEvent, error) {
 	limit = min(max(limit, 1), MaxAttemptLogPage)
-	return l.Repo.AttemptEvents(ctx, step, fence, max(after, 0), limit)
+	evs, err := l.Repo.AttemptEvents(ctx, step, fence, max(after, 0), limit)
+	for i := range evs {
+		if evs[i].Body != nil {
+			evs[i].Body = redactBody(evs[i].Kind, evs[i].Body)
+		}
+	}
+	return evs, err
 }

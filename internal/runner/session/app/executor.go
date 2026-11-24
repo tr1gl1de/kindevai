@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tr1gl1de/kindevai/internal/platform/redact"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/domain"
 )
@@ -110,6 +111,9 @@ type Executor struct {
 	Workspaces Workspaces
 	Grace      time.Duration // DefaultGrace when zero
 	Logger     *slog.Logger
+	// KnownSecrets returns secret values the runner holds besides the assignment's git token (proxy passwords,
+	// KIN-77); they are masked in the attempt's output by exact match.
+	KnownSecrets func() []string
 
 	mu     sync.Mutex
 	runs   map[key]*run
@@ -127,6 +131,7 @@ type run struct {
 	rec       domain.Record
 	proc      Process
 	stream    Stream
+	output    []*redact.Stream // stdout, stderr: flushed before the terminal event
 	cancelled string
 	done      chan struct{}
 	// result is the terminal event kind once the process ended but reporting it failed; the run stays listed
@@ -291,8 +296,9 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 		}
 		workdir = wd
 	}
+	stdout, stderr := x.redacted(r, a, "stdout"), x.redacted(r, a, "stderr")
 	proc, err := x.Launcher.Launch(ctx, LaunchSpec{Dir: dir, Workdir: workdir, Scenario: a.ScenarioOrDefault(),
-		Attempt: a.Fence, Stdout: x.guard(r.stream.Output("stdout")), Stderr: x.guard(r.stream.Output("stderr"))})
+		Attempt: a.Fence, Stdout: stdout, Stderr: stderr})
 	if err != nil {
 		x.logger().Error("launching the attempt", "step", a.Step, "fence", a.Fence, "err", err)
 		x.releaseWorkspace(r)
@@ -417,6 +423,23 @@ func (x *Executor) reserver(r *run) func(int64) error {
 	}
 }
 
+// outputIdle is how long a partial output line (a prompt, a progress line) is held back for redaction before it
+// is sent anyway.
+const outputIdle = time.Second
+
+// redacted is the attempt's output stream with secrets masked before they are spooled (KIN-77): the git token and
+// the runner's other known secrets by exact value, secret shapes by redact.Lines; a secret split across the
+// process's writes is masked too (the partial last line is held back).
+func (x *Executor) redacted(r *run, a domain.Assignment, name string) io.Writer {
+	known := []string{a.Token.Reveal()}
+	if x.KnownSecrets != nil {
+		known = append(known, x.KnownSecrets()...)
+	}
+	s := redact.NewStream(x.guard(r.stream.Output(name)), outputIdle, known...)
+	r.output = append(r.output, s)
+	return s
+}
+
 // guard drops output once the executor is shut down (a restarting runner's old pipes keep draining, so the process
 // never blocks on a full pipe).
 func (x *Executor) guard(w io.Writer) io.Writer { return guardedWriter{x, w} }
@@ -441,6 +464,11 @@ const reportRetry = time.Second
 func (x *Executor) watch(r *run) {
 	x.wg.Go(func() {
 		exit := r.proc.Wait()
+		for _, s := range r.output { // the pipes are drained: send the held-back partial lines before the end
+			if err := s.Flush(); err != nil {
+				x.logger().Warn("sending the attempt's last output", "step", r.rec.Step, "err", err)
+			}
+		}
 		if !x.closed.Load() {
 			x.finishWorkspace(r) // before done: a newer attempt of the step waits for the worktree's release
 		}

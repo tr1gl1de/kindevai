@@ -370,6 +370,39 @@ func TestOutputIsChunkedAndOrdered(t *testing.T) {
 	}
 }
 
+// KIN-77: chunks end at a line (else a word) boundary when one fits, so the Control Plane redacts whole lines and
+// a secret is never cut in two by the chunking.
+func TestOutputChunksEndAtLineBoundaries(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, data, sep string }{
+		{"lines", strings.Repeat("token: ghp_Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8 line\n", 3*protocol.MaxOutputChunk/40), "\n"},
+		{"one long line", strings.Repeat("word ", 3*protocol.MaxOutputChunk/5), " "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sp := &memSpool{epoch: "sp"}
+			ch := &Channel{Spool: sp, Cursor: &memCursor{}, Commands: (&applied{}).fn}
+			w := ch.Attempt("s", 2).Output("stdout")
+			if n, err := w.Write([]byte(tc.data)); err != nil || n != len(tc.data) {
+				t.Fatalf("Write = %d, %v", n, err)
+			}
+			evs, _ := sp.Read(0, 100, 1<<30)
+			var joined strings.Builder
+			for i, e := range evs {
+				var o protocol.Output
+				_ = json.Unmarshal(e.Body, &o)
+				if len(o.Data) > protocol.MaxOutputChunk || !strings.HasSuffix(o.Data, tc.sep) {
+					t.Fatalf("chunk %d of %d: %d bytes ending %q", i, len(evs), len(o.Data), o.Data[max(0, len(o.Data)-10):])
+				}
+				joined.WriteString(o.Data)
+			}
+			if joined.String() != tc.data || len(evs) < 3 {
+				t.Fatalf("reassembled %d bytes in %d chunks", joined.Len(), len(evs))
+			}
+		})
+	}
+}
+
 // Overflow policy: when the spool is full output is dropped and counted; the loss is reported by
 // execution.output.dropped before the attempt's next event, and the process's writes never fail.
 func TestFullSpoolDropsOutputAndReportsIt(t *testing.T) {

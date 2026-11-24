@@ -174,3 +174,23 @@ func (a *Agent) Serve(ctx context.Context, s Sender) error {
 
 // Config returns the applied configuration (for the local `ai-runner test-network`).
 func (a *Agent) Config() (protocol.ConfigUpdate, bool, error) { return a.Store.Load() }
+
+// Secrets returns the proxy passwords of the applied configuration (KIN-77: the session context masks them in
+// attempt output). An unreadable configuration has none to mask (and no proxy can authenticate with it either).
+func (a *Agent) Secrets() []string {
+	cu, ok, err := a.Store.Load()
+	if err != nil || !ok {
+		return nil
+	}
+	var out []string
+	add := func(p *protocol.NetworkProxy) {
+		if p != nil && p.Password != "" {
+			out = append(out, p.Password)
+		}
+	}
+	add(cu.Network.Default.Proxy)
+	for _, sc := range cu.Network.Scoped {
+		add(sc.Profile.Proxy)
+	}
+	return out
+}

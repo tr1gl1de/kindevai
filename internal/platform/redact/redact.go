@@ -4,10 +4,12 @@
 package redact
 
 import (
+	"bytes"
 	"math"
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // Placeholder replaces a redacted value.
@@ -16,19 +18,40 @@ const Placeholder = "[redacted]"
 // SecretKey reports a field name that names a credential (password, token, secret, API/private key,
 // authorization or cookie header), ignoring case and separators.
 func SecretKey(key string) bool {
-	k := strings.NewReplacer("_", "", "-", "", ".", "", " ", "").Replace(strings.ToLower(key))
-	switch k {
+	var buf [64]byte
+	k := normalizeKey(buf[:0], key)
+	switch string(k) { // a conversion in a switch does not allocate
 	case "authorization", "proxyauthorization", "cookie", "setcookie", "passwd", "credentials", "credential",
 		"jwt", "bearer", "dsn", "session", "sessionid", "otp", "pin":
 		return true
 	}
 	for _, s := range []string{"password", "passphrase", "secret", "token", "apikey", "privatekey"} {
-		if strings.HasSuffix(k, s) {
+		if bytes.HasSuffix(k, []byte(s)) {
 			return true
 		}
 	}
 	return false
 }
+
+// normalizeKey appends key to dst in lower case without the separators "_", "-", "." and " ". ASCII keys are
+// handled byte by byte without allocating, because scrub calls SecretKey for every pair in a large text.
+func normalizeKey(dst []byte, key string) []byte {
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		switch {
+		case c >= utf8.RuneSelf:
+			return append(dst[:0], keySeparators.Replace(strings.ToLower(key))...)
+		case c == '_' || c == '-' || c == '.' || c == ' ':
+		case c >= 'A' && c <= 'Z':
+			dst = append(dst, c+'a'-'A')
+		default:
+			dst = append(dst, c)
+		}
+	}
+	return dst
+}
+
+var keySeparators = strings.NewReplacer("_", "", "-", "", ".", "", " ", "")
 
 var (
 	jwtRe      = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*`)

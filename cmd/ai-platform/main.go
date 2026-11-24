@@ -20,6 +20,7 @@ import (
 
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
 	"github.com/tr1gl1de/kindevai/internal/platform/httpx"
+	runnersapp "github.com/tr1gl1de/kindevai/internal/runners/app"
 	"github.com/tr1gl1de/kindevai/internal/server"
 	"github.com/tr1gl1de/kindevai/web"
 )
@@ -78,12 +79,19 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	keyFile := fset.String("key-file", "", "encryption key file (default <data-dir>/secrets/master.key)")
 	proxies := fset.String("trusted-proxies", os.Getenv("KINDEV_TRUSTED_PROXIES"),
 		"comma-separated CIDRs of reverse proxies whose X-Forwarded-For is trusted (e.g. the Caddy network)")
+	plainPeers := fset.String("runner-plain-ws-peers", os.Getenv("KINDEV_RUNNER_PLAIN_WS_PEERS"),
+		"comma-separated CIDRs treated as this host for plain ws:// runner connections besides loopback "+
+			"(e.g. the Docker network when the port is published on 127.0.0.1 only); remote runners need wss://")
 	if err := fset.Parse(args); err != nil {
 		return err
 	}
 	trusted, err := httpx.ParseTrustedProxies(*proxies)
 	if err != nil {
 		return err
+	}
+	localPeers, err := httpx.ParseTrustedProxies(*plainPeers)
+	if err != nil {
+		return fmt.Errorf("runner-plain-ws-peers: %w", err)
 	}
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 
@@ -108,8 +116,10 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 		return err
 	}
 	msg := newMessaging(inst, logger)
-	modules := append(identity.Modules, newProjects(inst, identity, audit, logger)...)
+	hub := runnersapp.NewHub()
+	modules := append(identity.Modules, newProjects(inst, identity, audit, hub, logger)...)
 	modules = append(modules, msg.HTTP, audit.HTTP, newIntegrations(inst, msg, audit, logger).HTTP)
+	modules = append(modules, newRunnerGateway(inst, hub, localPeers, logger))
 	defer msg.start(ctx)() // deferred after inst.Close, so the dispatchers stop before the database closes
 
 	assets, built := web.Assets()
@@ -128,6 +138,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 		MaxHeaderBytes:    64 << 10,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
+	srv.RegisterOnShutdown(hub.Shutdown) // hijacked runner WebSockets are not closed by srv.Shutdown itself
 	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", *addr)
 	if err != nil {
 		return fmt.Errorf("listening on %s: %w", *addr, err)

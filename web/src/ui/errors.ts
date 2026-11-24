@@ -70,6 +70,8 @@ const validationKeys = new Set([
   "repo_name_format",
   "branch_format",
   "branch_protected",
+  "base_url_https",
+  "token_required_for_url",
 ]);
 
 /** Message for a server validation code, or undefined if unknown. */

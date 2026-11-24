@@ -53,7 +53,7 @@ function CheckResult({ check }: { check: ConnectionCheck }) {
       break;
     case "failed": {
       const code = check.code ?? "unknown";
-      const known = ["unauthorized", "not_found", "unreachable", "redirected", "unexpected_status", "bad_response", "bad_url"];
+      const known = ["unauthorized", "not_found", "unreachable", "redirected", "unexpected_status", "bad_response", "bad_url", "timeout", "not_configured"];
       text = t(`integrations.check_${known.includes(code) ? code : "unknown"}` as "integrations.check_unknown");
       if (check.detail) text += ` (${check.detail})`;
       break;

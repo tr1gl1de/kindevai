@@ -174,9 +174,13 @@ func TestYouTrackConnectionIsWriteOnly(t *testing.T) {
 	if strings.Contains(w.Body.String(), "s3cr3t") {
 		t.Fatal("PUT response leaks the token")
 	}
-	// Token omitted: kept.
-	if w := e.do(t, "owner", "PUT", "/api/integrations/youtrack", YouTrackRequest{BaseURL: "https://b.youtrack.cloud"}); w.Code != http.StatusOK {
-		t.Fatalf("url-only: %d %s", w.Code, w.Body)
+	// Token omitted: kept for the same URL, required for a new one.
+	if w := e.do(t, "owner", "PUT", "/api/integrations/youtrack", YouTrackRequest{BaseURL: "https://a.youtrack.cloud"}); w.Code != http.StatusOK {
+		t.Fatalf("save without token: %d %s", w.Code, w.Body)
+	}
+	if w := e.do(t, "owner", "PUT", "/api/integrations/youtrack", YouTrackRequest{BaseURL: "https://b.youtrack.cloud"}); w.Code != http.StatusUnprocessableEntity ||
+		!strings.Contains(w.Body.String(), "token_required_for_url") {
+		t.Fatalf("new url without token: %d %s", w.Code, w.Body)
 	}
 	if s, err := e.svc.YouTrackSettings(t.Context()); err != nil || s.Token.Reveal() != token {
 		t.Fatalf("token lost: %v", err)

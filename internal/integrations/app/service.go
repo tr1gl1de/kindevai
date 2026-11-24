@@ -170,6 +170,7 @@ func (s *Service) youtrackView(ctx context.Context) (*YouTrackView, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading youtrack token metadata: %w", err)
 	}
+	c.Check = c.CheckAt(s.Now())
 	return &YouTrackView{Connection: c, Token: meta}, nil
 }
 
@@ -210,6 +211,10 @@ func (s *Service) ConfigureYouTrack(ctx context.Context, actor auth.Principal, b
 		case err != nil:
 			return fmt.Errorf("loading youtrack connection: %w", err)
 		default:
+			// The stored token is never sent to another host: a new URL needs the token again.
+			if c.BaseURL != u && tok.IsZero() {
+				return &domain.ValidationError{Field: "token", Code: "token_required_for_url"}
+			}
 			if c.BaseURL != u || !tok.IsZero() {
 				c.ResetCheck()
 			}
@@ -276,6 +281,10 @@ func (s *Service) CheckYouTrack(ctx context.Context, actor auth.Principal) (YouT
 		if err != nil {
 			return err
 		}
+		if c.CheckRunning(s.Now()) { // a test is already on its way; do not queue another
+			view, err = s.youtrackView(ctx)
+			return err
+		}
 		c.StartCheck(id, s.Now())
 		if err := s.Store.SaveYouTrack(ctx, c); err != nil {
 			return fmt.Errorf("saving youtrack connection: %w", err)
@@ -313,14 +322,18 @@ func (s *Service) HandleYouTrackCheck(ctx context.Context, d messaging.Delivery)
 	if c.Check.Status != domain.CheckPending || c.Check.ID != p.CheckID {
 		return nil
 	}
+	var res domain.CheckResult
 	settings, err := s.YouTrackSettings(ctx)
-	if errors.Is(err, domain.ErrNotConfigured) || errors.Is(err, domain.ErrSecretNotSet) {
-		return nil
-	}
-	if err != nil {
+	switch {
+	case errors.Is(err, domain.ErrNotConfigured):
+		return nil // disconnected meanwhile: nothing left to report on
+	case errors.Is(err, domain.ErrSecretNotSet):
+		res = domain.CheckResult{Code: "not_configured"}
+	case err != nil:
 		return err
+	default:
+		res = s.Probe.Probe(ctx, settings.BaseURL, settings.Token)
 	}
-	res := s.Probe.Probe(ctx, settings.BaseURL, settings.Token)
 	// Safety net: the probe must not put credentials into the detail; mask anything that looks like one.
 	res.Detail = redact.Text(res.Detail)
 	res.Code = redact.Text(res.Code)

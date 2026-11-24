@@ -231,13 +231,18 @@ type probe struct {
 	mu     sync.Mutex
 	calls  []string // base URL + token seen
 	result domain.CheckResult
+	during func() // runs while the probe is "on the wire"
 }
 
 func (p *probe) Probe(_ context.Context, baseURL string, token domain.Secret) domain.CheckResult {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.calls = append(p.calls, baseURL+" "+token.Reveal())
-	return p.result
+	during, res := p.during, p.result
+	p.mu.Unlock()
+	if during != nil {
+		during()
+	}
+	return res
 }
 
 var (

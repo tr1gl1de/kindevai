@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -130,6 +131,10 @@ func NewBaseURL(s string) (string, error) {
 	if u.User != nil {
 		return "", invalid("baseUrl", "base_url_credentials")
 	}
+	// The token travels in a header: plain HTTP only to this machine (a local YouTrack or a test double).
+	if u.Scheme == "http" && !loopback(u.Hostname()) {
+		return "", invalid("baseUrl", "base_url_https")
+	}
 	if u.Host == "" || u.Hostname() == "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(s, "#") {
 		return "", invalid("baseUrl", "base_url_format")
 	}
@@ -137,6 +142,14 @@ func NewBaseURL(s string) (string, error) {
 	u.Path = strings.TrimRight(u.Path, "/")
 	u.RawPath = ""
 	return u.String(), nil
+}
+
+func loopback(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsLoopback()
 }
 
 // NewYouTrackToken validates a YouTrack permanent token: printable ASCII without spaces (it goes into an
@@ -206,6 +219,24 @@ type YouTrackConnection struct {
 // NewYouTrackConnection is a connection to the (validated) baseURL that has not been tested yet.
 func NewYouTrackConnection(baseURL string, now time.Time) YouTrackConnection {
 	return YouTrackConnection{BaseURL: baseURL, UpdatedAt: now, Check: Check{Status: CheckNone}}
+}
+
+// CheckTimeout is how long a pending test may take before it is shown as failed ("timeout") and may be restarted,
+// e.g. because the outbox message went dead.
+const CheckTimeout = 2 * time.Minute
+
+// CheckRunning reports a pending test younger than CheckTimeout.
+func (c YouTrackConnection) CheckRunning(now time.Time) bool {
+	return c.Check.Status == CheckPending && c.Check.RequestedAt != nil && now.Sub(*c.Check.RequestedAt) <= CheckTimeout
+}
+
+// CheckAt is the test as it should be shown at now: a pending test past CheckTimeout reads as failed with "timeout".
+func (c YouTrackConnection) CheckAt(now time.Time) Check {
+	ch := c.Check
+	if ch.Status == CheckPending && !c.CheckRunning(now) {
+		ch.Status, ch.Code = CheckFailed, "timeout"
+	}
+	return ch
 }
 
 // StartCheck marks a new connection test as pending.

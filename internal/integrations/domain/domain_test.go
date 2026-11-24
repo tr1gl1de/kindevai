@@ -81,6 +81,8 @@ func TestBaseURL(t *testing.T) {
 		"http://localhost:8080":                  "http://localhost:8080",
 		"HTTPS://Acme.YouTrack.Cloud":            "https://acme.youtrack.cloud",
 		"https://acme.youtrack.cloud/youtrack//": "https://acme.youtrack.cloud/youtrack",
+		"http://127.0.0.1:8080/yt":               "http://127.0.0.1:8080/yt",
+		"http://[::1]:8080":                      "http://[::1]:8080",
 	} {
 		got, err := domain.NewBaseURL(in)
 		if err != nil || got != want {
@@ -91,6 +93,8 @@ func TestBaseURL(t *testing.T) {
 		"":                                 "required",
 		"acme.youtrack.cloud":              "base_url_format",
 		"ftp://acme.youtrack.cloud":        "base_url_scheme",
+		"http://acme.youtrack.cloud":       "base_url_https",
+		"http://10.0.0.5":                  "base_url_https",
 		"https://":                         "base_url_format",
 		"https://u:p@acme.youtrack.cloud":  "base_url_credentials",
 		"https://acme.youtrack.cloud/?a=1": "base_url_format",
@@ -199,6 +203,17 @@ func TestConnectionCheckLifecycle(t *testing.T) {
 	}
 	if c.FinishCheck("c1", domain.CheckResult{OK: true}, now) {
 		t.Fatal("a finished check was applied twice")
+	}
+	// A check that never reports back is shown as timed out and may be restarted.
+	c.StartCheck("c3", now)
+	if !c.CheckRunning(now.Add(time.Minute)) || c.CheckRunning(now.Add(domain.CheckTimeout+time.Second)) {
+		t.Fatal("CheckRunning")
+	}
+	if v := c.CheckAt(now.Add(time.Minute)); v.Status != domain.CheckPending {
+		t.Fatalf("recent pending shown as %+v", v)
+	}
+	if v := c.CheckAt(now.Add(domain.CheckTimeout + time.Second)); v.Status != domain.CheckFailed || v.Code != "timeout" {
+		t.Fatalf("stuck pending shown as %+v", v)
 	}
 	c.ResetCheck()
 	if c.Check != (domain.Check{Status: domain.CheckNone}) {

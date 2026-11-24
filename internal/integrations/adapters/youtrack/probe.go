@@ -4,15 +4,18 @@ package youtrack
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
+	"syscall"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/integrations/domain"
-	"github.com/tr1gl1de/kindevai/internal/platform/redact"
 )
 
 // maxResponseBytes bounds what is read from YouTrack for a connection test.
@@ -34,6 +37,26 @@ func (p *Probe) client() *http.Client {
 	return &c
 }
 
+// networkDetail names the kind of network failure with a fixed phrase: raw dial errors would reveal internal
+// addresses and ports.
+func networkDetail(err error) string {
+	var dns *net.DNSError
+	var cert *tls.CertificateVerificationError
+	var hdr tls.RecordHeaderError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err):
+		return "timeout"
+	case errors.As(err, &dns):
+		return "DNS lookup failed"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection refused"
+	case errors.As(err, &cert) || errors.As(err, &hdr):
+		return "TLS error"
+	default:
+		return "connection failed"
+	}
+}
+
 // Probe implements app.YouTrackProbe. Results carry a code and a short detail (status code, login or the network
 // error), never the token or a response body.
 func (p *Probe) Probe(ctx context.Context, baseURL string, token domain.Secret) domain.CheckResult {
@@ -51,15 +74,7 @@ func (p *Probe) Probe(ctx context.Context, baseURL string, token domain.Secret) 
 	req.Header.Set("Accept", "application/json")
 	resp, err := p.client().Do(req)
 	if err != nil {
-		detail := "connection failed"
-		var ue interface{ Unwrap() error }
-		if errors.As(err, &ue) && ue.Unwrap() != nil {
-			detail = ue.Unwrap().Error()
-		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			detail = "timeout"
-		}
-		return domain.CheckResult{Code: "unreachable", Detail: redact.Text(detail)}
+		return domain.CheckResult{Code: "unreachable", Detail: networkDetail(err)}
 	}
 	defer resp.Body.Close()
 	status := fmt.Sprintf("HTTP %d", resp.StatusCode)

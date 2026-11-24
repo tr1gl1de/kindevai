@@ -3,7 +3,6 @@ package youtrack_test
 import (
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/tr1gl1de/kindevai/internal/integrations/adapters/youtrack"
@@ -59,8 +58,10 @@ func TestProbe(t *testing.T) {
 			t.Errorf("%s: got %+v, want %+v", c.base, got, c.want)
 		}
 	}
+	// Network failures are named with fixed phrases, never the raw dial error with internal addresses. (Behind a
+	// sandbox proxy the refusal may surface as a generic failure.)
 	got := p.Probe(t.Context(), deadURL, secret)
-	if got.OK || got.Code != "unreachable" || strings.Contains(got.Detail, "s3cr3t") {
+	if got.OK || got.Code != "unreachable" || (got.Detail != "connection refused" && got.Detail != "connection failed") {
 		t.Errorf("unreachable: %+v", got)
 	}
 }

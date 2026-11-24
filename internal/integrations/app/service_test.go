@@ -78,14 +78,21 @@ func TestConfigureYouTrackIsOwnerOnlyWriteOnlyAndAudited(t *testing.T) {
 		t.Fatal("token not stored trimmed")
 	}
 
-	// Changing only the URL keeps the token; the view never carries it.
+	// Saving without a token keeps it; the view never carries it.
 	e.now = t0.Add(time.Hour)
-	v, err = e.svc.ConfigureYouTrack(ctx, owner, "https://other.youtrack.cloud", "")
+	v, err = e.svc.ConfigureYouTrack(ctx, owner, "https://acme.youtrack.cloud", "")
 	if err != nil || !v.Token.Set || !v.Token.UpdatedAt.Equal(t0) {
-		t.Fatalf("url-only update: %+v %v", v, err)
+		t.Fatalf("save without token: %+v %v", v, err)
 	}
 	if got, _ := e.svc.Vault.Credential(ctx, domain.SecretYouTrackToken); got.Reveal() != token {
-		t.Fatal("token lost on url-only update")
+		t.Fatal("token lost on save without token")
+	}
+	// The stored token never goes to a new host: changing the URL needs the token again.
+	if _, err := e.svc.ConfigureYouTrack(ctx, owner, "https://attacker.example", ""); !errors.As(err, &ve) || ve.Field != "token" || ve.Code != "token_required_for_url" {
+		t.Fatalf("url change without token: %v", err)
+	}
+	if v, _ := e.svc.YouTrack(ctx, owner); v.Connection.BaseURL != "https://acme.youtrack.cloud" {
+		t.Fatalf("url changed: %+v", v)
 	}
 	b, _ := json.Marshal(v)
 	noLeak(t, "view", string(b))
@@ -176,7 +183,7 @@ func TestCheckYouTrackRunsThroughOutbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale := e.out.msgs[1]
-	if _, err := e.svc.ConfigureYouTrack(ctx, owner, "https://new.youtrack.cloud", ""); err != nil {
+	if _, err := e.svc.ConfigureYouTrack(ctx, owner, "https://new.youtrack.cloud", token); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.svc.HandleYouTrackCheck(ctx, messaging.Delivery{Payload: stale.Payload, Key: stale.Key, Attempt: 1}); err != nil {
@@ -305,5 +312,60 @@ func TestRepositoryRegistry(t *testing.T) {
 	}
 	if d := e.audit.entries[1].Details; d["repository"] != "tr1gl1de/kindevai" || d["integrationBranch"] != "next" {
 		t.Fatalf("details %v", d)
+	}
+}
+
+func TestCheckYouTrackEdgeCases(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	if _, err := e.svc.ConfigureYouTrack(ctx, owner, "https://acme.youtrack.cloud", token); err != nil {
+		t.Fatal(err)
+	}
+	deliver := func(m messaging.Message) {
+		t.Helper()
+		if err := e.svc.HandleYouTrackCheck(ctx, messaging.Delivery{Payload: m.Payload, Key: m.Key, Attempt: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A second request while a test is running does not queue another one.
+	if _, err := e.svc.CheckYouTrack(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := e.svc.CheckYouTrack(ctx, owner); err != nil || v.Connection.Check.Status != domain.CheckPending || len(e.out.msgs) != 1 {
+		t.Fatalf("double check: %+v %v, %d messages", v, err, len(e.out.msgs))
+	}
+
+	// A test that never reports back reads as timed out and can be restarted.
+	e.now = t0.Add(domain.CheckTimeout + time.Second)
+	if v, _ := e.svc.YouTrack(ctx, owner); v.Connection.Check.Status != domain.CheckFailed || v.Connection.Check.Code != "timeout" {
+		t.Fatalf("stuck check: %+v", v.Connection.Check)
+	}
+	if _, err := e.svc.CheckYouTrack(ctx, owner); err != nil || len(e.out.msgs) != 2 {
+		t.Fatalf("restart: %v, %d messages", err, len(e.out.msgs))
+	}
+
+	// Settings changed while the probe ran: its result is dropped.
+	e.probe.during = func() {
+		if _, err := e.svc.ConfigureYouTrack(ctx, owner, "https://acme.youtrack.cloud", token+"2"); err != nil {
+			t.Error(err)
+		}
+	}
+	e.probe.result = domain.CheckResult{OK: true, Detail: "robot"}
+	deliver(e.out.msgs[1])
+	if v, _ := e.svc.YouTrack(ctx, owner); v.Connection.Check.Status != domain.CheckNone {
+		t.Fatalf("result of a superseded probe applied: %+v", v.Connection.Check)
+	}
+	e.probe.during = nil
+
+	// The token disappeared (e.g. deleted by hand): the test fails instead of staying pending.
+	if _, err := e.svc.CheckYouTrack(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	_ = e.store.DeleteSecret(ctx, domain.SecretYouTrackToken)
+	deliver(e.out.msgs[len(e.out.msgs)-1])
+	if v, _ := e.svc.YouTrack(ctx, owner); v.Connection.Check.Status != domain.CheckFailed || v.Connection.Check.Code != "not_configured" {
+		t.Fatalf("missing token: %+v", v.Connection.Check)
 	}
 }

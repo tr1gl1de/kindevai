@@ -802,6 +802,7 @@ table.compact td {
   border: 1px solid var(--border);
   border-radius: 999px;
   cursor: pointer;
+  white-space: nowrap;
 }
 .segmented label:has(input:checked) {
   border-color: var(--accent);

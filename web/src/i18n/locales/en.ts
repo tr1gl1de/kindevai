@@ -609,7 +609,7 @@ export const en = {
     consumersNone: "Not measured. A runner measures what takes its space only with its operator's permission (I/O-limited, every 6 hours). To allow it, start the runner with",
     colCategory: "What",
     colSize: "Size",
-    colEntries: "Files and folders",
+    colEntries: "Files",
     atLeast: "at least {{size}}",
     partialNote: "“At least”: the I/O-limited measurement stopped early, so the real size is larger.",
     consumer_repos: "Git repositories",

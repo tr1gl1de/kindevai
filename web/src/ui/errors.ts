@@ -37,6 +37,8 @@ const validationKeys = new Set([
   "owner_has_full_access",
   "user_disabled",
   "slug_taken",
+  "password_reused",
+  "owner_cannot_be_disabled",
 ]);
 
 /** Message for a server validation code, or undefined if unknown. */

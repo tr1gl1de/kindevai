@@ -451,3 +451,33 @@ select[aria-invalid="true"] {
     transition: none !important;
   }
 }
+
+.narrow {
+  max-width: 480px;
+}
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.secret {
+  border: 2px solid var(--accent);
+  margin: var(--space) 0;
+}
+.secret-value {
+  display: inline-block;
+  font-size: 1.25rem;
+  letter-spacing: 0.05em;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  user-select: all;
+  word-break: break-all;
+}
+.nav-small {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  padding: 0 8px;
+}

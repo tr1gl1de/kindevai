@@ -20,12 +20,16 @@ export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
             {t("nav.overview")}
           </NavLink>
           <NavLink to="/projects">{t("nav.projects")}</NavLink>
+          {me.role === "owner" && <NavLink to="/users">{t("nav.users")}</NavLink>}
         </nav>
         <div className="user-area">
           <span className="user">
             <span className="visually-hidden">{t("app.signedInAs")} </span>
             <span>{me.login}</span>
           </span>
+          <NavLink to="/account/password" className="nav-small">
+            {t("nav.changePassword")}
+          </NavLink>
           <LanguageSwitcher />
           <button type="button" className="button subtle" onClick={() => logout.mutate()} disabled={logout.isPending}>
             {t("login.signOut")}

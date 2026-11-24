@@ -30,6 +30,29 @@ export interface Me {
   id: string;
   login: string;
   role: PlatformRole;
+  /** Signed in with a temporary password: only the password change is allowed. */
+  mustChangePassword: boolean;
+}
+
+/** An account as listed for the Owner. */
+export interface Account extends Me {
+  disabled: boolean;
+  createdAt: string;
+}
+
+export interface CreateUserRequest {
+  login: string;
+}
+
+/** A server-generated password, shown to the Owner once. */
+export interface TemporaryPasswordResult {
+  user?: Account;
+  temporaryPassword: string;
+}
+
+export interface ChangePasswordRequest {
+  currentPassword: string;
+  newPassword: string;
 }
 
 export interface LoginRequest {

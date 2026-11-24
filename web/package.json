@@ -6,7 +6,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "vitest"
+    "test": "vitest",
+    "lint": "oxlint -c .oxlintrc.json --deny-warnings src"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.108.4",
@@ -28,6 +29,7 @@
     "axe-core": "^4.14.1",
     "jsdom": "^31.0.1",
     "msw": "^3.0.7",
+    "oxlint": "^1.95.0",
     "typescript": "^7.0.2",
     "vite": "^8.3.8",
     "vitest": "^5.1.1"

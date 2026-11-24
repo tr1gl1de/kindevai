@@ -26,8 +26,23 @@ export function ConfirmDialog({ title, text, confirmLabel, cancelLabel, busy, on
     const others = [...document.body.children].filter((el) => el !== host && !el.hasAttribute("inert"));
     others.forEach((el) => el.setAttribute("inert", ""));
     cancelRef.current?.focus();
+    // Keeps Tab / Shift+Tab cycling between the dialog's buttons.
+    const trap = (e: KeyboardEvent) => {
+      const items = ref.current ? [...ref.current.querySelectorAll<HTMLElement>("button:not([disabled])")] : [];
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (!first || !last) return;
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onCancel();
+      if (e.key === "Tab") trap(e);
     };
     document.addEventListener("keydown", onKey);
     return () => {
@@ -36,21 +51,6 @@ export function ConfirmDialog({ title, text, confirmLabel, cancelLabel, busy, on
       if (opener?.isConnected) opener.focus();
     };
   }, [onCancel]);
-
-  function trap(e: React.KeyboardEvent) {
-    if (e.key !== "Tab" || !ref.current) return;
-    const items = [...ref.current.querySelectorAll<HTMLElement>("button:not([disabled])")];
-    const first = items[0];
-    const last = items[items.length - 1];
-    if (!first || !last) return;
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault();
-      last.focus();
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault();
-      first.focus();
-    }
-  }
 
   return createPortal(
     <div className="dialog-backdrop">
@@ -61,7 +61,6 @@ export function ConfirmDialog({ title, text, confirmLabel, cancelLabel, busy, on
         aria-labelledby={`${id}-title`}
         aria-describedby={`${id}-text`}
         className="dialog"
-        onKeyDown={trap}
       >
         <h2 id={`${id}-title`}>{title}</h2>
         <p id={`${id}-text`}>{text}</p>

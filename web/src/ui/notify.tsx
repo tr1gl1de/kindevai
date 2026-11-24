@@ -24,9 +24,10 @@ export function NotifyProvider({ children }: { children: ReactNode }) {
   return (
     <NotifyContext.Provider value={notify}>
       {children}
-      <div role="status" className="notice" data-visible={message ? "true" : "false"}>
+      {/* <output> is the native polite status region (implicit role="status"). */}
+      <output className="notice" data-visible={message ? "true" : "false"}>
         {message}
-      </div>
+      </output>
     </NotifyContext.Provider>
   );
 }

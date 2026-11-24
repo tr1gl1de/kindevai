@@ -136,6 +136,17 @@ ai-runner fingerprint                                    # compare with the runn
   `KINDEV_RUNNER_OUTPUT_LIMIT_MB`): over the limit the oldest output of finished executions is evicted first, and if
   only running executions hold output, new output is stored without its body (`output_storage_limit`) and a
   warning is logged. The cleanup runs at start and hourly in small batches.
+- Mock execution (no AI yet): `POST /api/tasks` creates a manual task, `POST /api/tasks/{id}/mock-run`
+  `{"scenario":"success|fail|flaky|crash|hang|gate"}` plans it with a fixed one-step plan on the project's first
+  repository (L1, so it starts without an approval unless the risk policy raises it), and `GET /api/tasks[/{id}]` shows
+  the task with its steps and attempts; `POST /api/tasks/{id}/cancel` `{"reason":"…"}` stops it. The scheduler assigns
+  READY steps only to APPROVED, connected, reachable runners granted the project, with the step's capabilities and
+  no critical volume; without one the task is `BLOCKED` (reason `runner`) until one appears. The runner checks every
+  assignment again (`ai-runner run --projects <id,…>` / `KINDEV_RUNNER_PROJECTS` limits the projects it accepts) and
+  runs the mock agent as a child process in its own process group; a cancel sends SIGTERM to the group, SIGKILL
+  after 5 s. A lost runner's attempt becomes `UNKNOWN` when its 60 s lease (renewed by heartbeats) runs out and
+  nothing is started again until the runner reconciles: a live process continues (a restarted runner adopts it from
+  its journal under `attempts/`), a gone one fails and is retried once.
 
 ### Integrations and external calls
 

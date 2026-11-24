@@ -235,8 +235,10 @@ func (s *Service) blockIfStuck(ctx context.Context, e *domain.Execution, t *doma
 	return s.Repo.SaveTask(ctx, t)
 }
 
-// RenewRunnerLeases extends the lease of every live claim the runner holds (its heartbeat, KIN-20). A lease that
-// already ran out is not renewed: that attempt is reconciled instead.
+// RenewRunnerLeases extends the lease of every RUNNING step the runner holds (its heartbeat, KIN-20). A CLAIMED
+// step is not renewed: its runner has not started it, so if the assignment was lost the lease returns it to READY
+// (a late start is then stale and cancelled). A lease that already ran out is not renewed either: that attempt is
+// reconciled instead.
 func (s *Service) RenewRunnerLeases(ctx context.Context, runnerID string) error {
 	ids, err := s.Repo.ExecutionsHeldBy(ctx, runnerID)
 	if err != nil {
@@ -251,7 +253,7 @@ func (s *Service) RenewRunnerLeases(ctx context.Context, runnerID string) error 
 			}
 			now, renewed := s.now(), false
 			for _, st := range e.Steps {
-				if st.RunnerID != runnerID || (st.State != domain.StepClaimed && st.State != domain.StepRunning) {
+				if st.RunnerID != runnerID || st.State != domain.StepRunning {
 					continue
 				}
 				if _, err := e.Renew(st.ID, runnerID, st.Fence, now, s.leaseTTL()); err == nil {

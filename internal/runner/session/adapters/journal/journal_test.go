@@ -62,3 +62,39 @@ func TestJournalRefusesUnsafeNames(t *testing.T) {
 		t.Error("fence 0 accepted")
 	}
 }
+
+// A finished attempt leaves a tombstone, so its re-delivered assignment is recognised; a corrupt record is moved
+// aside instead of blocking every assignment.
+func TestTombstonesAndCorruptRecords(t *testing.T) {
+	t.Parallel()
+	j := Dir{Path: t.TempDir()}
+	if done, err := j.Finished("S", 1); err != nil || done {
+		t.Fatalf("before: %v %v", done, err)
+	}
+	if err := j.Save(domain.Record{Step: "S", Fence: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Finish("S", 1); err != nil {
+		t.Fatal(err)
+	}
+	if done, err := j.Finished("S", 1); err != nil || !done {
+		t.Fatalf("after: %v %v", done, err)
+	}
+	if recs, _ := j.List(); len(recs) != 0 {
+		t.Fatalf("records %+v", recs)
+	}
+	bad := filepath.Join(j.Path, "X-1.json")
+	if err := os.WriteFile(bad, []byte("{trunc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Save(domain.Record{Step: "ok", Fence: 2}); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := j.List()
+	if err != nil || len(recs) != 1 || recs[0].Step != "ok" {
+		t.Fatalf("records %+v %v", recs, err)
+	}
+	if _, err := os.Stat(bad + ".corrupt"); err != nil {
+		t.Fatalf("corrupt record not moved aside: %v", err)
+	}
+}

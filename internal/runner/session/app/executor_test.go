@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -91,6 +92,24 @@ func (l *fakeLauncher) proc(i int) *fakeProc {
 type memJournal struct {
 	mu   sync.Mutex
 	recs map[string]domain.Record
+	done map[string]bool
+}
+
+func (j *memJournal) Finish(step string, fence int64) error {
+	_ = j.Delete(step, fence)
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.done == nil {
+		j.done = map[string]bool{}
+	}
+	j.done[jkey(step, fence)] = true
+	return nil
+}
+
+func (j *memJournal) Finished(step string, fence int64) (bool, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.done[jkey(step, fence)], nil
 }
 
 func jkey(step string, fence int64) string { return fmt.Sprintf("%s-%d", step, fence) }
@@ -132,8 +151,9 @@ type event struct {
 }
 
 type fakeEvents struct {
-	mu  sync.Mutex
-	evs []event
+	mu   sync.Mutex
+	evs  []event
+	fail bool // Emit fails (a full disk)
 }
 
 type fakeStream struct {
@@ -159,6 +179,12 @@ func (s *fakeStream) Emit(kind string, body any) error {
 		}
 		s.res = s.seq + 10
 	}
+	s.ev.mu.Lock()
+	if s.ev.fail {
+		s.ev.mu.Unlock()
+		return errors.New("disk full")
+	}
+	s.ev.mu.Unlock()
 	s.seq++
 	b, _ := json.Marshal(body)
 	s.ev.mu.Lock()
@@ -388,4 +414,64 @@ func TestUnknownCommandKindIsAcknowledged(t *testing.T) {
 	if err := x.Command(t.Context(), protocol.Command{ID: "y", Kind: protocol.CommandAssign, Body: []byte(`{`)}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// A finished attempt's assignment re-delivered later (lost ACK, restored cursor) never runs again.
+func TestFinishedAttemptIsNotRunAgain(t *testing.T) {
+	t.Parallel()
+	x, l, j, _ := newExecutor(domain.Policy{})
+	if err := x.Assign(t.Context(), assignment("P1")); err != nil {
+		t.Fatal(err)
+	}
+	l.proc(0).end(domain.Exit{Code: 0})
+	waitFor(t, "finished", func() bool { done, _ := j.Finished("S1", 1); return done })
+	if err := x.Assign(t.Context(), assignment("P1")); err != nil || l.count() != 1 {
+		t.Fatalf("re-delivered assignment launched %d (%v)", l.count(), err)
+	}
+}
+
+// A newer token waits until the older attempt of the step has ended: never two processes per step.
+func TestSupersededAttemptEndsBeforeTheNewOneStarts(t *testing.T) {
+	t.Parallel()
+	x, l, _, _ := newExecutor(domain.Policy{})
+	if err := x.Assign(t.Context(), assignment("P1")); err != nil {
+		t.Fatal(err)
+	}
+	old := l.proc(0) // ignores SIGTERM: ends only with SIGKILL after the grace period
+	a := assignment("P1")
+	a.Fence = 2
+	if err := x.Assign(t.Context(), a); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-old.exit:
+	default:
+		t.Fatal("the new attempt started while the old one still ran")
+	}
+	if s := old.sent(); !slices.Equal(s, []bool{false, true}) || l.count() != 2 {
+		t.Fatalf("signals %v, launches %d", s, l.count())
+	}
+	x.KillAll()
+}
+
+// Until the end of an attempt is reported it stays listed, with its result, so reconciliation never mistakes it
+// for a lost process.
+func TestUnreportedEndIsListedWithItsResult(t *testing.T) {
+	t.Parallel()
+	x, l, _, ev := newExecutor(domain.Policy{})
+	if err := x.Assign(t.Context(), assignment("P1")); err != nil {
+		t.Fatal(err)
+	}
+	ev.mu.Lock()
+	ev.fail = true
+	ev.mu.Unlock()
+	l.proc(0).end(domain.Exit{Code: 0})
+	waitFor(t, "result listed", func() bool {
+		a := x.Attempts()
+		return len(a) == 1 && !a[0].Running && a[0].Result == protocol.EventCompleted
+	})
+	ev.mu.Lock()
+	ev.fail = false
+	ev.mu.Unlock()
+	waitFor(t, "reported", func() bool { return len(x.Attempts()) == 0 })
 }

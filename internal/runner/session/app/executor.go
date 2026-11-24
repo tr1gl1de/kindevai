@@ -52,8 +52,12 @@ type Journal interface {
 	// Prepare creates the attempt's working directory (if missing) and returns it.
 	Prepare(step string, fence int64) (string, error)
 	Save(r domain.Record) error
-	// Delete removes the record and the working directory.
+	// Delete removes the record and the working directory (an attempt that may be assigned again).
 	Delete(step string, fence int64) error
+	// Finish removes the record and the working directory and leaves a tombstone, so a re-delivered assignment of
+	// a reported attempt is never run again (tombstones expire after the command log's retention).
+	Finish(step string, fence int64) error
+	Finished(step string, fence int64) (bool, error)
 	List() ([]domain.Record, error)
 }
 
@@ -93,11 +97,33 @@ type key struct {
 }
 
 type run struct {
+	recMu     sync.Mutex // guards rec: the reserver saves it from the output writers' goroutines
 	rec       domain.Record
 	proc      Process
 	stream    Stream
 	cancelled string
 	done      chan struct{}
+	// result is the terminal event kind once the process ended but reporting it failed; the run stays listed
+	// (with the result) and the report is retried.
+	result string
+}
+
+func (r *run) save(j Journal, fn func(rec *domain.Record)) error {
+	r.recMu.Lock()
+	defer r.recMu.Unlock()
+	rec := r.rec
+	fn(&rec)
+	if err := j.Save(rec); err != nil {
+		return err
+	}
+	r.rec = rec
+	return nil
+}
+
+func (r *run) key() key {
+	r.recMu.Lock()
+	defer r.recMu.Unlock()
+	return key{r.rec.Step, r.rec.Fence}
 }
 
 func (x *Executor) logger() *slog.Logger {
@@ -149,6 +175,9 @@ func (x *Executor) known(k key) (bool, error) {
 	if _, ok := x.runs[k]; ok {
 		return true, nil
 	}
+	if done, err := x.Journal.Finished(k.step, k.fence); err != nil || done {
+		return done, err
+	}
 	recs, err := x.Journal.List()
 	if err != nil {
 		return false, err
@@ -162,11 +191,32 @@ func (x *Executor) known(k key) (bool, error) {
 }
 
 // Assign runs the attempt unless it is already running or known (an assignment is applied at most once: a
-// repeated command never starts a second process). An assignment the runner's policy refuses fails at once.
+// repeated command never starts a second process). An assignment the runner's policy refuses fails at once. An
+// older attempt of the same step still running here is stopped (and waited for) before the new one starts.
 func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 	x.mu.Lock()
-	defer x.mu.Unlock()
 	x.init()
+	var older []*run
+	for k, r := range x.runs {
+		if k.step == a.Step && k.fence < a.Fence {
+			older = append(older, r)
+		}
+	}
+	x.mu.Unlock()
+	if len(older) > 0 && domain.CheckAssignment(a, x.Policy) == nil {
+		for _, r := range older {
+			x.mu.Lock()
+			x.terminate(r, protocol.CancelStaleFence)
+			x.mu.Unlock()
+			select { // terminate sends SIGKILL after the grace period
+			case <-r.done:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	x.mu.Lock()
+	defer x.mu.Unlock()
 	if x.closed.Load() {
 		return errors.New("executor is shut down")
 	}
@@ -182,10 +232,9 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 		return x.Events.Attempt(a.Step, a.Fence, 0, nil).Emit(protocol.EventFailed,
 			protocol.Failure{Reason: "assignment refused by the runner: " + err.Error()})
 	}
-	// A newer token for the step supersedes an older attempt still running here: never two processes per step.
 	for ok, r := range x.runs {
-		if ok.step == a.Step && ok.fence < a.Fence {
-			x.terminate(r, protocol.CancelStaleFence)
+		if ok.step == a.Step && ok.fence < a.Fence && !ended(r) {
+			return fmt.Errorf("an older attempt of step %s is still running", a.Step) // re-sent later
 		}
 	}
 	dir, err := x.Journal.Prepare(a.Step, a.Fence)
@@ -201,18 +250,17 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 	if err := r.stream.Emit(protocol.EventAccepted, nil); err != nil {
 		return x.abandon(r, fmt.Errorf("emitting accepted: %w", err))
 	}
-	proc, err := x.Launcher.Launch(ctx, LaunchSpec{Dir: dir, Scenario: r.rec.Scenario, Attempt: a.Fence,
+	proc, err := x.Launcher.Launch(ctx, LaunchSpec{Dir: dir, Scenario: a.ScenarioOrDefault(), Attempt: a.Fence,
 		Stdout: x.guard(r.stream.Output("stdout")), Stderr: x.guard(r.stream.Output("stderr"))})
 	if err != nil {
 		x.logger().Error("launching the attempt", "step", a.Step, "fence", a.Fence, "err", err)
 		if err := r.stream.Emit(protocol.EventFailed, protocol.Failure{Reason: "launch failed: " + err.Error()}); err != nil {
-			return err
+			return x.abandon(r, err) // the re-sent command tries again
 		}
-		return x.Journal.Delete(a.Step, a.Fence)
+		return x.Journal.Finish(a.Step, a.Fence)
 	}
 	r.proc = proc
-	r.rec.PID, r.rec.PGID = proc.PID(), proc.PGID()
-	if err := x.Journal.Save(r.rec); err != nil {
+	if err := r.save(x.Journal, func(rec *domain.Record) { rec.PID, rec.PGID = proc.PID(), proc.PGID() }); err != nil {
 		x.logger().Error("recording the attempt's process", "step", a.Step, "err", err)
 	}
 	x.runs[k] = r
@@ -223,9 +271,19 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 	return nil
 }
 
+func ended(r *run) bool {
+	select {
+	case <-r.done:
+		return true
+	default:
+		return false
+	}
+}
+
 // abandon drops a run that never launched.
 func (x *Executor) abandon(r *run, err error) error {
-	_ = x.Journal.Delete(r.rec.Step, r.rec.Fence)
+	k := r.key()
+	_ = x.Journal.Delete(k.step, k.fence)
 	return err
 }
 
@@ -235,17 +293,8 @@ func idOK(s string) bool {
 
 // reserver persists the attempt's event number reservations in its journal record (called under the stream's lock).
 func (x *Executor) reserver(r *run) func(int64) error {
-	var mu sync.Mutex
 	return func(upTo int64) error {
-		mu.Lock()
-		defer mu.Unlock()
-		rec := r.rec
-		rec.Reserved = upTo
-		if err := x.Journal.Save(rec); err != nil {
-			return err
-		}
-		r.rec.Reserved = upTo
-		return nil
+		return r.save(x.Journal, func(rec *domain.Record) { rec.Reserved = upTo })
 	}
 }
 
@@ -265,33 +314,54 @@ func (g guardedWriter) Write(p []byte) (int, error) {
 	return g.w.Write(p)
 }
 
-// watch waits for the process in the background and reports its end.
+// reportRetry is how often a failed report of an attempt's end is retried.
+const reportRetry = time.Second
+
+// watch waits for the process in the background and reports its end; a report that fails (e.g. the disk is full)
+// is retried, and until it succeeds the attempt is listed with its result for reconciliation.
 func (x *Executor) watch(r *run) {
 	x.wg.Go(func() {
 		exit := r.proc.Wait()
 		close(r.done)
 		x.mu.Lock()
-		defer x.mu.Unlock()
-		if x.closed.Load() {
-			return // the next runner process adopts the attempt from the journal
-		}
-		delete(x.runs, key{r.rec.Step, r.rec.Fence})
 		ok, reason := domain.Outcome(exit, r.cancelled)
-		var err error
-		if ok {
-			err = r.stream.Emit(protocol.EventCompleted, nil)
-		} else {
-			err = r.stream.Emit(protocol.EventFailed, protocol.Failure{Reason: reason})
+		x.mu.Unlock()
+		kind := protocol.EventCompleted
+		if !ok {
+			kind = protocol.EventFailed
 		}
-		if err != nil {
-			x.logger().Error("reporting the attempt's end; it is reported again after a restart", "step", r.rec.Step,
-				"fence", r.rec.Fence, "err", err)
-			return
-		}
-		if err := x.Journal.Delete(r.rec.Step, r.rec.Fence); err != nil {
-			x.logger().Error("removing the attempt record", "step", r.rec.Step, "err", err)
+		for {
+			if x.closed.Load() {
+				return // the next runner process adopts the attempt from the journal
+			}
+			if x.report(r, kind, reason) {
+				return
+			}
+			time.Sleep(reportRetry)
 		}
 	})
+}
+
+func (x *Executor) report(r *run, kind, reason string) bool {
+	var err error
+	if kind == protocol.EventCompleted {
+		err = r.stream.Emit(kind, nil)
+	} else {
+		err = r.stream.Emit(kind, protocol.Failure{Reason: reason})
+	}
+	k := r.key()
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if err != nil {
+		r.result = kind
+		x.logger().Error("reporting the attempt's end; retrying", "step", k.step, "fence", k.fence, "err", err)
+		return false
+	}
+	delete(x.runs, k)
+	if err := x.Journal.Finish(k.step, k.fence); err != nil {
+		x.logger().Error("removing the attempt record", "step", k.step, "err", err)
+	}
+	return true
 }
 
 // Cancel stops the attempt's process group: SIGTERM, then SIGKILL after the grace period. An unknown attempt is
@@ -312,9 +382,10 @@ func (x *Executor) terminate(r *run, reason string) {
 		return
 	}
 	r.cancelled = reason
-	x.logger().Info("cancelling attempt", "step", r.rec.Step, "fence", r.rec.Fence, "reason", reason)
+	k := r.key()
+	x.logger().Info("cancelling attempt", "step", k.step, "fence", k.fence, "reason", reason)
 	if err := r.proc.Signal(false); err != nil {
-		x.logger().Warn("SIGTERM to the attempt's process group", "step", r.rec.Step, "err", err)
+		x.logger().Warn("SIGTERM to the attempt's process group", "step", k.step, "err", err)
 	}
 	grace := x.grace()
 	x.wg.Go(func() {
@@ -324,7 +395,7 @@ func (x *Executor) terminate(r *run, reason string) {
 		case <-r.done:
 		case <-t.C:
 			if err := r.proc.Signal(true); err != nil {
-				x.logger().Warn("SIGKILL to the attempt's process group", "step", r.rec.Step, "err", err)
+				x.logger().Warn("SIGKILL to the attempt's process group", "step", k.step, "err", err)
 			}
 		}
 	})
@@ -351,7 +422,7 @@ func (x *Executor) Recover(_ context.Context) error {
 			if err := r.stream.Emit(protocol.EventFailed, protocol.Failure{Reason: "launch interrupted by a runner restart"}); err != nil {
 				return err
 			}
-			if err := x.Journal.Delete(rec.Step, rec.Fence); err != nil {
+			if err := x.Journal.Finish(rec.Step, rec.Fence); err != nil {
 				return err
 			}
 			continue
@@ -374,8 +445,11 @@ func (x *Executor) Attempts() []protocol.AttemptStatus {
 	defer x.mu.Unlock()
 	out := make([]protocol.AttemptStatus, 0, len(x.runs))
 	for _, r := range x.runs {
-		out = append(out, protocol.AttemptStatus{Step: r.rec.Step, Fence: r.rec.Fence, PID: r.rec.PID, PGID: r.rec.PGID,
-			Running: true})
+		r.recMu.Lock()
+		st := protocol.AttemptStatus{Step: r.rec.Step, Fence: r.rec.Fence, PID: r.rec.PID, PGID: r.rec.PGID,
+			Running: r.result == "", Result: r.result}
+		r.recMu.Unlock()
+		out = append(out, st)
 	}
 	return out
 }

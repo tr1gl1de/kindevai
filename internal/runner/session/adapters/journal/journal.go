@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/runner/session/app"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/domain"
@@ -87,7 +88,55 @@ func (d Dir) Delete(step string, fence int64) error {
 	return os.RemoveAll(filepath.Join(d.Path, n))
 }
 
-// List returns every record; an unreadable one is skipped with an error only if nothing else can be read.
+// TombstoneTTL is how long a finished attempt's tombstone is kept: as long as the Control Plane keeps
+// acknowledged commands (it never re-sends an older one).
+const TombstoneTTL = 7 * 24 * time.Hour
+
+// Finish removes the record and the working directory, leaves a tombstone and prunes expired tombstones.
+func (d Dir) Finish(step string, fence int64) error {
+	n, err := d.name(step, fence)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(d.Path, n+".done"), nil, 0o600); err != nil {
+		return err
+	}
+	if err := d.Delete(step, fence); err != nil {
+		return err
+	}
+	ents, err := os.ReadDir(d.Path)
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		if !strings.HasSuffix(e.Name(), ".done") {
+			continue
+		}
+		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > TombstoneTTL {
+			_ = os.Remove(filepath.Join(d.Path, e.Name()))
+		}
+	}
+	return nil
+}
+
+// Finished reports a tombstone of the attempt.
+func (d Dir) Finished(step string, fence int64) (bool, error) {
+	n, err := d.name(step, fence)
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Stat(filepath.Join(d.Path, n+".done"))
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, os.ErrNotExist):
+		return false, nil
+	}
+	return false, err
+}
+
+// List returns every readable record. An unreadable one (e.g. truncated by a full disk) is moved aside as
+// *.corrupt, so one bad file cannot stop the runner from taking or recovering any attempt.
 func (d Dir) List() ([]domain.Record, error) {
 	ents, err := os.ReadDir(d.Path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -101,13 +150,15 @@ func (d Dir) List() ([]domain.Record, error) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(d.Path, e.Name()))
+		p := filepath.Join(d.Path, e.Name())
+		b, err := os.ReadFile(p)
 		if err != nil {
 			return nil, err
 		}
 		var r domain.Record
-		if err := json.Unmarshal(b, &r); err != nil {
-			return nil, fmt.Errorf("attempt record %s: %w", e.Name(), err)
+		if json.Unmarshal(b, &r) != nil || !stepRe.MatchString(r.Step) || r.Fence < 1 {
+			_ = os.Rename(p, p+".corrupt")
+			continue
 		}
 		out = append(out, r)
 	}

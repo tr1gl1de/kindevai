@@ -298,3 +298,25 @@ func TestRenewRunnerLeases(t *testing.T) {
 		t.Fatalf("step %s", ex.Steps[0].State)
 	}
 }
+
+// A claim the runner never starts (lost assignment) is not kept alive by heartbeats: its lease returns it to READY
+// and the next pass assigns it again with a new token.
+func TestHeartbeatsDoNotKeepAnUnstartedClaim(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	task := e.task(t, onlyStep())
+	e.pool.set("p1", Candidate{ID: "r1", DiskHeavyAllowed: true})
+	e.schedule(t)
+	_, ex := e.state(t, task.ID)
+	fence := ex.Steps[0].Fence
+	for range 3 {
+		e.clock.Add(DefaultLeaseTTL / 2)
+		if err := e.svc.RenewRunnerLeases(t.Context(), "r1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.schedule(t)
+	if _, ex := e.state(t, task.ID); ex.Steps[0].State != domain.StepClaimed || ex.Steps[0].Fence != fence+1 {
+		t.Fatalf("step %+v", ex.Steps[0])
+	}
+}

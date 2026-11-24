@@ -133,11 +133,15 @@ func Alive(pid, pgid int) bool {
 	return true
 }
 
+// groupAlive reports a process group with at least one member.
+func groupAlive(pgid int) bool { return pgid > 1 && syscall.Kill(-pgid, 0) == nil }
+
 func (p *adopted) PID() int  { return p.pid }
 func (p *adopted) PGID() int { return p.pgid }
 func (p *adopted) Wait() domain.Exit {
 	p.once.Do(func() {
-		for Alive(p.pid, p.pgid) {
+		// The attempt runs while its leader or any process of its group does (children of an exited CLI).
+		for Alive(p.pid, p.pgid) || groupAlive(p.pgid) {
 			time.Sleep(p.poll)
 		}
 		if code, ok := mockagent.ReadResult(p.dir); ok {
@@ -149,7 +153,7 @@ func (p *adopted) Wait() domain.Exit {
 	return p.exit
 }
 func (p *adopted) Signal(kill bool) error {
-	if !Alive(p.pid, p.pgid) {
+	if !Alive(p.pid, p.pgid) && !groupAlive(p.pgid) {
 		return nil
 	}
 	return signalGroup(p.pgid, kill)

@@ -62,6 +62,20 @@ const (
 	e2eSchedule  = 30 * time.Millisecond
 )
 
+// e2eSlots bounds how many of these tests run at once: each mock agent re-executes the race-instrumented test
+// binary, and running them all together starves the package's other start-up-time-bounded tests.
+var e2eSlots = make(chan struct{}, 2)
+
+func e2eSlot(t *testing.T) {
+	t.Helper()
+	select {
+	case e2eSlots <- struct{}{}:
+	case <-t.Context().Done():
+		t.Fatal(t.Context().Err())
+	}
+	t.Cleanup(func() { <-e2eSlots })
+}
+
 var ownerP = auth.Principal{UserID: "owner1", Login: "owner", Owner: true}
 
 type controlPlane struct {
@@ -331,6 +345,7 @@ func succeeded(d workflowapp.TaskDetail) bool {
 // with a new token; a second failure fails the task.
 func TestMockExecutionEndToEnd(t *testing.T) {
 	t.Parallel()
+	e2eSlot(t)
 	cp := startCP(t, t.TempDir(), "127.0.0.1:0")
 	id, key := cp.seed(t, "p1")
 	r := startRunner(t, t.TempDir(), cp.addr, id, key, nil, nil)
@@ -369,6 +384,7 @@ func TestMockExecutionEndToEnd(t *testing.T) {
 // it refuses the assignment itself (no process is started).
 func TestSchedulingScopeAndRunnerSideCheck(t *testing.T) {
 	t.Parallel()
+	e2eSlot(t)
 	cp := startCP(t, t.TempDir(), "127.0.0.1:0")
 	other, otherKey := cp.seed(t, "p2")
 	startRunner(t, t.TempDir(), cp.addr, other, otherKey, nil, nil)
@@ -405,6 +421,7 @@ func TestSchedulingScopeAndRunnerSideCheck(t *testing.T) {
 // Cancelling the task stops the attempt's whole process group on the runner.
 func TestCancelKillsTheProcessGroup(t *testing.T) {
 	t.Parallel()
+	e2eSlot(t)
 	cp := startCP(t, t.TempDir(), "127.0.0.1:0")
 	id, key := cp.seed(t, "p1")
 	r := startRunner(t, t.TempDir(), cp.addr, id, key, nil, nil)
@@ -434,6 +451,7 @@ func TestCancelKillsTheProcessGroup(t *testing.T) {
 // and completes. A runner restart adopts the live process from its journal (no second process).
 func TestLostRunnerReconcilesWithoutASecondProcess(t *testing.T) {
 	t.Parallel()
+	e2eSlot(t)
 	cp := startCP(t, t.TempDir(), "127.0.0.1:0")
 	id, key := cp.seed(t, "p1")
 	r := startRunner(t, t.TempDir(), cp.addr, id, key, nil, nil)
@@ -470,6 +488,7 @@ func TestLostRunnerReconcilesWithoutASecondProcess(t *testing.T) {
 // A process that died while the runner was away is reconciled as gone: the attempt fails and is retried once.
 func TestDeadProcessIsRetriedAfterReconcile(t *testing.T) {
 	t.Parallel()
+	e2eSlot(t)
 	cp := startCP(t, t.TempDir(), "127.0.0.1:0")
 	id, key := cp.seed(t, "p1")
 	r := startRunner(t, t.TempDir(), cp.addr, id, key, nil, nil)
@@ -497,6 +516,7 @@ func TestDeadProcessIsRetriedAfterReconcile(t *testing.T) {
 // execution continues to the end.
 func TestControlPlaneRestartContinuesTheExecution(t *testing.T) {
 	t.Parallel()
+	e2eSlot(t)
 	dataDir := t.TempDir()
 	cp := startCP(t, dataDir, "127.0.0.1:0")
 	id, key := cp.seed(t, "p1")

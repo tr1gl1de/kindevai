@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -38,6 +39,7 @@ func (projects) Lookup(_ context.Context, id string) (app.ProjectRef, error) {
 }
 
 type env struct {
+	d      *sql.DB
 	h      *Handler
 	svc    *app.Service
 	hub    *app.Hub
@@ -50,6 +52,7 @@ type env struct {
 type opts struct {
 	cfg      Config
 	messages map[string]MessageFunc
+	sessions []SessionFunc
 	limiter  *ratelimit.Limiter
 	server   func(*http.Server) // adjust the HTTP server before it starts
 }
@@ -90,7 +93,7 @@ func newEnv(t *testing.T, o opts) *env {
 	}
 	h := &Handler{
 		Gateway: &app.Gateway{Runners: repo, Hub: hub, Rand: rand.Reader, Now: time.Now, NewID: rand.Text},
-		Limiter: o.limiter, Config: o.cfg, Messages: o.messages,
+		Limiter: o.limiter, Config: o.cfg, Messages: o.messages, Sessions: o.sessions,
 	}
 	mux := http.NewServeMux()
 	h.Register(mux)
@@ -101,7 +104,7 @@ func newEnv(t *testing.T, o opts) *env {
 	srv.Config.RegisterOnShutdown(hub.Shutdown)
 	srv.Start()
 	t.Cleanup(func() { hub.Shutdown(); srv.Close() })
-	return &env{h: h, svc: svc, hub: hub, srv: srv, url: "ws" + strings.TrimPrefix(srv.URL, "http") + protocol.ConnectPath,
+	return &env{d: d, h: h, svc: svc, hub: hub, srv: srv, url: "ws" + strings.TrimPrefix(srv.URL, "http") + protocol.ConnectPath,
 		runner: res.Runner.ID, key: priv}
 }
 

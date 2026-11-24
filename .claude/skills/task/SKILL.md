@@ -56,4 +56,7 @@ production/infra secrets, deleting YouTrack data, or a genuine spec contradictio
 ## 7. Merge into dev
 - When CI is green and review findings are fixed: `gh pr merge <n> --merge` (plain command; stacked PRs in order).
 - `YT issue command "Stage Done" <ID>` if not moved automatically.
-- From the main checkout: `./scripts/task-worktree.sh --prune` (removes merged worktrees, branches, docker stacks).
+- From the main checkout: `./scripts/task-worktree.sh --prune` (removes worktrees, branches and docker stacks of tasks
+  whose own commits are merged into dev — merged PR or tip on dev; fresh branches and worktrees with uncommitted or
+  untracked changes are skipped and reported, never forced). Use `--prune --dry-run` first when other tasks run in
+  parallel; to drop just your own worktree: `./scripts/task-worktree.sh --remove <ID>`.

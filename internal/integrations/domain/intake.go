@@ -10,8 +10,9 @@ import (
 )
 
 // YouTrack intake (KIN-27): issues of a bound YouTrack project become workflow tasks when they carry the project's
-// trigger tag (polling, optional webhook) or a project member starts one by ID. The issue's reporter must be linked
-// to a platform account that may start AI in the project: the right to create a YouTrack issue grants nothing.
+// trigger tag (polling, optional webhook) or a project member starts one by ID. The YouTrack user who applied the
+// trigger tag (KIN-50; not the reporter) must be linked to a platform account that may start AI in the project: the
+// right to create or edit a YouTrack issue grants nothing.
 
 var (
 	// ErrYouTrackLoginTaken: the YouTrack login is already linked to another account.
@@ -196,12 +197,15 @@ const (
 
 // Reasons a task was not created. They are shown to project members.
 const (
-	ReasonUnknownUser   = "unknown_user"    // the reporter is not linked to a platform account
+	ReasonUnknownUser   = "unknown_user"    // the reporter is not linked to a platform account (before KIN-50)
 	ReasonNotAllowed    = "not_allowed"     // the initiator may not start AI in the project
 	ReasonIssueNotFound = "issue_not_found" // YouTrack has no such issue (run by ID)
 	ReasonOtherProject  = "other_project"   // the issue moved to another YouTrack project (run by ID)
 	ReasonInvalidIssue  = "invalid_issue"   // the issue cannot become a task (malformed data)
 	ReasonUnavailable   = "unavailable"     // YouTrack refused or kept failing (run by ID)
+	// ReasonTagNotAllowed: the user who applied the trigger tag is unknown (the tag history is missing, ambiguous or
+	// unreadable), not linked to an account, or that account may not start AI in the project (KIN-50).
+	ReasonTagNotAllowed = "tag_not_allowed"
 )
 
 // Intake channels.
@@ -220,6 +224,7 @@ type IntakeRecord struct {
 	Reason       string
 	Initiator    string // platform user ID ("" when unknown)
 	Reporter     string // YouTrack login of the reporter
+	Tagger       string // YouTrack login that applied the trigger tag (poll, webhook); audited, not stored
 	TaskID       string
 	Channel      string
 	ProcessedAt  time.Time

@@ -127,6 +127,8 @@ type sendingLink struct {
 	wait chan struct{}
 }
 
+func (l *sendingLink) SetHandler(func(context.Context, protocol.Envelope) error) {}
+
 func (l *sendingLink) Wait(ctx context.Context) error {
 	select {
 	case <-l.wait:
@@ -157,7 +159,7 @@ func TestConnectorRunsTheReporterWhileTheLinkIsUp(t *testing.T) {
 	link := &sendingLink{wait: make(chan struct{})}
 	f, ctx := newConnFixture(t)
 	f.c.Dialer = linkDialer{link: link, cancel: f.d.cancel, used: new(bool)}
-	f.c.Reporter = &Reporter{Probe: &fakeProbe{}, HeartbeatEvery: time.Hour, StorageEvery: time.Hour}
+	f.c.Handlers = []LinkHandler{&Reporter{Probe: &fakeProbe{}, HeartbeatEvery: time.Hour, StorageEvery: time.Hour}}
 	go func() {
 		deadline := time.Now().Add(5 * time.Second)
 		for (link.count(protocol.TypeHeartbeat) < 1 || link.count(protocol.TypeCapabilities) < 1) && time.Now().Before(deadline) {

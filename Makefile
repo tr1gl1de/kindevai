@@ -8,7 +8,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 HAS_GO  := $(wildcard go.mod)
 HAS_WEB := $(wildcard web/package.json)
 
-.PHONY: help build test test-hooks test-pkg test-integration lint vuln cover dev clean web-deps docker release-snapshot
+.PHONY: help build test test-hooks test-scripts test-pkg test-integration lint vuln cover dev clean web-deps docker release-snapshot
 
 # Installs web dependencies once per worktree (fresh worktrees have no node_modules).
 web-deps:
@@ -27,7 +27,7 @@ ifneq ($(HAS_GO),)
 	go build -ldflags "-X main.version=$(VERSION)" -o bin/ ./cmd/...
 endif
 
-test: web-deps test-hooks ## unit tests: Go (race, shuffled, uncached) + web + hooks
+test: web-deps test-hooks test-scripts ## unit tests: Go (race, shuffled, uncached) + web + hooks + scripts
 ifneq ($(HAS_GO),)
 	go test -race -shuffle=on -count=1 $(GO_PKGS)
 endif
@@ -37,6 +37,9 @@ endif
 
 test-hooks: ## Claude Code git guard hook (needs jq)
 	.claude/hooks/guard-git.test.sh
+
+test-scripts: ## repo helper scripts (task-worktree.sh --prune) against throwaway git repos
+	scripts/task-worktree.test.sh
 
 test-pkg: ## fast loop for one package: make test-pkg P=./internal/runner/...
 	go test -race -shuffle=on -count=1 $(P)

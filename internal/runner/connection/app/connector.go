@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"sync"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
@@ -53,8 +54,9 @@ type Connector struct {
 	// MinBackoff, MaxBackoff bound the reconnect delay (defaults 1s and 60s); a session that stayed up for
 	// StableAfter (default 1m) resets it.
 	MinBackoff, MaxBackoff, StableAfter time.Duration
-	// Reporter sends telemetry while a link that can send (Sender) is up (KIN-20); nil sends nothing.
-	Reporter *Reporter
+	// Handlers run on every authorized link (KIN-22 command/event channel); a message no handler takes closes
+	// the link as a protocol error.
+	Handlers []LinkHandler
 }
 
 func (c *Connector) defaults() {
@@ -100,9 +102,7 @@ func (c *Connector) Run(ctx context.Context, e domain.Enrollment, id domain.Iden
 		if err == nil {
 			start := c.Now()
 			c.Logger.Info("connected to the Control Plane", "server", e.Server.String(), "runner", e.RunnerID)
-			stopReport := c.report(ctx, link)
-			err = link.Wait(ctx)
-			stopReport()
+			err = c.serve(ctx, link)
 			if c.Now().Sub(start) >= c.StableAfter {
 				b.Reset()
 			}
@@ -124,22 +124,37 @@ func (c *Connector) Run(ctx context.Context, e domain.Enrollment, id domain.Iden
 	}
 }
 
-// report runs the Reporter for the link's lifetime; the returned stop cancels it and waits for it.
-func (c *Connector) report(ctx context.Context, link Link) (stop func()) {
-	s, ok := link.(Sender)
-	if !ok || c.Reporter == nil {
-		return func() {}
+// serve runs the handlers on the link until it ends.
+func (c *Connector) serve(ctx context.Context, link Link) error {
+	conn, ok := link.(Conn)
+	if !ok || len(c.Handlers) == 0 {
+		return link.Wait(ctx)
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		if err := c.Reporter.Report(ctx, s); err != nil {
-			c.Logger.Warn("sending telemetry to the Control Plane", "err", err)
+	conn.SetHandler(func(ctx context.Context, env protocol.Envelope) error {
+		for _, h := range c.Handlers {
+			if ok, err := h.Handle(ctx, conn, env); ok {
+				return err
+			}
 		}
-	}()
-	return func() { cancel(); <-done }
+		return fmt.Errorf("%w: unknown message type %q", ErrUnknownMessage, env.Type)
+	})
+	lctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	for _, h := range c.Handlers {
+		wg.Go(func() {
+			if err := h.Serve(lctx, conn); err != nil && lctx.Err() == nil {
+				c.Logger.Warn("link handler stopped", "err", err)
+			}
+		})
+	}
+	err := link.Wait(ctx)
+	cancel()
+	wg.Wait()
+	return err
 }
+
+// ErrUnknownMessage: the Control Plane sent a message type no handler takes.
+var ErrUnknownMessage = errors.New("unknown message from the Control Plane")
 
 // sign answers a challenge after checking it was issued by the configured Control Plane for this protocol.
 func sign(e domain.Enrollment, id domain.Identity, ch Challenge) (Answer, error) {

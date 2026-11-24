@@ -12,16 +12,19 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
 
 	"golang.org/x/term"
 
+	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/configfile"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/controlplane"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/keyfile"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/probe"
+	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/spool"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/app"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/domain"
 	"github.com/tr1gl1de/kindevai/internal/runner/platform/datadir"
@@ -266,7 +269,29 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	}
 	fmt.Fprintf(e.stderr, "ai-runner %s: runner %s enrolled with %s (fingerprint %s); data dir %s\n", version, en.RunnerID,
 		en.Server, en.Fingerprint, d.Path())
-	conn := &app.Connector{Dialer: controlplane.New(), Logger: slog.New(slog.NewTextHandler(e.stderr, nil)),
-		Reporter: &app.Reporter{Probe: probe.New(d.Path())}}
+	logger := slog.New(slog.NewTextHandler(e.stderr, nil))
+	ch, closeSpool, err := commandChannel(d, logger)
+	if err != nil {
+		return err
+	}
+	defer closeSpool()
+	conn := &app.Connector{Dialer: controlplane.New(), Logger: logger, Handlers: []app.LinkHandler{ch,
+		&app.Reporter{Probe: probe.New(d.Path())}}} // KIN-20 heartbeat, capabilities, storage
 	return conn.Run(ctx, en, id)
+}
+
+// commandChannel opens the event spool (events/, 256 MiB) and the command cursor for the KIN-22 channel. Until an
+// executor exists (KIN-23) commands are logged and acknowledged: there is no process to start or stop.
+func commandChannel(d *datadir.Dir, logger *slog.Logger) (*app.Channel, func(), error) {
+	dir := filepath.Join(d.Path(), "events")
+	sp, err := spool.Open(spool.Config{Dir: dir})
+	if err != nil {
+		return nil, nil, err
+	}
+	ch := &app.Channel{Spool: sp, Cursor: spool.CursorFile{Path: filepath.Join(dir, "commands.json")}, Logger: logger,
+		Commands: func(_ context.Context, c protocol.Command) error {
+			logger.Warn("command received but this runner has no executor yet", "id", c.ID, "kind", c.Kind)
+			return nil
+		}}
+	return ch, func() { _ = sp.Close() }, nil
 }

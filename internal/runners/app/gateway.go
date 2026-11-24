@@ -142,6 +142,8 @@ type Session struct {
 	ID       string
 	RunnerID string
 	Detach   func()
+	// Send writes one message to the runner (set by the gateway adapter; safe for concurrent use).
+	Send func(ctx context.Context, typ string, payload any) error
 }
 
 func (g *Gateway) logger() *slog.Logger {

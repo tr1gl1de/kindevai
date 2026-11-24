@@ -122,6 +122,13 @@ ai-runner fingerprint                                    # compare with the runn
   `--public-url` / `KINDEV_PUBLIC_URL` (e.g. `https://ai.example.com`) pins the origins runners may dial; a connection
   addressed to another host is refused (421), so a relay cannot obtain a signature for itself. A revoked or disabled
   runner that ignores the close frame is cut off after 1 s.
+- Command/event channel: commands from the Control Plane (a per-runner transactional log written with the domain
+  change, monotonic seq) are applied once each, in commit order, and re-sent until the runner acknowledges them. Runner events (accepted, started,
+  output, completed, failed) are written to an on-disk spool first (`events/`, fsync, 256 MiB; when it is full the
+  output is dropped and reported as `execution.output.dropped`, lifecycle events are kept) and deleted only after the
+  Control Plane committed and acknowledged them, so a disconnect or a restart of either side loses nothing. Every
+  event carries its attempt's fencing token: a stale runner's events are rejected and it is told to cancel the
+  process. Each session starts with `runner.reconcile` (running attempts, unacknowledged results, spool offsets).
 
 ### Integrations and external calls
 
@@ -156,10 +163,10 @@ are harmless, and failures back off up to 15 minutes (honouring `Retry-After`) a
 The **webhook is optional**: once the Owner sets a secret, a YouTrack workflow may `POST /api/webhooks/youtrack` with
 the header `X-Kindevai-Webhook-Secret` and `{"issueId":"KIN-12","updated":<ms>}`; the platform keeps only the issue
 ID and re-reads the issue through the REST API, so a webhook body never decides anything. An issue runs for the
-platform account the Owner linked to its reporter's YouTrack login, and only if that account may start AI in the
-project (the Owner or a project member) — creating an issue in YouTrack grants nothing (note: whoever applies the tag starts intake on behalf of the
-reporter; the task still needs a plan and, for risky plans, the Owner's approval); otherwise no task is created
-and members see the reason on the project page. Members can also **run by issue ID** (no tag needed; the member is
+platform account the Owner linked to the YouTrack login of **whoever applied the trigger tag** (read from the issue's
+tag history, not the reporter), and only if that account may start AI in the project (the Owner or a project
+member) — creating or tagging an issue in YouTrack grants nothing. If the history does not show clearly who applied
+the tag, no task is created either (`tag_not_allowed`); members see the reason on the project page. Members can also **run by issue ID** (no tag needed; the member is
 the initiator). API: `GET|PUT /api/integrations/youtrack/intake`, `PUT|DELETE /api/integrations/youtrack/webhook`,
 `POST /api/integrations/youtrack/users`, `DELETE /api/integrations/youtrack/users/{userId}`,
 `PUT /api/projects/{id}/integrations/youtrack/trigger` (Owner); `GET /api/projects/{id}/youtrack`,
@@ -249,7 +256,7 @@ pinned by digest. Without `DOMAIN` the https profile serves `https://localhost` 
 make help             # list targets
 make dev              # run the Control Plane on this worktree's port
 npm --prefix web run dev   # Vite dev server, proxies /api to the Control Plane
-make test             # Go tests (-race -shuffle=on) + web unit tests
+make test             # Go tests (-race -shuffle=on) + web unit tests + hook/script tests
 make lint             # go vet + TypeScript typecheck
 make clean            # remove build and test leftovers
 ```

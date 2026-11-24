@@ -70,6 +70,14 @@ func (r *Reporter) Report(ctx context.Context, s Sender) error {
 	}
 }
 
+var _ LinkHandler = (*Reporter)(nil)
+
+// Serve runs Report on every authorized link (LinkHandler).
+func (r *Reporter) Serve(ctx context.Context, c Conn) error { return r.Report(ctx, c) }
+
+// Handle takes no Control Plane messages: telemetry is runner → server only.
+func (r *Reporter) Handle(context.Context, Conn, protocol.Envelope) (bool, error) { return false, nil }
+
 // probes sends capabilities and storage; each probe runs in its own goroutine so cancellation is never blocked.
 func (r *Reporter) probes(ctx context.Context, s Sender) error {
 	stEvery := r.StorageEvery

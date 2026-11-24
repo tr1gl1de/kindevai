@@ -54,6 +54,17 @@ func (l *Limiter) Allow(key string) bool {
 	return true
 }
 
+// Peek reports whether key has a token available without consuming it or starting to track the key.
+func (l *Limiter) Peek(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b, ok := l.buckets[key]
+	if !ok {
+		return l.cfg.Burst > 0
+	}
+	return b.tokens+float64(l.now().Sub(b.last))/float64(l.cfg.Every) >= 1
+}
+
 // evict drops the least recently used half of the keys.
 func (l *Limiter) evict() {
 	type kv struct {

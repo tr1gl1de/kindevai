@@ -58,6 +58,7 @@ func newIdentity(ctx context.Context, inst *bootstrap.Installation, logger *slog
 			Passwords: hasher,
 			Now:       time.Now,
 			Rand:      rand.Reader,
+			Logger:    logger,
 		},
 		IPLimiter:    perMinute(20),
 		LoginLimiter: perMinute(10),

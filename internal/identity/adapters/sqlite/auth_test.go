@@ -56,7 +56,7 @@ func TestSessionRepository(t *testing.T) {
 		t.Fatalf("ByTokenHash = %+v, %v", got, err)
 	}
 	later := now.Add(time.Hour)
-	if err := r.Touch(t.Context(), s.TokenHash, later); err != nil {
+	if err := r.Touch(t.Context(), s, later); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := r.ByTokenHash(t.Context(), s.TokenHash); !got.LastSeenAt.Equal(later) {
@@ -77,6 +77,9 @@ func TestSessionRepository(t *testing.T) {
 	}
 	if err := r.Delete(t.Context(), s.TokenHash); err != nil {
 		t.Fatal(err)
+	}
+	if err := r.Touch(t.Context(), s, later); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("Touch of a deleted session = %v, want ErrNotFound", err)
 	}
 	if _, err := r.ByTokenHash(t.Context(), s.TokenHash); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("after delete: %v", err)

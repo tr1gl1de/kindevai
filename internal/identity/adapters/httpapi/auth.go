@@ -73,6 +73,11 @@ func (h *AuthHandler) logger() *slog.Logger {
 // and answers 401 for every non-public /api/ path without a valid session.
 func (h *AuthHandler) Middleware(next http.Handler) http.Handler {
 	authn := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") { // static dashboard assets need no session lookup
+			next.ServeHTTP(w, r)
+			return
+		}
+		public := publicAPI[r.URL.Path]
 		if c, err := r.Cookie(SessionCookie); err == nil && c.Value != "" {
 			u, err := h.Service.Authenticate(r.Context(), c.Value)
 			switch {
@@ -80,13 +85,16 @@ func (h *AuthHandler) Middleware(next http.Handler) http.Handler {
 				r = r.WithContext(auth.WithPrincipal(r.Context(), auth.Principal{
 					UserID: u.ID, Login: string(u.Login), Owner: u.Role == domain.RoleOwner,
 				}))
-			case !errors.Is(err, domain.ErrUnauthenticated):
+			case errors.Is(err, domain.ErrUnauthenticated):
+			case public: // health, setup and login keep working while the database hiccups
+				h.logger().Warn("authenticating session on a public path", "err", err)
+			default:
 				h.logger().Error("authenticating session", "err", err)
 				httpx.WriteError(w, http.StatusInternalServerError, "internal", "internal error")
 				return
 			}
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/") && !publicAPI[r.URL.Path] {
+		if !public {
 			if _, ok := auth.FromContext(r.Context()); !ok {
 				httpx.WriteError(w, http.StatusUnauthorized, "unauthenticated", "login required")
 				return
@@ -101,8 +109,13 @@ func (h *AuthHandler) Middleware(next http.Handler) http.Handler {
 	return csrf.Handler(authn)
 }
 
+// login rate limits: every attempt counts against the client address; only failed attempts count against the
+// account, so a legitimate user's successful logins never lock them out. Invalid login names are not tracked
+// per account (the address limit still applies), which keeps the per-account limiter bounded.
 func (h *AuthHandler) login(w http.ResponseWriter, r *http.Request) {
-	if !h.IPLimiter.Allow(httpx.ClientIP(r)) {
+	client := httpx.ClientIP(r)
+	if !h.IPLimiter.Allow(client) {
+		h.logger().Warn("login rate limited", "client", client, "by", "address")
 		rateLimited(w)
 		return
 	}
@@ -110,20 +123,34 @@ func (h *AuthHandler) login(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	if !h.LoginLimiter.Allow(strings.ToLower(strings.TrimSpace(in.Login))) {
-		rateLimited(w)
-		return
+	account := ""
+	if l, err := domain.NewLogin(in.Login); err == nil {
+		account = string(l)
+		if !h.LoginLimiter.Peek(account) {
+			h.logger().Warn("login rate limited", "client", client, "by", "account")
+			rateLimited(w)
+			return
+		}
 	}
 	token, u, err := h.Service.Login(r.Context(), in.Login, in.Password)
 	switch {
 	case errors.Is(err, domain.ErrInvalidCredentials):
-		h.logger().Warn("failed login", "client", httpx.ClientIP(r))
+		if account != "" {
+			h.LoginLimiter.Allow(account)
+		}
+		h.logger().Warn("failed login", "client", client)
 		httpx.WriteError(w, http.StatusUnauthorized, "invalid_credentials", "invalid login or password")
 		return
 	case err != nil:
 		h.logger().Error("login", "err", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal", "internal error")
 		return
+	}
+	// A new login replaces the browser's previous session instead of leaving it valid.
+	if c, err := r.Cookie(SessionCookie); err == nil && c.Value != "" {
+		if err := h.Service.Logout(r.Context(), c.Value); err != nil {
+			h.logger().Warn("revoking previous session", "err", err)
+		}
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: SessionCookie, Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode,

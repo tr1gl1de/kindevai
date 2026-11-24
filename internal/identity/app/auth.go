@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/identity/domain"
@@ -20,7 +21,8 @@ type UserRepository interface {
 type SessionRepository interface {
 	Create(ctx context.Context, s domain.Session) error
 	ByTokenHash(ctx context.Context, hash []byte) (domain.Session, error)
-	Touch(ctx context.Context, hash []byte, at time.Time) error
+	// Touch records activity at at; ErrNotFound if the session no longer exists.
+	Touch(ctx context.Context, s domain.Session, at time.Time) error
 	Delete(ctx context.Context, hash []byte) error
 	DeleteExpired(ctx context.Context, now time.Time) error
 }
@@ -39,6 +41,7 @@ type AuthService struct {
 	Passwords PasswordVerifier
 	Now       func() time.Time
 	Rand      io.Reader
+	Logger    *slog.Logger // optional
 }
 
 // Login checks credentials and opens a session. Every failure is domain.ErrInvalidCredentials and costs one
@@ -65,8 +68,9 @@ func (s *AuthService) Login(ctx context.Context, login, password string) (string
 		return "", domain.User{}, domain.ErrInvalidCredentials
 	}
 	now := s.Now()
+	// Housekeeping must not block a valid login.
 	if err := s.Sessions.DeleteExpired(ctx, now); err != nil {
-		return "", domain.User{}, fmt.Errorf("purging sessions: %w", err)
+		s.logger().Warn("purging expired sessions", "err", err)
 	}
 	plain, sess, err := domain.NewSession(s.Rand, u.ID, now)
 	if err != nil {
@@ -109,11 +113,22 @@ func (s *AuthService) Authenticate(ctx context.Context, token string) (domain.Us
 		return domain.User{}, domain.ErrUnauthenticated
 	}
 	if sess.NeedsTouch(now) {
-		if err := s.Sessions.Touch(ctx, hash, now); err != nil {
+		err := s.Sessions.Touch(ctx, sess, now)
+		if errors.Is(err, domain.ErrNotFound) { // logged out concurrently
+			return domain.User{}, domain.ErrUnauthenticated
+		}
+		if err != nil {
 			return domain.User{}, fmt.Errorf("touching session: %w", err)
 		}
 	}
 	return u, nil
+}
+
+func (s *AuthService) logger() *slog.Logger {
+	if s.Logger == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return s.Logger
 }
 
 // Logout revokes the session; an unknown token is not an error.

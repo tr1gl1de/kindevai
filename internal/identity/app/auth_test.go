@@ -32,10 +32,12 @@ func (f *fakeUsers) ByID(_ context.Context, id string) (domain.User, error) {
 }
 
 type fakeSessions struct {
-	mu      sync.Mutex
-	byHash  map[string]domain.Session
-	touches int
-	purged  int
+	mu        sync.Mutex
+	purgeErr  error
+	touchGone bool
+	byHash    map[string]domain.Session
+	touches   int
+	purged    int
 }
 
 func (f *fakeSessions) Create(_ context.Context, s domain.Session) error {
@@ -55,10 +57,13 @@ func (f *fakeSessions) ByTokenHash(_ context.Context, h []byte) (domain.Session,
 	return s, nil
 }
 
-func (f *fakeSessions) Touch(_ context.Context, h []byte, at time.Time) error {
+func (f *fakeSessions) Touch(_ context.Context, s domain.Session, at time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	s := f.byHash[string(h)]
+	if f.touchGone {
+		return domain.ErrNotFound
+	}
+	h := s.TokenHash
 	s.LastSeenAt = at
 	f.byHash[string(h)] = s
 	f.touches++
@@ -75,6 +80,9 @@ func (f *fakeSessions) Delete(_ context.Context, h []byte) error {
 func (f *fakeSessions) DeleteExpired(_ context.Context, now time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.purgeErr != nil {
+		return f.purgeErr
+	}
 	for k, s := range f.byHash {
 		if !s.Valid(now) {
 			delete(f.byHash, k)
@@ -223,5 +231,25 @@ func TestAuthenticateRejectsDisabledUser(t *testing.T) {
 	_ = f.sessions.Create(t.Context(), s2)
 	if _, err := f.svc.Authenticate(t.Context(), plain); !errors.Is(err, domain.ErrUnauthenticated) {
 		t.Fatalf("disabled user session: %v", err)
+	}
+}
+
+func TestLoginSurvivesPurgeFailure(t *testing.T) {
+	t.Parallel()
+	f := newAuthFixture()
+	f.sessions.purgeErr = errors.New("database is locked")
+	if _, _, err := f.svc.Login(t.Context(), "owner", "correct horse battery"); err != nil {
+		t.Fatalf("login failed because cleanup failed: %v", err)
+	}
+}
+
+func TestAuthenticateWhenSessionVanishesDuringTouch(t *testing.T) {
+	t.Parallel()
+	f := newAuthFixture()
+	tok, _, _ := f.svc.Login(t.Context(), "owner", "correct horse battery")
+	f.clock.t = f.clock.t.Add(2 * time.Minute)
+	f.sessions.touchGone = true // logged out concurrently
+	if _, err := f.svc.Authenticate(t.Context(), tok); !errors.Is(err, domain.ErrUnauthenticated) {
+		t.Fatalf("err = %v, want ErrUnauthenticated", err)
 	}
 }

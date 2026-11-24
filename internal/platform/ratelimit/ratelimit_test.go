@@ -41,3 +41,21 @@ func TestLimiterBoundsMemory(t *testing.T) {
 		t.Fatalf("tracked keys = %d, want <= 10", n)
 	}
 }
+
+func TestPeekDoesNotConsume(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(0, 0)
+	l := New(Config{Burst: 1, Every: time.Hour, MaxKeys: 10}, func() time.Time { return now })
+	for range 3 {
+		if !l.Peek("a") {
+			t.Fatal("Peek consumed a token")
+		}
+	}
+	if l.Len() != 0 {
+		t.Fatal("Peek on an unknown key must not track it")
+	}
+	l.Allow("a")
+	if l.Peek("a") {
+		t.Fatal("Peek true with an empty bucket")
+	}
+}

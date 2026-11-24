@@ -89,16 +89,15 @@ func (r *SessionRepository) ByTokenHash(ctx context.Context, hash []byte) (domai
 	return s, nil
 }
 
-// Touch records activity and moves the expiry.
-func (r *SessionRepository) Touch(ctx context.Context, hash []byte, at time.Time) error {
-	s, err := r.ByTokenHash(ctx, hash)
-	if err != nil {
-		return err
-	}
-	_, err = r.db.ExecContext(ctx, "UPDATE user_sessions SET last_seen_at = ?, expires_at = ? WHERE token_hash = ?",
-		at.UTC().Format(tsFormat), s.ExpiresAt(at).UTC().Format(tsFormat), hash)
+// Touch records activity and moves the expiry in one statement.
+func (r *SessionRepository) Touch(ctx context.Context, s domain.Session, at time.Time) error {
+	res, err := r.db.ExecContext(ctx, "UPDATE user_sessions SET last_seen_at = ?, expires_at = ? WHERE token_hash = ?",
+		at.UTC().Format(tsFormat), s.ExpiresAt(at).UTC().Format(tsFormat), s.TokenHash)
 	if err != nil {
 		return fmt.Errorf("touching session: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return domain.ErrNotFound
 	}
 	return nil
 }

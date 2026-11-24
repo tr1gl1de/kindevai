@@ -18,7 +18,15 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/platform/ratelimit"
 )
 
-func authStack(t *testing.T, burst int) http.Handler {
+type authEnv struct {
+	h     http.Handler
+	db    interface{ Close() error }
+	authn *AuthHandler
+}
+
+func authStack(t *testing.T, burst int) http.Handler { return authStackEnv(t, burst).h }
+
+func authStackEnv(t *testing.T, burst int) authEnv {
 	t.Helper()
 	d, err := db.Open(t.Context(), filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -48,7 +56,7 @@ func authStack(t *testing.T, burst int) http.Handler {
 		p, _ := auth.FromContext(r.Context())
 		httpx.WriteJSON(w, 200, map[string]any{"login": p.Login, "owner": p.Owner})
 	})
-	return h.Middleware(mux)
+	return authEnv{h: h.Middleware(mux), db: d, authn: h}
 }
 
 type call struct {
@@ -198,5 +206,54 @@ func TestLoginRateLimits(t *testing.T) {
 	// Same login from another address is limited by the per-login bucket (owner already used 2 attempts).
 	if rec := doCall(t, h, call{method: "POST", target: "/api/auth/login", body: goodLogin, remote: "198.51.100.2:1"}); rec.Code != 429 {
 		t.Fatalf("per-login limit: %d", rec.Code)
+	}
+}
+
+func TestInvalidLoginsDoNotGrowTheLoginLimiter(t *testing.T) {
+	t.Parallel()
+	env := authStackEnv(t, 1000)
+	for i := range 50 {
+		body := `{"login":"` + strings.Repeat("x", 1000) + string(rune('a'+i%26)) + `","password":"p"}`
+		doCall(t, env.h, call{method: "POST", target: "/api/auth/login", body: body})
+	}
+	if n := env.authn.LoginLimiter.Len(); n != 0 {
+		t.Fatalf("login limiter tracks %d keys for invalid logins", n)
+	}
+}
+
+func TestSuccessfulLoginsDoNotConsumeTheAccountBucket(t *testing.T) {
+	t.Parallel()
+	h := authStack(t, 2)
+	for i := range 4 {
+		remote := "198.51.100." + string(rune('1'+i)) + ":1"
+		if rec := doCall(t, h, call{method: "POST", target: "/api/auth/login", body: goodLogin, remote: remote}); rec.Code != 200 {
+			t.Fatalf("login %d = %d", i, rec.Code)
+		}
+	}
+}
+
+func TestReloginRevokesThePreviousSession(t *testing.T) {
+	t.Parallel()
+	h := authStack(t, 100)
+	first := sessionCookie(t, doCall(t, h, call{method: "POST", target: "/api/auth/login", body: goodLogin}))
+	second := sessionCookie(t, doCall(t, h, call{method: "POST", target: "/api/auth/login", body: goodLogin, cookie: first.Value}))
+	if rec := doCall(t, h, call{method: "GET", target: "/api/auth/me", cookie: first.Value}); rec.Code != 401 {
+		t.Fatalf("old session still valid: %d", rec.Code)
+	}
+	if rec := doCall(t, h, call{method: "GET", target: "/api/auth/me", cookie: second.Value}); rec.Code != 200 {
+		t.Fatalf("new session = %d", rec.Code)
+	}
+}
+
+func TestDatabaseErrorOnlyFailsProtectedPaths(t *testing.T) {
+	t.Parallel()
+	env := authStackEnv(t, 100)
+	c := sessionCookie(t, doCall(t, env.h, call{method: "POST", target: "/api/auth/login", body: goodLogin}))
+	_ = env.db.Close()
+	if rec := doCall(t, env.h, call{method: "GET", target: "/api/health", cookie: c.Value}); rec.Code != 200 {
+		t.Fatalf("health with cookie and broken DB = %d", rec.Code)
+	}
+	if rec := doCall(t, env.h, call{method: "GET", target: "/api/private", cookie: c.Value}); rec.Code != 500 {
+		t.Fatalf("protected path with broken DB = %d", rec.Code)
 	}
 }

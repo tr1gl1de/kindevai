@@ -1,0 +1,409 @@
+package app
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
+	"github.com/tr1gl1de/kindevai/internal/protocol"
+	"github.com/tr1gl1de/kindevai/internal/runners/domain"
+)
+
+// Outbox adapter and topic of runner commands: Channel.Send enqueues, Channel.Deliver moves them into the
+// runner's command log.
+const (
+	OutboxAdapter = "runner"
+	TopicCommand  = "runner.command"
+)
+
+// ChannelRepo stores the command logs, channel cursors and recorded events.
+type ChannelRepo interface {
+	// EnsureChannel creates the runner's channel with epoch unless it exists.
+	EnsureChannel(ctx context.Context, runnerID, epoch string) error
+	Channel(ctx context.Context, runnerID string) (domain.Channel, bool, error)
+	// AppendCommand adds the command with the next Seq unless its ID is already in the log; it returns the Seq.
+	AppendCommand(ctx context.Context, runnerID string, c domain.QueuedCommand, now time.Time) (int64, error)
+	CommandsAfter(ctx context.Context, runnerID string, after int64, limit int) ([]domain.QueuedCommand, error)
+	// AckCommands records the cumulative ACK at now (never moving back) and purges commands acknowledged more than
+	// domain.AckedCommandRetention ago.
+	AckCommands(ctx context.Context, runnerID string, seq int64, now time.Time) error
+	SaveEventCursor(ctx context.Context, runnerID, epoch string, last int64) error
+	EventSeen(ctx context.Context, step string, fence, attemptSeq int64) (bool, error)
+	RecordEvent(ctx context.Context, e domain.AttemptEvent) error
+	// AddOutput counts n output bytes for the attempt if they fit under max; false when they do not.
+	AddOutput(ctx context.Context, step string, fence, n, max int64) (bool, error)
+}
+
+// Executions is the workflow as the channel needs it. runnerID comes from the authenticated session. Errors:
+// domain.ErrStaleAttempt (token superseded, or the lease ran out before the start), domain.ErrEventRejected
+// (the event does not fit the step's state); anything else is transient (the event is not acknowledged and the
+// runner sends it again).
+type Executions interface {
+	CheckAttempt(ctx context.Context, runnerID, step string, fence int64) error
+	StartAttempt(ctx context.Context, runnerID, step string, fence int64) error
+	CompleteAttempt(ctx context.Context, runnerID, step string, fence int64) error
+	FailAttempt(ctx context.Context, runnerID, step string, fence int64, reason string) error
+}
+
+// Reconciler receives the runner's runner.reconcile.response (KIN-23 resolves UNKNOWN attempts with it).
+type Reconciler interface {
+	Reconciled(ctx context.Context, runnerID string, r protocol.ReconcileResponse) error
+}
+
+// CommandOutbox is the durable outbox.
+type CommandOutbox interface {
+	Enqueue(ctx context.Context, m messaging.Message) error
+}
+
+// Channel is the Control Plane end of the runner command/event channel (KIN-22).
+type Channel struct {
+	Repo       ChannelRepo
+	Executions Executions
+	Reconciler Reconciler // optional
+	Outbox     CommandOutbox
+	Tx         TxRunner
+	Now        func() time.Time
+	NewID      func() string
+	Logger     *slog.Logger
+	// Window bounds unacknowledged commands in flight (default 32), AckTimeout re-sends from the last ACK when
+	// nothing was acknowledged for that long (default 30s).
+	Window     int
+	AckTimeout time.Duration
+
+	once  sync.Once
+	mu    sync.Mutex
+	wakes map[string]chan struct{} // runnerID → the live session's sender
+}
+
+// commandBatch: commands loaded per read; with ≤64 KiB per command it bounds a sender's memory to ~256 KiB.
+const commandBatch = 4
+
+func (c *Channel) init() {
+	c.once.Do(func() {
+		c.wakes = map[string]chan struct{}{}
+		if c.Logger == nil {
+			c.Logger = slog.New(slog.DiscardHandler)
+		}
+		if c.Window <= 0 {
+			c.Window = 32
+		}
+		if c.AckTimeout <= 0 {
+			c.AckTimeout = 30 * time.Second
+		}
+	})
+}
+
+func (c *Channel) wake(runnerID string) {
+	c.mu.Lock()
+	ch := c.wakes[runnerID]
+	c.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// outboxCommand is the outbox payload of a runner command.
+type outboxCommand struct {
+	RunnerID string          `json:"runnerId"`
+	ID       string          `json:"id"`
+	Kind     string          `json:"kind"`
+	Body     json.RawMessage `json:"body,omitempty"`
+}
+
+// Send queues a command for the runner through the durable outbox. Call it inside the use case's transaction;
+// id must be unique per runner and deterministic for the domain change (a repeated use case sends once).
+func (c *Channel) Send(ctx context.Context, runnerID, id, kind string, body any) error {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("encoding %s: %w", kind, err)
+	}
+	probe := protocol.Command{Epoch: "e", Seq: 1, ID: id, Kind: kind, Body: raw}
+	if err := probe.Validate(); err != nil {
+		return err
+	}
+	p, err := json.Marshal(outboxCommand{RunnerID: runnerID, ID: id, Kind: kind, Body: raw})
+	if err != nil {
+		return fmt.Errorf("encoding %s: %w", kind, err)
+	}
+	return c.Outbox.Enqueue(ctx, messaging.Message{Adapter: OutboxAdapter, Topic: TopicCommand,
+		Key: runnerID + "/" + id, Payload: p})
+}
+
+// Deliver is the outbox handler of TopicCommand: it appends the command to the runner's log, assigning its Seq,
+// and wakes the runner's session. A re-delivery finds the command id and appends nothing.
+func (c *Channel) Deliver(ctx context.Context, d messaging.Delivery) error {
+	c.init()
+	var m outboxCommand
+	if err := json.Unmarshal(d.Payload, &m); err != nil || m.RunnerID == "" {
+		return messaging.Permanent(fmt.Errorf("runner command payload: %w", err))
+	}
+	err := c.Tx.InTx(ctx, func(ctx context.Context) error {
+		if err := c.Repo.EnsureChannel(ctx, m.RunnerID, c.NewID()); err != nil {
+			return err
+		}
+		_, err := c.Repo.AppendCommand(ctx, m.RunnerID, domain.QueuedCommand{ID: m.ID, Kind: m.Kind, Body: m.Body}, c.Now())
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("appending runner command: %w", err)
+	}
+	c.wake(m.RunnerID)
+	return nil
+}
+
+// Serve runs for the lifetime of a runner session: it asks the runner to reconcile, then streams the runner's
+// unacknowledged commands in Seq order, at most Window in flight, re-sending from the last ACK after a reconnect
+// and when nothing was acknowledged for AckTimeout.
+func (c *Channel) Serve(ctx context.Context, s Session) {
+	c.init()
+	wake := make(chan struct{}, 1)
+	c.mu.Lock()
+	c.wakes[s.RunnerID] = wake
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		if c.wakes[s.RunnerID] == wake {
+			delete(c.wakes, s.RunnerID)
+		}
+		c.mu.Unlock()
+	}()
+	if err := s.Send(ctx, protocol.TypeReconcile, protocol.Reconcile{RequestID: c.NewID()}); err != nil {
+		return
+	}
+	if err := c.streamCommands(ctx, s, wake); err != nil && ctx.Err() == nil {
+		c.Logger.Warn("runner command stream stopped", "runner", s.RunnerID, "err", err)
+	}
+}
+
+func (c *Channel) streamCommands(ctx context.Context, s Session, wake chan struct{}) error {
+	var sent, progress int64 = -1, -1
+	timer := time.NewTimer(c.AckTimeout)
+	defer timer.Stop()
+	for {
+		st, ok, err := c.Repo.Channel(ctx, s.RunnerID)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if sent < st.CommandAcked {
+				sent = st.CommandAcked
+			}
+			if progress < 0 {
+				progress = st.CommandAcked
+			}
+			if free := c.Window - int(sent-st.CommandAcked); free > 0 && sent < st.CommandSeq {
+				cmds, err := c.Repo.CommandsAfter(ctx, s.RunnerID, sent, min(free, commandBatch))
+				if err != nil {
+					return err
+				}
+				for _, q := range cmds {
+					if err := s.Send(ctx, protocol.TypeCommand, protocol.Command{Epoch: st.CommandEpoch, Seq: q.Seq,
+						Base: st.CommandAcked, ID: q.ID, Kind: q.Kind, Body: q.Body}); err != nil {
+						return err
+					}
+					sent = q.Seq
+				}
+				if len(cmds) > 0 {
+					continue
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-wake:
+		case <-timer.C:
+			if ok && sent > st.CommandAcked && st.CommandAcked == progress {
+				c.Logger.Warn("runner commands not acknowledged in time; re-sending", "runner", s.RunnerID,
+					"from", st.CommandAcked+1)
+				sent = st.CommandAcked
+			}
+			progress = st.CommandAcked
+			timer.Reset(c.AckTimeout)
+		}
+	}
+}
+
+// Types are the message types Handle takes (register them on the gateway).
+func (c *Channel) Types() []string {
+	return []string{protocol.TypeCommandAck, protocol.TypeEvent, protocol.TypeReconcileResponse}
+}
+
+func strictDecode(env protocol.Envelope, v any) error {
+	dec := json.NewDecoder(strings.NewReader(string(env.Payload)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return fmt.Errorf("%w: %s", protocol.ErrChannelField, env.Type)
+	}
+	return nil
+}
+
+// Handle processes one channel message of the session. It runs in the session's read loop, so a slow commit
+// slows the runner down (TCP backpressure) instead of buffering. An error closes the connection (protocol error).
+func (c *Channel) Handle(ctx context.Context, s Session, env protocol.Envelope) error {
+	c.init()
+	switch env.Type {
+	case protocol.TypeCommandAck:
+		var a protocol.Ack
+		if err := strictDecode(env, &a); err != nil {
+			return err
+		}
+		return c.commandAck(ctx, s, a)
+	case protocol.TypeEvent:
+		var e protocol.Event
+		if err := strictDecode(env, &e); err != nil {
+			return err
+		}
+		if err := e.Validate(); err != nil {
+			return err
+		}
+		return c.event(ctx, s, e)
+	case protocol.TypeReconcileResponse:
+		var r protocol.ReconcileResponse
+		if err := strictDecode(env, &r); err != nil {
+			return err
+		}
+		c.Logger.Info("runner reconciled", "runner", s.RunnerID, "attempts", len(r.Attempts), "spool_acked", r.Spool.Acked,
+			"spool_last", r.Spool.Last, "spool_bytes", r.Spool.Bytes, "output_dropped_bytes", r.Spool.DroppedBytes)
+		if c.Reconciler != nil {
+			if err := c.Reconciler.Reconciled(ctx, s.RunnerID, r); err != nil {
+				c.Logger.Error("handling runner reconciliation", "runner", s.RunnerID, "err", err)
+			}
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: unexpected %s", protocol.ErrChannelField, env.Type)
+}
+
+func (c *Channel) commandAck(ctx context.Context, s Session, a protocol.Ack) error {
+	st, ok, err := c.Repo.Channel(ctx, s.RunnerID)
+	if err != nil {
+		return err
+	}
+	if !ok || a.Epoch != st.CommandEpoch || a.Seq <= st.CommandAcked {
+		return nil // another epoch's or an old ACK: nothing to do
+	}
+	if a.Seq > st.CommandSeq {
+		return fmt.Errorf("%w: ACK of command %d never sent", protocol.ErrChannelField, a.Seq)
+	}
+	if err := c.Repo.AckCommands(ctx, s.RunnerID, a.Seq, c.Now()); err != nil {
+		return err
+	}
+	c.wake(s.RunnerID)
+	return nil
+}
+
+// event applies one event exactly once per spool Seq (go-back-N: a gap is dropped and re-sent by the runner) and
+// once per attempt event, checks the fencing token and acknowledges only after the commit.
+func (c *Channel) event(ctx context.Context, s Session, e protocol.Event) error {
+	var ack int64 = -1
+	err := c.Tx.InTx(ctx, func(ctx context.Context) error {
+		st, _, err := c.Repo.Channel(ctx, s.RunnerID)
+		if err != nil {
+			return err
+		}
+		cur := protocol.Cursor{Epoch: st.EventEpoch, Last: st.EventLast}
+		v, next := cur.Receive(e.Epoch, e.Seq, e.Base)
+		if v == protocol.Invalid {
+			return fmt.Errorf("%w: event seq", protocol.ErrChannelField)
+		}
+		if v == protocol.Apply {
+			if err := c.applyEvent(ctx, s.RunnerID, e); err != nil {
+				return err
+			}
+		}
+		if next != cur {
+			if err := c.Repo.EnsureChannel(ctx, s.RunnerID, c.NewID()); err != nil {
+				return err
+			}
+			if err := c.Repo.SaveEventCursor(ctx, s.RunnerID, next.Epoch, next.Last); err != nil {
+				return err
+			}
+		}
+		if v != protocol.Gap {
+			ack = next.Last
+		}
+		return nil
+	})
+	if errors.Is(err, protocol.ErrChannelField) {
+		return err
+	}
+	if err != nil {
+		c.Logger.Warn("runner event not recorded; the runner will send it again", "runner", s.RunnerID, "seq", e.Seq, "err", err)
+		return nil
+	}
+	if ack > 0 {
+		return s.Send(ctx, protocol.TypeEventAck, protocol.Ack{Epoch: e.Epoch, Seq: ack})
+	}
+	return nil
+}
+
+func (c *Channel) applyEvent(ctx context.Context, runnerID string, e protocol.Event) error {
+	seen, err := c.Repo.EventSeen(ctx, e.Step, e.Fence, e.AttemptSeq)
+	if err != nil || seen {
+		return err // seen: the same attempt event under another spool epoch
+	}
+	rec := domain.AttemptEvent{RunnerID: runnerID, Step: e.Step, Fence: e.Fence, AttemptSeq: e.AttemptSeq, Kind: e.Kind,
+		Body: e.Body, Outcome: domain.OutcomeApplied, RunnerAt: time.UnixMilli(e.At).UTC(), ReceivedAt: c.Now().UTC()}
+	err = c.toWorkflow(ctx, runnerID, e)
+	if err == nil && (e.Kind == protocol.EventOutput || e.Kind == protocol.EventOutputDropped) {
+		fits, aerr := c.Repo.AddOutput(ctx, e.Step, e.Fence, int64(len(e.Body)), domain.MaxAttemptOutput)
+		if aerr != nil {
+			return aerr
+		}
+		if !fits {
+			rec.Body, rec.Reason = nil, "output_limit"
+		}
+	}
+	switch {
+	case errors.Is(err, domain.ErrStaleAttempt):
+		rec.Outcome, rec.Reason = domain.OutcomeRejected, protocol.CancelStaleFence
+		// The runner must stop a process whose token was superseded (same transaction: durable with the record).
+		if err := c.Send(ctx, runnerID, fmt.Sprintf("cancel/%s/%d", e.Step, e.Fence), protocol.CommandCancel,
+			protocol.Cancel{Step: e.Step, Fence: e.Fence, Reason: protocol.CancelStaleFence}); err != nil {
+			return err
+		}
+		c.Logger.Warn("stale runner event rejected", "runner", runnerID, "step", e.Step, "fence", e.Fence, "kind", e.Kind)
+	case errors.Is(err, domain.ErrEventRejected):
+		rec.Outcome, rec.Reason = domain.OutcomeRejected, truncate(err.Error(), protocol.MaxReasonLen)
+		c.Logger.Warn("runner event rejected", "runner", runnerID, "step", e.Step, "fence", e.Fence, "kind", e.Kind, "err", err)
+	case err != nil:
+		return err
+	}
+	return c.Repo.RecordEvent(ctx, rec)
+}
+
+func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Event) error {
+	switch e.Kind {
+	case protocol.EventStarted:
+		return c.Executions.StartAttempt(ctx, runnerID, e.Step, e.Fence)
+	case protocol.EventCompleted:
+		return c.Executions.CompleteAttempt(ctx, runnerID, e.Step, e.Fence)
+	case protocol.EventFailed:
+		var f protocol.Failure
+		_ = json.Unmarshal(e.Body, &f)
+		return c.Executions.FailAttempt(ctx, runnerID, e.Step, e.Fence, truncate(f.Reason, protocol.MaxReasonLen))
+	}
+	return c.Executions.CheckAttempt(ctx, runnerID, e.Step, e.Fence)
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !isRuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+func isRuneStart(b byte) bool { return b&0xC0 != 0x80 }

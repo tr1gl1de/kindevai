@@ -135,8 +135,10 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	modules := append(identity.Modules, newProjects(inst, identity, audit, hub, logger)...)
 	integ := newIntegrations(inst, msg, audit, ghURL, logger)
 	intake := newYouTrackIntake(inst, msg, integ, identity, logger)
-	modules = append(modules, msg.HTTP, audit.HTTP, integ.HTTP, intake.HTTP, newApprovals(inst, msg, audit, integ, logger).HTTP)
+	apv := newApprovals(inst, msg, audit, integ, logger)
+	modules = append(modules, msg.HTTP, audit.HTTP, integ.HTTP, intake.HTTP, apv.HTTP)
 	gateway := newRunnerGateway(inst, hub, localPeers, audiences, logger)
+	attachRunnerChannel(gateway, newRunnerChannel(inst, msg, apv.Workflow, logger))
 	modules = append(modules, gateway)
 	defer msg.start(ctx)()    // deferred after inst.Close, so the dispatchers stop before the database closes
 	defer intake.start(ctx)() // the YouTrack poller stops first

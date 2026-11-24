@@ -438,6 +438,10 @@ func TestRunnerEnrollmentEndToEnd(t *testing.T) {
 	if m, err := readMsg(); err != nil || m.Type != protocol.TypeAuthorized {
 		t.Fatalf("authorized: %+v %v", m, err)
 	}
+	// The command/event channel (KIN-22) starts by asking the runner to reconcile.
+	if m, err := readMsg(); err != nil || m.Type != protocol.TypeReconcile {
+		t.Fatalf("reconcile request: %+v %v", m, err)
+	}
 	if code, body := owner("POST", "/api/runners/"+reg.RunnerID+"/revoke", ""); code != 200 {
 		t.Fatalf("revoke = %d %s", code, body)
 	}

@@ -73,12 +73,17 @@ func (c Config) withDefaults() Config {
 // closes the connection with CloseProtocolError.
 type MessageFunc func(ctx context.Context, s app.Session, env protocol.Envelope) error
 
+// SessionFunc runs for the lifetime of an authorized session (the KIN-22 command stream); ctx ends with the
+// session. It may push messages with Session.Send.
+type SessionFunc func(ctx context.Context, s app.Session)
+
 // Handler serves ConnectPath.
 type Handler struct {
 	Gateway  *app.Gateway
 	Limiter  *ratelimit.Limiter // connection attempts per client address
 	Config   Config
 	Messages map[string]MessageFunc // message types accepted after authorization; anything else closes 4400
+	Sessions []SessionFunc          // features started for every authorized session
 	Logger   *slog.Logger
 
 	live       sync.WaitGroup // connection handlers that have upgraded; Wait drains them on shutdown
@@ -323,6 +328,7 @@ func (h *Handler) handshake(ctx context.Context, stop func(), c *websocket.Conn,
 		closeWith(c, code, text)
 		return app.Session{}, false
 	}
+	sess.Send = func(ctx context.Context, typ string, payload any) error { return h.write(ctx, c, typ, payload) }
 	if err := h.write(ctx, c, protocol.TypeAuthorized, protocol.Authorized{RunnerID: sess.RunnerID, SessionID: sess.ID,
 		Capabilities: []string{}}); err != nil {
 		sess.Detach()
@@ -364,6 +370,12 @@ const closeGrace = time.Second
 // when the hub closes the session; from then on nothing is dispatched.
 func (h *Handler) serve(ctx context.Context, c *websocket.Conn, s app.Session) error {
 	go h.keepalive(ctx, c)
+	fctx, stopFeatures := context.WithCancel(ctx)
+	var features sync.WaitGroup
+	defer func() { stopFeatures(); features.Wait() }()
+	for _, fn := range h.Sessions {
+		features.Go(func() { fn(fctx, s) })
+	}
 	for {
 		// Not ctx: cancelling a Read tears the connection down before the close frame is sent; stop bounds it.
 		env, ok := read(context.WithoutCancel(ctx), c)

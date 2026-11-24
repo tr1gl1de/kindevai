@@ -169,8 +169,11 @@ func TestHoldAndResumeAStepForApproval(t *testing.T) {
 	if s := got.Step(id); s.State != domain.StepWaiting || s.WaitReason != domain.WaitApproval {
 		t.Fatalf("held step = %+v", s)
 	}
-	if err := e.svc.ResumeStep(ctx, id); err != nil {
+	if err := e.svc.ResumeHeldStep(ctx, id); err != nil {
 		t.Fatal(err)
+	}
+	if err := e.svc.ResumeHeldStep(ctx, id); !errors.Is(err, domain.ErrInvalidTransition) {
+		t.Fatalf("resuming a step that is not held = %v", err)
 	}
 	got, _ = e.svc.Execution(ctx, ex.ID)
 	if got.Step(id).State != domain.StepReady {

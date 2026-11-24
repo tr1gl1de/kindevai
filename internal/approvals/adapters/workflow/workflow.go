@@ -94,7 +94,7 @@ func (p Port) HoldStep(ctx context.Context, stepID, runnerID string, fence int64
 }
 
 func (p Port) ResumeStep(ctx context.Context, stepID string) error {
-	return translate(p.Svc.ResumeStep(ctx, stepID))
+	return translate(p.Svc.ResumeHeldStep(ctx, stepID))
 }
 
 func (p Port) CancelTask(ctx context.Context, taskID, reason string) error {

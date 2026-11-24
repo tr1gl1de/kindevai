@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"slices"
 	"strconv"
 	"time"
@@ -38,6 +39,7 @@ const (
 // Workflow task states the approvals context reacts to.
 const (
 	TaskAwaitingApproval = "AWAITING_APPROVAL"
+	TaskRunning          = "RUNNING"
 	TaskVerifying        = "VERIFYING"
 )
 
@@ -114,7 +116,7 @@ type Workflow interface {
 	RejectPlan(ctx context.Context, taskID string, revision int, hash string) error
 	Step(ctx context.Context, stepID string) (StepRef, error)
 	HoldStep(ctx context.Context, stepID, runnerID string, fence int64, msg string) error
-	ResumeStep(ctx context.Context, stepID string) error
+	ResumeStep(ctx context.Context, stepID string) error // only a step held for approval
 	CancelTask(ctx context.Context, taskID, reason string) error
 }
 
@@ -326,6 +328,9 @@ type StepChanges struct {
 	Changed  []string
 }
 
+// MaxChangedFiles bounds the files one report is checked against; a longer report stops the step anyway.
+const MaxChangedFiles = 2000
+
 // approvedExtensions lists the files approved beyond the plan scope for the step of this revision.
 func approvedExtensions(all []domain.Approval, revision int, stepKey string) []string {
 	var out []string
@@ -360,10 +365,21 @@ func (s *Service) CheckChanges(ctx context.Context, ch StepChanges) (domain.Viol
 		if err != nil {
 			return err
 		}
-		// Files the Owner already approved for this step are covered, whatever the policy rates them.
+		// Files the Owner already approved for this step are covered, whatever the policy rates them; only valid,
+		// cleaned paths can match an approved extension.
 		ext := approvedExtensions(all, st.Revision, st.Key)
-		changed := slices.DeleteFunc(slices.Clone(ch.Changed), func(f string) bool { return slices.Contains(ext, f) })
+		changed := ch.Changed
+		more := len(changed) - MaxChangedFiles
+		if more > 0 {
+			changed = changed[:MaxChangedFiles]
+		}
+		changed = slices.DeleteFunc(slices.Clone(changed), func(f string) bool {
+			return domain.ValidChangedPath(f) && slices.Contains(ext, path.Clean(f))
+		})
 		v = domain.CheckChanges(st.Scope, st.Risk, pol, st.Repository, changed)
+		if more > 0 { // the rest is checked again after the approval; the step must not run on unchecked files
+			v.Outside = append(v.Outside, fmt.Sprintf("(+%d)", more))
+		}
 		if v.Empty() {
 			return nil
 		}
@@ -532,6 +548,17 @@ func (s *Service) Decide(ctx context.Context, p auth.Principal, id string, in De
 func (s *Service) apply(ctx context.Context, a domain.Approval, approve bool) error {
 	switch {
 	case a.Reason == domain.ReasonScopeExceeded:
+		// The held step belongs to the running execution of this revision; anything else is stale.
+		t, err := s.Workflow.Task(ctx, a.TaskID)
+		if err != nil {
+			return err
+		}
+		if t.PlanRevision != a.Revision {
+			return domain.ErrStaleRevision
+		}
+		if t.State != TaskRunning {
+			return domain.ErrNotReady
+		}
 		if approve {
 			return s.Workflow.ResumeStep(ctx, a.StepID)
 		}
@@ -540,7 +567,13 @@ func (s *Service) apply(ctx context.Context, a domain.Approval, approve bool) er
 		if approve {
 			return s.Workflow.ApprovePlan(ctx, a.TaskID, a.Revision, a.PlanHash)
 		}
-		return s.Workflow.RejectPlan(ctx, a.TaskID, a.Revision, a.PlanHash)
+		if err := s.Workflow.RejectPlan(ctx, a.TaskID, a.Revision, a.PlanHash); err != nil {
+			return err
+		}
+		// The rejected revision will never run: its merge-into-dev request is moot.
+		return s.supersede(ctx, a.TaskID, s.now(), func(o domain.Approval) bool {
+			return o.Revision == a.Revision && o.Scope == domain.ScopeIntegrateDev
+		})
 	default: // integrate_dev: the merge gate (KIN-37) reads the decision; the task must be verified on this revision
 		t, err := s.Workflow.Task(ctx, a.TaskID)
 		if err != nil {

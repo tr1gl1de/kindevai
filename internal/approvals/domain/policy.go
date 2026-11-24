@@ -190,7 +190,12 @@ func (p Policy) Rule(c Category) Rule {
 type Target struct {
 	Repository string
 	Path       string
+	broad      bool   // may touch any path of the repository
+	glob       string // the original glob entry when Path is its literal prefix
 }
+
+// BroadScope is the finding pattern of a scope entry that may touch any path ("." or a leading wildcard).
+const BroadScope = "*"
 
 // Finding is one rule that matched a target.
 type Finding struct {
@@ -215,7 +220,7 @@ func (p Policy) Evaluate(proposed Risk, targets []Target) Assessment {
 	if !risk.Valid() {
 		risk = RiskL3
 	}
-	findings := p.match(targets, func(Rule) bool { return true })
+	findings := p.match(planTargets(targets), func(Rule) bool { return true })
 	for _, f := range findings {
 		risk = maxRisk(risk, f.Risk)
 	}
@@ -225,17 +230,49 @@ func (p Policy) Evaluate(proposed Risk, targets []Target) Assessment {
 	return Assessment{Proposed: proposed, Risk: risk, Findings: findings}
 }
 
+// planTargets prepares a plan's scope entries for matching. A glob entry stands for its literal directory prefix
+// (everything before the first wildcard segment); an entry that is the whole repository (".") or starts with a
+// wildcard may touch anything and is marked broad, which every non-empty rule matches.
+func planTargets(targets []Target) []Target {
+	out := make([]Target, 0, len(targets))
+	for _, t := range targets {
+		c := path.Clean(strings.TrimSpace(t.Path))
+		segs := strings.Split(c, "/")
+		i := slices.IndexFunc(segs, func(s string) bool { return strings.ContainsAny(s, globMetaChars) })
+		switch {
+		case c == "." || i == 0 || len(segs) > MaxPathSegments:
+			out = append(out, Target{Repository: t.Repository, Path: c, broad: true})
+		case i > 0:
+			out = append(out, Target{Repository: t.Repository, Path: strings.Join(segs[:i], "/"), glob: c})
+		default:
+			out = append(out, Target{Repository: t.Repository, Path: c})
+		}
+	}
+	return out
+}
+
 func (p Policy) match(targets []Target, keep func(Rule) bool) []Finding {
 	var out []Finding
 	for _, t := range targets {
+		shown := t.Path
+		if t.glob != "" {
+			shown = t.glob
+		}
 		for _, r := range p.Rules {
-			if !keep(r) {
+			if !keep(r) || len(r.Patterns) == 0 {
+				continue
+			}
+			if t.broad {
+				out = append(out, Finding{Category: r.Category, Risk: r.Risk, Pattern: BroadScope,
+					Repository: t.Repository, Path: shown})
 				continue
 			}
 			for _, pat := range r.Patterns {
-				if MatchPattern(pat, t.Path) {
+				// A glob entry matches through its literal prefix or through its own text (path.Match lets "*.sql"
+				// match the segment "*.sql").
+				if MatchPattern(pat, t.Path) || (t.glob != "" && MatchPattern(pat, t.glob)) {
 					out = append(out, Finding{Category: r.Category, Risk: r.Risk, Pattern: pat,
-						Repository: t.Repository, Path: t.Path})
+						Repository: t.Repository, Path: shown})
 					break // one finding per rule and target
 				}
 			}
@@ -248,45 +285,60 @@ func (p Policy) match(targets []Target, keep func(Rule) bool) []Finding {
 	return slices.Compact(out)
 }
 
-// MatchPattern reports whether a repository path is covered by pattern. The path may be a file or a directory
-// from a plan's scope: it matches when the whole pattern matches it, or when it is a directory on the pattern's
-// literal prefix (so "internal/db/migrations" is covered by "**/migrations/*.sql" and "web" by "web/src/auth/**").
-// A directory reached only through wildcards ("internal" for "**/auth/**") is not covered: the runtime scope
-// check rates every changed file again (CheckChanges).
+// MaxPathSegments bounds the depth of a path the matchers look at; deeper paths are treated conservatively
+// (a policy rule matches, a scope does not contain them).
+const MaxPathSegments = 64
+
+// MatchPattern reports whether a repository path is covered by pattern, for the Policy Evaluator (it can only
+// raise risk, so it errs towards matching). The path may be a file or a directory from a plan's scope: it matches
+// when the whole pattern matches it, or when it is a directory on the pattern's literal prefix (so
+// "internal/db/migrations" is covered by "**/migrations/*.sql" and "web" by "web/src/auth/**"). A directory reached
+// only through wildcards ("internal" for "**/auth/**") is not covered: the runtime scope check rates every changed
+// file again (CheckChanges).
 func MatchPattern(pattern, p string) bool {
 	p = path.Clean(p)
 	if p == "." {
 		return pattern == recursiveSegment
 	}
-	return matchSegs(strings.Split(pattern, "/"), strings.Split(p, "/"), false)
-}
-
-// matchSegs matches pattern segments against path segments; literal records that a non-wildcard pattern segment
-// matched, which lets a path that ends early count as a covering directory.
-func matchSegs(pat, segs []string, literal bool) bool {
-	if len(pat) == 0 {
-		return len(segs) == 0
-	}
-	if len(segs) == 0 {
-		if literal {
-			return true
-		}
-		for _, s := range pat {
-			if s != recursiveSegment {
-				return false
-			}
-		}
+	segs := strings.Split(p, "/")
+	if len(segs) > MaxPathSegments {
 		return true
 	}
-	if pat[0] == recursiveSegment {
-		// zero segments, or consume one and stay on "**"
-		return matchSegs(pat[1:], segs, literal) || matchSegs(pat, segs[1:], literal)
+	return matchGlob(strings.Split(pattern, "/"), segs, true)
+}
+
+// matchGlob matches glob segments against path segments ("**" = any number of segments). With cover, a path that
+// ends after at least one literal (wildcard-free) pattern segment matched counts as a covering directory. Runs in
+// O(len(pat)·len(segs)) via memoisation, so untrusted globs with many "**" cannot blow up.
+func matchGlob(pat, segs []string, cover bool) bool {
+	pat = slices.CompactFunc(slices.Clone(pat), func(a, b string) bool { return a == recursiveSegment && b == recursiveSegment })
+	// memo[i][j][lit] for pattern index i, segment index j and whether a literal segment matched; 0 unknown, 1 no, 2 yes.
+	memo := make([]uint8, (len(pat)+1)*(len(segs)+1)*2)
+	var rec func(i, j int, lit bool) bool
+	rec = func(i, j int, lit bool) bool {
+		k := (i*(len(segs)+1)+j)*2 + map[bool]int{false: 0, true: 1}[lit]
+		if memo[k] != 0 {
+			return memo[k] == 2
+		}
+		var ok bool
+		switch {
+		case i == len(pat):
+			ok = j == len(segs)
+		case j == len(segs):
+			ok = (cover && lit) || !slices.ContainsFunc(pat[i:], func(s string) bool { return s != recursiveSegment })
+		case pat[i] == recursiveSegment:
+			ok = rec(i+1, j, lit) || rec(i, j+1, lit)
+		default:
+			m, err := path.Match(pat[i], segs[j])
+			ok = err == nil && m && rec(i+1, j+1, lit || !strings.ContainsAny(pat[i], globMetaChars))
+		}
+		memo[k] = 1
+		if ok {
+			memo[k] = 2
+		}
+		return ok
 	}
-	ok, err := path.Match(pat[0], segs[0])
-	if err != nil || !ok {
-		return false
-	}
-	return matchSegs(pat[1:], segs[1:], literal || !strings.ContainsAny(pat[0], globMetaChars))
+	return rec(0, 0, false)
 }
 
 // printable reports text of at most maxLen runes without control characters other than newline and tab.

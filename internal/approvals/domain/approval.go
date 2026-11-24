@@ -50,7 +50,7 @@ const PolicyApprover = "policy"
 // Limits.
 const (
 	MaxCommentLen = 2000
-	maxPaths      = 200
+	maxPaths      = 500
 )
 
 var planHashRe = regexp.MustCompile(`^[0-9a-f]{64}$`)

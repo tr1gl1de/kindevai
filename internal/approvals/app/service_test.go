@@ -420,3 +420,85 @@ func TestListAndDetailsFollowProjectRoles(t *testing.T) {
 		t.Fatalf("member detail = %v", err)
 	}
 }
+
+// Review KIN-24: rejecting a revision makes its merge-into-dev request moot.
+func TestRejectingExecuteSupersedesItsMergeRequest(t *testing.T) {
+	t.Parallel()
+	e := newEnv()
+	e.submit(t, 1, snapshot(domain.RiskL2, "docs"))
+	ex := find(t, e.pending(t), domain.ScopeExecute)
+	if _, err := e.svc.Decide(t.Context(), owner, ex.ID, DecideInput{Revision: 1, PlanHash: hashOf(1), Comment: "no"}); err != nil {
+		t.Fatal(err)
+	}
+	if p := e.pending(t); len(p) != 0 {
+		t.Fatalf("pending after reject = %+v", p)
+	}
+}
+
+func (e env) heldStep(t *testing.T) domain.Approval {
+	t.Helper()
+	e.submit(t, 1, snapshot(domain.RiskL1, "internal/api"))
+	e.wf.mu.Lock()
+	e.wf.tasks["t1"].State = TaskRunning
+	e.wf.steps["s1"] = StepRef{StepID: "s1", TaskID: "t1", Key: "backend", Repository: "api", Revision: 1,
+		PlanHash: hashOf(1), Risk: domain.RiskL1, Scope: []string{"internal/api"}}
+	e.wf.mu.Unlock()
+	if _, err := e.svc.CheckChanges(t.Context(), StepChanges{StepID: "s1", RunnerID: "r1", Fence: 1,
+		Changed: []string{"../outside", "web/a.ts"}}); err != nil {
+		t.Fatal(err)
+	}
+	return find(t, e.pending(t), domain.ScopeExecute)
+}
+
+// Review KIN-24: a scope approval applies only while the task runs that revision.
+func TestScopeApprovalNeedsTheRunningTask(t *testing.T) {
+	t.Parallel()
+	e := newEnv()
+	req := e.heldStep(t)
+	e.wf.mu.Lock()
+	e.wf.tasks["t1"].State = "BLOCKED"
+	e.wf.mu.Unlock()
+	if _, err := e.svc.Decide(t.Context(), owner, req.ID, DecideInput{Approve: true, Revision: 1, PlanHash: hashOf(1)}); !errors.Is(err, domain.ErrNotReady) {
+		t.Fatalf("approve while not running = %v", err)
+	}
+	if len(e.wf.resumed) != 0 {
+		t.Fatalf("resumed = %v", e.wf.resumed)
+	}
+}
+
+// Review KIN-24: invalid paths are stored quoted and an approval never makes them acceptable.
+func TestInvalidChangedPathsNeverBecomeInScope(t *testing.T) {
+	t.Parallel()
+	e := newEnv()
+	ctx := t.Context()
+	req := e.heldStep(t)
+	if !slices.Equal(req.Paths, []string{`"../outside"`, "web/a.ts"}) {
+		t.Fatalf("paths = %q", req.Paths)
+	}
+	if _, err := e.svc.Decide(ctx, owner, req.ID, DecideInput{Approve: true, Revision: 1, PlanHash: hashOf(1)}); err != nil {
+		t.Fatal(err)
+	}
+	v, err := e.svc.CheckChanges(ctx, StepChanges{StepID: "s1", RunnerID: "r1", Fence: 2, Changed: []string{"../outside", "web/a.ts"}})
+	if err != nil || !slices.Equal(v.Outside, []string{`"../outside"`}) {
+		t.Fatalf("after approval = %+v, %v", v, err)
+	}
+}
+
+func TestOverlongReportsStopTheStep(t *testing.T) {
+	t.Parallel()
+	e := newEnv()
+	e.submit(t, 1, snapshot(domain.RiskL1, "internal/api"))
+	e.wf.mu.Lock()
+	e.wf.tasks["t1"].State = TaskRunning
+	e.wf.steps["s1"] = StepRef{StepID: "s1", TaskID: "t1", Key: "backend", Repository: "api", Revision: 1,
+		PlanHash: hashOf(1), Risk: domain.RiskL1, Scope: []string{"internal/api"}}
+	e.wf.mu.Unlock()
+	files := make([]string, MaxChangedFiles+3)
+	for i := range files {
+		files[i] = fmt.Sprintf("internal/api/f%d.go", i)
+	}
+	v, err := e.svc.CheckChanges(t.Context(), StepChanges{StepID: "s1", RunnerID: "r1", Fence: 1, Changed: files})
+	if err != nil || v.Empty() || len(e.wf.held) != 1 {
+		t.Fatalf("overlong report = %+v, %v", v.Outside, err)
+	}
+}

@@ -24,6 +24,11 @@ func TestInScope(t *testing.T) {
 		{[]string{"web"}, "../web/a.ts", false}, // never trust a path that escapes the repository
 		{[]string{"web"}, "/web/a.ts", false},
 		{nil, "a.go", false},
+		// Review KIN-24: a glob scope covers files the whole glob matches, never a prefix of it.
+		{[]string{"src/*/x"}, "src/a", false},
+		{[]string{"src/**/foo.go"}, "src/bar", false},
+		{[]string{"src/**/foo.go"}, "src/a/b/foo.go", true},
+		{[]string{"web"}, "web/a\nb.ts", false},
 	}
 	for _, tt := range tests {
 		if got := InScope(tt.scope, tt.file); got != tt.want {
@@ -59,5 +64,13 @@ func TestCheckChanges(t *testing.T) {
 	// An L3 approval already covers it.
 	if v := CheckChanges(scope, RiskL3, pol, "app", []string{"internal/auth/login.go"}); !v.Empty() {
 		t.Fatalf("L3-approved change flagged: %+v", v)
+	}
+}
+
+func TestOutsidePathsAreSafeToShow(t *testing.T) {
+	t.Parallel()
+	v := CheckChanges([]string{"docs"}, RiskL3, DefaultPolicy(), "app", []string{"../etc/passwd", "a\x00b", "./web//x.ts"})
+	if !slices.Equal(v.Outside, []string{`"../etc/passwd"`, `"a\x00b"`, "web/x.ts"}) {
+		t.Fatalf("outside = %q", v.Outside)
 	}
 }

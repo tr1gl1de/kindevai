@@ -479,9 +479,13 @@ func (s *Service) HoldStep(ctx context.Context, stepID, runnerID string, fence i
 	})
 }
 
-// ResumeStep returns a WAITING step to READY (e.g. after the Owner approved the extended scope).
-func (s *Service) ResumeStep(ctx context.Context, stepID string) error {
+// ResumeHeldStep returns a step held for approval (WAITING approval) to READY after the Owner approved the
+// extended scope; a step waiting for anything else is domain.ErrInvalidTransition.
+func (s *Service) ResumeHeldStep(ctx context.Context, stepID string) error {
 	return s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
+		if st := e.Step(stepID); st != nil && (st.State != domain.StepWaiting || st.WaitReason != domain.WaitApproval) {
+			return fmt.Errorf("step %s is not held for approval: %w", st.Key, domain.ErrInvalidTransition)
+		}
 		return e.ResumeStep(stepID, now)
 	})
 }

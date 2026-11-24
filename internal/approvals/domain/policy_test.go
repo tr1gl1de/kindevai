@@ -3,7 +3,9 @@ package domain
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestMatchPattern(t *testing.T) {
@@ -158,7 +160,8 @@ func TestEvaluateNeverLowersAnyProposal(t *testing.T) {
 func TestEvaluateIsDeterministic(t *testing.T) {
 	t.Parallel()
 	pol := DefaultPolicy()
-	in := []Target{{"b", "internal/auth/x.go"}, {"a", "migrations/1.sql"}, {"a", "internal/auth/y.go"}}
+	in := []Target{{Repository: "b", Path: "internal/auth/x.go"}, {Repository: "a", Path: "migrations/1.sql"},
+		{Repository: "a", Path: "internal/auth/y.go"}}
 	first := pol.Evaluate(RiskL0, in)
 	rev := slices.Clone(in)
 	slices.Reverse(rev)
@@ -180,5 +183,45 @@ func TestRiskRouting(t *testing.T) {
 		if tt.risk.RequiresApproval() != tt.needsApproval || tt.risk.IntegrateDevAutoApproved() != tt.integrateByRule {
 			t.Errorf("%s: approval %v, integrate auto %v", tt.risk, tt.risk.RequiresApproval(), tt.risk.IntegrateDevAutoApproved())
 		}
+	}
+}
+
+// Review KIN-24: a scope that may touch anything cannot dodge the policy at plan time.
+func TestEvaluateTreatsBroadScopesConservatively(t *testing.T) {
+	t.Parallel()
+	pol := DefaultPolicy()
+	for _, tt := range []struct {
+		path string
+		want Risk
+	}{
+		{".", RiskL3},                          // the whole repository
+		{"**/au*/**", RiskL3},                  // starts with a wildcard
+		{"internal/platform/db/*.sql", RiskL2}, // the literal prefix stands for the glob ("db" is no rule, *.sql is)
+		{"internal/auth/*.go", RiskL3},         // literal prefix internal/auth is covered by **/auth/**
+		{"docs/*.md", RiskL0},
+	} {
+		a := pol.Evaluate(RiskL0, []Target{{Repository: "app", Path: tt.path}})
+		if a.Risk != tt.want {
+			t.Errorf("Evaluate(%q) = %s, want %s (%+v)", tt.path, a.Risk, tt.want, a.Findings)
+		}
+	}
+}
+
+// Review KIN-24: many "**" segments against a deep path must not take exponential time.
+func TestMatchingIsPolynomial(t *testing.T) {
+	t.Parallel()
+	deep := strings.Repeat("a/", MaxPathSegments-1) + "c"
+	glob := strings.Repeat("**/", 20) + "b"
+	start := time.Now()
+	for range 50 {
+		if MatchPattern(glob, deep) || InScope([]string{glob}, deep) {
+			t.Fatal("must not match")
+		}
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("matching took %s", d)
+	}
+	if !MatchPattern("docs/**", strings.Repeat("a/", MaxPathSegments+1)+"x") {
+		t.Fatal("a path deeper than the limit counts as matching a policy rule")
 	}
 }

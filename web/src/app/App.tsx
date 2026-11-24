@@ -14,6 +14,8 @@ import { AuditPage } from "../features/audit/AuditPage";
 import { RunnerPage } from "../features/runners/RunnerPage";
 import { ApprovalPage } from "../features/approvals/ApprovalPage";
 import { ApprovalsPage } from "../features/approvals/ApprovalsPage";
+import { TaskPage } from "../features/tasks/TaskPage";
+import { TasksPage } from "../features/tasks/TasksPage";
 import { AlertsPage } from "../features/alerts/AlertsPage";
 import { RunnersPage } from "../features/runners/RunnersPage";
 import { NetworkPage } from "../features/network/NetworkPage";
@@ -88,6 +90,8 @@ function Gate() {
           <Route path="/" element={<OverviewPage />} />
           <Route path="/projects" element={<ProjectsPage me={me.data} />} />
           <Route path="/projects/:id" element={<ProjectPage me={me.data} />} />
+          <Route path="/tasks" element={<TasksPage />} />
+          <Route path="/tasks/:id" element={<TaskPage isOwner={me.data.role === "owner"} />} />
           <Route path="/approvals" element={<ApprovalsPage />} />
           <Route path="/approvals/:id" element={<ApprovalPage />} />
           <Route path="/alerts" element={<AlertsPage />} />

@@ -199,6 +199,13 @@ func TestApprovalCenterFlow(t *testing.T) {
 	if w, _ := s.do(t, "owner", http.MethodGet, "/api/approvals?state=weird", nil); w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("bad filter = %d", w.Code)
 	}
+	// KIN-25: the task page lists the task's approvals.
+	if got := s.list(t, "owner", "?taskId="+task.ID); len(got) != 2 {
+		t.Fatalf("approvals of the task = %d", len(got))
+	}
+	if got := s.list(t, "owner", "?taskId=other"); len(got) != 0 {
+		t.Fatalf("approvals of another task = %d", len(got))
+	}
 
 	approve1 := map[string]any{"planRevision": 1, "planHash": r1.Hash(), "comment": ""}
 	for _, u := range []string{"alice", "bob"} {

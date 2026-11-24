@@ -107,7 +107,10 @@ ai-runner fingerprint                                    # compare with the runn
   `repos/ workspaces/ sessions/ events/ proxy/`, all mode 0700; one process at a time (lock file).
 - Services: `deploy/runner/kindevai-runner.service` (systemd system service with its own user),
   `kindevai-runner-user.service` (systemd user service, e.g. WSL2, so AI CLIs use your logins) and
-  `io.kindevai.runner.plist` (macOS launchd agent); install steps are in each file.
+  `io.kindevai.runner.plist` (macOS launchd agent); install steps are in each file. Stopping or restarting the
+  service stops only the daemon (`KillMode=process`, launchd `AbandonProcessGroup`): running attempts keep going and
+  the next start adopts them, recognising each process by its pid and start time so a reused pid is never taken for
+  it. To stop the attempts as well, disable the runner in the Dashboard or use `systemctl kill` (KIN-64).
 - `ai-runner run` keeps an outbound WebSocket to `wss://<server>/runner/connect` (`ws://` only for a Control Plane on
   loopback). Each connection is authenticated by challenge-response: the Control Plane sends a single-use 32-byte
   nonce bound to the connection id and its own address, the runner signs
@@ -134,7 +137,7 @@ ai-runner fingerprint                                    # compare with the runn
 - Retention of recorded runner events: nothing of a running execution is deleted. Output goes 14 days after its
   execution finished (`--runner-output-retention-days` / `KINDEV_RUNNER_OUTPUT_RETENTION_DAYS`), other events after
   30 days (`--runner-event-retention-days` / `KINDEV_RUNNER_EVENT_RETENTION_DAYS`); acknowledged commands after 7
-  days. Output is capped at 16 MiB per attempt and 1 GiB in total (`--runner-output-limit-mb` /
+  days; the whole command log of a revoked runner (it never connects again) within an hour. Output is capped at 16 MiB per attempt and 1 GiB in total (`--runner-output-limit-mb` /
   `KINDEV_RUNNER_OUTPUT_LIMIT_MB`): over the limit the oldest output of finished executions is evicted first, and if
   only running executions hold output, new output is stored without its body (`output_storage_limit`) and a
   warning is logged. The cleanup runs at start and hourly in small batches.
@@ -149,6 +152,26 @@ ai-runner fingerprint                                    # compare with the runn
   after 5 s. A lost runner's attempt becomes `UNKNOWN` when its 60 s lease (renewed by heartbeats) runs out and
   nothing is started again until the runner reconciles: a live process continues (a restarted runner adopts it from
   its journal under `attempts/`), a gone one fails and is retried once.
+- Tasks & Executions (`/tasks`, KIN-25): the task list filtered by project and state, and a task page with the plan
+  revision, steps by stage, attempts (runner, CLI) and each attempt's output and events, read by polling in bounded
+  pages. The Owner and project admins create tasks, plan them with the mock planner, cancel them and retry a failed
+  one (`POST /api/tasks/{id}/retry`: the current plan becomes a new revision, checked by the risk policy again).
+  **Agent time** is the time the agents' CLI processes ran (from the runner's `execution.started` to its
+  completed/failed event, on the runner's clock, recorded once per attempt); it is shown per attempt, step, task and
+  for the list's filter, apart from the task's calendar duration. A period without an end (a lost process) or a usable
+  time is shown as "accounting incomplete", never as a complete record.
+- Workspaces (runner): when the step's repository is registered for the project, the attempt runs in its own git
+  worktree under `workspaces/` on the branch `feature/<task>--<step>` (never main/master), started from the
+  repository's integration branch fetched into a bare cache under `repos/`; the base commit is recorded. The Control
+  Plane adds the branch and a short-lived installation token for that repository to the assignment only when it is
+  sent; the runner hands the token to git only through its credential helper (`ai-runner git-credential`, a unix
+  socket the runner serves during the fetch) and only for the host of `--git-base-url` (default
+  `https://github.com`, `KINDEV_RUNNER_GIT_BASE_URL`): never in arguments, environment, files or the remote URL.
+  Instruction files (`AGENTS.md`, `CLAUDE.md`, `.claude/{agents,skills,rules,commands,settings*}`, `.codex/`,
+  `.mcp.json`) are reported with their SHA-256 as untrusted data (symlinks are not followed, nothing is parsed).
+  When the attempt ends, uncommitted work is committed to the branch, the changed files against the base and any
+  changed instruction file are reported, and the worktree is removed; the branch stays. One writer per workspace;
+  a workspace needs `--workspace-min-free-mib` (default 2048) free on the data dir's filesystem.
 - Storage (Owner): the Overview shows every machine's disk space; **Infrastructure → Storage** (`/infrastructure/storage`)
   adds the hourly fill history for 7 or 30 days with the 75/85/95% levels, every volume with both forecasts and the
   space consumers. A runner measures its consumers (repos, workspaces and worktrees, CLI sessions, the event spool,

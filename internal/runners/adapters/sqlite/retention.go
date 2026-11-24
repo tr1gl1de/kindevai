@@ -165,6 +165,17 @@ func (r *Repository) OutputUsage(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
+// DeleteRevokedCommands deletes up to limit commands from the logs of revoked runners in one statement (KIN-72).
+// The channel row (cursor only) stays.
+func (r *Repository) DeleteRevokedCommands(ctx context.Context, limit int) (int64, error) {
+	res, err := db.Conn(ctx, r.db).ExecContext(ctx, `DELETE FROM runner_commands WHERE rowid IN (SELECT c.rowid
+		FROM runners r JOIN runner_commands c ON c.runner_id = r.id WHERE r.status = 'revoked' LIMIT ?)`, limit)
+	if err != nil {
+		return 0, fmt.Errorf("deleting commands of revoked runners: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // OutputDrops lists the attempts whose output was dropped because the output storage was full (reason
 // output_storage_limit) since then, newest first, at most limit of them, with the number of such events in all.
 // The reason is a literal in the SQL so that the partial index runner_attempt_events_output_dropped applies.

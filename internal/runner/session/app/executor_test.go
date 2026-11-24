@@ -28,6 +28,8 @@ type fakeProc struct {
 
 func (p *fakeProc) PID() int  { return p.pid }
 func (p *fakeProc) PGID() int { return p.pid }
+
+func (p *fakeProc) StartTime() string { return fmt.Sprintf("start-%d", p.pid) }
 func (p *fakeProc) Wait() domain.Exit {
 	<-p.exit
 	return p.result
@@ -246,6 +248,10 @@ func TestAssignRunsTheAttemptAndReportsItsEnd(t *testing.T) {
 	}
 	if got := x.Attempts(); len(got) != 1 || !got[0].Running || got[0].PID != 100 || got[0].Step != "S1" {
 		t.Fatalf("attempts %+v", got)
+	}
+	// KIN-64: the journal identifies the process by pid and start time, so a restart never adopts a reused pid.
+	if recs, _ := j.List(); len(recs) != 1 || recs[0].PID != 100 || recs[0].Start != "start-100" {
+		t.Fatalf("journal %+v", recs)
 	}
 	if s := l.launched[0]; s.Scenario != domain.ScenarioSuccess || s.Attempt != 1 || s.Dir != "/work/S1-1" {
 		t.Fatalf("launch %+v", s)

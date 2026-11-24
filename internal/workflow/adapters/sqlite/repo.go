@@ -291,25 +291,17 @@ func (r *Repository) steps(ctx context.Context, c db.Executor, execID string) ([
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("reading steps: %w", err)
 	}
-	arows, err := c.QueryContext(ctx, `SELECT a.step_id, a.number, a.runner_id, a.fence, a.state, a.error,
-		a.started_at, a.finished_at FROM step_attempts a JOIN workflow_steps s ON s.id = a.step_id
-		WHERE s.execution_id = ? ORDER BY a.step_id, a.number`, execID)
+	arows, err := c.QueryContext(ctx, `SELECT a.step_id, `+attemptCols+` FROM step_attempts a
+		JOIN workflow_steps s ON s.id = a.step_id WHERE s.execution_id = ? ORDER BY a.step_id, a.number`, execID)
 	if err != nil {
 		return nil, fmt.Errorf("reading attempts: %w", err)
 	}
 	defer arows.Close()
 	for arows.Next() {
-		var stepID, started string
-		var finished sql.NullString
-		var a domain.Attempt
-		if err := arows.Scan(&stepID, &a.Number, &a.RunnerID, &a.Fence, &a.State, &a.Error, &started, &finished); err != nil {
-			return nil, fmt.Errorf("reading attempt: %w", err)
-		}
-		if a.StartedAt, err = parseTS(started); err == nil {
-			a.FinishedAt, err = parseNullTS(finished)
-		}
+		var stepID string
+		a, err := scanAttempt(arows, &stepID)
 		if err != nil {
-			return nil, fmt.Errorf("reading attempt of step %s: %w", stepID, err)
+			return nil, err
 		}
 		if i, ok := index[stepID]; ok {
 			steps[i].Attempts = append(steps[i].Attempts, a)
@@ -338,10 +330,15 @@ func (r *Repository) SaveExecution(ctx context.Context, e *domain.Execution) err
 		}
 		for _, a := range s.Attempts {
 			if _, err := c.ExecContext(ctx, `INSERT INTO step_attempts(step_id, number, runner_id, fence, state, error,
-				started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+				started_at, finished_at, agent, work_started_at, work_ended_at, work_incomplete)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(step_id, number) DO UPDATE SET state = excluded.state, error = excluded.error,
-				finished_at = excluded.finished_at`,
-				s.ID, a.Number, a.RunnerID, a.Fence, a.State, a.Error, ts(a.StartedAt), nullTS(a.FinishedAt)); err != nil {
+				finished_at = excluded.finished_at, agent = excluded.agent,
+				work_started_at = coalesce(work_started_at, excluded.work_started_at),
+				work_ended_at = coalesce(work_ended_at, excluded.work_ended_at),
+				work_incomplete = max(work_incomplete, excluded.work_incomplete)`,
+				s.ID, a.Number, a.RunnerID, a.Fence, a.State, a.Error, ts(a.StartedAt), nullTS(a.FinishedAt), a.Agent,
+				nullTS(a.WorkStart), nullTS(a.WorkEnd), a.WorkIncomplete); err != nil {
 				return fmt.Errorf("saving attempt %d of step %s: %w", a.Number, s.Key, err)
 			}
 		}
@@ -407,18 +404,65 @@ func (r *Repository) ExecutionsHeldBy(ctx context.Context, runnerID string) ([]s
 		WHERE e.state = 'RUNNING' AND s.runner_id = ? ORDER BY e.id`, runnerID)
 }
 
-// ListTasks returns the tasks of the projects, newest first, at most limit.
-func (r *Repository) ListTasks(ctx context.Context, projectIDs []string, limit int) ([]domain.Task, error) {
-	if len(projectIDs) == 0 {
+// HeldSteps counts, per runner, the steps of running executions it holds: CLAIMED, RUNNING, or WAITING on a last
+// attempt whose outcome is UNKNOWN (domain.Step.Holding).
+func (r *Repository) HeldSteps(ctx context.Context) (map[string]int, error) {
+	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, `SELECT s.runner_id, COUNT(*) FROM workflow_steps s
+		JOIN executions e ON e.id = s.execution_id
+		WHERE e.state = 'RUNNING' AND s.runner_id IS NOT NULL AND s.runner_id != '' AND (s.state IN ('CLAIMED', 'RUNNING')
+			OR s.state = 'WAITING' AND (SELECT a.state FROM step_attempts a WHERE a.step_id = s.id
+				ORDER BY a.number DESC LIMIT 1) = 'UNKNOWN')
+		GROUP BY s.runner_id`)
+	if err != nil {
+		return nil, fmt.Errorf("counting held steps: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, fmt.Errorf("counting held steps: %w", err)
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}
+
+// taskWhere is the WHERE clause (on tasks aliased t) and arguments for f; ok is false when f selects nothing.
+func taskWhere(f app.TaskFilter) (string, []any, bool) {
+	if len(f.ProjectIDs) == 0 && len(f.TaskIDs) == 0 {
+		return "", nil, false
+	}
+	var conds []string
+	var args []any
+	in := func(col string, vals []string) {
+		if len(vals) == 0 {
+			return
+		}
+		conds = append(conds, col+" IN (?"+strings.Repeat(", ?", len(vals)-1)+")")
+		for _, v := range vals {
+			args = append(args, v)
+		}
+	}
+	in("t.project_id", f.ProjectIDs)
+	in("t.id", f.TaskIDs)
+	states := make([]string, 0, len(f.States))
+	for _, st := range f.States {
+		states = append(states, string(st))
+	}
+	in("t.state", states)
+	return strings.Join(conds, " AND "), args, true
+}
+
+// ListTasks returns the tasks f selects, newest first, at most limit.
+func (r *Repository) ListTasks(ctx context.Context, f app.TaskFilter, limit int) ([]domain.Task, error) {
+	where, args, ok := taskWhere(f)
+	if !ok {
 		return nil, nil
 	}
-	args := make([]any, 0, len(projectIDs)+1)
-	for _, id := range projectIDs {
-		args = append(args, id)
-	}
-	args = append(args, limit)
-	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, "SELECT "+taskCols+" FROM tasks WHERE project_id IN (?"+
-		strings.Repeat(", ?", len(projectIDs)-1)+") ORDER BY created_at DESC, id DESC LIMIT ?", args...)
+	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, "SELECT "+taskCols+" FROM tasks t WHERE "+where+
+		" ORDER BY created_at DESC, id DESC LIMIT ?", append(args, limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("listing tasks: %w", err)
 	}
@@ -430,6 +474,93 @@ func (r *Repository) ListTasks(ctx context.Context, projectIDs []string, limit i
 			return nil, err
 		}
 		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+const attemptCols = `a.number, a.runner_id, a.fence, a.state, a.error, a.started_at, a.finished_at, a.agent,
+	a.work_started_at, a.work_ended_at, a.work_incomplete`
+
+func scanAttempt(row scanner, key *string) (domain.Attempt, error) {
+	var a domain.Attempt
+	var started string
+	var finished, workStart, workEnd sql.NullString
+	if err := row.Scan(key, &a.Number, &a.RunnerID, &a.Fence, &a.State, &a.Error, &started, &finished, &a.Agent,
+		&workStart, &workEnd, &a.WorkIncomplete); err != nil {
+		return a, fmt.Errorf("reading attempt: %w", err)
+	}
+	var err error
+	if a.StartedAt, err = parseTS(started); err == nil {
+		if a.FinishedAt, err = parseNullTS(finished); err == nil {
+			if a.WorkStart, err = parseNullTS(workStart); err == nil {
+				a.WorkEnd, err = parseNullTS(workEnd)
+			}
+		}
+	}
+	if err != nil {
+		return a, fmt.Errorf("reading attempt %d: %w", a.Number, err)
+	}
+	return a, nil
+}
+
+// EachAttempt streams the attempts of every execution of the tasks f selects (rows are not buffered).
+func (r *Repository) EachAttempt(ctx context.Context, f app.TaskFilter, fn func(taskID string, a domain.Attempt) error) error {
+	where, args, ok := taskWhere(f)
+	if !ok {
+		return nil
+	}
+	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, `SELECT t.id, `+attemptCols+` FROM tasks t
+		JOIN executions e ON e.task_id = t.id JOIN workflow_steps s ON s.execution_id = e.id
+		JOIN step_attempts a ON a.step_id = s.id WHERE `+where, args...)
+	if err != nil {
+		return fmt.Errorf("reading agent time: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var taskID string
+		a, err := scanAttempt(rows, &taskID)
+		if err != nil {
+			return err
+		}
+		if err := fn(taskID, a); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// ExecutionSpans returns, per task with executions, its first execution's start and its last one's end (nil
+// while one runs). Timestamps have a fixed width, so MIN/MAX compare them correctly as text.
+func (r *Repository) ExecutionSpans(ctx context.Context, taskIDs []string) (map[string]app.ExecutionSpan, error) {
+	out := map[string]app.ExecutionSpan{}
+	if len(taskIDs) == 0 {
+		return out, nil
+	}
+	args := make([]any, 0, len(taskIDs))
+	for _, id := range taskIDs {
+		args = append(args, id)
+	}
+	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, `SELECT task_id, min(created_at),
+		CASE WHEN sum(finished_at IS NULL) > 0 THEN NULL ELSE max(finished_at) END
+		FROM executions WHERE task_id IN (?`+strings.Repeat(", ?", len(taskIDs)-1)+`) GROUP BY task_id`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("reading execution spans: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, start string
+		var end sql.NullString
+		if err := rows.Scan(&id, &start, &end); err != nil {
+			return nil, fmt.Errorf("reading execution spans: %w", err)
+		}
+		var sp app.ExecutionSpan
+		if sp.Start, err = parseTS(start); err == nil {
+			sp.End, err = parseNullTS(end)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading execution span of %s: %w", id, err)
+		}
+		out[id] = sp
 	}
 	return out, rows.Err()
 }

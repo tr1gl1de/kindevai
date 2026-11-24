@@ -250,6 +250,10 @@ func (r *Repository) List(ctx context.Context, f app.Filter) ([]domain.Approval,
 			args = append(args, string(s))
 		}
 	}
+	if f.TaskID != "" {
+		where = append(where, "task_id = ?")
+		args = append(args, f.TaskID)
+	}
 	q := `SELECT ` + approvalCols + ` FROM approvals`
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")

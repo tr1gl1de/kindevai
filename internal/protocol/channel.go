@@ -47,13 +47,16 @@ const (
 	EventOutputDropped = "execution.output.dropped" // body: OutputDropped — the spool was full
 	EventCompleted     = "execution.completed"      // terminal: success
 	EventFailed        = "execution.failed"         // terminal, body: Failure
+	// Workspace events (KIN-29), sent before the attempt's process starts and before its terminal event.
+	EventWorkspacePrepared = "workspace.prepared" // body: WorkspacePrepared
+	EventWorkspaceChanges  = "workspace.changes"  // body: WorkspaceChanges
 )
 
 // TerminalEvent reports whether kind ends an attempt.
 func TerminalEvent(kind string) bool { return kind == EventCompleted || kind == EventFailed }
 
 var eventKinds = map[string]bool{EventAccepted: true, EventStarted: true, EventOutput: true, EventOutputDropped: true,
-	EventCompleted: true, EventFailed: true}
+	EventCompleted: true, EventFailed: true, EventWorkspacePrepared: true, EventWorkspaceChanges: true}
 
 // Limits of the channel. MaxOutputChunk raw bytes of output escape to at most 6× in JSON (\u00XX), so an output
 // event stays below MaxMessageBytes.
@@ -109,6 +112,12 @@ type Assign struct {
 	Scope      []string `json:"scope"`      // repository-relative paths the step may change
 	Adapter    string   `json:"adapter"`    // AdapterMock until the CLI adapters (KIN-32)
 	Scenario   string   `json:"scenario,omitempty"`
+	// Base is the branch the attempt's worktree starts from (the repository's integration branch, KIN-26/KIN-29).
+	// Empty: the attempt runs in an empty directory (no registered repository).
+	Base string `json:"base,omitempty"`
+	// Credential is added by the Control Plane right before sending (Channel.Prepare), never stored in its command
+	// log: a short-lived installation token for Repository only (KIN-28).
+	Credential *GitCredential `json:"credential,omitempty"`
 }
 
 // Agent adapters a runner may be assigned.
@@ -173,6 +182,12 @@ type Output struct {
 type OutputDropped struct {
 	Bytes  int64 `json:"bytes"`
 	Chunks int64 `json:"chunks"`
+}
+
+// Started is the body of execution.started (KIN-25): the agent (CLI adapter, e.g. "mock") that runs the attempt.
+// The Control Plane counts the attempt's agent time from this event's time to its terminal event's time.
+type Started struct {
+	Agent string `json:"agent,omitempty"`
 }
 
 // Failure is the body of execution.failed.

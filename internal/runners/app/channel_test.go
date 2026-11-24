@@ -145,6 +145,7 @@ type fakeWorkflow struct {
 	fence   map[string]int64
 	state   map[string]string
 	calls   []string
+	marks   []string
 	failing error
 }
 
@@ -174,14 +175,24 @@ func (w *fakeWorkflow) op(name, step string, fence int64, from, to string) error
 func (w *fakeWorkflow) CheckAttempt(_ context.Context, _, step string, fence int64) error {
 	return w.op("check", step, fence, "", "")
 }
-func (w *fakeWorkflow) StartAttempt(_ context.Context, _, step string, fence int64) error {
+func (w *fakeWorkflow) StartAttempt(_ context.Context, _, step string, fence int64, at time.Time, agent string) error {
+	w.mark("start", at, agent)
 	return w.op("start", step, fence, "claimed", "running")
 }
-func (w *fakeWorkflow) CompleteAttempt(_ context.Context, _, step string, fence int64) error {
+func (w *fakeWorkflow) CompleteAttempt(_ context.Context, _, step string, fence int64, at time.Time) error {
+	w.mark("complete", at, "")
 	return w.op("complete", step, fence, "running", "done")
 }
-func (w *fakeWorkflow) FailAttempt(_ context.Context, _, step string, fence int64, _ string) error {
+func (w *fakeWorkflow) FailAttempt(_ context.Context, _, step string, fence int64, _ string, at time.Time) error {
+	w.mark("fail", at, "")
 	return w.op("fail", step, fence, "running", "failed")
+}
+
+// mark records the event time (and agent) the workflow got.
+func (w *fakeWorkflow) mark(name string, at time.Time, agent string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.marks = append(w.marks, fmt.Sprintf("%s %d %s", name, at.UnixMilli(), agent))
 }
 
 func (w *fakeWorkflow) history() []string {
@@ -788,5 +799,29 @@ func TestOutputStorageFlappingDoesNotResolve(t *testing.T) {
 	output(1)
 	if got := ob.topics(); !slices.Equal(got, []string{TopicRunnerOutputFull, TopicRunnerOutputRecovered}) {
 		t.Fatalf("topics after a quiet minute = %v", got)
+	}
+}
+
+// The workflow gets each lifecycle event's time on the runner's clock and the agent from execution.started, so it
+// can account the attempt's agent time (KIN-25).
+func TestLifecycleEventsCarryTheRunnerTimeAndAgent(t *testing.T) {
+	t.Parallel()
+	e := newChannelEnv()
+	e.wf.fence["s1"], e.wf.state["s1"] = 3, "claimed"
+	sess, _ := newSession("r1")
+	started, _ := json.Marshal(protocol.Started{Agent: "mock"})
+	evs := []protocol.Event{
+		{Epoch: "sp", Seq: 1, Step: "s1", Fence: 3, AttemptSeq: 1, Kind: protocol.EventStarted, At: 1_000, Body: started},
+		{Epoch: "sp", Seq: 2, Base: 1, Step: "s1", Fence: 3, AttemptSeq: 2, Kind: protocol.EventCompleted, At: 41_000},
+	}
+	for _, ev := range evs {
+		if err := handle(t, e.ch, sess, protocol.TypeEvent, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.wf.mu.Lock()
+	defer e.wf.mu.Unlock()
+	if !slices.Equal(e.wf.marks, []string{"start 1000 mock", "complete 41000 "}) {
+		t.Fatalf("marks %q", e.wf.marks)
 	}
 }

@@ -296,6 +296,19 @@ func (c *Channel) Attempt(step string, fence int64) *Attempt {
 	return &Attempt{ch: c, step: step, fence: fence, offsets: map[string]int64{}}
 }
 
+// AttemptSeqBlock is how many attempt event numbers a resumable attempt reserves at once.
+const AttemptSeqBlock = 256
+
+// ResumeAttempt returns the event stream of an attempt that must survive a runner restart: its events are numbered
+// after `after`, and before a number is used reserve(upTo) must durably record that numbers up to upTo may be
+// taken (in blocks of AttemptSeqBlock). A stream resumed after a restart passes the last reservation as after, so
+// it never reuses a number the Control Plane may already have stored.
+func (c *Channel) ResumeAttempt(step string, fence, after int64, reserve func(upTo int64) error) *Attempt {
+	a := c.Attempt(step, fence)
+	a.seq, a.reserved, a.reserve = after, after, reserve
+	return a
+}
+
 // Attempt is the event stream of one attempt (Step + Fence). It is safe for concurrent use (stdout and stderr).
 //
 // Backpressure: output is written to the spool synchronously in chunks of at most protocol.MaxOutputChunk, so a
@@ -310,6 +323,9 @@ type Attempt struct {
 	seq     int64
 	offsets map[string]int64
 	dropped protocol.OutputDropped
+	// reserve, when set, records durably that numbers up to reserved may be used (ResumeAttempt).
+	reserve  func(upTo int64) error
+	reserved int64
 }
 
 // Emit appends a lifecycle event (body is marshalled to JSON; nil for none).
@@ -333,6 +349,12 @@ func (a *Attempt) Emit(kind string, body any) error {
 }
 
 func (a *Attempt) append(kind string, body json.RawMessage) error {
+	if a.reserve != nil && a.seq+1 > a.reserved {
+		if err := a.reserve(a.seq + AttemptSeqBlock); err != nil {
+			return fmt.Errorf("reserving attempt event numbers: %w", err)
+		}
+		a.reserved = a.seq + AttemptSeqBlock
+	}
 	_, err := a.ch.Emit(SpooledEvent{Step: a.step, Fence: a.fence, AttemptSeq: a.seq + 1, Kind: kind, Body: body})
 	if err == nil {
 		a.seq++

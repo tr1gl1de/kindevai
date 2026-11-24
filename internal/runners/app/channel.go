@@ -340,7 +340,7 @@ func (c *Channel) applyEvent(ctx context.Context, runnerID string, e protocol.Ev
 	case errors.Is(err, domain.ErrStaleAttempt):
 		rec.Outcome, rec.Reason = domain.OutcomeRejected, protocol.CancelStaleFence
 		// The runner must stop a process whose token was superseded (same transaction: durable with the record).
-		if err := c.Send(ctx, runnerID, fmt.Sprintf("cancel/%s/%d", e.Step, e.Fence), protocol.CommandCancel,
+		if err := c.Send(ctx, runnerID, protocol.CancelCommandID(e.Step, e.Fence), protocol.CommandCancel,
 			protocol.Cancel{Step: e.Step, Fence: e.Fence, Reason: protocol.CancelStaleFence}); err != nil {
 			return err
 		}

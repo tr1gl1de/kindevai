@@ -246,6 +246,20 @@ func (r *memRepo) ExecutionsHeldBy(_ context.Context, runnerID string) ([]string
 	return ids, nil
 }
 
+func (r *memRepo) HeldSteps(context.Context) (map[string]int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := map[string]int{}
+	for _, e := range r.execs {
+		for i := range e.Steps {
+			if e.State == domain.ExecutionRunning && e.Steps[i].Holding() {
+				out[e.Steps[i].RunnerID]++
+			}
+		}
+	}
+	return out, nil
+}
+
 func (f TaskFilter) matches(t domain.Task) bool {
 	return (len(f.ProjectIDs) > 0 || len(f.TaskIDs) > 0) &&
 		(len(f.ProjectIDs) == 0 || slices.Contains(f.ProjectIDs, t.ProjectID)) &&

@@ -7,7 +7,7 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest",
-    "lint": "oxlint -c .oxlintrc.json --deny-warnings src"
+    "lint": "oxlint -c .oxlintrc.json --deny-warnings src && stylelint --max-warnings 0 \"src/**/*.css\""
   },
   "dependencies": {
     "@tanstack/react-query": "^5.108.4",
@@ -30,6 +30,8 @@
     "jsdom": "^31.0.1",
     "msw": "^3.0.7",
     "oxlint": "^1.95.0",
+    "stylelint": "^18.1.0",
+    "stylelint-config-recommended": "^19.1.0",
     "typescript": "^7.0.2",
     "vite": "^8.3.8",
     "vitest": "^5.1.1"

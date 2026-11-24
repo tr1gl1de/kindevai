@@ -267,6 +267,26 @@ export interface StorageOverview {
   generatedAt: string;
   thresholds: { warningPercent: number; highPercent: number; criticalPercent: number; minHeadroomBytes: number };
   machines: StorageMachine[];
+  /** Runner output stored in the Control Plane's database (KIN-52 limit, KIN-59); absent on older servers. */
+  runnerOutput?: RunnerOutputStorage;
+}
+
+/** ok; high: ≥ 90% of the limit (the oldest finished output is evicted); full: new output is being dropped. */
+export type RunnerOutputState = "ok" | "high" | "full";
+
+export interface RunnerOutputStorage {
+  usedBytes: number;
+  limitBytes: number;
+  usedPercent: number;
+  state: RunnerOutputState;
+  outputRetentionDays: number;
+  eventRetentionDays: number;
+  /** The window of droppedEvents and drops. */
+  dropsWindowHours: number;
+  droppedEvents: number;
+  lastDroppedAt: string | null;
+  /** Attempts whose output was dropped for the limit, newest first (at most 10). */
+  drops: { runnerId: string; stepId: string; fence: number; events: number; lastAt: string }[];
 }
 
 // Infrastructure → Storage (GET /api/storage/machines/{id}?days=7|30, KIN-55).

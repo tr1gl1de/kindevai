@@ -9,6 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/tr1gl1de/kindevai/internal/alerts/app"
 	"github.com/tr1gl1de/kindevai/internal/alerts/domain"
@@ -101,6 +104,50 @@ func (h Handlers) StorageLevel(ctx context.Context, d messaging.Delivery) error 
 			"availableBytes": strconv.FormatInt(p.AvailableBytes, 10)}}))
 }
 
+// runnerOutputKey groups the Control Plane's "runner output storage full" alerts until output is stored again.
+const runnerOutputKey = "runner-output/full"
+
+// RunnerOutputFull handles alerts.runner_output_full {limitBytes, runnerId, stepId} (KIN-59): output of running
+// executions is dropped because the Control Plane's runner output storage is full.
+func (h Handlers) RunnerOutputFull(ctx context.Context, d messaging.Delivery) error {
+	var p struct {
+		LimitBytes int64  `json:"limitBytes"`
+		RunnerID   string `json:"runnerId"`
+		StepID     string `json:"stepId"`
+	}
+	if err := decode(d, &p); err != nil {
+		return err
+	}
+	if p.LimitBytes <= 0 {
+		return messaging.Permanent(errors.New("runner_output_full: no limitBytes"))
+	}
+	return permanent(h.Svc.Raise(ctx, d.Key, domain.Occurrence{Kind: domain.KindRunnerOutputFull,
+		Severity: domain.SeverityWarning, DedupKey: runnerOutputKey, Subject: "control-plane", Details: map[string]string{
+			"limitBytes": strconv.FormatInt(p.LimitBytes, 10), "limitMiB": strconv.FormatInt(p.LimitBytes>>20, 10),
+			"runnerId": clipID(p.RunnerID), "stepId": clipID(p.StepID)}}))
+}
+
+// clipID keeps at most 128 bytes of the printable runes of an id the runner reported, so a malformed one never
+// costs the alert.
+func clipID(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToValidUTF8(s, "") {
+		if unicode.IsControl(r) {
+			continue
+		}
+		if b.Len()+utf8.RuneLen(r) > 128 {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// RunnerOutputRecovered handles alerts.runner_output_recovered {}: output is stored again, the alert resolves.
+func (h Handlers) RunnerOutputRecovered(ctx context.Context, _ messaging.Delivery) error {
+	return h.Svc.ResolveKey(ctx, runnerOutputKey)
+}
+
 // ApprovalRequested handles telegram.approval_requested {approvalId, projectId, taskId, planRevision, scope,
 // reason, risk}: the Owners are told in Telegram.
 func (h Handlers) ApprovalRequested(ctx context.Context, d messaging.Delivery) error {
@@ -116,4 +163,21 @@ func (h Handlers) ApprovalRequested(ctx context.Context, d messaging.Delivery) e
 	}
 	return permanent(h.Svc.NotifyApproval(ctx, app.ApprovalRequest{ApprovalID: p.ApprovalID, ProjectID: p.ProjectID,
 		TaskID: p.TaskID, Risk: p.Risk, Reason: p.Reason}))
+}
+
+// TaskFinished handles telegram.task_finished {taskId, projectId, state, title, createdBy} (KIN-62): the
+// task's audience is told in Telegram.
+func (h Handlers) TaskFinished(ctx context.Context, d messaging.Delivery) error {
+	var p struct {
+		TaskID    string `json:"taskId"`
+		ProjectID string `json:"projectId"`
+		State     string `json:"state"`
+		Title     string `json:"title"`
+		CreatedBy string `json:"createdBy"`
+	}
+	if err := decode(d, &p); err != nil {
+		return err
+	}
+	return permanent(h.Svc.NotifyTask(ctx, app.TaskFinished{TaskID: p.TaskID, ProjectID: p.ProjectID, State: p.State,
+		Title: p.Title, CreatedBy: p.CreatedBy}))
 }

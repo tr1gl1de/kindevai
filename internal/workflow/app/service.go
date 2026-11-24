@@ -75,15 +75,23 @@ type Events interface {
 	TaskClosed(ctx context.Context, t domain.Task) error // CANCELLED or FAILED
 }
 
+// TaskNotifier is told, inside the use case's transaction, that a task finished: it entered COMPLETED or FAILED
+// (a cancellation is someone's own decision and is not announced). It runs once per state change, so the
+// notification (an outbox message, KIN-62) commits or rolls back with the task.
+type TaskNotifier interface {
+	TaskFinished(ctx context.Context, t domain.Task) error
+}
+
 // Service implements the workflow use cases.
 type Service struct {
 	Repo        Repository
 	Projects    Projects
-	Policy      RiskPolicy // required for SubmitPlan
-	Events      Events     // optional
-	Runners     RunnerPool // required for Schedule
-	Dispatcher  Dispatcher // runner commands; required for Schedule, optional otherwise
-	Access      Access     // project visibility for the task API (KIN-23)
+	Policy      RiskPolicy   // required for SubmitPlan
+	Events      Events       // optional
+	Notifier    TaskNotifier // optional: "task finished" notifications (KIN-62)
+	Runners     RunnerPool   // required for Schedule
+	Dispatcher  Dispatcher   // runner commands; required for Schedule, optional otherwise
+	Access      Access       // project visibility for the task API (KIN-23)
 	Tx          TxRunner
 	Now         func() time.Time
 	NewID       func() string
@@ -168,10 +176,14 @@ func (s *Service) updateTask(ctx context.Context, id string, fn func(ctx context
 		if t, err = s.Repo.Task(ctx, id); err != nil {
 			return err
 		}
+		from := t.State
 		if err := fn(ctx, &t, s.now()); err != nil {
 			return err
 		}
-		return s.Repo.SaveTask(ctx, &t)
+		if err := s.Repo.SaveTask(ctx, &t); err != nil {
+			return err
+		}
+		return s.finished(ctx, from, t)
 	})
 	if err != nil {
 		return domain.Task{}, err
@@ -328,6 +340,7 @@ func (s *Service) syncTask(ctx context.Context, e *domain.Execution, now time.Ti
 	if err != nil {
 		return err
 	}
+	from := t.State
 	if t.State == domain.TaskBlocked && t.BlockedFrom == domain.TaskRunning {
 		if err := t.Resume(now); err != nil {
 			return err
@@ -340,9 +353,19 @@ func (s *Service) syncTask(ctx context.Context, e *domain.Execution, now time.Ti
 		return err
 	}
 	if to == domain.TaskFailed && s.Events != nil {
-		return s.Events.TaskClosed(ctx, t)
+		if err := s.Events.TaskClosed(ctx, t); err != nil {
+			return err
+		}
 	}
-	return nil
+	return s.finished(ctx, from, t)
+}
+
+// finished tells the notifier when the saved task has just entered COMPLETED or FAILED.
+func (s *Service) finished(ctx context.Context, from domain.TaskState, t domain.Task) error {
+	if s.Notifier == nil || from == t.State || (t.State != domain.TaskCompleted && t.State != domain.TaskFailed) {
+		return nil
+	}
+	return s.Notifier.TaskFinished(ctx, t)
 }
 
 // Claim gives runnerID the READY step with a new fencing token and a lease, only while the task is RUNNING (not

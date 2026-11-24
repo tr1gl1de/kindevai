@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http } from "msw";
 import { describe, expect, it } from "vitest";
-import type { Me, StorageForecast, StorageMachineDetail, StorageOverview, StorageVolume } from "../../api/types";
+import type { Me, RunnerOutputStorage, StorageForecast, StorageMachineDetail, StorageOverview, StorageVolume } from "../../api/types";
 import { apiError, json, owner, server } from "../../test/msw";
 import { expectAccessible, renderApp } from "../../test/render";
 
@@ -51,11 +51,20 @@ const detail = (id: string, days: 7 | 30): StorageMachineDetail => {
   };
 };
 
+const output: RunnerOutputStorage = {
+  usedBytes: 970 * 2 ** 20, limitBytes: 2 ** 30, usedPercent: 94.7, state: "high", outputRetentionDays: 14, eventRetentionDays: 30,
+  dropsWindowHours: 24, droppedEvents: 5, lastDroppedAt: "2026-11-24T10:00:00Z",
+  drops: [
+    { runnerId: "r1", stepId: "step-7", fence: 2, events: 4, lastAt: "2026-11-24T10:00:00Z" },
+    { runnerId: "gone", stepId: "step-3", fence: 1, events: 1, lastAt: "2026-11-24T09:00:00Z" },
+  ],
+};
+
 const signedIn = (me: Me = owner) => server.use(http.get("/api/auth/me", () => json(me)));
 
 function serveStorage(seen: string[] = []) {
   server.use(
-    http.get("/api/storage/overview", () => json(overview)),
+    http.get("/api/storage/overview", () => json({ ...overview, runnerOutput: output })),
     http.get("/api/storage/machines/:id", ({ params, request }) => {
       const days = new URL(request.url).searchParams.get("days") === "30" ? 30 : 7;
       seen.push(`${String(params.id)}?${days}`);
@@ -109,6 +118,38 @@ describe("Infrastructure → Storage page", () => {
     expect(await within(cp).findByRole("img", { name: /Data directory/ })).toBeInTheDocument();
     expect(within(cp).queryByRole("table", { name: /Space consumers/ })).not.toBeInTheDocument();
     await expectAccessible(container);
+  });
+
+  // KIN-59: usage against the limit, the retention settings and the recent "output dropped" occurrences.
+  it("shows the runner output storage with its limit, retention settings and recently dropped output", async () => {
+    signedIn();
+    serveStorage();
+    const { container } = await renderApp("/infrastructure/storage");
+    const sec = await screen.findByRole("region", { name: "Runner output (Control Plane database)" });
+    expect(within(sec).getByRole("meter", { name: "Runner output: 95% of the limit used" })).toHaveAttribute("value", "95");
+    expect(within(sec).getByText("Near the limit")).toBeInTheDocument();
+    expect(within(sec).getByText("1.1 GB (1024 MiB)")).toBeInTheDocument();
+    expect(within(sec).getByText("--runner-output-limit-mb")).toBeInTheDocument();
+    expect(within(sec).getByText("14 days after the execution finished")).toBeInTheDocument();
+    expect(within(sec).getByText("30 days after the execution finished")).toBeInTheDocument();
+    expect(within(sec).getByText(/5 output events were dropped in the last 24 h/)).toBeInTheDocument();
+    const drops = within(sec).getByRole("table", { name: "Output dropped in the last 24 h" });
+    const [, first, second] = within(drops).getAllByRole("row") as [HTMLElement, HTMLElement, HTMLElement];
+    expect(within(first).getByRole("rowheader", { name: "wsl-box" })).toBeInTheDocument();
+    expect(within(first).getByText("step-7")).toBeInTheDocument();
+    expect(within(first).getByText("4")).toBeInTheDocument();
+    expect(within(second).getByRole("rowheader", { name: "gone" })).toBeInTheDocument(); // a runner no longer listed
+    await expectAccessible(container);
+  });
+
+  it("says when no runner output was dropped", async () => {
+    signedIn();
+    server.use(http.get("/api/storage/overview", () =>
+      json({ ...overview, machines: [], runnerOutput: { ...output, state: "ok", usedPercent: 1, droppedEvents: 0, lastDroppedAt: null, drops: [] } })));
+    await renderApp("/infrastructure/storage");
+    const sec = await screen.findByRole("region", { name: "Runner output (Control Plane database)" });
+    expect(within(sec).getByText("No output was dropped in the last 24 h.")).toBeInTheDocument();
+    expect(within(sec).queryByRole("table")).not.toBeInTheDocument();
   });
 
   it("switches the history window to 30 days", async () => {
@@ -165,6 +206,10 @@ describe("Infrastructure → Storage page", () => {
     expect(await within(wsl).findByRole("table", { name: /Потребители места/ })).toBeInTheDocument();
     expect(within(wsl).getByText("Рабочие каталоги и worktree")).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "30 дней" })).toBeInTheDocument();
+    const sec = screen.getByRole("region", { name: "Вывод раннеров (БД Control Plane)" });
+    expect(within(sec).getByText("Близко к лимиту")).toBeInTheDocument();
+    expect(within(sec).getByText("14 дней после завершения исполнения")).toBeInTheDocument();
+    expect(within(sec).getByRole("table", { name: "Вывод, отброшенный за последние 24 ч" })).toBeInTheDocument();
   });
 
   it("is not available to members", async () => {

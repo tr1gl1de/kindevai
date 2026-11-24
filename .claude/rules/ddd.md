@@ -29,3 +29,9 @@ internal/<context>/
 - `domain`: fast table-driven unit tests, no fakes needed.
 - `app`: use-case tests with in-memory fakes of the ports.
 - `adapters`: real SQLite per test (`t.TempDir()`), `httptest` for HTTP.
+
+## Runner
+The Runner daemon (`cmd/ai-runner`, `internal/runner/...`) is its own deployable with contexts session (CLI
+processes), workspace (git worktrees), connection (WSS to the Control Plane) and egress (proxy policy), using the
+same domain/app/adapters layering. Wire messages shared with the Control Plane live in one protocol package; neither
+side imports the other's domain.

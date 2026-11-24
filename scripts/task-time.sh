@@ -46,9 +46,12 @@ case "$cmd" in
     # aggregate unposted closed segments by type, round each type up to whole minutes
     awk '$4==0 && $3!="-"{s[$1]+=$3-$2} END{for(k in s) print k, int((s[k]+59)/60)}' "$f" | while read -r type min; do
       [ "$min" -gt 0 ] || continue
-      post_item "$id" "$min" "$(yt_type "$type")" "$text"
+      name=$(yt_type "$type")
+      post_item "$id" "$min" "$name" "$text"
+      # mark this type as posted right away, so a later failure of another type cannot cause a duplicate post
+      awk -v ty="$type" 'BEGIN{OFS="\t"} $1==ty && $3!="-"{$4=1} {print}' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
       echo "$id: posted ${min}m $(yt_type "$type")"
     done
-    awk 'BEGIN{OFS="\t"} $3!="-"{$4=1} {print}' "$f" >"$f.tmp" && mv "$f.tmp" "$f" ;;
+    ;;
   *) echo "unknown command $cmd" >&2; exit 1 ;;
 esac

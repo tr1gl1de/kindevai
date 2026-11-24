@@ -69,6 +69,19 @@ manages memberships. Users see only projects they belong to — any other projec
 missing one. API: `GET/POST /api/projects`, `GET /api/projects/{id}`, `GET /api/projects/{id}/members`,
 `PUT/DELETE /api/projects/{id}/members/{login}`.
 
+## Docker Compose
+
+```bash
+docker compose up -d                                        # one container, http://127.0.0.1:8080
+DOMAIN=ai.example.com docker compose --profile https up -d  # + Caddy with automatic HTTPS on 80/443
+docker compose exec cp cat /data/secrets/setup-token        # first-run setup token
+```
+
+No `.env` is needed. The plain-HTTP port is published on the host's loopback only; public access goes through
+the `https` profile (DNS for `DOMAIN` must point to the host). Data and the encryption key live in the `data`
+volume — back it up as a whole. The image is distroless, runs as a non-root user with a read-only root
+filesystem, and has a built-in health check (`ai-platform health`).
+
 ## Development
 
 ```bash

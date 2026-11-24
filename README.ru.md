@@ -69,6 +69,19 @@ Owner создаёт проекты и выдаёт участие (`project_adm
 `GET/POST /api/projects`, `GET /api/projects/{id}`, `GET /api/projects/{id}/members`,
 `PUT/DELETE /api/projects/{id}/members/{login}`.
 
+## Docker Compose
+
+```bash
+docker compose up -d                                        # один контейнер, http://127.0.0.1:8080
+DOMAIN=ai.example.com docker compose --profile https up -d  # + Caddy с автоматическим HTTPS на 80/443
+docker compose exec cp cat /data/secrets/setup-token        # setup token для первой настройки
+```
+
+`.env` не нужен. HTTP-порт публикуется только на loopback хоста; публичный доступ — через профиль `https`
+(DNS для `DOMAIN` должен указывать на хост). Данные и ключ шифрования лежат в volume `data` — сохраняйте его
+целиком. Образ distroless, работает от непривилегированного пользователя с read-only корневой ФС и встроенной
+проверкой здоровья (`ai-platform health`).
+
 ## Разработка
 
 ```bash

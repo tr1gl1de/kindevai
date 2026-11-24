@@ -1,0 +1,7 @@
+# Public HTTPS for the Control Plane. DOMAIN comes from `DOMAIN=… docker compose --profile https up -d`;
+# DNS must point to this host and ports 80/443 must be reachable for the ACME certificate.
+{$DOMAIN} {
+	encode zstd gzip
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	reverse_proxy cp:8080
+}

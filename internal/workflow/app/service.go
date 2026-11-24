@@ -46,7 +46,7 @@ type Repository interface {
 	// ExecutionsHeldBy lists running executions with a step whose claim or unknown attempt is the runner's.
 	ExecutionsHeldBy(ctx context.Context, runnerID string) ([]string, error)
 	ListTasks(ctx context.Context, projectIDs []string, limit int) ([]domain.Task, error) // newest first
-	LatestExecution(ctx context.Context, taskID string) (domain.Execution, error)       // domain.ErrNotFound
+	LatestExecution(ctx context.Context, taskID string) (domain.Execution, error)         // domain.ErrNotFound
 }
 
 // TxRunner runs fn in one database transaction; repositories called with fn's ctx join it.

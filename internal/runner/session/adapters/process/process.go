@@ -37,8 +37,9 @@ var _ app.Launcher = (*Launcher)(nil)
 func (l *Launcher) Launch(_ context.Context, s app.LaunchSpec) (app.Process, error) {
 	// Not CommandContext: the process must outlive this runner process (it is adopted after a restart) and is
 	// only stopped by an explicit cancel.
-	cmd := exec.Command(l.Program, append(append([]string{}, l.Args...), "--scenario", s.Scenario, //nolint:gosec // fixed program; scenario is validated
-		"--attempt", strconv.FormatInt(s.Attempt, 10))...)
+	args := append(append([]string{}, l.Args...), "--scenario", s.Scenario, "--attempt", strconv.FormatInt(s.Attempt, 10))
+	//nolint:noctx,gosec // must outlive ctx (adopted after a restart); fixed program, validated scenario
+	cmd := exec.Command(l.Program, args...)
 	cmd.Dir, cmd.Stdout, cmd.Stderr = s.Dir, s.Stdout, s.Stderr
 	cmd.Env = l.Env
 	if cmd.Env == nil {

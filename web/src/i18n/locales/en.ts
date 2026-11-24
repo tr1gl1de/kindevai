@@ -850,6 +850,7 @@ export const en = {
     r_diagnostic_failed: "the diagnostic endpoint failed",
     r_diagnostic_invalid_response: "the diagnostic endpoint did not return an IP",
     r_egress_ip_mismatch: "the egress IP is not the expected one",
+    r_egress_ip_unverified: "the egress IP could not be verified (the diagnostic endpoint saw only the other IP version)",
     r_endpoint_unreachable: "a required endpoint is not reachable",
     r_timeout: "timed out",
     r_dns_failed: "name resolution failed",
@@ -879,6 +880,7 @@ export const en = {
     v_allow_ports: "Give 1–16 ports between 1 and 65535.",
     v_allow_too_many: "At most 64 destinations.",
     v_name_taken: "A profile with this name exists.",
+    v_test_pending: "There is already a test running on this runner; wait for its result.",
     v_runner_inactive: "The runner is not approved.",
   },
   audit: {

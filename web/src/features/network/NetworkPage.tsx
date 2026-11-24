@@ -51,6 +51,7 @@ const knownCodes = new Set([
   "allow_too_many",
   "name_taken",
   "runner_inactive",
+  "test_pending",
 ]);
 
 function codeMessage(t: TFunction, code: string | undefined): string {
@@ -612,6 +613,7 @@ const reasonCodes = new Set([
   "diagnostic_failed",
   "diagnostic_invalid_response",
   "egress_ip_mismatch",
+  "egress_ip_unverified",
   "endpoint_unreachable",
   "timeout",
   "dns_failed",

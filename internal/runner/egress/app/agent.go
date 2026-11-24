@@ -40,6 +40,8 @@ type Agent struct {
 	Prober  Prober
 	Logger  *slog.Logger
 	Timeout time.Duration // per test; default 90s
+	// Context bounds background tests (the daemon's lifetime); nil: each test is bounded by Timeout only.
+	Context context.Context
 
 	once    sync.Once
 	mu      sync.Mutex
@@ -90,13 +92,16 @@ func (a *Agent) Command(ctx context.Context, cmd protocol.Command) error {
 	return ErrNotNetworkCommand
 }
 
+// apply stores every update: commands arrive in the Control Plane's commit order (KIN-22), so the last one is the
+// current configuration even when the revision went down (a restored Control Plane database).
 func (a *Agent) apply(cu protocol.ConfigUpdate) error {
-	cur, ok, err := a.Store.Load()
-	if err != nil {
-		a.Logger.Warn("stored network configuration unreadable; replacing it", "err", err)
+	sealed := cu.Network.Default.Proxy != nil && cu.Network.Default.Proxy.PasswordSealed != nil
+	for _, sc := range cu.Network.Scoped {
+		sealed = sealed || (sc.Profile.Proxy != nil && sc.Profile.Proxy.PasswordSealed != nil)
 	}
-	if ok && cur.Revision >= cu.Revision {
-		return nil // an older or repeated update
+	if sealed {
+		a.Logger.Warn("the Control Plane could not deliver a proxy password; proxy authentication will fail until the profile is saved again",
+			"revision", cu.Revision)
 	}
 	if err := a.Store.Save(cu); err != nil {
 		return fmt.Errorf("saving network configuration: %w", err) // unacknowledged: re-sent later
@@ -119,8 +124,12 @@ func (a *Agent) test(ctx context.Context, nt protocol.NetworkTest) {
 	a.mu.Unlock()
 	go func() {
 		defer func() { a.mu.Lock(); a.busy = false; a.mu.Unlock() }()
-		// Bounded by Timeout, not by the link: a result produced after a reconnect is still delivered.
-		tctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), a.Timeout)
+		// Bounded by Timeout and the daemon, not by the link: a result produced after a reconnect is still delivered.
+		base := a.Context
+		if base == nil {
+			base = context.WithoutCancel(ctx)
+		}
+		tctx, cancel := context.WithTimeout(base, a.Timeout)
 		defer cancel()
 		start := time.Now()
 		r := a.Prober.Probe(tctx, nt.Profile, nt.Endpoints)

@@ -353,9 +353,11 @@ type Effective struct {
 }
 
 // Resolve merges layers from the widest to the most specific. A narrower level may replace the proxy, the
-// expected IPs and the diagnostic endpoint, but never relax security: enforcement, DNS policy and fail-closed
-// only tighten, and its allowlist only narrows what the wider levels allow (rules not covered by them are
-// dropped, ports are intersected). Strict egress set at a wider level therefore cannot be lifted below.
+// expected IPs and the diagnostic endpoint — unless a wider level is strict: then they are locked, so a project
+// or CLI profile cannot redirect strict egress or make its IP check trivially pass. Security never relaxes:
+// enforcement, DNS policy and fail-closed only tighten, and an allowlist only narrows what the wider levels
+// allow (rules not covered by them are dropped, ports are intersected). Strict egress set at a wider level
+// therefore cannot be lifted below.
 func Resolve(layers []Layer) Effective {
 	e := Effective{Profile: Profile{Enforcement: EnforcementOff, DNS: DNSSystem}}
 	for _, l := range layers {
@@ -365,7 +367,8 @@ func Resolve(layers []Layer) Effective {
 		}
 		e.Sources = append(e.Sources, l.Level)
 		e.ID, e.Name = p.ID, p.Name
-		if p.Proxy != nil {
+		locked := e.StrictFrom != "" // decided by a wider level
+		if p.Proxy != nil && !locked {
 			px := *p.Proxy
 			e.Proxy, e.ProxyProfileID = &px, p.ID
 		}
@@ -379,13 +382,13 @@ func Resolve(layers []Layer) Effective {
 			e.DNS = p.DNS
 		}
 		e.FailClosed = e.FailClosed || p.FailClosed
-		if p.ExpectedIPv4 != "" {
+		if p.ExpectedIPv4 != "" && !locked {
 			e.ExpectedIPv4 = p.ExpectedIPv4
 		}
-		if p.ExpectedIPv6 != "" {
+		if p.ExpectedIPv6 != "" && !locked {
 			e.ExpectedIPv6 = p.ExpectedIPv6
 		}
-		if p.DiagnosticURL != "" {
+		if p.DiagnosticURL != "" && !locked {
 			e.DiagnosticURL = p.DiagnosticURL
 		}
 		if len(p.Allow) > 0 {

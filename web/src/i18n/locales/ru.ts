@@ -850,6 +850,7 @@ export const ru: Messages = {
     r_diagnostic_failed: "ошибка диагностического endpoint",
     r_diagnostic_invalid_response: "диагностический endpoint не вернул IP",
     r_egress_ip_mismatch: "внешний IP не совпадает с ожидаемым",
+    r_egress_ip_unverified: "внешний IP не удалось проверить (диагностический endpoint увидел только другую версию IP)",
     r_endpoint_unreachable: "обязательный адрес недоступен",
     r_timeout: "истекло время ожидания",
     r_dns_failed: "ошибка разрешения имени",
@@ -879,6 +880,7 @@ export const ru: Messages = {
     v_allow_ports: "Укажите от 1 до 16 портов в диапазоне 1–65535.",
     v_allow_too_many: "Не более 64 адресов.",
     v_name_taken: "Профиль с таким названием уже есть.",
+    v_test_pending: "На этом runner уже идёт проверка; дождитесь результата.",
     v_runner_inactive: "Runner не одобрен.",
   },
   audit: {

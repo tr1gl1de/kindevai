@@ -83,7 +83,7 @@ func command(t *testing.T, kind string, body any) protocol.Command {
 	return protocol.Command{ID: kind, Kind: kind, Body: b}
 }
 
-func TestConfigUpdateStoredNewestOnlyAndNotLogged(t *testing.T) {
+func TestConfigUpdateAppliedInStreamOrderAndNotLogged(t *testing.T) {
 	t.Parallel()
 	logs := &lockedBuf{}
 	st := &memStore{}
@@ -92,7 +92,7 @@ func TestConfigUpdateStoredNewestOnlyAndNotLogged(t *testing.T) {
 		return protocol.ConfigUpdate{Revision: rev, Network: protocol.NetworkConfig{Default: protocol.NetworkProfile{
 			Enforcement: "strict", Proxy: &protocol.NetworkProxy{Scheme: "socks5", Host: "p.example", Port: 1080, Password: "hunter2"}}}}
 	}
-	for _, rev := range []int64{2, 1, 2} {
+	for _, rev := range []int64{1, 3, 2} { // the stream's order wins (a restored Control Plane restarts revisions)
 		if err := a.Command(t.Context(), command(t, protocol.CommandConfigUpdate, cfg(rev))); err != nil {
 			t.Fatal(err)
 		}
@@ -100,6 +100,12 @@ func TestConfigUpdateStoredNewestOnlyAndNotLogged(t *testing.T) {
 	got, ok, _ := a.Config()
 	if !ok || got.Revision != 2 || got.Network.Default.Proxy.Password != "hunter2" {
 		t.Fatalf("stored %+v", got)
+	}
+	sealed := cfg(4)
+	sealed.Network.Default.Proxy.Password, sealed.Network.Default.Proxy.PasswordSealed = "", []byte{1, 2}
+	_ = a.Command(t.Context(), command(t, protocol.CommandConfigUpdate, sealed))
+	if !strings.Contains(logs.String(), "could not deliver a proxy password") {
+		t.Fatalf("no warning for an undeliverable password: %s", logs.String())
 	}
 	if strings.Contains(logs.String(), "hunter2") || !strings.Contains(logs.String(), "network configuration applied") {
 		t.Fatalf("logs: %s", logs.String())

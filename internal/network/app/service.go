@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"slices"
 	"strconv"
 	"time"
@@ -419,8 +420,9 @@ func (s *Service) Assign(ctx context.Context, a auth.Principal, level, target, p
 
 // state is everything resolution needs, loaded once.
 type state struct {
-	profiles map[string]domain.Profile
-	assigned map[domain.Scope]string
+	profiles  map[string]domain.Profile
+	assigned  map[domain.Scope]string
+	passwords map[string]*string // read once per use case: profile id → password (nil: none)
 }
 
 func (s *Service) load(ctx context.Context) (state, error) {
@@ -432,7 +434,7 @@ func (s *Service) load(ctx context.Context) (state, error) {
 	if err != nil {
 		return state{}, err
 	}
-	st := state{profiles: map[string]domain.Profile{}, assigned: map[domain.Scope]string{}}
+	st := state{profiles: map[string]domain.Profile{}, assigned: map[domain.Scope]string{}, passwords: map[string]*string{}}
 	for _, p := range ps {
 		st.profiles[p.ID] = p
 	}
@@ -497,7 +499,7 @@ func commandAAD(runnerID, commandID string) string {
 }
 
 // wire converts an effective profile, sealing its proxy password for runnerID's command commandID.
-func (s *Service) wire(ctx context.Context, e domain.Effective, runnerID, commandID string) (protocol.NetworkProfile, error) {
+func (s *Service) wire(ctx context.Context, st state, e domain.Effective, runnerID, commandID string) (protocol.NetworkProfile, error) {
 	np := protocol.NetworkProfile{ID: e.ID, Name: e.Name, Enforcement: string(e.Enforcement), DNS: string(e.DNS),
 		FailClosed: e.FailClosed, ExpectedIPv4: e.ExpectedIPv4, ExpectedIPv6: e.ExpectedIPv6, Restricted: e.Restricted,
 		DiagnosticURL: e.DiagnosticURL}
@@ -507,12 +509,19 @@ func (s *Service) wire(ctx context.Context, e domain.Effective, runnerID, comman
 	if e.Proxy != nil {
 		np.Proxy = &protocol.NetworkProxy{Scheme: string(e.Proxy.Scheme), Host: e.Proxy.Host, Port: e.Proxy.Port,
 			Username: e.Proxy.Username}
-		pw, ok, err := s.Secrets.Get(ctx, PasswordSecret(e.ProxyProfileID))
-		if err != nil {
-			return np, fmt.Errorf("reading proxy password: %w", err)
+		pw, cached := st.passwords[e.ProxyProfileID]
+		if !cached {
+			v, ok, err := s.Secrets.Get(ctx, PasswordSecret(e.ProxyProfileID))
+			if err != nil {
+				return np, fmt.Errorf("reading proxy password: %w", err)
+			}
+			if ok {
+				pw = &v
+			}
+			st.passwords[e.ProxyProfileID] = pw
 		}
-		if ok {
-			sealed, err := s.Cipher.Seal([]byte(pw), commandAAD(runnerID, commandID))
+		if pw != nil {
+			sealed, err := s.Cipher.Seal([]byte(*pw), commandAAD(runnerID, commandID))
 			if err != nil {
 				return np, fmt.Errorf("sealing proxy password: %w", err)
 			}
@@ -524,7 +533,8 @@ func (s *Service) wire(ctx context.Context, e domain.Effective, runnerID, comman
 
 // config builds runner r's configuration for command commandID.
 func (s *Service) config(ctx context.Context, st state, r RunnerRef, commandID string, rev int64) (protocol.ConfigUpdate, error) {
-	def, err := s.wire(ctx, st.resolve(r.ID, "", ""), r.ID, commandID)
+	defEff := st.resolve(r.ID, "", "")
+	def, err := s.wire(ctx, st, defEff, r.ID, commandID)
 	if err != nil {
 		return protocol.ConfigUpdate{}, err
 	}
@@ -542,10 +552,17 @@ func (s *Service) config(ctx context.Context, st state, r RunnerRef, commandID s
 	}
 	slices.Sort(roles)
 	add := func(project, role string) error {
-		if len(cu.Network.Scoped) == protocol.MaxNetworkScoped {
-			return errors.New("too many scoped network profiles for one runner")
+		e := st.resolve(r.ID, project, role)
+		if sameEffect(e, defEff) {
+			return nil // the runner's default applies anyway
 		}
-		np, err := s.wire(ctx, st.resolve(r.ID, project, role), r.ID, commandID)
+		if len(cu.Network.Scoped) == protocol.MaxNetworkScoped {
+			// Never fail the Owner's change over it; the runner falls back to the default for the rest (KIN-31
+			// enforces the strictest of the two before running a step).
+			s.logger().Warn("too many scoped network profiles for one runner; the rest use the default", "runner", r.ID)
+			return nil
+		}
+		np, err := s.wire(ctx, st, e, r.ID, commandID)
 		cu.Network.Scoped = append(cu.Network.Scoped, protocol.ScopedNetworkProfile{Project: project, Role: role, Profile: np})
 		return err
 	}
@@ -565,6 +582,13 @@ func (s *Service) config(ctx context.Context, st state, r RunnerRef, commandID s
 		}
 	}
 	return cu, nil
+}
+
+// sameEffect reports whether two effective profiles configure the network identically.
+func sameEffect(a, b domain.Effective) bool {
+	a.ID, a.Name, a.Sources, a.CreatedAt, a.UpdatedAt = "", "", nil, time.Time{}, time.Time{}
+	b.ID, b.Name, b.Sources, b.CreatedAt, b.UpdatedAt = "", "", nil, time.Time{}, time.Time{}
+	return reflect.DeepEqual(a, b)
 }
 
 func configCommandID(rev int64) string { return "network-config/" + strconv.FormatInt(rev, 10) }
@@ -623,18 +647,23 @@ func (s *Service) PushConfig(ctx context.Context, runnerID string) error {
 	})
 }
 
+// errPasswordSealed: a sealed proxy password could not be opened (wrong runner, rotated key). The channel then
+// sends the stored body, whose password stays sealed: the runner reports it as undeliverable and fails closed on
+// proxy authentication; the command stream is never blocked.
+var errPasswordSealed = errors.New("proxy password of the runner command could not be opened")
+
 // PrepareCommand opens the sealed proxy passwords of a network command right before it is sent to runnerID over
-// its authenticated session. Other kinds pass through. A password that cannot be opened is dropped (the runner
-// then fails closed on proxy authentication) rather than blocking the runner's command stream.
+// its authenticated session. Other kinds pass through.
 func (s *Service) PrepareCommand(_ context.Context, runnerID, commandID, kind string, body json.RawMessage) (json.RawMessage, error) {
+	var failed bool
 	open := func(px *protocol.NetworkProxy) {
 		if px == nil || px.PasswordSealed == nil {
 			return
 		}
 		p, err := s.Cipher.Open(px.PasswordSealed, commandAAD(runnerID, commandID))
 		if err != nil {
-			s.logger().Warn("proxy password of a runner command could not be opened; sent without it",
-				"runner", runnerID, "command", commandID)
+			failed = true
+			return
 		}
 		px.Password, px.PasswordSealed = string(p), nil
 	}
@@ -648,6 +677,9 @@ func (s *Service) PrepareCommand(_ context.Context, runnerID, commandID, kind st
 		for i := range cu.Network.Scoped {
 			open(cu.Network.Scoped[i].Profile.Proxy)
 		}
+		if failed {
+			return nil, errPasswordSealed
+		}
 		return json.Marshal(cu)
 	case protocol.CommandNetworkTest:
 		var nt protocol.NetworkTest
@@ -655,6 +687,9 @@ func (s *Service) PrepareCommand(_ context.Context, runnerID, commandID, kind st
 			return nil, fmt.Errorf("decoding %s: %w", kind, err)
 		}
 		open(nt.Profile.Proxy)
+		if failed {
+			return nil, errPasswordSealed
+		}
 		return json.Marshal(nt)
 	}
 	return body, nil
@@ -674,6 +709,13 @@ func (s *Service) RequestTest(ctx context.Context, a auth.Principal, runnerID, p
 		if !r.Active {
 			return &domain.ValidationError{Field: "runnerId", Code: "runner_inactive"}
 		}
+		recent, err := s.Repo.Tests(ctx, r.ID, 1)
+		if err != nil {
+			return err
+		}
+		if len(recent) > 0 && recent[0].StatusAt(s.Now()) == domain.TestPending {
+			return &domain.ValidationError{Field: "runnerId", Code: "test_pending"}
+		}
 		st, err := s.load(ctx)
 		if err != nil {
 			return err
@@ -691,7 +733,7 @@ func (s *Service) RequestTest(ctx context.Context, a auth.Principal, runnerID, p
 			return err
 		}
 		cmdID := "network-test/" + t.ID
-		np, err := s.wire(ctx, e, r.ID, cmdID)
+		np, err := s.wire(ctx, st, e, r.ID, cmdID)
 		if err != nil {
 			return err
 		}

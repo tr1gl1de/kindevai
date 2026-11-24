@@ -31,6 +31,7 @@ const (
 	CodeDiagnosticFailed  = "diagnostic_failed"
 	CodeDiagnosticInvalid = "diagnostic_invalid_response"
 	CodeIPMismatch        = "egress_ip_mismatch"
+	CodeIPUnverified      = "egress_ip_unverified"
 	CodeEndpoint          = "endpoint_unreachable"
 	CodeTimeout           = "timeout"
 	CodeDNS               = "dns_failed"
@@ -70,8 +71,7 @@ func classify(err error) string {
 	var unknownAuth x509.UnknownAuthorityError
 	msg := err.Error()
 	switch {
-	case strings.Contains(msg, "Proxy Authentication Required") || strings.Contains(msg, "407") ||
-		strings.Contains(msg, "authentication failed"):
+	case strings.Contains(msg, "Proxy Authentication Required") || strings.Contains(msg, "username/password authentication failed"):
 		return CodeProxyAuthFailed
 	case errors.Is(err, context.DeadlineExceeded) || isTimeout(err):
 		return CodeTimeout
@@ -133,8 +133,8 @@ func (p *Prober) Probe(ctx context.Context, np protocol.NetworkProfile, eps []pr
 	r.Checks = p.checks(ctx, client, eps)
 	switch {
 	case r.Code != "":
-	case np.ExpectedIPv4 != "" && r.ObservedIPv4 != np.ExpectedIPv4, np.ExpectedIPv6 != "" && r.ObservedIPv6 != np.ExpectedIPv6:
-		r.Code = CodeIPMismatch
+	case ipVerdict(np, r) != "":
+		r.Code = ipVerdict(np, r)
 	default:
 		for _, c := range r.Checks {
 			if !c.OK {
@@ -209,4 +209,17 @@ func (p *Prober) check(ctx context.Context, client *http.Client, e protocol.Netw
 	_ = resp.Body.Close()
 	c.OK = true
 	return c
+}
+
+// ipVerdict mirrors the Control Plane's rule (network domain IPVerdict): a diagnostic request observes one address
+// family; only that family is compared, and a test that could observe no expected family is unverified.
+func ipVerdict(np protocol.NetworkProfile, r protocol.NetworkTestResult) string {
+	e4, e6, o4, o6 := np.ExpectedIPv4, np.ExpectedIPv6, r.ObservedIPv4, r.ObservedIPv6
+	if (e4 != "" && o4 != "" && o4 != e4) || (e6 != "" && o6 != "" && o6 != e6) {
+		return CodeIPMismatch
+	}
+	if (e4 != "" || e6 != "") && !(e4 != "" && o4 == e4) && !(e6 != "" && o6 == e6) {
+		return CodeIPUnverified
+	}
+	return ""
 }

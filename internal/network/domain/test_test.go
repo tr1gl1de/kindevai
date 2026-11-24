@@ -80,3 +80,24 @@ func TestPendingTestTimesOut(t *testing.T) {
 		t.Fatal("not expired after the timeout")
 	}
 }
+
+// One diagnostic request observes one address family: an expected IP of the other family is not a mismatch, but
+// a test whose expected IPs were all unobservable is not verified.
+func TestCompleteJudgesTheObservedFamilyOnly(t *testing.T) {
+	t.Parallel()
+	both := domain.NewTest("t", "r1", "", "u", domain.Expected{IPv4: "203.0.113.7", IPv6: "2001:db8:1::7"}, t0)
+	_ = both.Complete(domain.Result{OK: true, ObservedIPv4: "203.0.113.7"}, t0)
+	if both.Status != domain.TestOK {
+		t.Fatalf("both expected, v4 observed and matching: %+v", both)
+	}
+	v6 := domain.NewTest("t", "r1", "", "u", domain.Expected{IPv6: "2001:db8:1::7"}, t0)
+	_ = v6.Complete(domain.Result{OK: true, ObservedIPv4: "203.0.113.7"}, t0)
+	if v6.Status != domain.TestFailed || v6.Code != domain.CodeIPUnverified {
+		t.Fatalf("v6 expected, only v4 observed: %+v", v6)
+	}
+	bad6 := domain.NewTest("t", "r1", "", "u", domain.Expected{IPv4: "203.0.113.7", IPv6: "2001:db8:1::7"}, t0)
+	_ = bad6.Complete(domain.Result{OK: true, ObservedIPv6: "2001:db8:1::8"}, t0)
+	if bad6.Code != domain.CodeIPMismatch {
+		t.Fatalf("v6 observed and different: %+v", bad6)
+	}
+}

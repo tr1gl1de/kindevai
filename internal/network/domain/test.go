@@ -25,6 +25,7 @@ const TestTimeout = 3 * time.Minute
 // proxy_auth_failed, diagnostic_failed).
 const (
 	CodeIPMismatch          = "egress_ip_mismatch"
+	CodeIPUnverified        = "egress_ip_unverified" // no expected IP's family could be observed
 	CodeEndpointUnreachable = "endpoint_unreachable"
 	CodeFailed              = "failed"
 )
@@ -151,9 +152,8 @@ func (t *Test) Complete(r Result, now time.Time) error {
 		if t.Code == "" {
 			t.Code = CodeFailed
 		}
-	case t.Expected.IPv4 != "" && t.ObservedIPv4 != t.Expected.IPv4,
-		t.Expected.IPv6 != "" && t.ObservedIPv6 != t.Expected.IPv6:
-		ok, t.Code = false, CodeIPMismatch
+	case IPVerdict(t.Expected, t.ObservedIPv4, t.ObservedIPv6) != "":
+		ok, t.Code = false, IPVerdict(t.Expected, t.ObservedIPv4, t.ObservedIPv6)
 	default:
 		for _, c := range t.Checks {
 			if !c.OK {
@@ -169,4 +169,17 @@ func (t *Test) Complete(r Result, now time.Time) error {
 	at := now.UTC()
 	t.CompletedAt = &at
 	return nil
+}
+
+// IPVerdict compares the observed egress IPs with the expected ones, family by family: "" when they agree (or
+// nothing is expected), CodeIPMismatch when an observed family differs, CodeIPUnverified when no expected family
+// was observed (a single diagnostic request sees only the family it used).
+func IPVerdict(exp Expected, observed4, observed6 string) string {
+	if (exp.IPv4 != "" && observed4 != "" && observed4 != exp.IPv4) || (exp.IPv6 != "" && observed6 != "" && observed6 != exp.IPv6) {
+		return CodeIPMismatch
+	}
+	if (exp.IPv4 != "" || exp.IPv6 != "") && !(exp.IPv4 != "" && observed4 == exp.IPv4) && !(exp.IPv6 != "" && observed6 == exp.IPv6) {
+		return CodeIPUnverified
+	}
+	return ""
 }

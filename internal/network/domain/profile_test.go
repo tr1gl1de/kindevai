@@ -114,7 +114,7 @@ func TestResolveStrictCannotBeLiftedBelow(t *testing.T) {
 		Enforcement: domain.EnforcementStrict, ExpectedIPv4: "203.0.113.7"})
 	runner := profile(t, domain.ProfileInput{Name: "runner", Enforcement: domain.EnforcementOff, DNS: domain.DNSSystem})
 	project := profile(t, domain.ProfileInput{Name: "project", Enforcement: domain.EnforcementMonitor,
-		Proxy: proxy(t, "http://other.example:3128")})
+		Proxy: proxy(t, "http://other.example:3128"), ExpectedIPv4: "198.51.100.1", DiagnosticURL: "https://ip.evil.example"})
 	role := profile(t, domain.ProfileInput{Name: "role", Enforcement: domain.EnforcementOff})
 
 	e := domain.Resolve([]domain.Layer{
@@ -129,8 +129,9 @@ func TestResolveStrictCannotBeLiftedBelow(t *testing.T) {
 	if e.StrictFrom != domain.LevelSystem {
 		t.Fatalf("StrictFrom = %q, want system", e.StrictFrom)
 	}
-	if e.Proxy == nil || e.Proxy.Host != "other.example" || e.ProxyProfileID != project.ID {
-		t.Fatalf("proxy = %+v from %q, want the project's", e.Proxy, e.ProxyProfileID)
+	// Under strict from a wider level, a narrower one cannot redirect egress to another proxy.
+	if e.Proxy == nil || e.Proxy.Host != "proxy.example" || e.ProxyProfileID != system.ID {
+		t.Fatalf("proxy = %+v from %q, want the system's", e.Proxy, e.ProxyProfileID)
 	}
 	if e.ExpectedIPv4 != "203.0.113.7" {
 		t.Fatalf("expected IPv4 = %q, want inherited", e.ExpectedIPv4)
@@ -195,5 +196,15 @@ func TestNewAssignment(t *testing.T) {
 		if _, err := domain.NewScope(c.level, c.target); err == nil {
 			t.Errorf("NewScope(%s, %q) accepted", c.level, c.target)
 		}
+	}
+}
+
+func TestResolveNarrowerLevelMayChangeProxyWithoutStrict(t *testing.T) {
+	t.Parallel()
+	system := profile(t, domain.ProfileInput{Name: "system", Proxy: proxy(t, "socks5://proxy.example:1080"), Enforcement: domain.EnforcementMonitor})
+	project := profile(t, domain.ProfileInput{Name: "project", Proxy: proxy(t, "http://other.example:3128"), ExpectedIPv4: "198.51.100.1"})
+	e := domain.Resolve([]domain.Layer{{Level: domain.LevelSystem, Profile: &system}, {Level: domain.LevelProject, Profile: &project}})
+	if e.Proxy.Host != "other.example" || e.ExpectedIPv4 != "198.51.100.1" || e.Enforcement != domain.EnforcementMonitor {
+		t.Fatalf("effective = %+v", e.Profile)
 	}
 }

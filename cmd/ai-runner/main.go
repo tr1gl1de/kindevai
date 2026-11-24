@@ -279,6 +279,7 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	}
 	defer closeSpool()
 	agent := networkAgent(d, logger) // KIN-30 network profiles and Test Network
+	agent.Context = ctx
 	ch.Commands = withNetwork(agent, ch.Commands)
 	conn := &app.Connector{Dialer: controlplane.New(), Logger: logger, Handlers: []app.LinkHandler{ch,
 		&app.Reporter{Probe: probe.New(d.Path())}, networkLink{agent}}} // KIN-20 heartbeat, capabilities, storage

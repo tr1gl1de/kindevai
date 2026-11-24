@@ -137,7 +137,17 @@ func (r *repo) SaveTest(_ context.Context, t domain.Test) error {
 	return nil
 }
 
-func (r *repo) Tests(context.Context, string, int) ([]domain.Test, error) { return nil, nil }
+func (r *repo) Tests(_ context.Context, runnerID string, _ int) ([]domain.Test, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []domain.Test
+	for _, t := range r.tests {
+		if t.RunnerID == runnerID && t.Status == domain.TestPending {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
 
 type vault struct {
 	mu sync.Mutex
@@ -360,7 +370,8 @@ func TestAssignDeliversConfigWithSealedPassword(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	sys := e.create(t, app.ProfileRequest{Name: "Strict", ProxyURL: "http://u:hunter2@proxy.example:3128", Enforcement: "strict"})
-	loose := e.create(t, app.ProfileRequest{Name: "Loose", Enforcement: "off"})
+	loose := e.create(t, app.ProfileRequest{Name: "Loose", Enforcement: "off",
+		Allow: []domain.RuleInput{{Host: "api.github.com", Ports: []int{443}}}})
 	if err := e.svc.Assign(t.Context(), ownerP, "system", "", sys.Profile.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -409,9 +420,8 @@ func TestAssignDeliversConfigWithSealedPassword(t *testing.T) {
 		t.Fatalf("endpoints = %+v", cu.Network.Endpoints)
 	}
 	// Another runner's session cannot open it (sealed to runner + command id).
-	out, _ = e.svc.PrepareCommand(t.Context(), "r2", last.id, last.kind, last.body)
-	if strings.Contains(string(out), "hunter2") {
-		t.Fatal("a command sealed for r1 opened for r2")
+	if out, err := e.svc.PrepareCommand(t.Context(), "r2", last.id, last.kind, last.body); err == nil || strings.Contains(string(out), "hunter2") {
+		t.Fatalf("a command sealed for r1 opened for r2: %v", err)
 	}
 	if !slices.Contains(e.audit.kinds(), app.KindAssigned) {
 		t.Fatalf("audit kinds = %v", e.audit.kinds())
@@ -523,6 +533,13 @@ func TestTestNetworkRunsOnTheRunner(t *testing.T) {
 	}
 	if k := e.audit.kinds(); !slices.Contains(k, app.KindTestRequested) || !slices.Contains(k, app.KindTestCompleted) {
 		t.Fatalf("audit kinds = %v", k)
+	}
+	// One pending test per runner at a time.
+	if _, err := e.svc.RequestTest(t.Context(), ownerP, "r2", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.RequestTest(t.Context(), ownerP, "r2", ""); err == nil || !strings.Contains(err.Error(), "test_pending") {
+		t.Fatalf("second pending test: %v", err)
 	}
 	if _, err := e.svc.RequestTest(t.Context(), ownerP, "r3", ""); err == nil {
 		t.Fatal("test on an inactive runner accepted")

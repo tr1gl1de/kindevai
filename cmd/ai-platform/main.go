@@ -161,6 +161,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	netSvc, netHTTP := newNetwork(inst, audit, integ, channel, logger) // KIN-30 network profiles
 	netSvc.Outbox = msg.Outbox                                         // KIN-60 egress check alerts
 	attachCheckoutSource(channel, integ.GitHub)                        // KIN-29 worktree base + repository token
+	attachScopeCheck(channel, apv.Approvals)                           // KIN-51 changed files vs the approved scope
 	attachNetwork(gateway, netSvc, logger)
 	modules = append(modules, netHTTP)
 	maint, err := newMaintenance(ctx, inst, audit, apv.Workflow, logger) // KIN-41 maintenance mode

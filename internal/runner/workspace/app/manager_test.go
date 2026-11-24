@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -42,6 +43,11 @@ func (g *fakeGit) Snapshot(_ context.Context, admin, dir, msg string) (string, e
 
 func (g *fakeGit) Diff(_ context.Context, admin, from, to string) ([]domain.Change, error) {
 	g.log("diff " + from + " " + to)
+	return g.changes, nil
+}
+
+func (g *fakeGit) Changes(_ context.Context, admin, dir, base string) ([]domain.Change, error) {
+	g.log("changes " + base)
 	return g.changes, nil
 }
 
@@ -258,5 +264,32 @@ func TestTokenIsRedacted(t *testing.T) {
 		if strings.Contains(s, "ghs_") {
 			t.Fatal(s)
 		}
+	}
+}
+
+// KIN-51: while the attempt runs, Changes lists the worktree against the base without committing or removing
+// anything; an attempt this process holds no workspace for reports nothing.
+func TestChangesReportTheRunningAttempt(t *testing.T) {
+	t.Parallel()
+	m, g, st, _ := newManager()
+	for i := range 5000 {
+		g.changes = append(g.changes, domain.Change{Path: fmt.Sprintf("dir/%0100d.go", i), Status: "A"})
+	}
+	if res, err := m.Changes(t.Context(), "st1", 1); res != nil || err != nil {
+		t.Fatalf("no workspace: %v %v", res, err)
+	}
+	if _, err := m.Prepare(t.Context(), req()); err != nil {
+		t.Fatal(err)
+	}
+	res, err := m.Changes(t.Context(), "st1", 1)
+	if err != nil || res == nil || res.BaseSHA != "base-sha" || res.HeadSHA != "" || res.Total != 5000 || !res.Truncated ||
+		len(res.Files) == 0 || len(res.Files) >= 5000 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if slices.Contains(g.calls, "snapshot") || len(g.removed) != 0 || len(st.meta) != 1 || len(st.locks) != 1 {
+		t.Fatalf("interim report changed the workspace: %v %v", g.calls, g.removed)
+	}
+	if res, err := m.Changes(t.Context(), "st1", 2); res != nil || err != nil {
+		t.Fatalf("other attempt: %v %v", res, err)
 	}
 }

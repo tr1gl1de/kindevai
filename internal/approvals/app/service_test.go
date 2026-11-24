@@ -352,6 +352,11 @@ func TestChangesBeyondTheScopeStopTheStepUntilApproved(t *testing.T) {
 	if len(e.outbox.msgs) != 1 {
 		t.Fatalf("notification = %+v", e.outbox.msgs)
 	}
+	// KIN-51: the audit entry carries the diff summary (the files beyond the approval).
+	if a := e.audit.entries[len(e.audit.entries)-1]; a.Kind != KindRequested || a.Details["reason"] != "scope_exceeded" ||
+		a.Details["paths"] != "internal/api/auth/token.go, web/app.ts" {
+		t.Fatalf("audit = %+v", a)
+	}
 	if _, err := e.svc.Decide(ctx, owner, req.ID, DecideInput{Approve: true, Revision: 1, PlanHash: hashOf(1)}); err != nil {
 		t.Fatal(err)
 	}
@@ -500,5 +505,23 @@ func TestOverlongReportsStopTheStep(t *testing.T) {
 	v, err := e.svc.CheckChanges(t.Context(), StepChanges{StepID: "s1", RunnerID: "r1", Fence: 1, Changed: files})
 	if err != nil || v.Empty() || len(e.wf.held) != 1 {
 		t.Fatalf("overlong report = %+v, %v", v.Outside, err)
+	}
+}
+
+// KIN-51: a report that leaves files out (truncated by the runner, or unreadable) stops the step even when every
+// listed file is in scope: the unlisted files were never checked.
+func TestUnreportedFilesStopTheStep(t *testing.T) {
+	t.Parallel()
+	e := newEnv()
+	e.submit(t, 1, snapshot(domain.RiskL1, "internal/api"))
+	e.wf.mu.Lock()
+	e.wf.tasks["t1"].State = TaskRunning
+	e.wf.steps["s1"] = StepRef{StepID: "s1", TaskID: "t1", Key: "backend", Repository: "api", Revision: 1,
+		PlanHash: hashOf(1), Risk: domain.RiskL1, Scope: []string{"internal/api"}}
+	e.wf.mu.Unlock()
+	v, err := e.svc.CheckChanges(t.Context(), StepChanges{StepID: "s1", RunnerID: "r1", Fence: 1,
+		Changed: []string{"internal/api/a.go"}, Unreported: 7})
+	if err != nil || !slices.Equal(v.Outside, []string{"(+7 unreported)"}) || len(e.wf.held) != 1 {
+		t.Fatalf("truncated report = %+v, %v (held %v)", v.Outside, err, e.wf.held)
 	}
 }

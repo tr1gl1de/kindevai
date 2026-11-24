@@ -377,7 +377,7 @@ func TestExecutionInvariantsUnderRandomOperations(t *testing.T) {
 			s := e.Steps[rng.IntN(len(e.Steps))]
 			r := runners[rng.IntN(len(runners))]
 			fence := s.Fence - int64(rng.IntN(2)) // sometimes stale
-			switch rng.IntN(9) {
+			switch rng.IntN(10) {
 			case 0, 1:
 				_, _ = e.Claim(s.ID, r, now, ttl)
 			case 2:
@@ -394,6 +394,8 @@ func TestExecutionInvariantsUnderRandomOperations(t *testing.T) {
 				_ = e.ResumeStep(s.ID, now)
 			case 8:
 				_ = e.HoldForApproval(s.ID, s.RunnerID, fence, "scope", now)
+			case 9:
+				e.ReleaseRunner(r, "runner disabled", now, 2)
 			}
 			active := 0
 			for _, st := range e.Steps {
@@ -537,5 +539,50 @@ func TestHoldForApprovalStopsTheStepWithoutUsingTheRetryBudget(t *testing.T) {
 	_ = e.Start(id, "r1", l.Fence, t0, ttl)
 	if err := e.Fail(id, "r1", l.Fence, "boom", t0, 2); err != nil || stepState(t, &e, "backend") != StepReady {
 		t.Fatalf("first real failure must be retried: %v, %s", err, stepState(t, &e, "backend"))
+	}
+}
+
+func TestReleaseRunnerEndsEveryAttemptTheRunnerHolds(t *testing.T) {
+	t.Parallel()
+	e := newExecution(t, 3)
+	backend, lint := e.StepByKey("backend").ID, e.StepByKey("lint").ID
+	lb, _ := e.Claim(backend, "r1", t0, ttl)
+	if err := e.Start(backend, "r1", lb.Fence, t0, ttl); err != nil {
+		t.Fatal(err)
+	}
+	ll, _ := e.Claim(lint, "r1", t0, ttl) // claimed, never started
+	got := e.ReleaseRunner("r1", "runner disabled", t0.Add(time.Second), 2)
+	want := []Released{{StepID: backend, Fence: lb.Fence}, {StepID: lint, Fence: ll.Fence}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("released = %+v, want %+v", got, want)
+	}
+	b := e.StepByKey("backend")
+	if b.State != StepReady || b.RunnerID != "" || b.LeaseExpiresAt != nil || len(b.Attempts) != 1 ||
+		b.Attempts[0].State != AttemptFailed || b.Attempts[0].Error != "runner disabled" {
+		t.Fatalf("running step = %+v", b)
+	}
+	if l := e.StepByKey("lint"); l.State != StepReady || l.RunnerID != "" || len(l.Attempts) != 0 {
+		t.Fatalf("claimed step = %+v", l)
+	}
+	// The old token is stale: a late report of the released attempt changes nothing.
+	if err := e.Succeed(backend, "r1", lb.Fence, t0.Add(2*time.Second)); !errors.Is(err, ErrStaleFence) {
+		t.Fatalf("late report = %v", err)
+	}
+	if e.ReleaseRunner("r1", "again", t0, 2) != nil {
+		t.Fatal("a second release found attempts")
+	}
+}
+
+func TestReleaseRunnerFailsAnUnknownAttemptAndRespectsTheBudget(t *testing.T) {
+	t.Parallel()
+	e, id, l := unknownStep(t, 2)
+	if got := e.ReleaseRunner("r2", "runner revoked", t0, 2); got != nil {
+		t.Fatalf("another runner's release = %+v", got)
+	}
+	if got := e.ReleaseRunner("r1", "runner revoked", t0.Add(2*ttl), 1); !slices.Equal(got, []Released{{StepID: id, Fence: l.Fence}}) {
+		t.Fatalf("released = %+v", got)
+	}
+	if s := e.StepByKey("backend"); s.State != StepFailed || s.Attempts[0].State != AttemptFailed || e.State != ExecutionFailed {
+		t.Fatalf("step = %+v, execution %s", s, e.State)
 	}
 }

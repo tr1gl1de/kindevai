@@ -338,7 +338,8 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	if *measureSpace {                               // KIN-55: only with the operator's explicit permission
 		rep.Meter = probe.NewSpaceMeter(d.Path()).Measure
 	}
-	conn := &app.Connector{Dialer: controlplane.New(), Logger: logger, Handlers: []app.LinkHandler{ch, rep, networkLink{agent}}}
+	conn := &app.Connector{Dialer: controlplane.New(), Logger: logger, Handlers: []app.LinkHandler{ch, rep, networkLink{agent}},
+		Halt: x.StopAll} // KIN-63: disabled or revoked, the runner stops its attempts itself (fail-closed)
 	return conn.Run(ctx, en, id)
 }
 

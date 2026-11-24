@@ -83,6 +83,26 @@ type Service struct {
 	Logger   *slog.Logger
 	// Sessions closes live gateway connections when a runner is disabled or revoked (nil: no gateway wired).
 	Sessions Disconnector
+	// Attempts ends the runner's attempts when it is disabled or revoked (KIN-63; nil: no workflow wired).
+	Attempts Attempts
+}
+
+// Attempts is the workflow as disable and revoke need it (KIN-63): ReleaseRunner joins the caller's transaction,
+// fails the attempts the runner holds (retried on another runner) and queues execution.cancel for them. reason is
+// "disabled" or "revoked".
+type Attempts interface {
+	ReleaseRunner(ctx context.Context, runnerID, reason string) error
+}
+
+// releaseAttempts ends the runner's attempts in the status change's transaction.
+func (s *Service) releaseAttempts(ctx context.Context, runnerID, reason string) error {
+	if s.Attempts == nil {
+		return nil
+	}
+	if err := s.Attempts.ReleaseRunner(ctx, runnerID, reason); err != nil {
+		return fmt.Errorf("releasing the runner's attempts: %w", err)
+	}
+	return nil
 }
 
 // TokenView is an enrollment token with its state at the time of the call.
@@ -422,8 +442,11 @@ func (s *Service) SetProjects(ctx context.Context, actor auth.Principal, id stri
 
 // Disable blocks an approved runner (Owner only).
 func (s *Service) Disable(ctx context.Context, actor auth.Principal, id string) (RunnerView, error) {
-	return s.change(ctx, actor, id, KindDisabled, func(_ context.Context, r *domain.Runner, now time.Time) (map[string]string, error) {
-		return nil, r.Disable(now)
+	return s.change(ctx, actor, id, KindDisabled, func(ctx context.Context, r *domain.Runner, now time.Time) (map[string]string, error) {
+		if err := r.Disable(now); err != nil {
+			return nil, err
+		}
+		return nil, s.releaseAttempts(ctx, r.ID, "disabled")
 	})
 }
 
@@ -436,11 +459,11 @@ func (s *Service) Enable(ctx context.Context, actor auth.Principal, id string) (
 
 // Revoke permanently rejects the runner's key (Owner only). For a pending runner this rejects the enrollment.
 func (s *Service) Revoke(ctx context.Context, actor auth.Principal, id string) (RunnerView, error) {
-	return s.change(ctx, actor, id, KindRevoked, func(_ context.Context, r *domain.Runner, now time.Time) (map[string]string, error) {
+	return s.change(ctx, actor, id, KindRevoked, func(ctx context.Context, r *domain.Runner, now time.Time) (map[string]string, error) {
 		from := r.Status
 		if err := r.Revoke(actor.UserID, now); err != nil {
 			return nil, err
 		}
-		return map[string]string{"from": string(from), "fingerprint": r.Fingerprint}, nil
+		return map[string]string{"from": string(from), "fingerprint": r.Fingerprint}, s.releaseAttempts(ctx, r.ID, "revoked")
 	})
 }

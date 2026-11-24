@@ -23,6 +23,7 @@ export const handlers = [
   http.get("/api/runners", () => json([])),
   http.get("/api/telegram/link", () => json({ configured: false, identity: null, request: null })),
   http.get("/api/alerts", () => json([])),
+  http.get("/api/maintenance", () => json({ enabled: false, reason: "", since: null, by: "", activeAttempts: 0 })),
   http.get("/api/notifications/preferences", () =>
     json({ language: "en", disabled: [], types: ["approval_requested", "alert_raised", "task_finished"], telegramLinked: false }),
   ),

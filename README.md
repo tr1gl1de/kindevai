@@ -43,7 +43,7 @@ still starts and serves a placeholder page.
 
 On first start `serve` creates `./data` (`--data-dir` to change it) with the SQLite database in WAL mode
 (`data/db/platform.db`), applies schema migrations and generates the encryption key `data/secrets/master.key`
-(mode 0600; `--key-file` keeps it elsewhere). Later starts reuse them. **Back up the key together with the database:**
+(mode 0600; `--key-file` keeps it elsewhere). Later starts reuse them. **Keep the key safe — backups need it (see Backup, restore and moving):**
 if the database exists but the key is missing or different, the Control Plane refuses to start and never generates
 a replacement. Only one process can use a data directory at a time.
 
@@ -113,7 +113,9 @@ ai-runner fingerprint                                    # compare with the runn
   nonce bound to the connection id and its own address, the runner signs
   `kindevai-runner-auth/1\n<runner id>\n<audience>\n<nonce>\n<expiry>\n<connection id>` with its Ed25519 key, and
   only an **approved** runner is let in (pending/disabled are refused and retried, revoked stops the daemon with exit
-  code 78). Disabling or revoking a runner closes its live connection immediately. The runner reconnects with jittered
+  code 78). Disabling or revoking a runner closes its live connection immediately and, in the same transaction, fails
+  its running attempts (retried on another runner); the runner stops their processes itself as soon as it is told it
+  was disabled or revoked, without waiting for the Control Plane (KIN-63). The runner reconnects with jittered
   exponential backoff (1 s … 60 s); a TLS verification failure or a challenge for another address stops it (78).
 - Limits on the Control Plane: 64 KiB per message, 10 s to authenticate, ping every 30 s (15 s to answer), 30
   connection attempts per minute per address, 256 connections (32 still authenticating); browsers (an `Origin`
@@ -288,6 +290,41 @@ removed; runner enrollment tokens created or revoked, runners enrolled (or rejec
 refuse it, and there is no API for it); values that look like passwords or tokens are stored as `[redacted]`. The
 Owner reads the log on the **Audit log** page or at `GET /api/audit?actor=&project=&kind=&from=&to=&before=&limit=`
 (newest first, `next` is the cursor for the following page); other users get `403`. No automatic retention in the MVP.
+
+### Backup, restore and moving the installation
+
+Automatic backups are not part of the MVP; `export`/`import` move an installation by hand. The Control Plane is a
+single instance: besides the lock file `data/ai-platform.lock` it keeps an instance record (host, pid, heartbeat) in
+the database, so a second process on the same data refuses to start — even over a network file system. A restart on the same
+host takes the record over at once; from another host it expires 30 seconds after the last heartbeat, and an instance
+that loses its record stops.
+
+1. **Maintenance mode** (Owner, *Maintenance* in the menu): no new steps are handed out, running ones finish, runners
+   keep reconciling, and changes in the UI/API are paused for everyone (signing in, webhooks and safety actions still work:
+   cancelling a task, revoking/disabling a runner, disabling a user, rejecting an approval). A banner shows the reason and how many steps are still running. Wait until none are.
+2. **Export** (works while serving; an online, consistent SQLite snapshot):
+   ```bash
+   ai-platform export --data-dir ./data --out backup.tar.gz --key-out backup.key
+   # Docker: docker compose exec cp ai-platform export --data-dir /data --out /data/backup.tar.gz --key-out /data/backup.key
+   #         docker compose cp cp:/data/backup.tar.gz . && docker compose cp cp:/data/backup.key .
+   ```
+   The archive holds a manifest (format, version, schema, installation id, SHA-256 of every file), the database and
+   `data/artifacts/`. **The encryption key is never inside it.** You choose explicitly: `--key-out` writes it to a
+   separate 0600 file, `--without-key` leaves it out and you copy the key file yourself. Whoever has both the archive
+   and the key can read every stored secret — move them over different channels and delete leftover copies.
+3. **Stop the old Control Plane** (`docker compose down`) so that two instances never run at once.
+4. **Import** into an empty data directory on the new host:
+   ```bash
+   ai-platform import --data-dir ./data --archive backup.tar.gz --key backup.key
+   # Docker (files readable by uid 65532):
+   # docker compose run --rm --no-deps -v "$PWD:/backup:ro" cp import --data-dir /data --archive /backup/backup.tar.gz --key /backup/backup.key
+   ```
+   Import checks the manifest, every checksum, the database integrity, the schema version (a database from a newer
+   binary is refused before anything is written), and that the key matches the database. Without the key it stops
+   with an error — a new key is never generated. Then it applies pending migrations.
+5. **Start** the new Control Plane, point DNS/`--public-url` at it and switch maintenance mode off. Runners reconnect
+   by themselves; every Control Plane start uses a new command-channel epoch, so a restored (older) database never makes
+   a runner skip new commands.
 
 ## Docker Compose
 

@@ -675,3 +675,13 @@ export interface NotificationPreferences {
   types?: NotificationType[];
   telegramLinked?: boolean;
 }
+
+// Maintenance mode (KIN-41).
+export interface MaintenanceStatus {
+  enabled: boolean;
+  reason: string;
+  since: string | null;
+  by: string;
+  /** Claimed or running steps still draining. */
+  activeAttempts: number;
+}

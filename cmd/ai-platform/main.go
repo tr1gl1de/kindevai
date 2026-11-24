@@ -45,6 +45,8 @@ commands:
   serve     run the Control Plane (default 127.0.0.1:8080, data in ./data)
   health    check a running Control Plane (used by the Docker HEALTHCHECK)
   setup-token  print the one-time first-run setup token (needs access to the data directory)
+  export    write a consistent backup archive of the installation (works while serving)
+  import    restore a backup archive into an empty data directory
   version   print the version
 `
 
@@ -61,6 +63,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, ready cha
 		return setupToken(args[1:], stdout, stderr)
 	case "health":
 		return health(ctx, args[1:], stderr)
+	case "export":
+		return exportCmd(ctx, args[1:], stdout, stderr)
+	case "import":
+		return importCmd(ctx, args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintln(stdout, version)
 		return nil
@@ -150,10 +156,16 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	// KIN-59: stored runner output in the Storage Overview, "output storage full" alerts.
 	reportOutputStorage(inst, msg, tel, channel, retention)
 	wireExecution(apv.Workflow, channel, gateway, tel, hub, logger)    // KIN-23 scheduler, leases, reconciliation
+	wireRunnerRelease(modules, apv.Workflow)                           // KIN-63 disable/revoke end the runner's attempts
 	netSvc, netHTTP := newNetwork(inst, audit, integ, channel, logger) // KIN-30 network profiles
 	attachCheckoutSource(channel, integ.GitHub)                        // KIN-29 worktree base + repository token
 	attachNetwork(gateway, netSvc, logger)
 	modules = append(modules, netHTTP)
+	maint, err := newMaintenance(ctx, inst, audit, apv.Workflow, logger) // KIN-41 maintenance mode
+	if err != nil {
+		return err
+	}
+	modules = append(modules, maint)
 	modules = append(modules, gateway)
 	defer msg.start(ctx)()    // deferred after inst.Close, so the dispatchers stop before the database closes
 	defer intake.start(ctx)() // the YouTrack poller stops first
@@ -168,7 +180,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	srv := &http.Server{
 		Handler: server.New(server.Options{
 			Version: version, Assets: assets, Logger: logger, Modules: modules,
-			Middleware: func(h http.Handler) http.Handler { return trusted.Middleware(identity.Middleware(h)) },
+			Middleware: func(h http.Handler) http.Handler { return trusted.Middleware(identity.Middleware(maint.ReadOnly(h))) },
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -189,10 +201,14 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
+	var lostErr error
 	select {
 	case err := <-errc:
 		return fmt.Errorf("serving: %w", err)
 	case <-ctx.Done():
+	case <-inst.Lost(): // KIN-41: another instance owns the database now; stop writing to it
+		logger.Error("instance record lost: another Control Plane instance may be using this database; stopping")
+		lostErr = bootstrap.ErrInstanceActive
 	}
 	logger.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -207,7 +223,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	if err := <-errc; !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serving: %w", err)
 	}
-	return nil
+	return lostErr
 }
 
 // health exits non-zero unless the Control Plane answers 200 on its health endpoint.

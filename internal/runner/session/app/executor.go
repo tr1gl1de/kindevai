@@ -570,6 +570,37 @@ func (x *Executor) Attempts() []protocol.AttemptStatus {
 	return out
 }
 
+// stopWait bounds how long StopAll waits beyond the grace period for a killed process group to be reaped.
+const stopWait = 5 * time.Second
+
+// StopAll stops every running attempt's process group (SIGTERM, SIGKILL after the grace period) with reason and
+// returns once they all ended (KIN-63: the Control Plane disabled or revoked the runner, which stops its attempts
+// itself instead of waiting for execution.cancel). Their ends are reported as usual (failed, "cancelled: reason").
+func (x *Executor) StopAll(reason string) {
+	x.mu.Lock()
+	runs := make([]*run, 0, len(x.runs))
+	for _, r := range x.runs {
+		if r.proc != nil && !ended(r) {
+			x.terminate(r, reason)
+			runs = append(runs, r)
+		}
+	}
+	x.mu.Unlock()
+	if len(runs) == 0 {
+		return
+	}
+	t := time.NewTimer(x.grace() + stopWait)
+	defer t.Stop()
+	for _, r := range runs {
+		select {
+		case <-r.done:
+		case <-t.C:
+			x.logger().Error("attempt processes did not end after SIGKILL", "reason", reason)
+			return
+		}
+	}
+}
+
 // Close stops reporting and leaves the processes running for the next runner process to adopt.
 func (x *Executor) Close() {
 	x.closed.Store(true)

@@ -49,6 +49,8 @@ type Dispatcher interface {
 const (
 	CancelReasonCancelled = "cancelled"
 	CancelReasonStale     = "stale_fence"
+	// CancelReasonRunnerDisabled: the Owner disabled the runner (KIN-63).
+	CancelReasonRunnerDisabled = "runner_" + ReleaseDisabled
 )
 
 // Wait details shown with a task BLOCKED for a runner.
@@ -60,10 +62,20 @@ const (
 // Schedule is one scheduler pass (KIN-23): leases that ran out are handled, READY tasks start their execution, and
 // every running execution's schedulable steps are claimed for a candidate runner with an execution.assign command
 // in the same transaction. A step without a candidate waits for a runner, and a task that cannot progress is
-// BLOCKED with reason runner until a candidate appears (resumed automatically).
+// BLOCKED with reason runner until a candidate appears (resumed automatically). While Pause reports maintenance
+// mode only the lease pass runs.
 func (s *Service) Schedule(ctx context.Context) error {
 	if _, err := s.ExpireLeases(ctx); err != nil {
 		return err
+	}
+	if s.Pause != nil {
+		paused, err := s.Pause.SchedulingPaused(ctx)
+		if err != nil {
+			return err
+		}
+		if paused {
+			return nil // maintenance mode: no new executions or step claims (KIN-41)
+		}
 	}
 	ready, err := s.Repo.TasksInState(ctx, domain.TaskReady)
 	if err != nil {
@@ -360,6 +372,49 @@ func (s *Service) ReconcileRunner(ctx context.Context, runnerID string, reports 
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// Release reasons of ReleaseRunner (KIN-63).
+const (
+	ReleaseDisabled = "disabled"
+	ReleaseRevoked  = "revoked"
+)
+
+// ReleaseRunner takes every attempt away from a runner the Owner disabled or revoked (KIN-63). It joins the
+// caller's transaction, so the attempts end together with the runner's status change: a running or unknown attempt
+// fails ("runner disabled/revoked by the Owner") and is retried on another runner within the budget, a claimed step
+// returns to READY. A disabled runner gets an execution.cancel (runner_disabled) for every released attempt, delivered
+// from its command log when it connects again. A revoked runner never connects again, so nothing is queued for it
+// (it would stay in the log for good): it stops its processes itself (fail-closed, close code 4410).
+func (s *Service) ReleaseRunner(ctx context.Context, runnerID, reason string) error {
+	if reason != ReleaseDisabled && reason != ReleaseRevoked {
+		return fmt.Errorf("unknown runner release reason %q", reason)
+	}
+	return s.Tx.InTx(ctx, func(ctx context.Context) error {
+		ids, err := s.Repo.ExecutionsHeldBy(ctx, runnerID)
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			var released []domain.Released
+			err := s.updateExecutionByID(ctx, id, func(_ context.Context, e *domain.Execution, now time.Time) error {
+				released = e.ReleaseRunner(runnerID, "runner "+reason+" by the Owner", now, s.maxAttempts())
+				return nil
+			})
+			if err != nil {
+				return fmt.Errorf("releasing execution %s: %w", id, err)
+			}
+			if s.Dispatcher == nil || reason == ReleaseRevoked {
+				continue
+			}
+			for _, r := range released {
+				if err := s.Dispatcher.Cancel(ctx, runnerID, r.StepID, r.Fence, CancelReasonRunnerDisabled); err != nil {
+					return fmt.Errorf("queueing the cancel of step %s: %w", r.StepID, err)
+				}
+			}
+		}
+		return nil
+	})
 }
 
 // cancelReleased asks runners to stop the processes of steps the change cancelled (an execution that failed or

@@ -50,7 +50,29 @@ type Assignment struct {
 	Scope      []string
 	Adapter    string
 	Scenario   string
+	// Base is the branch the attempt's worktree starts from (KIN-29); empty: an empty working directory.
+	Base string
+	// Token is the short-lived git credential for Repository (KIN-28/KIN-29), held in memory only.
+	Token Secret
 }
+
+// Secret is a credential that never formats in clear (logs, errors, JSON).
+type Secret struct{ v string }
+
+// NewSecret wraps s.
+func NewSecret(s string) Secret { return Secret{s} }
+
+// Reveal returns the credential.
+func (s Secret) Reveal() string { return s.v }
+
+// String redacts the credential.
+func (Secret) String() string { return "[redacted]" }
+
+// GoString redacts the credential.
+func (Secret) GoString() string { return "[redacted]" }
+
+// MarshalJSON redacts the credential.
+func (Secret) MarshalJSON() ([]byte, error) { return []byte(`"[redacted]"`), nil }
 
 // Policy is the runner's local policy for assignments.
 type Policy struct {
@@ -147,7 +169,8 @@ type Record struct {
 	Execution string `json:"execution"`
 	Project   string `json:"project"`
 	Scenario  string `json:"scenario"`
-	PID       int    `json:"pid,omitempty"` // 0 until the process was launched
+	Workdir   string `json:"workdir,omitempty"` // the attempt's git worktree (KIN-29); empty: its journal directory
+	PID       int    `json:"pid,omitempty"`     // 0 until the process was launched
 	PGID      int    `json:"pgid,omitempty"`
 	// Start is the process's start time as the kernel reports it (KIN-64): with PID it identifies the process, so
 	// a pid reused by another process is never adopted. Empty for records written before KIN-64 or where the

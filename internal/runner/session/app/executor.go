@@ -22,7 +22,8 @@ import (
 
 // LaunchSpec is one attempt to start.
 type LaunchSpec struct {
-	Dir      string // the attempt's working directory
+	Dir      string // the attempt's state directory (the mock agent's result file)
+	Workdir  string // the process's working directory (the git worktree, KIN-29); Dir when empty
 	Scenario string
 	Attempt  int64 // the fencing token: distinct for every attempt of a step
 	Stdout   io.Writer
@@ -76,6 +77,25 @@ type Events interface {
 	Attempt(step string, fence, after int64, reserve func(upTo int64) error) Stream
 }
 
+// WorkspaceRequest asks for an attempt's git worktree (workspace context, KIN-29).
+type WorkspaceRequest struct {
+	Step       string
+	Fence      int64
+	Task       string
+	Repository string
+	Base       string
+	Token      domain.Secret
+}
+
+// Workspaces prepares and finishes attempt worktrees (the workspace context's Manager).
+type Workspaces interface {
+	// Prepare returns the worktree directory and its report (workspace.prepared).
+	Prepare(ctx context.Context, r WorkspaceRequest) (string, protocol.WorkspacePrepared, error)
+	// Finish commits leftover work to the attempt's branch, removes the worktree and returns what changed
+	// (workspace.changes); nil for an attempt without a workspace.
+	Finish(ctx context.Context, step string, fence int64) (*protocol.WorkspaceChanges, error)
+}
+
 // DefaultGrace is how long a cancelled process group has between SIGTERM and SIGKILL.
 const DefaultGrace = 5 * time.Second
 
@@ -85,8 +105,11 @@ type Executor struct {
 	Journal  Journal
 	Events   Events
 	Policy   domain.Policy
-	Grace    time.Duration // DefaultGrace when zero
-	Logger   *slog.Logger
+	// Workspaces prepares the git worktree of an assignment with a Base (KIN-29); without it such an assignment
+	// fails.
+	Workspaces Workspaces
+	Grace      time.Duration // DefaultGrace when zero
+	Logger     *slog.Logger
 
 	mu     sync.Mutex
 	runs   map[key]*run
@@ -159,8 +182,12 @@ func (x *Executor) Command(ctx context.Context, cmd protocol.Command) error {
 			x.logger().Warn("malformed assignment ignored", "id", cmd.ID, "err", err)
 			return nil
 		}
-		return x.Assign(ctx, domain.Assignment{Step: a.Step, Fence: a.Fence, Execution: a.Execution, Task: a.Task,
-			Project: a.Project, Repository: a.Repository, Scope: a.Scope, Adapter: a.Adapter, Scenario: a.Scenario})
+		as := domain.Assignment{Step: a.Step, Fence: a.Fence, Execution: a.Execution, Task: a.Task,
+			Project: a.Project, Repository: a.Repository, Scope: a.Scope, Adapter: a.Adapter, Scenario: a.Scenario, Base: a.Base}
+		if a.Credential != nil {
+			as.Token = domain.NewSecret(a.Credential.Token)
+		}
+		return x.Assign(ctx, as)
 	case protocol.CommandCancel:
 		var c protocol.Cancel
 		if err := json.Unmarshal(cmd.Body, &c); err != nil {
@@ -253,10 +280,22 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 	if err := r.stream.Emit(protocol.EventAccepted, nil); err != nil {
 		return x.abandon(r, fmt.Errorf("emitting accepted: %w", err))
 	}
-	proc, err := x.Launcher.Launch(ctx, LaunchSpec{Dir: dir, Scenario: a.ScenarioOrDefault(), Attempt: a.Fence,
-		Stdout: x.guard(r.stream.Output("stdout")), Stderr: x.guard(r.stream.Output("stderr"))})
+	var workdir string
+	if a.Base != "" {
+		wd, failed, err := x.prepareWorkspace(ctx, a, r)
+		switch {
+		case err != nil:
+			return x.abandon(r, err)
+		case failed:
+			return x.Journal.Finish(a.Step, a.Fence)
+		}
+		workdir = wd
+	}
+	proc, err := x.Launcher.Launch(ctx, LaunchSpec{Dir: dir, Workdir: workdir, Scenario: a.ScenarioOrDefault(),
+		Attempt: a.Fence, Stdout: x.guard(r.stream.Output("stdout")), Stderr: x.guard(r.stream.Output("stderr"))})
 	if err != nil {
 		x.logger().Error("launching the attempt", "step", a.Step, "fence", a.Fence, "err", err)
+		x.releaseWorkspace(r)
 		if err := r.stream.Emit(protocol.EventFailed, protocol.Failure{Reason: "launch failed: " + err.Error()}); err != nil {
 			return x.abandon(r, err) // the re-sent command tries again
 		}
@@ -289,9 +328,82 @@ func ended(r *run) bool {
 
 // abandon drops a run that never launched.
 func (x *Executor) abandon(r *run, err error) error {
+	x.releaseWorkspace(r)
 	k := r.key()
 	_ = x.Journal.Delete(k.step, k.fence)
 	return err
+}
+
+// prepareWorkspace creates the attempt's worktree and reports it. failed: the attempt failed (reported); err: the
+// command should be re-sent.
+func (x *Executor) prepareWorkspace(ctx context.Context, a domain.Assignment, r *run) (string, bool, error) {
+	var (
+		dir  string
+		prep protocol.WorkspacePrepared
+		err  = errors.New("this runner has no workspace manager")
+	)
+	if x.Workspaces != nil {
+		dir, prep, err = x.Workspaces.Prepare(ctx, WorkspaceRequest{Step: a.Step, Fence: a.Fence, Task: a.Task,
+			Repository: a.Repository, Base: a.Base, Token: a.Token})
+	}
+	if err != nil && ctx.Err() != nil {
+		return "", false, fmt.Errorf("preparing the workspace: %w", ctx.Err()) // re-sent on the next connection
+	}
+	if err != nil {
+		x.logger().Warn("preparing the workspace", "step", a.Step, "fence", a.Fence, "err", err)
+		if err := r.stream.Emit(protocol.EventFailed, protocol.Failure{Reason: "workspace: " + err.Error()}); err != nil {
+			return "", false, err
+		}
+		return "", true, nil
+	}
+	if err := r.save(x.Journal, func(rec *domain.Record) { rec.Workdir = dir }); err != nil {
+		return "", false, fmt.Errorf("recording the workspace: %w", err)
+	}
+	if err := r.stream.Emit(protocol.EventWorkspacePrepared, prep); err != nil {
+		return "", false, fmt.Errorf("emitting workspace.prepared: %w", err)
+	}
+	return dir, false, nil
+}
+
+// finishWorkspace saves the attempt's work to its branch, reports the changes and removes the worktree. A failure
+// is logged and the worktree kept (its work is not lost).
+func (x *Executor) finishWorkspace(r *run) {
+	r.recMu.Lock()
+	step, fence, wd := r.rec.Step, r.rec.Fence, r.rec.Workdir
+	r.recMu.Unlock()
+	if wd == "" || x.Workspaces == nil {
+		return
+	}
+	// The leader ended; anything it left in its process group must not write into the worktree while it is saved
+	// and removed.
+	if err := r.proc.Signal(true); err != nil {
+		x.logger().Warn("killing the attempt's leftover processes", "step", step, "fence", fence, "err", err)
+	}
+	ch, err := x.Workspaces.Finish(context.Background(), step, fence)
+	if err != nil {
+		x.logger().Error("finishing the workspace; the worktree is kept", "step", step, "fence", fence, "err", err)
+		return
+	}
+	if ch != nil {
+		if err := r.stream.Emit(protocol.EventWorkspaceChanges, ch); err != nil {
+			x.logger().Error("emitting workspace.changes", "step", step, "fence", fence, "err", err)
+		}
+	}
+}
+
+// releaseWorkspace finishes the workspace of an attempt that never ran (no report). It does not rely on the
+// record's Workdir: a workspace may have been prepared before the record could be saved (Finish is a no-op for an
+// attempt without one).
+func (x *Executor) releaseWorkspace(r *run) {
+	r.recMu.Lock()
+	step, fence := r.rec.Step, r.rec.Fence
+	r.recMu.Unlock()
+	if x.Workspaces == nil {
+		return
+	}
+	if _, err := x.Workspaces.Finish(context.Background(), step, fence); err != nil {
+		x.logger().Error("releasing the workspace; the worktree is kept", "step", step, "fence", fence, "err", err)
+	}
 }
 
 func idOK(s string) bool {
@@ -329,6 +441,9 @@ const reportRetry = time.Second
 func (x *Executor) watch(r *run) {
 	x.wg.Go(func() {
 		exit := r.proc.Wait()
+		if !x.closed.Load() {
+			x.finishWorkspace(r) // before done: a newer attempt of the step waits for the worktree's release
+		}
 		close(r.done)
 		x.mu.Lock()
 		ok, reason := domain.Outcome(exit, r.cancelled)
@@ -426,6 +541,7 @@ func (x *Executor) Recover(_ context.Context) error {
 		r := &run{rec: rec, done: make(chan struct{})}
 		r.stream = x.Events.Attempt(rec.Step, rec.Fence, rec.Reserved, x.reserver(r))
 		if rec.PID == 0 {
+			x.releaseWorkspace(r)
 			if err := r.stream.Emit(protocol.EventFailed, protocol.Failure{Reason: "launch interrupted by a runner restart"}); err != nil {
 				return err
 			}

@@ -21,7 +21,8 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/runner/session/domain"
 )
 
-// Launcher starts the mock agent as `Program Args... --scenario <s> --attempt <n>`. Env is the child's whole
+// Launcher starts the mock agent as `Program Args... --scenario <s> --attempt <n> --state <dir>` in the attempt's
+// worktree (or its state dir). Env is the child's whole
 // environment: the runner's own variables (and any secret in them) are never inherited.
 type Launcher struct {
 	Program string
@@ -37,10 +38,14 @@ var _ app.Launcher = (*Launcher)(nil)
 func (l *Launcher) Launch(_ context.Context, s app.LaunchSpec) (app.Process, error) {
 	// Not CommandContext: the process must outlive this runner process (it is adopted after a restart) and is
 	// only stopped by an explicit cancel.
-	args := append(append([]string{}, l.Args...), "--scenario", s.Scenario, "--attempt", strconv.FormatInt(s.Attempt, 10))
+	args := append(append([]string{}, l.Args...), "--scenario", s.Scenario, "--attempt", strconv.FormatInt(s.Attempt, 10),
+		"--state", s.Dir)
 	//nolint:noctx,gosec // must outlive ctx (adopted after a restart); fixed program, validated scenario
 	cmd := exec.Command(l.Program, args...)
 	cmd.Dir, cmd.Stdout, cmd.Stderr = s.Dir, s.Stdout, s.Stderr
+	if s.Workdir != "" {
+		cmd.Dir = s.Workdir
+	}
 	cmd.Env = l.Env
 	if cmd.Env == nil {
 		cmd.Env = []string{}

@@ -118,10 +118,10 @@ func (h *Hasher) Verify(ctx context.Context, encoded, pw string) (bool, error) {
 		return false, ErrMalformedHash
 	}
 	want, err := base64.RawStdEncoding.DecodeString(parts[5])
-	if err != nil || len(want) == 0 {
+	if err != nil || len(want) == 0 || len(want) > 64 {
 		return false, ErrMalformedHash
 	}
-	got, err := h.derive(ctx, []byte(pw), salt, t, m, p, uint32(len(want)))
+	got, err := h.derive(ctx, []byte(pw), salt, t, m, p, uint32(len(want))) //nolint:gosec // G115: bounded to 64 above
 	if err != nil {
 		return false, err
 	}

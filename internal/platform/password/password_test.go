@@ -47,7 +47,7 @@ func TestVerifyUsesParamsFromHash(t *testing.T) {
 
 func TestVerifyRejectsMalformed(t *testing.T) {
 	t.Parallel()
-	for _, enc := range []string{"", "plain", "$argon2i$v=19$m=64,t=1,p=1$c2FsdA$aGFzaA", "$argon2id$v=19$m=999999999,t=1,p=1$c2FsdA$aGFzaA"} {
+	for _, enc := range []string{"", "plain", "$argon2i$v=19$m=64,t=1,p=1$c2FsdA$aGFzaA", "$argon2id$v=19$m=999999999,t=1,p=1$c2FsdA$aGFzaA", "$argon2id$v=19$m=64,t=1,p=1$c2FsdA$" + strings.Repeat("QUFB", 100)} {
 		if _, err := testHasher().Verify(t.Context(), enc, "x"); err == nil {
 			t.Fatalf("Verify(%q) accepted a malformed or oversized hash", enc)
 		}

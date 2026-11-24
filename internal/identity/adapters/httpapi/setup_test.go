@@ -103,7 +103,7 @@ func TestSetupFlow(t *testing.T) {
 	if strings.Contains(rec.Body.String(), "correct horse") || strings.Contains(rec.Body.String(), "h:") {
 		t.Fatal("response leaks the password or its hash")
 	}
-	rec, body = send(t, h, req{method: "GET", target: "/api/setup/status"})
+	_, body = send(t, h, req{method: "GET", target: "/api/setup/status"})
 	if body["setupRequired"] != false {
 		t.Fatalf("status after setup = %v", body)
 	}

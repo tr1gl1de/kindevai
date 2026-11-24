@@ -152,6 +152,7 @@ func (h *AuthHandler) login(w http.ResponseWriter, r *http.Request) {
 			h.logger().Warn("revoking previous session", "err", err)
 		}
 	}
+	//nolint:gosec // G124: Secure is set whenever the request is HTTPS; plain HTTP is the trusted-local profile.
 	http.SetCookie(w, &http.Cookie{
 		Name: SessionCookie, Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode,
 		Secure: isHTTPS(r), MaxAge: int(domain.SessionMaxAge.Seconds()),
@@ -167,6 +168,7 @@ func (h *AuthHandler) logout(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	//nolint:gosec // G124: Secure is set whenever the request is HTTPS; plain HTTP is the trusted-local profile.
 	http.SetCookie(w, &http.Cookie{
 		Name: SessionCookie, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode,
 		Secure: isHTTPS(r), MaxAge: -1,

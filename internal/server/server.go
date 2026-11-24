@@ -68,7 +68,7 @@ func spa(assets fs.FS) http.Handler {
 			if strings.HasPrefix(name, "assets/") { // Vite emits content-hashed names here
 				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 			}
-			http.ServeFileFS(w, r, assets, name)
+			http.ServeFileFS(w, r, assets, name) //nolint:gosec // G703: name is path.Clean'ed and served from an fs.FS, which rejects ".."
 			return
 		case err != nil && !errors.Is(err, fs.ErrNotExist):
 			http.Error(w, "internal error", http.StatusInternalServerError)

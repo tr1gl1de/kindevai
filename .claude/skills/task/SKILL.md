@@ -25,7 +25,7 @@ production/infra secrets, deleting YouTrack data, or a genuine spec contradictio
 ## 2. Understand
 - `TT start <ID> research`. Delegate to `spec-reader`: issue + linked KB articles → brief.
 - If the issue has no `Оценка`, set one (`YT issue command "Оценка 3h" <ID>`).
-- `YT issue command "Stage Develop for me" <ID>`.
+- `YT issue command "Stage Develop Assignee me" <ID>`.
 
 ## 3. Plan
 - Write the plan as a short YouTrack comment (3–8 bullets) and proceed immediately.

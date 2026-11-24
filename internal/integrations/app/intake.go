@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,7 +25,9 @@ import (
 // project updated since the binding's cursor and hands each one to the inbox. The optional webhook only names an
 // issue; its state is always re-read through the REST API (outbox), so a webhook payload never decides anything.
 // "Run by issue ID" works the same way on behalf of a project member. HandleIssue (inbox, one transaction, no
-// external calls) turns a snapshot into a task when the initiator may start AI in the project.
+// external calls) turns a snapshot into a task when the initiator may start AI in the project: the member who ran
+// it by ID, or the YouTrack user who applied the trigger tag as read from the issue's tag history before the inbox
+// (KIN-50).
 
 // Inbox/outbox topics of the intake.
 const (
@@ -114,7 +117,13 @@ type IssueSource interface {
 	// UpdatedIssues returns one page of the binding's tagged issues updated around or after Since, oldest first.
 	UpdatedIssues(ctx context.Context, baseURL string, token domain.Secret, q IssueQuery) ([]domain.IssueSnapshot, error)
 	Issue(ctx context.Context, baseURL string, token domain.Secret, issueID string) (domain.IssueSnapshot, error) // domain.ErrIssueNotFound
+	// TagEvents returns the issue's tag history (KIN-50): domain.ErrIssueNotFound, ErrTagHistoryUnusable when the
+	// answer cannot be relied on (malformed, too long), *StatusError, or a transient error.
+	TagEvents(ctx context.Context, baseURL string, token domain.Secret, issueID string) ([]domain.TagEvent, error)
 }
+
+// ErrTagHistoryUnusable: YouTrack's tag history of an issue cannot be relied on; nobody counts as the tag's applier.
+var ErrTagHistoryUnusable = errors.New("youtrack: tag history unusable")
 
 // StatusError is an unexpected HTTP status from YouTrack.
 type StatusError struct {
@@ -190,6 +199,10 @@ type issuePayload struct {
 	Channel     string               `json:"channel"`
 	ProjectID   string               `json:"projectId,omitempty"`   // run by ID: the project it was started in
 	RequestedBy string               `json:"requestedBy,omitempty"` // run by ID: the member who started it
+	// Poll and webhook (KIN-50): the YouTrack login that applied TaggedTag, from the issue's tag history; "" when it
+	// could not be told. HandleIssue only trusts it for the binding's current trigger tag.
+	TaggedBy  string `json:"taggedBy,omitempty"`
+	TaggedTag string `json:"taggedTag,omitempty"`
 }
 
 // webhookPayload is all that is kept of a webhook call: the issue it names.
@@ -269,7 +282,11 @@ func (in *Intake) pollBinding(ctx context.Context, settings YouTrackSettings, b 
 				in.logger().Warn("youtrack issue skipped", "issue", s.ID, "err", err)
 				continue
 			}
-			if err := in.receive(ctx, issuePayload{Issue: s, Channel: domain.ChannelPoll}, issueDelivery(s)); err != nil {
+			p := issuePayload{Issue: s, Channel: domain.ChannelPoll}
+			if p.TaggedBy, p.TaggedTag, err = in.tagApplier(ctx, settings, b, s); err != nil {
+				return err // as above: nothing past this issue is handed over, the cursor stays before it
+			}
+			if err := in.receive(ctx, p, issueDelivery(s)); err != nil {
 				return err
 			}
 			cursor = max(cursor, s.Updated)
@@ -292,6 +309,31 @@ func (in *Intake) pollBinding(ctx context.Context, settings YouTrackSettings, b 
 		in.logger().Warn("youtrack poll stopped at the page cap", "youtrackProject", b.ShortName, "read", skip)
 	}
 	return in.Store.AdvanceCursor(ctx, b.ProjectID, b.ShortName, cursor, in.now())
+}
+
+// tagApplier reads who applied the binding's trigger tag to the issue (KIN-50) when that decides anything: for an
+// open issue that carries the tag. A history that cannot be relied on for good (malformed, too long, the issue gone)
+// yields no applier, so the issue is rejected (fail closed) instead of stalling the binding. Any other failure —
+// transient, or a refusal such as 401/403 that the Owner must fix — is returned, so the cursor stays and the issue
+// is decided once YouTrack answers instead of being rejected for good.
+func (in *Intake) tagApplier(ctx context.Context, settings YouTrackSettings, b domain.Binding, s domain.IssueSnapshot) (login, tag string, err error) {
+	if s.Resolved || !b.Wants(s, false) {
+		return "", "", nil
+	}
+	events, err := in.Source.TagEvents(ctx, settings.BaseURL, settings.Token, s.ID)
+	var se *StatusError
+	switch {
+	case errors.Is(err, ErrTagHistoryUnusable), errors.Is(err, domain.ErrIssueNotFound), errors.As(err, &se) && se.Status == http.StatusGone:
+		in.logger().Warn("youtrack tag history unreadable", "issue", s.ID, "err", err)
+		return "", b.TriggerTag, nil
+	case err != nil:
+		return "", "", err
+	}
+	login, ok := domain.TagApplier(events, b.TriggerTag)
+	if !ok {
+		in.logger().Warn("youtrack tag applier unknown", "issue", s.ID, "tag", b.TriggerTag)
+	}
+	return login, b.TriggerTag, nil
 }
 
 func issueDelivery(s domain.IssueSnapshot) string {
@@ -425,14 +467,18 @@ func (in *Intake) HandleIssue(ctx context.Context, e messaging.InboundEvent) err
 	if s.Resolved && !manual {
 		return nil // a closed issue does not start new work
 	}
-	initiator := p.RequestedBy
+	// The initiator is the member who ran the issue by ID, or the YouTrack user who applied the trigger tag: anybody
+	// who may edit an issue may tag it, so the reporter grants nothing (KIN-50).
+	initiator, denied := p.RequestedBy, domain.ReasonNotAllowed
 	if !manual {
-		if s.Reporter == "" {
-			return in.reject(ctx, rec, domain.ReasonUnknownUser)
+		denied = domain.ReasonTagNotAllowed
+		rec.Tagger = p.TaggedBy
+		if p.TaggedBy == "" || !strings.EqualFold(strings.TrimSpace(p.TaggedTag), b.TriggerTag) {
+			return in.reject(ctx, rec, denied)
 		}
-		initiator, err = in.Store.LinkedUser(ctx, s.Reporter)
+		initiator, err = in.Store.LinkedUser(ctx, p.TaggedBy)
 		if errors.Is(err, domain.ErrNotFound) {
-			return in.reject(ctx, rec, domain.ReasonUnknownUser)
+			return in.reject(ctx, rec, denied)
 		}
 		if err != nil {
 			return err
@@ -444,7 +490,7 @@ func (in *Intake) HandleIssue(ctx context.Context, e messaging.InboundEvent) err
 		return err
 	}
 	if !ok {
-		return in.reject(ctx, rec, domain.ReasonNotAllowed)
+		return in.reject(ctx, rec, denied)
 	}
 	if rec.TaskID, err = in.Tasks.CreateIssueTask(ctx, b.ProjectID, s.ID, title, initiator); err != nil {
 		return err
@@ -454,7 +500,7 @@ func (in *Intake) HandleIssue(ctx context.Context, e messaging.InboundEvent) err
 		return err
 	}
 	return in.Integrations.record(ctx, auditapp.System(), KindYouTrackTaskCreated, b.ProjectID, "task:"+rec.TaskID,
-		map[string]string{"issue": s.ID, "initiator": initiator, "channel": p.Channel})
+		map[string]string{"issue": s.ID, "initiator": initiator, "tagger": rec.Tagger, "channel": p.Channel})
 }
 
 func (in *Intake) reject(ctx context.Context, rec domain.IntakeRecord, reason string) error {
@@ -484,7 +530,7 @@ func (in *Intake) reject(ctx context.Context, rec domain.IntakeRecord, reason st
 	}
 	return in.Integrations.record(ctx, auditapp.System(), KindYouTrackIssueRejected, rec.ProjectID,
 		"project:"+rec.ProjectID, map[string]string{"issue": rec.IssueID, "reason": reason,
-			"reporter": rec.Reporter, "initiator": rec.Initiator, "channel": rec.Channel})
+			"reporter": rec.Reporter, "initiator": rec.Initiator, "tagger": rec.Tagger, "channel": rec.Channel})
 }
 
 func (in *Intake) rejectManual(ctx context.Context, p issuePayload, reason string) error {
@@ -594,10 +640,25 @@ func (in *Intake) HandleFetch(ctx context.Context, d messaging.Delivery) error {
 		return in.fetchFailed(ctx, p, domain.ReasonInvalidIssue, nil)
 	}
 	delivery := issueDelivery(s)
+	out := issuePayload{Issue: s, Channel: p.Channel, ProjectID: p.ProjectID, RequestedBy: p.RequestedBy}
 	if p.Channel == domain.ChannelManual {
 		delivery = "manual/" + p.RequestID
+	} else {
+		b, err := in.Store.BindingByShortName(ctx, s.Project)
+		switch {
+		case errors.Is(err, domain.ErrNotFound): // unbound: HandleIssue ignores it
+		case err != nil:
+			return err
+		default:
+			if out.TaggedBy, out.TaggedTag, err = in.tagApplier(ctx, settings, b, s); err != nil {
+				if errors.As(err, &se) && se.Permanent() {
+					return messaging.Permanent(err) // polling covers the issue once the Owner fixes the token
+				}
+				return err // the outbox retries; polling still covers the issue if it gives up
+			}
+		}
 	}
-	return in.receive(ctx, issuePayload{Issue: s, Channel: p.Channel, ProjectID: p.ProjectID, RequestedBy: p.RequestedBy}, delivery)
+	return in.receive(ctx, out, delivery)
 }
 
 // fetchFailed records why a run by ID produced no task (webhook hints are dropped: polling still covers them) and

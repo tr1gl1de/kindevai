@@ -122,6 +122,64 @@ func (c *Client) Issue(ctx context.Context, baseURL string, token domain.Secret,
 	return j.snapshot(), nil
 }
 
+// errBadResponse: YouTrack answered 200 with a body that cannot be used (malformed or too large).
+var errBadResponse = errors.New("malformed response")
+
+// tagEventFields are the fields of a tag activity: who changed which tags when.
+const tagEventFields = "id,timestamp,author(login),added(name),removed(name)"
+
+type tagEventJSON struct {
+	Timestamp int64 `json:"timestamp"`
+	Author    *struct {
+		Login string `json:"login"`
+	} `json:"author"`
+	Added []struct {
+		Name string `json:"name"`
+	} `json:"added"`
+	Removed []struct {
+		Name string `json:"name"`
+	} `json:"removed"`
+}
+
+// TagEvents implements app.IssueSource: the issue's tag history, newest first (KIN-50). A history longer than
+// domain.MaxTagEvents, or one that cannot be parsed, is app.ErrTagHistoryUnusable.
+func (c *Client) TagEvents(ctx context.Context, baseURL string, token domain.Secret, issueID string) ([]domain.TagEvent, error) {
+	id, err := domain.NewIssueID(issueID)
+	if err != nil {
+		return nil, err
+	}
+	v := url.Values{}
+	v.Set("categories", "TagsCategory")
+	v.Set("fields", tagEventFields)
+	v.Set("reverse", "true")
+	v.Set("$top", strconv.Itoa(domain.MaxTagEvents+1))
+	var out []tagEventJSON
+	err = c.get(ctx, baseURL+"/api/issues/"+url.PathEscape(id)+"/activities?"+v.Encode(), token, &out)
+	switch {
+	case errors.Is(err, errBadResponse):
+		return nil, fmt.Errorf("%w: %w", app.ErrTagHistoryUnusable, err)
+	case err != nil:
+		return nil, err
+	case len(out) > domain.MaxTagEvents:
+		return nil, fmt.Errorf("%w: more than %d tag changes", app.ErrTagHistoryUnusable, domain.MaxTagEvents)
+	}
+	events := make([]domain.TagEvent, 0, len(out))
+	for _, j := range out {
+		e := domain.TagEvent{At: j.Timestamp}
+		if j.Author != nil {
+			e.Author = j.Author.Login
+		}
+		for _, t := range j.Added {
+			e.Added = append(e.Added, t.Name)
+		}
+		for _, t := range j.Removed {
+			e.Removed = append(e.Removed, t.Name)
+		}
+		events = append(events, e)
+	}
+	return events, nil
+}
+
 func (c *Client) get(ctx context.Context, u string, token domain.Secret, dst any) error {
 	timeout := c.Timeout
 	if timeout <= 0 {
@@ -151,10 +209,10 @@ func (c *Client) get(ctx context.Context, u string, token domain.Secret, dst any
 		return fmt.Errorf("youtrack: reading response: %s", networkDetail(err))
 	}
 	if len(body) > maxIssuesBytes {
-		return errors.New("youtrack: response too large")
+		return fmt.Errorf("youtrack: %w: too large", errBadResponse)
 	}
 	if err := json.Unmarshal(body, dst); err != nil {
-		return errors.New("youtrack: malformed response")
+		return fmt.Errorf("youtrack: %w", errBadResponse)
 	}
 	return nil
 }

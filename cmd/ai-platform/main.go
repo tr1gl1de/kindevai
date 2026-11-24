@@ -147,7 +147,10 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	gateway := newRunnerGateway(inst, hub, tel, localPeers, audiences, logger)
 	channel := newRunnerChannel(inst, apv.Workflow, retention, logger)
 	attachRunnerChannel(gateway, channel)
-	wireExecution(apv.Workflow, channel, gateway, tel, hub, logger) // KIN-23 scheduler, leases, reconciliation
+	wireExecution(apv.Workflow, channel, gateway, tel, hub, logger)    // KIN-23 scheduler, leases, reconciliation
+	netSvc, netHTTP := newNetwork(inst, audit, integ, channel, logger) // KIN-30 network profiles
+	attachNetwork(gateway, netSvc, logger)
+	modules = append(modules, netHTTP)
 	modules = append(modules, gateway)
 	defer msg.start(ctx)()    // deferred after inst.Close, so the dispatchers stop before the database closes
 	defer intake.start(ctx)() // the YouTrack poller stops first

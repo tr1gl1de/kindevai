@@ -647,3 +647,27 @@ func TestReconcileResponseReachesReconciler(t *testing.T) {
 		t.Fatalf("reconciler got %+v", rec.got)
 	}
 }
+
+// Prepare transforms a command right before it is sent (KIN-30 opens sealed proxy passwords there): the log keeps
+// the stored body; a failing Prepare sends the stored body rather than blocking the stream.
+func TestCommandsPreparedBeforeSending(t *testing.T) {
+	t.Parallel()
+	e := newChannelEnv()
+	e.ch.Prepare = func(_ context.Context, runnerID string, q domain.QueuedCommand) (json.RawMessage, error) {
+		if q.ID == "bad" {
+			return nil, errors.New("cannot prepare")
+		}
+		return json.RawMessage(`{"for":"` + runnerID + `/` + q.ID + `"}`), nil
+	}
+	_ = e.ch.Send(t.Context(), "r1", "c1", protocol.CommandCancel, protocol.Cancel{Reason: "stored"})
+	_ = e.ch.Send(t.Context(), "r1", "bad", protocol.CommandCancel, protocol.Cancel{Reason: "stored"})
+	sess, f := newSession("r1")
+	runServe(t, e.ch, sess)
+	cmds := commandsSent(t, f, 2)
+	if string(cmds[0].Body) != `{"for":"r1/c1"}` || !strings.Contains(string(cmds[1].Body), "stored") {
+		t.Fatalf("sent %s, %s", cmds[0].Body, cmds[1].Body)
+	}
+	if !strings.Contains(string(e.commands("r1")[0].Body), "stored") {
+		t.Fatal("the command log was changed")
+	}
+}

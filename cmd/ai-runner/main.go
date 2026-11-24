@@ -109,6 +109,7 @@ commands:
                the token is read from the prompt, stdin or --token-file, never from arguments
   fingerprint  print the key fingerprint to compare with the runner's card in Dashboard -> Runners
   run          run the daemon (systemd/launchd services start this)
+  test-network check the proxy, egress IP and required endpoints with the network profile from the Control Plane
   version      print the version
 
 common flags:
@@ -133,6 +134,8 @@ func run(ctx context.Context, args []string, e *env) error {
 			return exitError(code)
 		}
 		return nil
+	case "test-network":
+		return testNetwork(ctx, args[1:], e)
 	case "version":
 		fmt.Fprintf(e.stdout, "ai-runner %s %s/%s\n", version, runtime.GOOS, runtime.GOARCH)
 		return nil
@@ -312,11 +315,14 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	if err := x.Recover(ctx); err != nil {
 		return fmt.Errorf("recovering running attempts: %w", err)
 	}
+	agent := networkAgent(d, logger) // KIN-30 network profiles and Test Network
+	agent.Context = ctx
+	ch.Commands = withNetwork(agent, ch.Commands)
 	rep := &app.Reporter{Probe: probe.New(d.Path())} // KIN-20 heartbeat, capabilities, storage
 	if *measureSpace {                               // KIN-55: only with the operator's explicit permission
 		rep.Meter = probe.NewSpaceMeter(d.Path()).Measure
 	}
-	conn := &app.Connector{Dialer: controlplane.New(), Logger: logger, Handlers: []app.LinkHandler{ch, rep}}
+	conn := &app.Connector{Dialer: controlplane.New(), Logger: logger, Handlers: []app.LinkHandler{ch, rep, networkLink{agent}}}
 	return conn.Run(ctx, en, id)
 }
 

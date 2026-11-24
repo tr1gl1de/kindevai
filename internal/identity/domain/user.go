@@ -80,6 +80,7 @@ type User struct {
 	PasswordHash string
 	Role         PlatformRole
 	CreatedAt    time.Time
+	Disabled     bool
 }
 
 // ErrNotFound is returned by repositories when an entity does not exist.

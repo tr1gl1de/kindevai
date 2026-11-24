@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -81,6 +82,30 @@ func TestOpenIsExclusive(t *testing.T) {
 	d2, err := Open(root)
 	if err != nil {
 		t.Fatalf("Open after Close: %v", err)
+	}
+	_ = d2.Close()
+}
+
+// KIN-58: a child process forked by another goroutine (os/exec) shares the lock's open file description until
+// it execs, so closing our descriptor alone leaves the directory locked. Close must release the lock itself.
+func TestCloseReleasesLockSharedWithForkedChild(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	d, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inherited, err := syscall.Dup(int(d.lock.Fd())) //nolint:gosec // G115: fd fits int
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Close(inherited) })
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d2, err := Open(root)
+	if err != nil {
+		t.Fatalf("Open after Close while a child still holds the descriptor: %v", err)
 	}
 	_ = d2.Close()
 }

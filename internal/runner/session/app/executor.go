@@ -367,6 +367,11 @@ func (x *Executor) finishWorkspace(r *run) {
 	if wd == "" || x.Workspaces == nil {
 		return
 	}
+	// The leader ended; anything it left in its process group must not write into the worktree while it is saved
+	// and removed.
+	if err := r.proc.Signal(true); err != nil {
+		x.logger().Warn("killing the attempt's leftover processes", "step", step, "fence", fence, "err", err)
+	}
 	ch, err := x.Workspaces.Finish(context.Background(), step, fence)
 	if err != nil {
 		x.logger().Error("finishing the workspace; the worktree is kept", "step", step, "fence", fence, "err", err)
@@ -379,12 +384,14 @@ func (x *Executor) finishWorkspace(r *run) {
 	}
 }
 
-// releaseWorkspace finishes the workspace of an attempt that never ran (no report).
+// releaseWorkspace finishes the workspace of an attempt that never ran (no report). It does not rely on the
+// record's Workdir: a workspace may have been prepared before the record could be saved (Finish is a no-op for an
+// attempt without one).
 func (x *Executor) releaseWorkspace(r *run) {
 	r.recMu.Lock()
-	step, fence, wd := r.rec.Step, r.rec.Fence, r.rec.Workdir
+	step, fence := r.rec.Step, r.rec.Fence
 	r.recMu.Unlock()
-	if wd == "" || x.Workspaces == nil {
+	if x.Workspaces == nil {
 		return
 	}
 	if _, err := x.Workspaces.Finish(context.Background(), step, fence); err != nil {

@@ -2,7 +2,7 @@ package protocol
 
 // Workspaces (KIN-29, KB KIN-A-16/KIN-A-18). For an assignment with a Base the runner keeps a bare repository
 // cache in repos/ and runs the attempt in its own git worktree under workspaces/, on the branch
-// feature/<task>-<step> started from origin/<base>. It reports the worktree and the repository's native
+// feature/<task>--<step> started from origin/<base>. It reports the worktree and the repository's native
 // instruction files (workspace.prepared) before starting the process, and what the attempt changed
 // (workspace.changes, the input of KIN-51 scope enforcement) before its terminal event.
 

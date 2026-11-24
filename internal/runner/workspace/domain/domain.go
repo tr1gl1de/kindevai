@@ -63,12 +63,24 @@ func CheckWorkBranch(b string) error {
 	return nil
 }
 
-// WorkBranch is the branch of a step: feature/<task>-<step>. Every attempt of the step continues on it.
-func WorkBranch(task, step string) (string, error) {
-	if !idRe.MatchString(task) || !idRe.MatchString(step) {
-		return "", fmt.Errorf("%w: task %q, step %q", ErrInvalidRef, task, step)
+// Leaf is the workspace name of a step, <task>--<step>: unambiguous, since an id never contains "--" nor starts
+// or ends with "-".
+func Leaf(task, step string) (string, error) {
+	for _, id := range []string{task, step} {
+		if !idRe.MatchString(id) || strings.Contains(id, "--") || strings.HasSuffix(id, "-") {
+			return "", fmt.Errorf("%w: task %q, step %q", ErrInvalidRef, task, step)
+		}
 	}
-	b := WorkBranchPrefix + task + "-" + step
+	return task + "--" + step, nil
+}
+
+// WorkBranch is the branch of a step: feature/<task>--<step>. Every attempt of the step continues on it.
+func WorkBranch(task, step string) (string, error) {
+	leaf, err := Leaf(task, step)
+	if err != nil {
+		return "", err
+	}
+	b := WorkBranchPrefix + leaf
 	return b, CheckWorkBranch(b)
 }
 

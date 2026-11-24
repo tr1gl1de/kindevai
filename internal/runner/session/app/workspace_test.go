@@ -26,7 +26,7 @@ func (w *fakeWorkspaces) Prepare(_ context.Context, r WorkspaceRequest) (string,
 	if w.err != nil {
 		return "", protocol.WorkspacePrepared{}, w.err
 	}
-	return "/ws/" + r.Step, protocol.WorkspacePrepared{Repository: r.Repository, Branch: "feature/" + r.Task + "-" + r.Step,
+	return "/ws/" + r.Step, protocol.WorkspacePrepared{Repository: r.Repository, Branch: "feature/" + r.Task + "--" + r.Step,
 		Base: r.Base, BaseSHA: "abc", Instructions: []protocol.InstructionFile{{Path: "AGENTS.md", SHA256: "h"}}}, nil
 }
 
@@ -141,5 +141,45 @@ func TestInterruptedPreparationIsRetried(t *testing.T) {
 	}
 	if done, _ := j.Finished("S1", 1); done {
 		t.Fatal("attempt finished")
+	}
+}
+
+type failingJournal struct{ *memJournal }
+
+func (j failingJournal) Save(r domain.Record) error {
+	if r.Workdir != "" {
+		return errors.New("disk full")
+	}
+	return j.memJournal.Save(r)
+}
+
+// A workspace prepared for an attempt that is then dropped (its record could not be saved) is released, so the
+// re-sent assignment can take it again.
+func TestDroppedAttemptReleasesItsWorkspace(t *testing.T) {
+	t.Parallel()
+	x, l, j, _ := newExecutor(domain.Policy{})
+	x.Journal = failingJournal{j}
+	ws := &fakeWorkspaces{}
+	x.Workspaces = ws
+	if err := x.Assign(t.Context(), repoAssignment()); err == nil {
+		t.Fatal("no error")
+	}
+	if l.count() != 0 || !slices.Equal(ws.done(), []string{"S1-1"}) {
+		t.Fatalf("launched %d, released %v", l.count(), ws.done())
+	}
+}
+
+// Before the worktree is saved and removed, whatever the agent left running in its process group is killed.
+func TestLeftoverProcessesAreKilledBeforeTheWorkspaceIsFinished(t *testing.T) {
+	t.Parallel()
+	x, l, _, ev := newExecutor(domain.Policy{})
+	x.Workspaces = &fakeWorkspaces{}
+	if err := x.Assign(t.Context(), repoAssignment()); err != nil {
+		t.Fatal(err)
+	}
+	l.proc(0).end(domain.Exit{Code: 0})
+	waitFor(t, "completed", func() bool { return slices.Contains(ev.kinds(), protocol.EventCompleted) })
+	if s := l.proc(0).sent(); !slices.Contains(s, true) {
+		t.Fatalf("signals %v", s)
 	}
 }

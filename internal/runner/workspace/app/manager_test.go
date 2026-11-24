@@ -138,11 +138,11 @@ func TestPrepareCreatesTheStepBranchFromTheBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Branch != "feature/KIN-29-st1" || p.BaseSHA != "base-sha" || p.Dir != "/w/acme/api/KIN-29-st1" ||
+	if p.Branch != "feature/KIN-29--st1" || p.BaseSHA != "base-sha" || p.Dir != "/w/acme/api/KIN-29--st1" ||
 		len(p.Instructions) != 1 {
 		t.Fatalf("%+v", p)
 	}
-	if strings.Join(g.calls, ";") != "fetch acme/api dev;add feature/KIN-29-st1 base-sha" || g.tokens[0] != "ghs_x" {
+	if strings.Join(g.calls, ";") != "fetch acme/api dev;add feature/KIN-29--st1 base-sha" || g.tokens[0] != "ghs_x" {
 		t.Fatalf("%v", g.calls)
 	}
 	if _, ok, _ := st.LoadMeta("st1", 1); !ok {

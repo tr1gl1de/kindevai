@@ -62,7 +62,7 @@ func TestWorkspaceLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Branch != "feature/KIN-7-s1" || p.BaseSHA != base || len(p.Instructions) != 2 ||
+	if p.Branch != "feature/KIN-7--s1" || p.BaseSHA != base || len(p.Instructions) != 2 ||
 		!strings.HasPrefix(p.Dir, filepath.Join(data, "workspaces")+string(filepath.Separator)) {
 		t.Fatalf("%+v", p)
 	}
@@ -86,7 +86,7 @@ func TestWorkspaceLifecycle(t *testing.T) {
 		t.Fatal("worktree not removed")
 	}
 	if got := git(t, data, "--git-dir", filepath.Join(data, "repos", "acme", "api.git"), "rev-parse",
-		"refs/heads/feature/KIN-7-s1"); got != res.HeadSHA {
+		"refs/heads/feature/KIN-7--s1"); got != res.HeadSHA {
 		t.Fatalf("branch %s, head %s", got, res.HeadSHA)
 	}
 	// The retry of the step continues the branch with the earlier work.

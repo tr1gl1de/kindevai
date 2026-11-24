@@ -148,7 +148,7 @@ ai-runner fingerprint                                    # compare with the runn
   nothing is started again until the runner reconciles: a live process continues (a restarted runner adopts it from
   its journal under `attempts/`), a gone one fails and is retried once.
 - Workspaces (runner): when the step's repository is registered for the project, the attempt runs in its own git
-  worktree under `workspaces/` on the branch `feature/<task>-<step>` (never main/master), started from the
+  worktree under `workspaces/` on the branch `feature/<task>--<step>` (never main/master), started from the
   repository's integration branch fetched into a bare cache under `repos/`; the base commit is recorded. The Control
   Plane adds the branch and a short-lived installation token for that repository to the assignment only when it is
   sent; the runner hands the token to git only through its credential helper (`ai-runner git-credential`, a unix

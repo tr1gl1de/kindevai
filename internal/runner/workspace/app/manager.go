@@ -143,7 +143,7 @@ type Manager struct {
 
 func key(step string, fence int64) string { return fmt.Sprintf("%s/%d", step, fence) }
 
-// Prepare creates the attempt's worktree on feature/<task>-<step> from origin/<base>.
+// Prepare creates the attempt's worktree on feature/<task>--<step> from origin/<base>.
 func (m *Manager) Prepare(ctx context.Context, r Request) (Prepared, error) {
 	owner, name, err := domain.SplitRepository(r.Repository)
 	if err != nil {
@@ -161,7 +161,8 @@ func (m *Manager) Prepare(ctx context.Context, r Request) (Prepared, error) {
 	} else if free < m.MinFree {
 		return Prepared{}, fmt.Errorf("%w: %d MiB free, %d MiB needed", ErrDiskFull, free>>20, m.MinFree>>20)
 	}
-	mirror, dir := m.Store.MirrorPath(owner, name), m.Store.WorktreePath(owner, name, r.Task+"-"+r.Step)
+	leaf, _ := domain.Leaf(r.Task, r.Step) // valid: WorkBranch checked it
+	mirror, dir := m.Store.MirrorPath(owner, name), m.Store.WorktreePath(owner, name, leaf)
 	unlock, err := m.Store.Lock(dir)
 	if err != nil {
 		return Prepared{}, err

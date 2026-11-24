@@ -9,10 +9,12 @@ import (
 func TestWorkBranchIsAFeatureBranch(t *testing.T) {
 	t.Parallel()
 	b, err := WorkBranch("KIN-29", "step_1")
-	if err != nil || b != "feature/KIN-29-step_1" {
+	if err != nil || b != "feature/KIN-29--step_1" {
 		t.Fatalf("%q %v", b, err)
 	}
-	for _, tc := range [][2]string{{"", "s"}, {"t", ""}, {"a/b", "s"}, {"t", "x..y"}, {"t", "s.lock"}, {"-t", "s"}} {
+	for _, tc := range [][2]string{{"", "s"}, {"t", ""}, {"a/b", "s"}, {"t", "x..y"}, {"t", "s.lock"}, {"-t", "s"},
+		// "--" separates task and step: ids that could make two attempts share a branch are refused.
+		{"A-", "B"}, {"A", "-B"}, {"A--B", "C"}, {"A", "B--C"}} {
 		if _, err := WorkBranch(tc[0], tc[1]); !errors.Is(err, ErrInvalidRef) {
 			t.Errorf("%v: %v", tc, err)
 		}

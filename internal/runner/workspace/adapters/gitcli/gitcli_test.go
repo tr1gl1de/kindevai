@@ -306,3 +306,16 @@ func TestCredentialAnswersOnlyTheConfiguredHost(t *testing.T) {
 		}
 	}
 }
+
+// A token never crosses the network in clear: plain http is used with a token only on loopback (tests).
+func TestTokenNeedsHTTPS(t *testing.T) {
+	t.Parallel()
+	g, err := New("http://git.example.com", helper(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mirror := filepath.Join(t.TempDir(), "acme", "api.git")
+	if _, err := g.FetchBase(t.Context(), mirror, "acme/api", "dev", app.NewToken("ghs_x")); !errors.Is(err, ErrInsecureTransport) {
+		t.Fatalf("%v", err)
+	}
+}

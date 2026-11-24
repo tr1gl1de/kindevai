@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -26,6 +27,9 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/runner/workspace/app"
 	"github.com/tr1gl1de/kindevai/internal/runner/workspace/domain"
 )
+
+// ErrInsecureTransport: a token would be sent over plain http to a non-loopback host.
+var ErrInsecureTransport = errors.New("git token refused: the base URL is not https")
 
 // DefaultBaseURL is where repositories live ("owner/name" → https://github.com/owner/name.git).
 const DefaultBaseURL = "https://github.com"
@@ -157,6 +161,11 @@ func (g *Git) worktreeRun(ctx context.Context, admin, dir string, args ...string
 	return g.run(ctx, env, nil, args...)
 }
 
+func loopback(host string) bool {
+	ip := net.ParseIP(host)
+	return host == "localhost" || ip != nil && ip.IsLoopback()
+}
+
 func exists(p string) bool {
 	_, err := os.Lstat(p)
 	return err == nil
@@ -184,6 +193,9 @@ func (g *Git) FetchBase(ctx context.Context, mirror, repository, base string, to
 		}
 	}
 	var extra []string
+	if !tok.Empty() && g.base.Scheme == "http" && !loopback(g.base.Hostname()) {
+		return "", ErrInsecureTransport
+	}
 	if !tok.Empty() && g.base.Scheme != "file" {
 		c, err := serve(ctx, credential{scheme: g.base.Scheme, host: g.base.Host, token: tok.Reveal()})
 		if err != nil {

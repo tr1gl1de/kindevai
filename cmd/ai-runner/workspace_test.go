@@ -56,7 +56,7 @@ func TestSessionWorkspacesOnARealRepository(t *testing.T) {
 	}
 	dir, prep, err := ws.Prepare(t.Context(), sessionapp.WorkspaceRequest{Step: "s1", Fence: 1, Task: "KIN-9",
 		Repository: "acme/api", Base: "dev", Token: sessiondomain.NewSecret("")})
-	if err != nil || prep.Branch != "feature/KIN-9-s1" || len(prep.Instructions) != 1 || prep.Instructions[0].Path != "AGENTS.md" {
+	if err != nil || prep.Branch != "feature/KIN-9--s1" || len(prep.Instructions) != 1 || prep.Instructions[0].Path != "AGENTS.md" {
 		t.Fatalf("%+v %v", prep, err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("n"), 0o644); err != nil {

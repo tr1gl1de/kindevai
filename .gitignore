@@ -53,3 +53,6 @@ Thumbs.db
 .vscode/
 *.swp
 *~
+
+# Python bytecode (Claude Code hooks)
+__pycache__/

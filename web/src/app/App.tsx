@@ -18,13 +18,25 @@ import { PageNotFound } from "./PageNotFound";
 import { ErrorState, Loading } from "../ui/feedback";
 import { NotifyProvider } from "../ui/notify";
 import { AppShell } from "./AppShell";
+import { TelegramContext, useTelegramLaunch } from "../features/telegram/TelegramContext";
+import { LinkConfirmPage } from "../features/telegram/LinkConfirmPage";
+import { MiniAppSignIn } from "../features/telegram/MiniAppSignIn";
+import { TelegramSettingsPage } from "../features/telegram/TelegramSettingsPage";
+import { startTarget, type TelegramLaunch } from "../features/telegram/webapp";
+import { useState } from "react";
 
-/** Gate: setup wizard → sign-in → application, with loading and error states for each step. */
-export function App() {
+/**
+ * Gate: setup wizard → sign-in → application, with loading and error states for each step. Inside the Telegram
+ * Mini App (telegram launch data present) sign-in uses Telegram, and startapp links open the invitation or the
+ * Link Telegram confirmation first.
+ */
+export function App({ telegram = null }: { telegram?: TelegramLaunch | null }) {
   return (
-    <NotifyProvider>
-      <Gate />
-    </NotifyProvider>
+    <TelegramContext.Provider value={telegram}>
+      <NotifyProvider>
+        <Gate />
+      </NotifyProvider>
+    </TelegramContext.Provider>
   );
 }
 
@@ -33,9 +45,15 @@ function Gate() {
   const setup = useSetupStatus();
   const me = useMe(setup.data?.setupRequired === false);
   const location = useLocation();
+  const tg = useTelegramLaunch();
+  const [startDone, setStartDone] = useState(false);
+  const target = tg && !startDone ? startTarget(tg.startParam) : null;
 
   // Invitation links are for people without an account: no setup or session checks apply.
   if (location.pathname === "/invite") return <AcceptInvitePage />;
+  if (tg && target?.kind === "invite")
+    return <AcceptInvitePage telegramToken={target.token} onDone={() => setStartDone(true)} />;
+  if (tg && target?.kind === "link") return <LinkConfirmPage initData={tg.initData} onDone={() => setStartDone(true)} />;
 
   if (setup.isPending || (setup.data?.setupRequired === false && me.isPending)) {
     return (
@@ -53,7 +71,7 @@ function Gate() {
     );
   }
   if (setup.data?.setupRequired) return <SetupWizard />;
-  if (!me.data) return <LoginPage />;
+  if (!me.data) return tg ? <MiniAppSignIn initData={tg.initData} /> : <LoginPage />;
   if (me.data.mustChangePassword) return <ForcedPasswordChange />;
 
   return (
@@ -68,6 +86,7 @@ function Gate() {
           {me.data.role === "owner" && <Route path="/runners/:id" element={<RunnerPage />} />}
           {me.data.role === "owner" && <Route path="/integrations" element={<IntegrationsPage />} />}
           {me.data.role === "owner" && <Route path="/audit" element={<AuditPage />} />}
+          {me.data.role === "owner" && <Route path="/settings/telegram" element={<TelegramSettingsPage />} />}
           <Route path="*" element={<PageNotFound />} />
         </Routes>
     </AppShell>

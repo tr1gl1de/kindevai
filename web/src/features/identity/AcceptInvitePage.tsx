@@ -9,6 +9,7 @@ import { formatDateTime } from "../../ui/format";
 import { useFieldErrors } from "../../ui/form";
 import { AuthLayout } from "./AuthLayout";
 import { useAcceptInvitation, useInvitationPreview } from "./invitationsApi";
+import { useTelegramLaunch } from "../telegram/TelegramContext";
 
 const fields = ["login", "password", "passwordRepeat"] as const;
 
@@ -23,11 +24,18 @@ function useFragmentToken(): string {
   return token;
 }
 
-/** Public page behind an invitation link: shows the offer, then lets the holder create their own account. */
-export function AcceptInvitePage() {
+/**
+ * Public page behind an invitation link: shows the offer, then lets the holder create their own account. Opened
+ * from the Mini App (startapp=invite_…) the token comes from the start parameter and the account is linked to that
+ * Telegram account; onDone then continues to the Telegram sign-in.
+ */
+export function AcceptInvitePage({ telegramToken, onDone }: { telegramToken?: string; onDone?: () => void } = {}) {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
-  const token = useFragmentToken();
+  const fragmentToken = useFragmentToken();
+  const tg = useTelegramLaunch();
+  const token = telegramToken ?? fragmentToken;
+  const initData = telegramToken && tg ? tg.initData : undefined;
   const preview = useInvitationPreview(token);
   const accept = useAcceptInvitation();
   const { errors, show, clear, register } = useFieldErrors(fields);
@@ -60,7 +68,7 @@ export function AcceptInvitePage() {
       return;
     }
     try {
-      const r = await accept.mutateAsync({ token, login: values.login.trim(), password: values.password });
+      const r = await accept.mutateAsync({ token, login: values.login.trim(), password: values.password, ...(initData ? { initData } : {}) });
       accept.reset();
       setValues({ login: "", password: "", passwordRepeat: "" });
       setCreated(r.user.login);
@@ -88,10 +96,10 @@ export function AcceptInvitePage() {
           <h2 id="invite-done" ref={doneHeading} tabIndex={-1}>
             {t("invite.doneTitle")}
           </h2>
-          <p>{t("invite.doneText", { login: created })}</p>
+          <p>{initData ? t("invite.doneTelegram", { login: created }) : t("invite.doneText", { login: created })}</p>
           <div className="form-actions">
-            <button type="button" className="button primary" onClick={() => navigate("/", { replace: true })}>
-              {t("invite.toSignIn")}
+            <button type="button" className="button primary" onClick={() => (onDone ? onDone() : navigate("/", { replace: true }))}>
+              {onDone ? t("invite.continue") : t("invite.toSignIn")}
             </button>
           </div>
         </section>

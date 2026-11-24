@@ -30,7 +30,16 @@ type Session struct {
 	UserID     string
 	CreatedAt  time.Time
 	LastSeenAt time.Time
+	Via        SessionVia
 }
+
+// SessionVia records how a session was opened.
+type SessionVia string
+
+const (
+	ViaPassword SessionVia = "password"
+	ViaTelegram SessionVia = "telegram" // Mini App initData; revoked when Telegram is unlinked
+)
 
 // NewSession creates a session for userID and returns its plaintext token (for the cookie) and stored form.
 func NewSession(rnd io.Reader, userID string, now time.Time) (string, Session, error) {
@@ -39,7 +48,7 @@ func NewSession(rnd io.Reader, userID string, now time.Time) (string, Session, e
 		return "", Session{}, fmt.Errorf("generating session token: %w", err)
 	}
 	plain := base64.RawURLEncoding.EncodeToString(b[:])
-	return plain, Session{TokenHash: HashSessionToken(plain), UserID: userID, CreatedAt: now, LastSeenAt: now}, nil
+	return plain, Session{TokenHash: HashSessionToken(plain), UserID: userID, CreatedAt: now, LastSeenAt: now, Via: ViaPassword}, nil
 }
 
 // HashSessionToken is the lookup key for a presented token.

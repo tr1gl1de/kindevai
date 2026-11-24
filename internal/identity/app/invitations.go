@@ -72,6 +72,13 @@ type InvitationsService struct {
 	Now         func() time.Time
 	NewID       func() string
 	Logger      *slog.Logger
+	// Telegram links the Mini App user to the new account when an invitation is accepted from Telegram (optional).
+	Telegram TelegramLinker
+}
+
+// TelegramLinker links a Telegram user to an account created in the caller's transaction.
+type TelegramLinker interface {
+	LinkNewUser(ctx context.Context, u domain.User, tg domain.TelegramUser) error
 }
 
 const invitationListLimit = 200
@@ -225,6 +232,15 @@ func (s *InvitationsService) Preview(ctx context.Context, token string) (Invitat
 // Accept creates the holder's account and project membership and consumes the invitation, atomically: either all
 // three happen or none (a taken login leaves the invitation usable). The new user is not signed in.
 func (s *InvitationsService) Accept(ctx context.Context, token, login, password string) (domain.User, error) {
+	return s.AcceptWithTelegram(ctx, token, login, password, nil)
+}
+
+// AcceptWithTelegram is Accept that also links the validated Telegram user tg (if not nil) to the new account in
+// the same transaction: a Telegram account linked meanwhile fails the whole acceptance.
+func (s *InvitationsService) AcceptWithTelegram(ctx context.Context, token, login, password string, tg *domain.TelegramUser) (domain.User, error) {
+	if tg != nil && s.Telegram == nil {
+		return domain.User{}, domain.ErrTelegramNotConfigured
+	}
 	if _, err := s.pending(ctx, token); err != nil {
 		return domain.User{}, err
 	}
@@ -268,6 +284,11 @@ func (s *InvitationsService) Accept(ctx context.Context, token, login, password 
 				return domain.ErrInvitationInvalid
 			}
 			return fmt.Errorf("granting membership: %w", err)
+		}
+		if tg != nil {
+			if err := s.Telegram.LinkNewUser(ctx, u, *tg); err != nil {
+				return err
+			}
 		}
 		if err := record(ctx, s.Audit, auditapp.Entry{Actor: auditapp.User(u.ID, string(u.Login)), Kind: KindInvitationAccepted,
 			ProjectID: inv.ProjectID, Subject: invitationSubject(inv.ID),

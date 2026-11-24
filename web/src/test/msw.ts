@@ -15,6 +15,7 @@ export const handlers = [
   http.get("/api/auth/me", () => apiError(401, "unauthenticated")),
   http.get("/api/projects", () => json([])),
   http.get("/api/invitations", () => json([])),
+  http.get("/api/telegram/link", () => json({ configured: false, identity: null, request: null })),
 ];
 
 export const server = setupServer(...handlers);

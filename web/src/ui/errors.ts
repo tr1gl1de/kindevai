@@ -35,6 +35,20 @@ export function errorMessage(t: TFunction, e: unknown): string {
       return t("integrations.notConnected");
     case "invalid_transition":
       return t("runners.invalid_transition");
+    case "telegram_not_configured":
+    case "telegram_auth_invalid":
+    case "telegram_auth_expired":
+    case "telegram_not_linked":
+    case "account_disabled":
+    case "telegram_taken":
+    case "telegram_already_linked":
+    case "link_invalid":
+    case "link_expired":
+    case "link_used":
+    case "link_cancelled":
+    case "link_claimed":
+    case "link_not_confirmed":
+      return t(`telegram.err_${e.code}`);
     default:
       return t("errors.unknown");
   }

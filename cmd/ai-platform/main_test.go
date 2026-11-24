@@ -249,6 +249,22 @@ func TestLoginAfterSetupEndToEnd(t *testing.T) {
 	if code := get("/api/integrations/status"); code != 200 {
 		t.Fatalf("integrations status = %d (messaging module not wired)", code)
 	}
+	// KIN-39: the bot token round-trips through the encrypted vault of the integrations context.
+	putReq, _ := http.NewRequestWithContext(t.Context(), "PUT", base+"/api/telegram/settings",
+		strings.NewReader(`{"botUsername":"kindev_bot","appShortName":"app","botToken":"123456789:TEST_token-for-unit-tests_only_000"}`))
+	putReq.Header.Set("Content-Type", "application/json")
+	putResp, err := client.Do(putReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	putBody, _ := io.ReadAll(putResp.Body)
+	putResp.Body.Close()
+	if putResp.StatusCode != 200 || !strings.Contains(string(putBody), `"configured":true`) || strings.Contains(string(putBody), "TEST_token") {
+		t.Fatalf("telegram settings = %d %s", putResp.StatusCode, putBody)
+	}
+	if code := post("/api/telegram/login", `{"initData":"auth_date=1&hash=00"}`); code != 401 {
+		t.Fatalf("telegram login with forged initData = %d, want 401", code)
+	}
 	if code := post("/api/users", `{"login":"carol"}`); code != 201 {
 		t.Fatalf("create user = %d", code)
 	}

@@ -163,3 +163,20 @@ func TestFailedRunReleasesLock(t *testing.T) {
 	}
 	_ = d.Close()
 }
+
+// A first run that created the database but died before recording the key check has stored no secrets, so a
+// retry is still a fresh install and may use whatever key is present (or create one).
+func TestInterruptedFirstRunIsStillFresh(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(DBPath(dir)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(DBPath(dir), nil, 0o600); err != nil { // empty file, no schema, no key
+		t.Fatal(err)
+	}
+	inst := mustRun(t, dir)
+	if !inst.Fresh {
+		t.Fatal("Fresh = false for a database without a key check")
+	}
+}

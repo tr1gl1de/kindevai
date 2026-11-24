@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -35,26 +36,60 @@ func CreateKey(path string) (Key, error) {
 	if _, err := rand.Read(k[:]); err != nil {
 		return Key{}, fmt.Errorf("generating encryption key: %w", err)
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return Key{}, fmt.Errorf("creating key directory: %w", err)
-	}
-	tmp, err := os.CreateTemp(dir, ".master.key.tmp*")
-	if err != nil {
-		return Key{}, fmt.Errorf("writing encryption key: %w", err)
-	}
-	defer os.Remove(tmp.Name()) // no-op after a successful link+remove
-	if err := writeAndSync(tmp, k[:]); err != nil {
-		return Key{}, fmt.Errorf("writing encryption key: %w", err)
-	}
-	// Link is atomic and, unlike rename, fails when the target exists.
-	if err := os.Link(tmp.Name(), path); err != nil {
-		return Key{}, fmt.Errorf("installing encryption key: %w", err)
-	}
-	if err := syncDir(dir); err != nil {
-		return Key{}, fmt.Errorf("syncing key directory: %w", err)
+	if err := installKey(path, k, os.Link); err != nil {
+		return Key{}, err
 	}
 	return k, nil
+}
+
+const tmpPattern = ".master.key.tmp*"
+
+// installKey writes k to a temp file and links it into place, which is atomic and fails if path exists.
+// Filesystems without hard links (some bind mounts, drvfs, SMB) fall back to an O_EXCL create.
+func installKey(path string, k Key, link func(oldname, newname string) error) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating key directory: %w", err)
+	}
+	// Leftovers of a run killed between write and link hold a key that was never installed.
+	if stale, _ := filepath.Glob(filepath.Join(dir, tmpPattern)); len(stale) > 0 {
+		for _, f := range stale {
+			_ = os.Remove(f)
+		}
+	}
+	tmp, err := os.CreateTemp(dir, tmpPattern)
+	if err != nil {
+		return fmt.Errorf("writing encryption key: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	if err := writeAndSync(tmp, k[:]); err != nil {
+		return fmt.Errorf("writing encryption key: %w", err)
+	}
+	err = link(tmp.Name(), path)
+	switch {
+	case errors.Is(err, fs.ErrExist):
+		return fmt.Errorf("installing encryption key %s: %w", path, err)
+	case err != nil:
+		if err := createExclusive(path, k); err != nil {
+			return fmt.Errorf("installing encryption key %s: %w", path, err)
+		}
+	}
+	if err := syncDir(dir); err != nil {
+		return fmt.Errorf("syncing key directory: %w", err)
+	}
+	return nil
+}
+
+func createExclusive(path string, k Key) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := writeAndSync(f, k[:]); err != nil {
+		_ = os.Remove(path) // a short key would otherwise be rejected forever as malformed
+		return err
+	}
+	return nil
 }
 
 func writeAndSync(f *os.File, b []byte) error {
@@ -82,27 +117,35 @@ func syncDir(dir string) error {
 	return d.Sync()
 }
 
-// LoadKey reads the key at path. It refuses files readable or writable by group/others.
+// LoadKey reads the key at path. It refuses non-regular files and files readable or writable by group/others;
+// the checks run on the opened descriptor, so they apply to the file actually read (symlinks included).
 func LoadKey(path string) (Key, error) {
-	st, err := os.Stat(path)
+	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return Key{}, fmt.Errorf("%s: %w", path, ErrKeyMissing)
 	}
 	if err != nil {
 		return Key{}, fmt.Errorf("reading encryption key: %w", err)
 	}
-	if st.Mode().Perm()&0o077 != 0 {
-		return Key{}, fmt.Errorf("%s has mode %v: %w", path, st.Mode().Perm(), ErrKeyPermissions)
-	}
-	b, err := os.ReadFile(path)
+	defer f.Close()
+	st, err := f.Stat()
 	if err != nil {
 		return Key{}, fmt.Errorf("reading encryption key: %w", err)
 	}
-	if len(b) != KeySize {
-		return Key{}, fmt.Errorf("%s: %w", path, ErrKeyInvalid)
+	if !st.Mode().IsRegular() {
+		return Key{}, fmt.Errorf("%s is not a regular file: %w", path, ErrKeyInvalid)
+	}
+	if st.Mode().Perm()&0o077 != 0 {
+		return Key{}, fmt.Errorf("%s has mode %v: %w", path, st.Mode().Perm(), ErrKeyPermissions)
 	}
 	var k Key
-	copy(k[:], b)
+	n, err := io.ReadFull(f, k[:])
+	if err != nil || n != KeySize {
+		return Key{}, fmt.Errorf("%s: %w", path, ErrKeyInvalid)
+	}
+	if extra, _ := f.Read(make([]byte, 1)); extra != 0 {
+		return Key{}, fmt.Errorf("%s: %w", path, ErrKeyInvalid)
+	}
 	return k, nil
 }
 

@@ -129,3 +129,58 @@ func TestBoxRejectsTampering(t *testing.T) {
 		})
 	}
 }
+
+func TestCreateKeyRemovesStaleTempFiles(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stale := filepath.Join(dir, ".master.key.tmp123")
+	if err := os.WriteFile(stale, []byte("old key bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateKey(filepath.Join(dir, "master.key")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("stale temp key file left behind")
+	}
+}
+
+func TestLoadKeyChecksTheFileItReads(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "world-readable.key")
+	if err := os.WriteFile(target, bytes.Repeat([]byte{1}, KeySize), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chmod(target, 0o644)
+	link := filepath.Join(dir, "master.key")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadKey(link); !errors.Is(err, ErrKeyPermissions) {
+		t.Fatalf("err = %v, want ErrKeyPermissions for a symlink to a world-readable file", err)
+	}
+	if _, err := LoadKey(dir); !errors.Is(err, ErrKeyInvalid) {
+		t.Fatalf("directory as key: err = %v, want ErrKeyInvalid", err)
+	}
+}
+
+func TestInstallKeyFallsBackWhenLinkUnsupported(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "master.key")
+	var k Key
+	k[0] = 9
+	noLink := func(string, string) error {
+		return &os.LinkError{Op: "link", Err: errors.New("operation not supported")}
+	}
+	if err := installKey(path, k, noLink); err != nil {
+		t.Fatalf("installKey: %v", err)
+	}
+	got, err := LoadKey(path)
+	if err != nil || got != k {
+		t.Fatalf("LoadKey = %v, %v", got[0], err)
+	}
+	if err := installKey(path, k, noLink); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("fallback overwrote an existing key: err = %v", err)
+	}
+}

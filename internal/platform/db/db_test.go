@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -131,5 +132,68 @@ func TestEmbeddedMigrationsApply(t *testing.T) {
 	}
 	if _, err := d.ExecContext(context.WithoutCancel(t.Context()), "INSERT INTO meta(key, value) VALUES ('k', 'v')"); err != nil {
 		t.Fatalf("meta table missing: %v", err)
+	}
+}
+
+func TestOpenPathWithURLCharacters(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "a?b#c%d e")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "x.db")
+	d, err := Open(t.Context(), path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	if _, err := d.ExecContext(t.Context(), "CREATE TABLE t (id INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("database not created at the requested path: %v", err)
+	}
+}
+
+func TestNewerDatabaseIsNotWritten(t *testing.T) {
+	t.Parallel()
+	d := openTemp(t)
+	if _, err := Migrate(t.Context(), d, testMigrations); err != nil {
+		t.Fatal(err)
+	}
+	older := fstest.MapFS{"0001_init.sql": testMigrations["0001_init.sql"]}
+	if _, err := Migrate(t.Context(), d, older); !errors.Is(err, ErrSchemaTooNew) {
+		t.Fatalf("err = %v", err)
+	}
+	if v, _ := Version(t.Context(), d); v != 2 {
+		t.Fatalf("version changed to %d", v)
+	}
+}
+
+func TestMigrateRejectsMismatchedHistory(t *testing.T) {
+	t.Parallel()
+	d := openTemp(t)
+	if _, err := Migrate(t.Context(), d, testMigrations); err != nil {
+		t.Fatal(err)
+	}
+	renamed := fstest.MapFS{
+		"0001_init.sql":  testMigrations["0001_init.sql"],
+		"0002_other.sql": testMigrations["0002_more.sql"],
+	}
+	if _, err := Migrate(t.Context(), d, renamed); !errors.Is(err, ErrSchemaMismatch) {
+		t.Fatalf("err = %v, want ErrSchemaMismatch", err)
+	}
+}
+
+func TestVersionOnFreshDatabaseDoesNotWrite(t *testing.T) {
+	t.Parallel()
+	d := openTemp(t)
+	if v, err := Version(t.Context(), d); err != nil || v != 0 {
+		t.Fatalf("Version = %d, %v", v, err)
+	}
+	var n int
+	_ = d.QueryRowContext(t.Context(), "SELECT count(*) FROM sqlite_master").Scan(&n)
+	if n != 0 {
+		t.Fatalf("Version created %d schema objects", n)
 	}
 }

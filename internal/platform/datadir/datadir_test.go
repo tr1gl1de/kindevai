@@ -78,3 +78,23 @@ func TestOpenRejectsFile(t *testing.T) {
 		t.Fatal("want error when data dir is a file")
 	}
 }
+
+func TestOpenTightensExistingDirMode(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "data")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil { // defeat umask
+		t.Fatal(err)
+	}
+	d, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	st, _ := os.Stat(dir)
+	if st.Mode().Perm() != 0o700 {
+		t.Fatalf("mode = %v, want 0700", st.Mode().Perm())
+	}
+}

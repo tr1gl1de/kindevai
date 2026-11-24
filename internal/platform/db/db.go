@@ -29,6 +29,9 @@ func Migrations() fs.FS {
 	return sub
 }
 
+// ErrSchemaMismatch means the applied migration history differs from the migrations in this binary.
+var ErrSchemaMismatch = errors.New("database migration history does not match this ai-platform binary")
+
 // ErrSchemaTooNew means the database was migrated by a newer binary; running an older one could corrupt it.
 var ErrSchemaTooNew = errors.New("database schema is newer than this ai-platform binary")
 
@@ -40,12 +43,12 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 		q.Add("_pragma", p)
 	}
 	q.Set("_txlock", "immediate")
-	d, err := sql.Open("sqlite", "file:"+path+"?"+q.Encode())
+	// URI form: escape the path so '?', '#' and '%' in a directory name cannot inject parameters.
+	d, err := sql.Open("sqlite", "file:"+(&url.URL{Path: path}).EscapedPath()+"?"+q.Encode())
 	if err != nil {
 		return nil, fmt.Errorf("opening database %s: %w", path, err)
 	}
 	d.SetMaxOpenConns(1)
-	d.SetConnMaxIdleTime(0)
 	var mode string
 	if err := d.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode); err != nil {
 		_ = d.Close()
@@ -93,34 +96,69 @@ func list(migrations fs.FS) ([]migration, error) {
 
 func isSQL(name string) bool { return len(name) > 4 && name[len(name)-4:] == ".sql" }
 
-// Version returns the highest applied migration version (0 for a fresh database).
+// Version returns the highest applied migration version (0 for a fresh database). It never writes.
 func Version(ctx context.Context, d *sql.DB) (int, error) {
-	if _, err := d.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
-		version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL) STRICT`); err != nil {
-		return 0, fmt.Errorf("preparing schema_migrations: %w", err)
+	hist, err := history(ctx, d)
+	if err != nil {
+		return 0, err
 	}
-	var v int
-	if err := d.QueryRowContext(ctx, "SELECT coalesce(max(version), 0) FROM schema_migrations").Scan(&v); err != nil {
-		return 0, fmt.Errorf("reading schema version: %w", err)
-	}
-	return v, nil
+	return len(hist), nil
 }
 
-// Migrate applies pending migrations, each in its own transaction, and returns how many ran.
+// history returns applied migrations ordered by version, without creating anything.
+func history(ctx context.Context, d *sql.DB) ([]migration, error) {
+	var n int
+	if err := d.QueryRowContext(ctx,
+		"SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").Scan(&n); err != nil {
+		return nil, fmt.Errorf("reading schema version: %w", err)
+	}
+	if n == 0 {
+		return nil, nil
+	}
+	rows, err := d.QueryContext(ctx, "SELECT version, name FROM schema_migrations ORDER BY version")
+	if err != nil {
+		return nil, fmt.Errorf("reading schema version: %w", err)
+	}
+	defer rows.Close()
+	var hist []migration
+	for rows.Next() {
+		var m migration
+		if err := rows.Scan(&m.version, &m.name); err != nil {
+			return nil, fmt.Errorf("reading schema version: %w", err)
+		}
+		hist = append(hist, m)
+	}
+	return hist, rows.Err()
+}
+
+// Migrate checks the applied history against the binary's migrations, then applies pending ones, each in
+// its own transaction, and returns how many ran.
 func Migrate(ctx context.Context, d *sql.DB, migrations fs.FS) (int, error) {
 	ms, err := list(migrations)
 	if err != nil {
 		return 0, err
 	}
-	current, err := Version(ctx, d)
+	hist, err := history(ctx, d)
 	if err != nil {
 		return 0, err
 	}
-	if current > len(ms) {
-		return 0, fmt.Errorf("database is at version %d, binary knows %d: %w", current, len(ms), ErrSchemaTooNew)
+	if len(hist) > len(ms) {
+		return 0, fmt.Errorf("database has %d migrations, binary knows %d: %w", len(hist), len(ms), ErrSchemaTooNew)
+	}
+	for i, h := range hist {
+		if h != ms[i] {
+			return 0, fmt.Errorf("applied %04d %s, binary has %04d %s: %w", h.version, h.name, ms[i].version, ms[i].name, ErrSchemaMismatch)
+		}
+	}
+	if len(hist) == len(ms) {
+		return 0, nil
+	}
+	if _, err := d.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL) STRICT`); err != nil {
+		return 0, fmt.Errorf("preparing schema_migrations: %w", err)
 	}
 	applied := 0
-	for _, m := range ms[current:] {
+	for _, m := range ms[len(hist):] {
 		body, err := fs.ReadFile(migrations, m.name)
 		if err != nil {
 			return applied, fmt.Errorf("reading migration %s: %w", m.name, err)

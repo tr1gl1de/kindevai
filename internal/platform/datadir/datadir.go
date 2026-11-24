@@ -37,6 +37,11 @@ func Open(dir string) (*Dir, error) {
 	if !st.IsDir() {
 		return nil, fmt.Errorf("data dir %s is not a directory", abs)
 	}
+	if st.Mode().Perm()&0o077 != 0 { // pre-existing dirs (docker volumes, ./data) may be world-readable
+		if err := os.Chmod(abs, 0o700); err != nil {
+			return nil, fmt.Errorf("restricting data dir %s to mode 0700: %w", abs, err)
+		}
+	}
 	f, err := os.OpenFile(filepath.Join(abs, lockName), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("data dir %s is not writable: %w", abs, err)

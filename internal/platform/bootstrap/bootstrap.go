@@ -73,18 +73,6 @@ func Run(ctx context.Context, opts Options) (inst *Installation, err error) {
 	}
 	dbFile := DBPath(dir.Path())
 
-	fresh, err := isMissing(dbFile)
-	if err != nil {
-		return nil, fmt.Errorf("checking database: %w", err)
-	}
-	key, err := loadOrCreateKey(keyFile, fresh)
-	if err != nil {
-		return nil, err
-	}
-	box, err := secrets.NewBox(key)
-	if err != nil {
-		return nil, err
-	}
 	if err := os.MkdirAll(filepath.Dir(dbFile), 0o700); err != nil {
 		return nil, fmt.Errorf("creating database directory: %w", err)
 	}
@@ -97,6 +85,21 @@ func Run(ctx context.Context, opts Options) (inst *Installation, err error) {
 			_ = sqldb.Close()
 		}
 	}()
+	// An installation is established once its key check is stored: from then on secrets may be encrypted
+	// with the key, so it must never change. Before that (clean host or interrupted first run) nothing has
+	// been encrypted and any key — existing or new — can be adopted.
+	established, err := hasKeyCheck(ctx, sqldb)
+	if err != nil {
+		return nil, err
+	}
+	key, err := loadOrCreateKey(keyFile, established)
+	if err != nil {
+		return nil, err
+	}
+	box, err := secrets.NewBox(key)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := db.Migrate(ctx, sqldb, db.Migrations()); err != nil {
 		return nil, fmt.Errorf("migrating database: %w", err)
 	}
@@ -104,6 +107,7 @@ func Run(ctx context.Context, opts Options) (inst *Installation, err error) {
 	if err != nil {
 		return nil, err
 	}
+	fresh := !established
 	return &Installation{Dir: dir, DB: sqldb, Box: box, ID: id, Fresh: fresh}, nil
 }
 
@@ -112,29 +116,40 @@ func (i *Installation) Close() error {
 	return errors.Join(i.DB.Close(), i.Dir.Close())
 }
 
-func isMissing(path string) (bool, error) {
-	_, err := os.Stat(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return true, nil
+// hasKeyCheck reports whether the database already records a key check. It only reads.
+func hasKeyCheck(ctx context.Context, d *sql.DB) (bool, error) {
+	var n int
+	if err := d.QueryRowContext(ctx,
+		"SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'meta'").Scan(&n); err != nil {
+		return false, fmt.Errorf("inspecting database: %w", err)
 	}
-	return false, err
+	if n == 0 {
+		return false, nil
+	}
+	if err := d.QueryRowContext(ctx, "SELECT count(*) FROM meta WHERE key = ?", metaKeyCheck).Scan(&n); err != nil {
+		return false, fmt.Errorf("inspecting database: %w", err)
+	}
+	return n > 0, nil
 }
 
-// loadOrCreateKey creates a key only for a brand-new database. An existing database never gets a new key.
-func loadOrCreateKey(path string, freshDB bool) (secrets.Key, error) {
+// loadOrCreateKey creates a key only for an installation that has not been established yet.
+func loadOrCreateKey(path string, established bool) (secrets.Key, error) {
 	k, err := secrets.LoadKey(path)
 	switch {
 	case err == nil:
 		return k, nil
-	case errors.Is(err, secrets.ErrKeyMissing) && freshDB:
+	case errors.Is(err, secrets.ErrKeyMissing) && established:
+		return secrets.Key{}, fmt.Errorf("the database exists but %w; restore the key file from the original "+
+			"installation (it is never regenerated, or stored secrets would become unreadable)", err)
+	case errors.Is(err, secrets.ErrKeyMissing):
 		k, err := secrets.CreateKey(path)
+		if errors.Is(err, fs.ErrExist) { // created concurrently (shared --key-file): use that one
+			return secrets.LoadKey(path)
+		}
 		if err != nil {
 			return secrets.Key{}, fmt.Errorf("creating encryption key: %w", err)
 		}
 		return k, nil
-	case errors.Is(err, secrets.ErrKeyMissing):
-		return secrets.Key{}, fmt.Errorf("the database exists but %w; restore the key file from the original "+
-			"installation (it is never regenerated, or stored secrets would become unreadable)", err)
 	default:
 		return secrets.Key{}, err
 	}

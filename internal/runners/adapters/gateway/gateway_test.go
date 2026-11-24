@@ -383,7 +383,7 @@ func TestUnknownMessageAfterAuthorizationCloses(t *testing.T) {
 func TestKeepaliveClosesUnresponsivePeerAndServerTimeoutsDoNotApply(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, opts{
-		cfg:    Config{PingInterval: 50 * time.Millisecond, PongTimeout: 100 * time.Millisecond},
+		cfg:    Config{PingInterval: 50 * time.Millisecond, PongTimeout: time.Second},
 		server: func(s *http.Server) { s.ReadTimeout, s.WriteTimeout = 100*time.Millisecond, 100*time.Millisecond },
 	})
 	e.approve(t)

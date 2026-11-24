@@ -10,15 +10,8 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/workflow/domain"
 )
 
-// Candidate is a runner the scheduler may give a project's steps to: the runners context already checked it is
-// APPROVED, granted the project and online (connected, not UNREACHABLE).
-type Candidate struct {
-	ID    string
-	Tools []string // capability names the runner reported (e.g. "git", "claude")
-	// DiskHeavyAllowed is false while one of the runner's volumes is critical (KIN-20): no new step goes there,
-	// because every step works in a git worktree on the runner's disk.
-	DiskHeavyAllowed bool
-}
+// Candidate is a runner the scheduler may give a project's steps to (see domain.RunnerCandidate).
+type Candidate = domain.RunnerCandidate
 
 // RunnerPool is the runners context's API as the scheduler needs it.
 type RunnerPool interface {
@@ -106,15 +99,6 @@ func schedulable(st *domain.Step) bool {
 		st.State == domain.StepWaiting && st.WaitReason == domain.WaitRunner && !st.AttemptUnknown()
 }
 
-func pick(cands []Candidate, caps []string) (Candidate, bool) {
-	for _, c := range cands {
-		if c.DiskHeavyAllowed && !slices.ContainsFunc(caps, func(x string) bool { return !slices.Contains(c.Tools, x) }) {
-			return c, true
-		}
-	}
-	return Candidate{}, false
-}
-
 func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 	return s.Tx.InTx(ctx, func(ctx context.Context) error {
 		e, err := s.Repo.Execution(ctx, id)
@@ -146,6 +130,13 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 		if err != nil {
 			return fmt.Errorf("runner candidates: %w", err)
 		}
+		held, err := s.Repo.HeldSteps(ctx) // in this transaction: earlier assignments of the pass are committed
+		if err != nil {
+			return fmt.Errorf("runner load: %w", err)
+		}
+		if held == nil {
+			held = map[string]int{}
+		}
 		now := s.now()
 		before := e.Clone()
 		for i := range e.Steps {
@@ -154,7 +145,7 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 				continue
 			}
 			ps := caps[st.Key]
-			c, ok := pick(cands, ps.Capabilities)
+			c, ok := domain.PickRunner(cands, ps.Capabilities, held)
 			if !ok {
 				if st.State == domain.StepReady {
 					if err := e.WaitStep(st.ID, domain.WaitRunner, now); err != nil {
@@ -184,6 +175,7 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 				ExecutionID: e.ID, TaskID: t.ID, ProjectID: t.ProjectID, Repository: ps.Repository, Scope: ps.Scope}); err != nil {
 				return fmt.Errorf("queueing the assignment: %w", err)
 			}
+			held[c.ID]++
 		}
 		if !executionEqual(before, e) {
 			if err := s.Repo.SaveExecution(ctx, &e); err != nil {

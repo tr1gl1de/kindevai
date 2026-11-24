@@ -13,6 +13,7 @@ import { formatDateTime } from "../../ui/format";
 import { useNotify } from "../../ui/notify";
 import { useProjects } from "../projects/api";
 import { useCheckYouTrack, useDisconnectYouTrack, useIntegrations, useSaveYouTrack } from "./api";
+import { GitHubSettings } from "./GitHubSettings";
 
 /** Message for a field-level validation code from the integrations API. */
 export function fieldError(t: TFunction, code: string | undefined): string {
@@ -35,6 +36,10 @@ export function IntegrationsPage() {
         {integrations.isSuccess && (
           <YouTrackSettings key={integrations.data.youtrack?.updatedAt ?? "none"} connection={integrations.data.youtrack} />
         )}
+      </section>
+      <section aria-labelledby="github-title" className="section">
+        <h2 id="github-title">{t("github.title")}</h2>
+        {integrations.isSuccess && <GitHubSettings key={integrations.data.github?.updatedAt ?? "none"} app={integrations.data.github ?? null} />}
       </section>
       <ProjectLinks />
     </>

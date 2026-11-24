@@ -286,9 +286,29 @@ export interface YouTrackConnection {
   check: ConnectionCheck;
 }
 
+/** The installation's GitHub App (KIN-28); key and webhook secret are write-only. */
+export interface GitHubApp {
+  appId: number;
+  privateKey: SecretMeta;
+  webhookSecret: SecretMeta;
+  updatedAt: string;
+  /** "Test" authenticates as the App; on success detail is the App's slug. */
+  check: ConnectionCheck;
+  lastDeliveryAt: string | null;
+  lastEvent?: string;
+}
+
+/** PUT /api/integrations/github: empty privateKey / webhookSecret keep the stored ones. */
+export interface GitHubRequest {
+  appId: string;
+  privateKey: string;
+  webhookSecret: string;
+}
+
 /** GET /api/integrations (Owner only). */
 export interface Integrations {
   youtrack: YouTrackConnection | null;
+  github: GitHubApp | null;
 }
 
 /** PUT /api/integrations/youtrack: an empty token keeps the stored one (write-only). */
@@ -307,6 +327,18 @@ export interface ProjectRepository {
   protectedBranches: string[];
   createdAt: string;
   updatedAt: string;
+  /** What the GitHub App last read about the repository. */
+  github: RepositoryGitHub;
+}
+
+export interface RepositoryGitHub {
+  installed: boolean;
+  defaultBranch: string;
+  protection: "unknown" | "protected" | "unprotected";
+  /** Existing main/master without a ruleset or branch protection. */
+  unprotected: string[];
+  /** The last read from GitHub; failure codes as in ConnectionCheck plus not_installed. */
+  sync: ConnectionCheck;
 }
 
 /** GET /api/projects/{id}/integrations (Owner only); youtrackProject is "" when unbound. */

@@ -237,6 +237,8 @@ a {
 
 .table-wrap {
   overflow-x: auto;
+  /* contains absolutely positioned visually-hidden labels, which would otherwise widen the page */
+  position: relative;
 }
 table {
   width: 100%;
@@ -268,7 +270,8 @@ form {
   font-weight: 600;
 }
 input,
-select {
+select,
+textarea {
   font: inherit;
   color: var(--text);
   background: var(--bg);
@@ -279,7 +282,8 @@ select {
   width: 100%;
 }
 input[aria-invalid="true"],
-select[aria-invalid="true"] {
+select[aria-invalid="true"],
+textarea[aria-invalid="true"] {
   border: 2px solid var(--danger);
 }
 .field-hint {
@@ -605,4 +609,25 @@ legend {
 
 .narrow > .card {
   margin-top: 1.5rem;
+}
+
+textarea {
+  min-height: 8rem;
+  resize: vertical;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+}
+.code-value {
+  font-family: ui-monospace, monospace;
+  word-break: break-all;
+}
+.repo-github {
+  font-weight: normal;
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+}
+.repo-github p {
+  margin: 0;
+  font-size: 0.9rem;
 }

@@ -64,6 +64,8 @@ type env struct {
 	db     *sql.DB
 	outbox *messaging.Outbox
 	svc    *app.Service
+	gh     *app.GitHubService
+	inbox  *messaging.Inbox
 	logs   *syncBuf
 }
 
@@ -98,7 +100,11 @@ func newEnv(t *testing.T) *env {
 		Tx: db.Transactor{DB: d}, Audit: &auditapp.Service{Repo: auditdb.New(d), Now: time.Now}, Outbox: ob,
 		Now: time.Now, NewID: rand.Text, Logger: logger,
 	}
-	h := &Handler{Service: svc, Logger: logger}
+	inbox := messaging.NewInbox(d, messaging.Config{Logger: logger})
+	gh := &app.GitHubService{Vault: svc.Vault, Store: repo, Projects: projects{}, Tx: svc.Tx, Audit: svc.Audit, Outbox: ob,
+		Inbox: inbox, Now: time.Now, NewID: rand.Text, Logger: logger}
+	svc.RepositoryAdded = gh.RepositoryAdded
+	h := &Handler{Service: svc, GitHub: gh, Logger: logger}
 	mux := http.NewServeMux()
 	h.Register(mux)
 	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -107,7 +113,7 @@ func newEnv(t *testing.T) *env {
 		}
 		mux.ServeHTTP(w, r)
 	})
-	return &env{h: wrapped, db: d, outbox: ob, svc: svc, logs: logs}
+	return &env{h: wrapped, db: d, outbox: ob, svc: svc, gh: gh, inbox: inbox, logs: logs}
 }
 
 func (e *env) do(t *testing.T, user, method, path string, body any) *httptest.ResponseRecorder {

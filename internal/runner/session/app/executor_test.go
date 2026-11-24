@@ -95,7 +95,9 @@ type memJournal struct {
 
 func jkey(step string, fence int64) string { return fmt.Sprintf("%s-%d", step, fence) }
 
-func (j *memJournal) Prepare(step string, fence int64) (string, error) { return "/work/" + jkey(step, fence), nil }
+func (j *memJournal) Prepare(step string, fence int64) (string, error) {
+	return "/work/" + jkey(step, fence), nil
+}
 func (j *memJournal) Save(r domain.Record) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()

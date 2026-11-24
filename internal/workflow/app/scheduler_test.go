@@ -1,0 +1,300 @@
+package app
+
+import (
+	"context"
+	"fmt"
+	"slices"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/tr1gl1de/kindevai/internal/workflow/domain"
+)
+
+type fakePool struct {
+	mu    sync.Mutex
+	cands map[string][]Candidate // project → candidates
+}
+
+func (p *fakePool) Candidates(_ context.Context, projectID string) ([]Candidate, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.cands[projectID]), nil
+}
+
+func (p *fakePool) set(projectID string, cs ...Candidate) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cands == nil {
+		p.cands = map[string][]Candidate{}
+	}
+	p.cands[projectID] = cs
+}
+
+type fakeDispatcher struct {
+	mu   sync.Mutex
+	cmds []string
+}
+
+func (d *fakeDispatcher) Assign(_ context.Context, runnerID string, a Assignment) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cmds = append(d.cmds, fmt.Sprintf("assign %s %s/%d %s %s", runnerID, a.StepKey, a.Fence, a.ProjectID, a.Repository))
+	return nil
+}
+
+func (d *fakeDispatcher) Cancel(_ context.Context, runnerID, stepID string, fence int64, reason string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cmds = append(d.cmds, fmt.Sprintf("cancel %s %s/%d %s", runnerID, stepID, fence, reason))
+	return nil
+}
+
+func (d *fakeDispatcher) take() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := d.cmds
+	d.cmds = nil
+	return out
+}
+
+type schedEnv struct {
+	env
+	pool *fakePool
+	disp *fakeDispatcher
+}
+
+func newSchedEnv() schedEnv {
+	e := newEnv()
+	e.svc.Projects = fakeProjects{"p1": {"api", "web"}}
+	pool, disp := &fakePool{}, &fakeDispatcher{}
+	e.svc.Runners, e.svc.Dispatcher = pool, disp
+	return schedEnv{env: e, pool: pool, disp: disp}
+}
+
+func onlyStep(caps ...string) domain.Plan {
+	return domain.Plan{Risk: domain.RiskL1, MaxParallel: 1, Summary: "s", Steps: []domain.PlanStep{
+		{Key: "only", Title: "Only", Repository: "api", Capabilities: caps, Scope: []string{"src/"}}}}
+}
+
+func (e schedEnv) task(t *testing.T, p domain.Plan) domain.Task {
+	t.Helper()
+	ctx := t.Context()
+	task, err := e.svc.CreateTask(ctx, "p1", "Mock", "", "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.StartAnalysis(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.SubmitPlan(ctx, task.ID, p, "planner"); err != nil {
+		t.Fatal(err)
+	}
+	return task
+}
+
+func (e schedEnv) schedule(t *testing.T) {
+	t.Helper()
+	if err := e.svc.Schedule(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (e schedEnv) state(t *testing.T, taskID string) (domain.Task, domain.Execution) {
+	t.Helper()
+	task, err := e.repo.Task(t.Context(), taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ex, err := e.repo.LatestExecution(t.Context(), taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return task, ex
+}
+
+// The scheduler starts a READY (L0/L1, or approved) task and assigns its READY step only to a candidate runner with
+// the step's capabilities and disk headroom, queueing execution.assign with the claim's token.
+func TestScheduleAssignsReadyStepsToAMatchingCandidate(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	task := e.task(t, onlyStep("git"))
+	e.pool.set("p1",
+		Candidate{ID: "r-nogit", Tools: []string{"claude"}, DiskHeavyAllowed: true},
+		Candidate{ID: "r-full", Tools: []string{"git"}, DiskHeavyAllowed: false},
+		Candidate{ID: "r-ok", Tools: []string{"git", "claude"}, DiskHeavyAllowed: true})
+	e.schedule(t)
+	got, ex := e.state(t, task.ID)
+	if got.State != domain.TaskRunning || ex.Steps[0].State != domain.StepClaimed || ex.Steps[0].RunnerID != "r-ok" {
+		t.Fatalf("task %s step %+v", got.State, ex.Steps[0])
+	}
+	if c := e.disp.take(); !slices.Equal(c, []string{"assign r-ok only/1 p1 api"}) {
+		t.Fatalf("commands %v", c)
+	}
+	e.schedule(t) // nothing new to assign
+	if c := e.disp.take(); len(c) != 0 {
+		t.Fatalf("second pass queued %v", c)
+	}
+}
+
+// No candidate: the step waits for a runner and the task is BLOCKED (reason runner) until one appears; then the
+// task resumes by itself and the step is assigned.
+func TestNoCandidateBlocksTheTaskUntilARunnerAppears(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	task := e.task(t, onlyStep())
+	e.schedule(t)
+	got, ex := e.state(t, task.ID)
+	if got.State != domain.TaskBlocked || got.BlockReason != domain.WaitRunner || got.Reason.Detail != DetailNoRunner {
+		t.Fatalf("task %+v", got)
+	}
+	if st := ex.Steps[0]; st.State != domain.StepWaiting || st.WaitReason != domain.WaitRunner {
+		t.Fatalf("step %+v", st)
+	}
+	e.schedule(t) // still none: unchanged, nothing queued
+	if c := e.disp.take(); len(c) != 0 {
+		t.Fatalf("commands %v", c)
+	}
+	e.pool.set("p1", Candidate{ID: "r1", DiskHeavyAllowed: true})
+	e.schedule(t)
+	got, ex = e.state(t, task.ID)
+	if got.State != domain.TaskRunning || ex.Steps[0].State != domain.StepClaimed {
+		t.Fatalf("after a runner appeared: task %s step %s", got.State, ex.Steps[0].State)
+	}
+}
+
+func run(t *testing.T, e schedEnv, ex domain.Execution) domain.Step {
+	t.Helper()
+	st := ex.Steps[0]
+	if err := e.svc.StartStep(t.Context(), st.ID, st.RunnerID, st.Fence); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// A lost runner: the lease runs out, the attempt becomes UNKNOWN and the step is not assigned again (no second
+// process) — the task is BLOCKED until the runner reconciles. A live process returns to RUNNING under the same
+// token; a gone one fails and is retried once with a new token; a second failure fails the task.
+func TestLostRunnerIsReconciledBeforeAnyRetry(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	task := e.task(t, onlyStep())
+	e.pool.set("p1", Candidate{ID: "r1", DiskHeavyAllowed: true}, Candidate{ID: "r2", DiskHeavyAllowed: true})
+	e.schedule(t)
+	_, ex := e.state(t, task.ID)
+	st := run(t, e, ex)
+	e.disp.take()
+
+	e.clock.Add(DefaultLeaseTTL + time.Second)
+	e.schedule(t)
+	got, ex := e.state(t, task.ID)
+	if !ex.Steps[0].AttemptUnknown() || got.State != domain.TaskBlocked || got.Reason.Detail != DetailRunnerLost {
+		t.Fatalf("after lease expiry: task %+v step %+v", got, ex.Steps[0])
+	}
+	if c := e.disp.take(); len(c) != 0 {
+		t.Fatalf("an unknown attempt was assigned again: %v", c)
+	}
+
+	// The runner comes back with the process alive: same token, RUNNING, task resumes.
+	if err := e.svc.ReconcileRunner(t.Context(), "r1", []AttemptReport{{StepID: st.ID, Fence: st.Fence, Running: true}}); err != nil {
+		t.Fatal(err)
+	}
+	e.schedule(t)
+	got, ex = e.state(t, task.ID)
+	if ex.Steps[0].State != domain.StepRunning || ex.Steps[0].Fence != st.Fence || got.State != domain.TaskRunning {
+		t.Fatalf("after alive: task %s step %+v", got.State, ex.Steps[0])
+	}
+
+	// Lost again; this time the process is gone: the attempt fails and the step is retried with a new token.
+	e.clock.Add(DefaultLeaseTTL + time.Second)
+	if err := e.svc.ReconcileRunner(t.Context(), "r1", nil); err != nil {
+		t.Fatal(err)
+	}
+	e.schedule(t)
+	_, ex = e.state(t, task.ID)
+	if s := ex.Steps[0]; s.State != domain.StepClaimed || s.Fence != st.Fence+1 || s.Attempts[0].State != domain.AttemptFailed {
+		t.Fatalf("retry: %+v", s)
+	}
+	if c := e.disp.take(); len(c) != 1 {
+		t.Fatalf("retry commands %v", c)
+	}
+	st = run(t, e, ex)
+	// The retry's runner restarted and has no such process: the budget (1 retry) is used up.
+	if err := e.svc.ReconcileRunner(t.Context(), st.RunnerID, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, ex = e.state(t, task.ID)
+	if got.State != domain.TaskFailed || ex.State != domain.ExecutionFailed {
+		t.Fatalf("after the second failure: task %s execution %s", got.State, ex.State)
+	}
+}
+
+// A runner reporting a process the Control Plane no longer assigns to it is told to stop it; a kept result and a
+// CLAIMED step whose assignment may still be in flight are left alone.
+func TestReconcileCancelsStaleProcesses(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	task := e.task(t, onlyStep())
+	e.pool.set("p1", Candidate{ID: "r1", DiskHeavyAllowed: true})
+	e.schedule(t)
+	_, ex := e.state(t, task.ID)
+	st := ex.Steps[0]
+	e.disp.take()
+	err := e.svc.ReconcileRunner(t.Context(), "r1", []AttemptReport{
+		{StepID: "old-step", Fence: 3, Running: true},
+		{StepID: "done-step", Fence: 1, Result: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := e.disp.take(); !slices.Equal(c, []string{"cancel r1 old-step/3 stale_fence"}) {
+		t.Fatalf("commands %v", c)
+	}
+	_, ex = e.state(t, task.ID)
+	if ex.Steps[0].State != domain.StepClaimed || ex.Steps[0].Fence != st.Fence {
+		t.Fatalf("claimed step changed: %+v", ex.Steps[0])
+	}
+}
+
+// Cancelling the task stops the runner's process group (execution.cancel in the same transaction).
+func TestCancelTaskCancelsRunningAttempts(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	task := e.task(t, onlyStep())
+	e.pool.set("p1", Candidate{ID: "r1", DiskHeavyAllowed: true})
+	e.schedule(t)
+	_, ex := e.state(t, task.ID)
+	st := run(t, e, ex)
+	e.disp.take()
+	if _, err := e.svc.CancelTask(t.Context(), task.ID, "owner stopped it"); err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("cancel r1 %s/%d cancelled", st.ID, st.Fence)
+	if c := e.disp.take(); !slices.Equal(c, []string{want}) {
+		t.Fatalf("commands %v", c)
+	}
+}
+
+// Heartbeats renew the runner's live leases, so a long step keeps running.
+func TestRenewRunnerLeases(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	task := e.task(t, onlyStep())
+	e.pool.set("p1", Candidate{ID: "r1", DiskHeavyAllowed: true})
+	e.schedule(t)
+	_, ex := e.state(t, task.ID)
+	run(t, e, ex)
+	for range 3 {
+		e.clock.Add(DefaultLeaseTTL / 2)
+		if err := e.svc.RenewRunnerLeases(t.Context(), "r1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.svc.RenewRunnerLeases(t.Context(), "someone-else"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.schedule(t)
+	if _, ex := e.state(t, task.ID); ex.Steps[0].State != domain.StepRunning {
+		t.Fatalf("step %s", ex.Steps[0].State)
+	}
+}

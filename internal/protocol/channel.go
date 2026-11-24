@@ -144,10 +144,14 @@ const CancelCancelled = "cancelled"
 
 // AssignCommandID and CancelCommandID are the deterministic command ids of an attempt's assignment and
 // cancellation: a repeated use case appends nothing, and the stale-fence cancel and a task cancel share one.
-func AssignCommandID(step string, fence int64) string { return fmt.Sprintf("assign/%s/%d", step, fence) }
+func AssignCommandID(step string, fence int64) string {
+	return fmt.Sprintf("assign/%s/%d", step, fence)
+}
 
 // CancelCommandID: see AssignCommandID.
-func CancelCommandID(step string, fence int64) string { return fmt.Sprintf("cancel/%s/%d", step, fence) }
+func CancelCommandID(step string, fence int64) string {
+	return fmt.Sprintf("cancel/%s/%d", step, fence)
+}
 
 // Output is the body of execution.output: a chunk of a process stream at byte Offset of that stream.
 type Output struct {

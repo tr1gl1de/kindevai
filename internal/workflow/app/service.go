@@ -41,6 +41,12 @@ type Repository interface {
 	SaveExecution(ctx context.Context, e *domain.Execution) error
 	// ExpiredLeaseExecutions lists running executions with a step lease that ran out at now.
 	ExpiredLeaseExecutions(ctx context.Context, now time.Time) ([]string, error)
+	RunningExecutions(ctx context.Context) ([]string, error)
+	TasksInState(ctx context.Context, s domain.TaskState) ([]string, error)
+	// ExecutionsHeldBy lists running executions with a step whose claim or unknown attempt is the runner's.
+	ExecutionsHeldBy(ctx context.Context, runnerID string) ([]string, error)
+	ListTasks(ctx context.Context, projectIDs []string, limit int) ([]domain.Task, error) // newest first
+	LatestExecution(ctx context.Context, taskID string) (domain.Execution, error)       // domain.ErrNotFound
 }
 
 // TxRunner runs fn in one database transaction; repositories called with fn's ctx join it.
@@ -75,6 +81,9 @@ type Service struct {
 	Projects    Projects
 	Policy      RiskPolicy // required for SubmitPlan
 	Events      Events     // optional
+	Runners     RunnerPool // required for Schedule
+	Dispatcher  Dispatcher // runner commands; required for Schedule, optional otherwise
+	Access      Access     // project visibility for the task API (KIN-23)
 	Tx          TxRunner
 	Now         func() time.Time
 	NewID       func() string
@@ -243,15 +252,56 @@ func (s *Service) updateExecution(ctx context.Context, stepID string, fn func(ct
 		if err != nil {
 			return err
 		}
-		now := s.now()
-		if err := fn(ctx, &e, now); err != nil {
-			return err
-		}
-		if err := s.Repo.SaveExecution(ctx, &e); err != nil {
-			return err
-		}
-		return s.syncTask(ctx, &e, now)
+		return s.applyExecution(ctx, e, fn)
 	})
+}
+
+// updateExecutionByID is updateExecution for an execution id.
+func (s *Service) updateExecutionByID(ctx context.Context, id string, fn func(ctx context.Context, e *domain.Execution, now time.Time) error) error {
+	return s.Tx.InTx(ctx, func(ctx context.Context) error {
+		e, err := s.Repo.Execution(ctx, id)
+		if err != nil {
+			return err
+		}
+		return s.applyExecution(ctx, e, fn)
+	})
+}
+
+func (s *Service) applyExecution(ctx context.Context, e domain.Execution, fn func(ctx context.Context, e *domain.Execution, now time.Time) error) error {
+	now := s.now()
+	before := e.Clone()
+	if err := fn(ctx, &e, now); err != nil {
+		return err
+	}
+	if executionEqual(before, e) && before.State == e.State && attemptsEqual(before, e) {
+		return nil
+	}
+	if err := s.Repo.SaveExecution(ctx, &e); err != nil {
+		return err
+	}
+	if err := s.cancelReleased(ctx, &before, &e); err != nil {
+		return err
+	}
+	return s.syncTask(ctx, &e, now)
+}
+
+func attemptsEqual(a, b domain.Execution) bool {
+	for i := range a.Steps {
+		x, y := a.Steps[i], b.Steps[i]
+		if len(x.Attempts) != len(y.Attempts) || !ptrTimeEqual(x.LeaseExpiresAt, y.LeaseExpiresAt) {
+			return false
+		}
+		for j := range x.Attempts {
+			if x.Attempts[j].State != y.Attempts[j].State {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func ptrTimeEqual(a, b *time.Time) bool {
+	return a == nil && b == nil || a != nil && b != nil && a.Equal(*b)
 }
 
 // syncTask moves the task when its execution finished: SUCCEEDED -> VERIFYING, FAILED -> FAILED. A task blocked
@@ -406,10 +456,14 @@ func (s *Service) CancelTask(ctx context.Context, taskID, reason string) (domain
 		if err != nil {
 			return err
 		}
+		before := e.Clone()
 		if err := e.Cancel(reason, now); err != nil {
 			return err
 		}
-		return s.Repo.SaveExecution(ctx, &e)
+		if err := s.Repo.SaveExecution(ctx, &e); err != nil {
+			return err
+		}
+		return s.cancelReleased(ctx, &before, &e)
 	})
 }
 

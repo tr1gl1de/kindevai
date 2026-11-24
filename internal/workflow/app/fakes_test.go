@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -198,4 +199,75 @@ func (c *clock) Add(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.now = c.now.Add(d)
+}
+
+func (r *memRepo) RunningExecutions(_ context.Context) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var ids []string
+	for _, e := range r.execs {
+		if e.State == domain.ExecutionRunning {
+			ids = append(ids, e.ID)
+		}
+	}
+	slices.Sort(ids)
+	return ids, nil
+}
+
+func (r *memRepo) TasksInState(_ context.Context, s domain.TaskState) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var ids []string
+	for _, t := range r.tasks {
+		if t.State == s {
+			ids = append(ids, t.ID)
+		}
+	}
+	slices.Sort(ids)
+	return ids, nil
+}
+
+func (r *memRepo) ExecutionsHeldBy(_ context.Context, runnerID string) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var ids []string
+	for _, e := range r.execs {
+		if e.State == domain.ExecutionRunning && slices.ContainsFunc(e.Steps, func(s domain.Step) bool { return s.RunnerID == runnerID }) {
+			ids = append(ids, e.ID)
+		}
+	}
+	slices.Sort(ids)
+	return ids, nil
+}
+
+func (r *memRepo) ListTasks(_ context.Context, projectIDs []string, limit int) ([]domain.Task, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []domain.Task
+	for _, t := range r.tasks {
+		if slices.Contains(projectIDs, t.ProjectID) {
+			out = append(out, t)
+		}
+	}
+	slices.SortFunc(out, func(a, b domain.Task) int { return b.CreatedAt.Compare(a.CreatedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (r *memRepo) LatestExecution(_ context.Context, taskID string) (domain.Execution, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var best *domain.Execution
+	for _, e := range r.execs {
+		if e.TaskID == taskID && (best == nil || e.CreatedAt.After(best.CreatedAt) || e.CreatedAt.Equal(best.CreatedAt) && e.ID > best.ID) {
+			c := e.Clone()
+			best = &c
+		}
+	}
+	if best == nil {
+		return domain.Execution{}, domain.ErrNotFound
+	}
+	return *best, nil
 }

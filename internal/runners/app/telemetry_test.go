@@ -22,11 +22,13 @@ type memTelemetry struct {
 	vols    map[string][]domain.Volume
 	samples map[string]map[string][]domain.Sample
 	status  map[string]domain.Status
+	cons    map[string]domain.SpaceConsumers
 }
 
 func newMemTelemetry() *memTelemetry {
 	return &memTelemetry{hb: map[string]time.Time{}, down: map[string]time.Time{}, caps: map[string]domain.Capabilities{},
-		vols: map[string][]domain.Volume{}, samples: map[string]map[string][]domain.Sample{}, status: map[string]domain.Status{}}
+		vols: map[string][]domain.Volume{}, samples: map[string]map[string][]domain.Sample{}, status: map[string]domain.Status{},
+		cons: map[string]domain.SpaceConsumers{}}
 }
 
 func (m *memTelemetry) RecordHeartbeat(_ context.Context, id string, at time.Time) (*time.Time, error) {
@@ -114,6 +116,37 @@ func (m *memTelemetry) Samples(_ context.Context, _ time.Time) (map[string]map[s
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return cloneMap(m.samples), nil
+}
+
+func (m *memTelemetry) MachineSamples(_ context.Context, machine string, since time.Time) (map[string][]domain.Sample, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[string][]domain.Sample{}
+	for role, ss := range m.samples[machine] {
+		for _, s := range ss {
+			if !s.Hour.Before(since.Truncate(time.Hour)) {
+				out[role] = append(out[role], s)
+			}
+		}
+	}
+	return out, nil
+}
+
+func (m *memTelemetry) ReplaceSpaceConsumers(_ context.Context, machine string, c domain.SpaceConsumers) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cons[machine] = c
+	return nil
+}
+
+func (m *memTelemetry) SpaceConsumers(_ context.Context, machine string) (*domain.SpaceConsumers, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.cons[machine]
+	if !ok {
+		return nil, nil
+	}
+	return &c, nil
 }
 
 func (m *memTelemetry) PurgeSamples(context.Context, time.Time, int) (int64, error) { return 0, nil }
@@ -463,5 +496,72 @@ func TestStorageRiseAfterRecoveryAlertsAgain(t *testing.T) {
 	}
 	if got := f.outbox.topics(); len(got) != 2 {
 		t.Fatalf("alerts = %v, want two critical rises", got)
+	}
+}
+
+func TestStorageMachineDetailHasHistoryVolumesAndConsumers(t *testing.T) {
+	t.Parallel()
+	f := newTelFixture(t)
+	ctx := t.Context()
+	r := f.approved(t, keyA)
+	pending := f.enrolled(t, keyB)
+	now := f.clock.Now()
+	for d := 40; d >= 0; d-- { // 41 days of daily samples; the 7-day window keeps the last 8 days' points
+		_, _ = f.trepo.ReplaceVolumes(ctx, r.ID, []domain.Volume{volume(t, domain.RoleWorkspaces, 100*gib, 50*gib, now.AddDate(0, 0, -d))})
+	}
+	_ = f.tel.Heartbeat(ctx, r.ID, "s1")
+	if err := f.tel.SpaceConsumers(ctx, r.ID, "s1", []domain.SpaceConsumer{{Category: domain.ConsumerSpool, Bytes: 9}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.tel.Machine(ctx, member, r.ID, 7); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("member = %v", err)
+	}
+	for _, id := range []string{"nope", pending.ID} {
+		if _, err := f.tel.Machine(ctx, owner, id, 7); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("machine %s = %v", id, err)
+		}
+	}
+	var ve *domain.ValidationError
+	if _, err := f.tel.Machine(ctx, owner, r.ID, 14); !errors.As(err, &ve) || ve.Field != "days" {
+		t.Fatalf("14 days = %v", err)
+	}
+
+	m, err := f.tel.Machine(ctx, owner, r.ID, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.ID != r.ID || m.Kind != MachineRunner || m.Days != 7 || len(m.Volumes) != 1 {
+		t.Fatalf("machine = %+v", m.MachineOverview)
+	}
+	if h := m.History[domain.RoleWorkspaces]; len(h) != 8 || !h[7].Hour.Equal(now.Truncate(time.Hour)) {
+		t.Fatalf("7-day history = %d points", len(h))
+	}
+	if m.Consumers == nil || m.Consumers.Items[0].Bytes != 9 || !m.Consumers.MeasuredAt.Equal(now) {
+		t.Fatalf("consumers = %+v", m.Consumers)
+	}
+	m30, _ := f.tel.Machine(ctx, owner, r.ID, 30)
+	if h := m30.History[domain.RoleWorkspaces]; len(h) != 31 {
+		t.Fatalf("30-day history = %d points", len(h))
+	}
+	cp, err := f.tel.Machine(ctx, owner, domain.ControlPlaneMachine, 30)
+	if err != nil || cp.Kind != MachineControlPlane || cp.Consumers != nil || cp.History == nil {
+		t.Fatalf("control plane = %+v, %v", cp, err)
+	}
+}
+
+func TestSpaceConsumersAreValidatedAndNeverDropped(t *testing.T) {
+	t.Parallel()
+	f := newTelFixture(t)
+	ctx := t.Context()
+	var ve *domain.ValidationError
+	if err := f.tel.SpaceConsumers(ctx, "r1", "s1", []domain.SpaceConsumer{{Category: "home"}}); !errors.As(err, &ve) {
+		t.Fatalf("invalid report = %v", err)
+	}
+	_ = f.tel.SpaceConsumers(ctx, "r1", "s1", []domain.SpaceConsumer{{Category: domain.ConsumerRepos, Bytes: 1}})
+	f.clock.add(time.Second)
+	_ = f.tel.SpaceConsumers(ctx, "r1", "s1", []domain.SpaceConsumer{{Category: domain.ConsumerRepos, Bytes: 2}})
+	if got, _ := f.trepo.SpaceConsumers(ctx, "r1"); got.Items[0].Bytes != 2 {
+		t.Fatalf("a measurement right after another was dropped: %+v", got)
 	}
 }

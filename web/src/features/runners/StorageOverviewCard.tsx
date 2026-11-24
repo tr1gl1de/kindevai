@@ -22,11 +22,16 @@ export function StorageOverviewCard() {
       ) : !machines.some((m) => m.volumes.length > 0) ? (
         <p>{t("storage.empty")}</p>
       ) : (
-        <ul className="machine-list">
-          {machines.map((m) => (
-            <MachineRow key={m.id} m={m} />
-          ))}
-        </ul>
+        <>
+          <ul className="machine-list">
+            {machines.map((m) => (
+              <MachineRow key={m.id} m={m} />
+            ))}
+          </ul>
+          <p>
+            <Link to="/infrastructure/storage">{t("storage.openDetails")}</Link>
+          </p>
+        </>
       )}
     </section>
   );

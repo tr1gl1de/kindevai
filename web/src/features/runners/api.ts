@@ -1,6 +1,12 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
-import type { CreateEnrollmentTokenResult, EnrollmentToken, Runner, StorageOverview } from "../../api/types";
+import type {
+  CreateEnrollmentTokenResult,
+  EnrollmentToken,
+  Runner,
+  StorageMachineDetail,
+  StorageOverview,
+} from "../../api/types";
 
 const keys = {
   runners: ["runners"] as const,
@@ -10,8 +16,13 @@ const keys = {
 
 const path = (id: string) => `/api/runners/${encodeURIComponent(id)}`;
 
-export function useRunners() {
-  return useQuery({ queryKey: keys.runners, queryFn: ({ signal }) => api<Runner[]>("GET", "/api/runners", undefined, signal) });
+/** The runner list; refetchInterval keeps it live (the Overview card, KIN-55). */
+export function useRunners(refetchInterval?: number) {
+  return useQuery({
+    queryKey: keys.runners,
+    refetchInterval,
+    queryFn: ({ signal }) => api<Runner[]>("GET", "/api/runners", undefined, signal),
+  });
 }
 
 export function useRunner(id: string) {
@@ -84,5 +95,16 @@ export function useStorageOverview(enabled: boolean) {
     enabled,
     refetchInterval: 60_000,
     queryFn: ({ signal }) => api<StorageOverview>("GET", "/api/storage/overview", undefined, signal),
+  });
+}
+
+/** Infrastructure → Storage: one machine with its history window (7 or 30 days) and space consumers (KIN-55). */
+export function useStorageMachine(id: string, days: 7 | 30) {
+  return useQuery({
+    queryKey: ["storage-machine", id, days] as const,
+    refetchInterval: 5 * 60_000,
+    placeholderData: keepPreviousData, // keep the chart while the other window loads
+    queryFn: ({ signal }) =>
+      api<StorageMachineDetail>("GET", `/api/storage/machines/${encodeURIComponent(id)}?days=${days}`, undefined, signal),
   });
 }

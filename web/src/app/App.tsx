@@ -16,6 +16,7 @@ import { ApprovalPage } from "../features/approvals/ApprovalPage";
 import { ApprovalsPage } from "../features/approvals/ApprovalsPage";
 import { AlertsPage } from "../features/alerts/AlertsPage";
 import { RunnersPage } from "../features/runners/RunnersPage";
+import { StoragePage } from "../features/runners/StoragePage";
 import { IntegrationsPage } from "../features/integrations/IntegrationsPage";
 import { PageNotFound } from "./PageNotFound";
 import { ErrorState, Loading } from "../ui/feedback";
@@ -92,6 +93,7 @@ function Gate() {
           {me.data.role === "owner" && <Route path="/users" element={<UsersPage />} />}
           {me.data.role === "owner" && <Route path="/runners" element={<RunnersPage />} />}
           {me.data.role === "owner" && <Route path="/runners/:id" element={<RunnerPage />} />}
+          {me.data.role === "owner" && <Route path="/infrastructure/storage" element={<StoragePage />} />}
           {me.data.role === "owner" && <Route path="/integrations" element={<IntegrationsPage />} />}
           {me.data.role === "owner" && <Route path="/audit" element={<AuditPage />} />}
           {me.data.role === "owner" && <Route path="/settings/telegram" element={<TelegramSettingsPage />} />}

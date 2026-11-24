@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/platform/httpx"
@@ -134,15 +135,85 @@ func (h *Handler) storageOverview(w http.ResponseWriter, r *http.Request) {
 		Thresholds: ThresholdsView{WarningPercent: domain.WarningPercent, HighPercent: domain.HighPercent,
 			CriticalPercent: domain.CriticalPercent, MinHeadroomBytes: domain.MinHeadroomBytes}}
 	for _, m := range ov.Machines {
-		mv := MachineView{ID: m.ID, Kind: m.Kind, Name: m.Name, Status: string(m.Status), Availability: string(m.Availability),
-			LastHeartbeatAt: m.LastHeartbeatAt, DiskHeavyAllowed: m.DiskHeavyAllowed, Volumes: make([]VolumeView, 0, len(m.Volumes))}
-		for _, v := range m.Volumes {
-			mv.Volumes = append(mv.Volumes, VolumeView{Role: v.Role, MountOrVolumeID: v.ID, Path: v.Path, TotalBytes: v.TotalBytes,
-				AvailableBytes: v.AvailableBytes, FreeBytes: v.FreeBytes, UsedPercent: v.UsedPercent, Level: string(v.Level),
-				DiskHeavyAllowed: v.DiskHeavyAllowed(), Stale: v.Stale, LastReportedAt: v.ReportedAt,
-				Forecast7d: forecastView(v.Forecast7), Forecast30d: forecastView(v.Forecast30)})
+		out.Machines = append(out.Machines, machineView(m))
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+func machineView(m app.MachineOverview) MachineView {
+	mv := MachineView{ID: m.ID, Kind: m.Kind, Name: m.Name, Status: string(m.Status), Availability: string(m.Availability),
+		LastHeartbeatAt: m.LastHeartbeatAt, DiskHeavyAllowed: m.DiskHeavyAllowed, Volumes: make([]VolumeView, 0, len(m.Volumes))}
+	for _, v := range m.Volumes {
+		mv.Volumes = append(mv.Volumes, VolumeView{Role: v.Role, MountOrVolumeID: v.ID, Path: v.Path, TotalBytes: v.TotalBytes,
+			AvailableBytes: v.AvailableBytes, FreeBytes: v.FreeBytes, UsedPercent: v.UsedPercent, Level: string(v.Level),
+			DiskHeavyAllowed: v.DiskHeavyAllowed(), Stale: v.Stale, LastReportedAt: v.ReportedAt,
+			Forecast7d: forecastView(v.Forecast7), Forecast30d: forecastView(v.Forecast30)})
+	}
+	return mv
+}
+
+// SampleView is one hourly point of the storage history.
+type SampleView struct {
+	At         time.Time `json:"at"`
+	TotalBytes int64     `json:"totalBytes"`
+	UsedBytes  int64     `json:"usedBytes"`
+}
+
+// ConsumerView is the size of one space-consumer category (KIN-55).
+type ConsumerView struct {
+	Category string `json:"category"`
+	Bytes    int64  `json:"bytes"`
+	Entries  int64  `json:"entries"`
+	Partial  bool   `json:"partial"`
+}
+
+// ConsumersView is a machine's latest space-consumer measurement.
+type ConsumersView struct {
+	MeasuredAt time.Time      `json:"measuredAt"`
+	Items      []ConsumerView `json:"items"`
+}
+
+// StorageMachineDetail is GET /api/storage/machines/{id}?days=7|30 (Infrastructure → Storage, KIN-55).
+type StorageMachineDetail struct {
+	MachineView
+	Days      int                     `json:"days"`
+	History   map[string][]SampleView `json:"history"` // volume role → hourly samples, oldest first
+	Consumers *ConsumersView          `json:"consumers"`
+}
+
+func (h *Handler) storageMachine(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	days := 7
+	if q := r.URL.Query().Get("days"); q != "" {
+		n, err := strconv.Atoi(q)
+		if err != nil {
+			h.fail(w, &domain.ValidationError{Field: "days", Code: "unsupported"})
+			return
 		}
-		out.Machines = append(out.Machines, mv)
+		days = n
+	}
+	m, err := h.Telemetry.Machine(r.Context(), p, r.PathValue("id"), days)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	out := StorageMachineDetail{MachineView: machineView(m.MachineOverview), Days: m.Days,
+		History: make(map[string][]SampleView, len(m.History))}
+	for role, ss := range m.History {
+		vs := make([]SampleView, 0, len(ss))
+		for _, s := range ss {
+			vs = append(vs, SampleView{At: s.Hour, TotalBytes: s.TotalBytes, UsedBytes: s.UsedBytes})
+		}
+		out.History[role] = vs
+	}
+	if c := m.Consumers; c != nil {
+		out.Consumers = &ConsumersView{MeasuredAt: c.MeasuredAt, Items: make([]ConsumerView, 0, len(c.Items))}
+		for _, x := range c.Items {
+			out.Consumers.Items = append(out.Consumers.Items, ConsumerView(x))
+		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }

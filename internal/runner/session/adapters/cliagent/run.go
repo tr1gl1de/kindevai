@@ -92,6 +92,7 @@ type Run struct {
 	done  chan struct{}
 
 	mu        sync.Mutex
+	exited    bool // the CLI ended: a later cancel or timeout changes nothing
 	stopping  bool
 	cancelled string
 	timedOut  bool
@@ -112,15 +113,25 @@ func (a *Adapter) Start(ctx context.Context, req domain.AgentRequest, h Hooks) (
 	if !filepath.IsAbs(c.Binary) || !filepath.IsAbs(c.Home) {
 		return nil, errors.New("the CLI's binary and HOME must be absolute paths")
 	}
-	if domain.Within(c.Home, req.Workdir) {
+	// Compare resolved paths: a symlink must not place HOME (the CLI's login) or the prompt inside the workspace.
+	// (While agent and runner share a uid the agent can still reach HOME at run time; isolating it is the
+	// sandbox's job, KIN-31.)
+	wd, home, pf, err := resolve(req.Workdir, c.Home, req.PromptFile)
+	if err != nil {
+		return nil, err
+	}
+	if domain.Within(home, wd) {
 		return nil, errors.New("the CLI's HOME lies inside the workspace: its login would be exposed to the agent")
+	}
+	if domain.Within(pf, wd) {
+		return nil, fmt.Errorf("%w: prompt file", domain.ErrInvalidAgentRequest)
 	}
 	strict := c.Sandbox != nil && c.Sandbox.StrictEgress(ctx)
 	perms, err := domain.ChoosePermissions(req.BypassPermissions, strict)
 	if err != nil {
 		return nil, err
 	}
-	prompt, err := openPrompt(req.PromptFile)
+	prompt, err := openPrompt(pf)
 	if err != nil {
 		return nil, err
 	}
@@ -132,6 +143,18 @@ func (a *Adapter) Start(ctx context.Context, req domain.AgentRequest, h Hooks) (
 		}
 	}
 	return a.start(ctx, req, cmd, prompt, h)
+}
+
+func resolve(paths ...string) (string, string, string, error) {
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		r, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			return "", "", "", fmt.Errorf("resolving %s: %w", filepath.Base(p), err)
+		}
+		out[i] = r
+	}
+	return out[0], out[1], out[2], nil
 }
 
 func openPrompt(name string) (*os.File, error) {
@@ -192,6 +215,7 @@ func (a *Adapter) start(ctx context.Context, req domain.AgentRequest, c Command,
 		maxLine = DefaultMaxLine
 	}
 	var (
+		trMu    sync.Mutex
 		tr      domain.Transcript
 		tail    tailBuffer
 		readers sync.WaitGroup
@@ -200,7 +224,9 @@ func (a *Adapter) start(ctx context.Context, req domain.AgentRequest, c Command,
 	readers.Go(func() {
 		readLines(outR, maxLine, h.Stdout, func(line []byte) {
 			for _, e := range parser.Parse(line) {
+				trMu.Lock()
 				tr.Apply(e)
+				trMu.Unlock()
 				if h.OnEvent != nil {
 					h.OnEvent(e)
 				}
@@ -225,8 +251,12 @@ func (a *Adapter) start(ctx context.Context, req domain.AgentRequest, c Command,
 	go func() {
 		state, werr := cmd.Process.Wait()
 		timer.Stop()
-		// The CLI ended: whatever it left in its group must not outlive the run (or hold the pipes open).
+		r.mu.Lock()
+		r.exited = true
+		// The CLI ended: whatever it left in its group must not outlive the run (or hold the pipes open). Under the
+		// lock, so no cancel signals the group after this.
 		_ = signalGroup(r.pid, true)
+		r.mu.Unlock()
 		drained := make(chan struct{})
 		go func() { readers.Wait(); close(drained) }()
 		select {
@@ -234,13 +264,18 @@ func (a *Adapter) start(ctx context.Context, req domain.AgentRequest, c Command,
 		case <-time.After(drainWait): // a process outside the group still holds the pipes
 			_ = outR.Close()
 			_ = errR.Close()
-			<-drained
+			select {
+			case <-drained:
+			case <-time.After(drainWait): // a hook blocks: finish without it (it may still be running)
+			}
 		}
 		_ = outR.Close()
 		_ = errR.Close()
 		r.mu.Lock()
 		end := domain.End{Exit: exitOf(state, werr), StderrTail: tail.String(), TimedOut: r.timedOut, Cancelled: r.cancelled}
+		trMu.Lock()
 		r.result = tr.Result(end)
+		trMu.Unlock()
 		r.mu.Unlock()
 		close(r.done)
 	}()
@@ -281,18 +316,11 @@ func (r *Run) Cancel(reason string) {
 
 func (r *Run) stop(reason string, timeout bool) {
 	r.mu.Lock()
-	if r.stopping {
-		r.mu.Unlock()
+	defer r.mu.Unlock()
+	if r.stopping || r.exited {
 		return
-	}
-	select {
-	case <-r.done:
-		r.mu.Unlock()
-		return
-	default:
 	}
 	r.stopping, r.cancelled, r.timedOut = true, reason, timeout
-	r.mu.Unlock()
 	_ = signalGroup(r.pid, false)
 	go func() {
 		t := time.NewTimer(r.grace)
@@ -300,7 +328,11 @@ func (r *Run) stop(reason string, timeout bool) {
 		select {
 		case <-r.done:
 		case <-t.C:
-			_ = signalGroup(r.pid, true)
+			r.mu.Lock()
+			if !r.exited {
+				_ = signalGroup(r.pid, true)
+			}
+			r.mu.Unlock()
 		}
 	}()
 }

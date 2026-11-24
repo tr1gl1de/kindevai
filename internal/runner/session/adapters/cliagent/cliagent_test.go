@@ -125,8 +125,8 @@ func TestClaudeRun(t *testing.T) {
 		t.Fatalf("result = %+v", res)
 	}
 	want := []string{"-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits",
-		"--setting-sources", "user"}
-	if got := strings.Fields(f.recorded("argv")); !slices.Equal(got, want) {
+		"--setting-sources", "user", "--settings", `{"disableAllHooks":true}`}
+	if got := strings.Split(strings.TrimSuffix(f.recorded("argv"), "\n"), "\n"); !slices.Equal(got, want) {
 		t.Fatalf("argv = %q, want %q", got, want)
 	}
 	if got, _ := os.ReadFile(f.prompt); f.recorded("stdin") != string(got) {
@@ -153,7 +153,7 @@ func TestResumeArgs(t *testing.T) {
 		want []string
 	}{
 		{Claude{}, []string{"-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits",
-			"--setting-sources", "user", "--model", "sonnet", "--resume", "sess-1"}},
+			"--setting-sources", "user", "--settings", `{"disableAllHooks":true}`, "--model", "sonnet", "--resume", "sess-1"}},
 		{Codex{}, []string{"exec", "--json", "--skip-git-repo-check", "--sandbox", "workspace-write", "--model", "sonnet",
 			"resume", "sess-1", "-"}},
 	}
@@ -164,7 +164,7 @@ func TestResumeArgs(t *testing.T) {
 			req := f.request(c.d.Name())
 			req.Resume, req.Model = "sess-1", "sonnet"
 			waitResult(t, start(t, f.adapter(c.d), req, Hooks{}))
-			if got := strings.Fields(f.recorded("argv")); !slices.Equal(got, c.want) {
+			if got := strings.Split(strings.TrimSuffix(f.recorded("argv"), "\n"), "\n"); !slices.Equal(got, c.want) {
 				t.Fatalf("argv = %q, want %q", got, c.want)
 			}
 		})
@@ -217,6 +217,46 @@ func TestHomeInsideTheWorkspaceIsRefused(t *testing.T) {
 	a.Config.Home = filepath.Join(f.workdir, "home")
 	if _, err := a.Start(t.Context(), f.request(domain.AgentClaude), Hooks{}); err == nil {
 		t.Fatal("a HOME inside the workspace would expose the CLI's login to the agent")
+	}
+}
+
+// A symlink must not smuggle HOME or the prompt into the workspace.
+func TestSymlinksAreResolved(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	link := filepath.Join(t.TempDir(), "home")
+	if err := os.Symlink(f.workdir, link); err != nil {
+		t.Fatal(err)
+	}
+	a := f.adapter(Claude{})
+	a.Config.Home = link
+	if _, err := a.Start(t.Context(), f.request(domain.AgentClaude), Hooks{}); err == nil {
+		t.Fatal("a HOME linked into the workspace was accepted")
+	}
+	inside := filepath.Join(f.workdir, "prompt.md")
+	if err := os.WriteFile(inside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plink := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.Symlink(inside, plink); err != nil {
+		t.Fatal(err)
+	}
+	req := f.request(domain.AgentClaude)
+	req.PromptFile = plink
+	if _, err := f.adapter(Claude{}).Start(t.Context(), req, Hooks{}); !errors.Is(err, domain.ErrInvalidAgentRequest) {
+		t.Fatalf("a prompt linked into the workspace: %v", err)
+	}
+}
+
+// A cancel that arrives after the CLI ended does not turn a success into a failure.
+func TestCancelAfterExitKeepsTheResult(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	r := start(t, f.adapter(Claude{}, stream("claude/read.jsonl")), f.request(domain.AgentClaude), Hooks{})
+	res := waitResult(t, r)
+	r.Cancel("late")
+	if ok, reason := r.Wait().Outcome(); !ok || res.Failure != nil {
+		t.Fatalf("late cancel changed the result: %s", reason)
 	}
 }
 

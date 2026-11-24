@@ -202,10 +202,11 @@ func (f AgentFailure) Reason() string {
 }
 
 var (
-	authRe = regexp.MustCompile(`(?i)not logged in|/login|log ?in again|sign in again|unauthori[sz]ed|\b401\b|` +
-		`invalid api key|authentication|oauth token|token (has )?expired|could not be refreshed|credentials? (expired|invalid)`)
-	rateRe = regexp.MustCompile(`(?i)rate.?limit|usage limit|hit your (usage )?limit|limit reached|too many requests|` +
-		`\b429\b|quota exceeded|resets? (at|in) |try again in`)
+	authRe = regexp.MustCompile(`(?i)not logged in|run /login|log ?in again|sign in again|401 unauthori[sz]ed|` +
+		`invalid api key|authentication (failed|error|required)|oauth token (has )?expired|token (has )?expired|` +
+		`could not be refreshed`)
+	rateRe = regexp.MustCompile(`(?i)rate.?limit(ed| reached| exceeded)|usage limit|hit your (usage )?limit|` +
+		`limit reached|429 too many requests|status:? 429\b|quota exceeded`)
 )
 
 // ClassifyCLIError maps a CLI error message to a failure: logged out or rate/usage limited is cli_limit, anything

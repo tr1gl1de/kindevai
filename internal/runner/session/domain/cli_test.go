@@ -98,6 +98,9 @@ func TestClassifyCLIError(t *testing.T) {
 		{"API Error: 500 Internal server error", FailureCLI, ""},
 		{"error_max_turns", FailureCLI, ""},
 		{"", FailureCLI, ""},
+		{"panic: authentication module crashed while compiling", FailureCLI, ""},
+		{"read /work/401.txt: line 429: unexpected token", FailureCLI, ""},
+		{"error: the rate limiter test failed", FailureCLI, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.msg, func(t *testing.T) {

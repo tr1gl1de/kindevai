@@ -15,9 +15,13 @@ import (
 // Safe mode is `--permission-mode acceptEdits --setting-sources user`: edits in the working directory are allowed,
 // anything that would prompt (shell commands, network tools) is denied in print mode, and the repository's own
 // .claude/settings*.json are not loaded, so untrusted repository settings can neither allow tools nor run hooks on
-// the host (CLAUDE.md, skills and agents still apply). The bypass is `--dangerously-skip-permissions`, only inside
+// the host (CLAUDE.md, skills and agents still apply); `--settings {"disableAllHooks":true}` also stops hooks that
+// a repository skill or agent could declare in its frontmatter. The bypass is `--dangerously-skip-permissions`, only inside
 // the strict-egress sandbox, where the repository's settings load as usual.
 type Claude struct{}
+
+// safeSettings is the settings JSON of safe mode: no hooks run on the host.
+const safeSettings = `{"disableAllHooks":true}`
 
 // Name is the agent name.
 func (Claude) Name() string { return domain.AgentClaude }
@@ -28,7 +32,7 @@ func (Claude) Args(r domain.AgentRequest, p domain.Permissions) []string {
 	if p == domain.PermissionsBypass {
 		args = append(args, "--dangerously-skip-permissions")
 	} else {
-		args = append(args, "--permission-mode", "acceptEdits", "--setting-sources", "user")
+		args = append(args, "--permission-mode", "acceptEdits", "--setting-sources", "user", "--settings", safeSettings)
 	}
 	if r.Model != "" {
 		args = append(args, "--model", r.Model)

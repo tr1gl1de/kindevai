@@ -4,7 +4,9 @@
 // the timeout (SIGTERM, then SIGKILL to the group), parses the CLI's machine-readable stream into the common event
 // model (domain.AgentEvent) and folds it into the run's result: native session id, usage and a typed failure
 // (cli_limit for rate limits and logouts). The permission bypass is used only inside the verified strict-egress
-// sandbox (Sandbox, KIN-31).
+// sandbox (Sandbox, KIN-31). Limits here are the wall-clock timeout, the parsed line size, the stderr tail and
+// the event field sizes; memory, CPU, process count and disk quotas are the sandbox's (cgroups of KIN-31), and the
+// raw output volume is bounded by the attempt's output spool (KIN-22), which drops output once it is full.
 package cliagent
 
 import (

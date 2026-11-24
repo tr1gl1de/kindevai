@@ -62,7 +62,7 @@ func TestRouting(t *testing.T) {
 		{"dot segments are redirected to the clean path", http.MethodGet, "/../../etc/passwd", 307, "", ""},
 		{"encoded traversal stays inside assets", http.MethodGet, "/assets/..%2f..%2fetc%2fpasswd", 200, "<html>app</html>", "no-cache"},
 		{"unknown api is JSON 404", http.MethodGet, "/api/nope", 404, `"error":"not_found"`, "no-store"},
-		{"health wrong method", http.MethodPost, "/api/health", 404, `"error":"not_found"`, "no-store"},
+		{"health wrong method", http.MethodPost, "/api/health", 405, `"error":"method_not_allowed"`, "no-store"},
 		{"spa rejects POST", http.MethodPost, "/projects", 405, "", ""},
 		{"HEAD on route", http.MethodHead, "/projects", 200, "", "no-cache"},
 	}
@@ -80,5 +80,30 @@ func TestRouting(t *testing.T) {
 				t.Fatalf("Cache-Control = %q, want %q", rec.Header().Get("Cache-Control"), tt.wantCache)
 			}
 		})
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	t.Parallel()
+	h := New(Options{Assets: testAssets()})
+	for _, target := range []string{"/", "/api/health", "/assets/app-1.js"} {
+		rec := do(t, h, http.MethodGet, target)
+		csp := rec.Header().Get("Content-Security-Policy")
+		for _, want := range []string{"default-src 'self'", "object-src 'none'", "base-uri 'none'", "frame-ancestors 'self' https://web.telegram.org"} {
+			if !strings.Contains(csp, want) {
+				t.Errorf("%s: CSP %q lacks %q", target, csp, want)
+			}
+		}
+		if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("%s: nosniff = %q", target, got)
+		}
+	}
+}
+
+func TestHealthMethodNotAllowedHasAllow(t *testing.T) {
+	t.Parallel()
+	rec := do(t, New(Options{Assets: testAssets()}), http.MethodDelete, "/api/health")
+	if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") == "" {
+		t.Fatalf("status = %d, Allow = %q", rec.Code, rec.Header().Get("Allow"))
 	}
 }

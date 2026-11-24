@@ -61,7 +61,7 @@ dev: ## run control plane on this worktree's port (web: npm --prefix web run dev
 	go run ./cmd/ai-platform serve --addr 127.0.0.1:$${KINDEV_PORT:-8080}
 
 clean: ## remove build/test leftovers of this worktree (keeps data/ and .env)
-	rm -rf bin/ coverage.* *.test *.out web/dist web/coverage
+	rm -rf bin/ coverage.* *.test *.out web/dist/app web/coverage
 ifneq ($(COMPOSE_TEST),)
 	docker compose -f $(COMPOSE_TEST) down -v --remove-orphans 2>/dev/null || true
 endif

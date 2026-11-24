@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"slices"
 	"strings"
 )
 
@@ -24,14 +25,27 @@ func New(opts Options) http.Handler {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/health", allow([]string{http.MethodGet, http.MethodHead}, func(w http.ResponseWriter, r *http.Request) {
 		WriteJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": opts.Version})
-	})
+	}))
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusNotFound, "not_found", "unknown API endpoint")
 	})
 	mux.Handle("/", spa(opts.Assets))
 	return securityHeaders(mux)
+}
+
+// allow wraps an API handler so other methods get a JSON 405 with an Allow header instead of falling
+// through to the catch-all 404.
+func allow(methods []string, h http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !slices.Contains(methods, r.Method) {
+			w.Header().Set("Allow", strings.Join(methods, ", "))
+			WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+			return
+		}
+		h(w, r)
+	})
 }
 
 // WriteJSON writes v as a JSON response with the given status.
@@ -99,11 +113,17 @@ func serveIndex(w http.ResponseWriter, r *http.Request, assets fs.FS) {
 	}
 }
 
+// contentSecurityPolicy allows only same-origin resources. Framing is limited to the Telegram web client,
+// which hosts the Mini App in an iframe; native Telegram clients use a webview and are unaffected.
+const contentSecurityPolicy = "default-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; " +
+	"form-action 'self'; frame-ancestors 'self' https://web.telegram.org"
+
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Content-Security-Policy", contentSecurityPolicy)
 		next.ServeHTTP(w, r)
 	})
 }

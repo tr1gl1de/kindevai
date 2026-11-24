@@ -274,7 +274,7 @@ func NewRepository(id, projectID, owner, name, branch string, now time.Time) (Re
 	case name == "":
 		return Repository{}, invalid("name", "required")
 	case !repoNameRE.MatchString(name) || name == "." || name == "..":
-		return Repository{}, invalid("name", "name_format")
+		return Repository{}, invalid("name", "repo_name_format")
 	}
 	r := Repository{ID: id, ProjectID: projectID, Owner: owner, Name: name, CreatedAt: now}
 	if strings.TrimSpace(branch) == "" {

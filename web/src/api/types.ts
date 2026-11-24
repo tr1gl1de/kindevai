@@ -206,3 +206,65 @@ export interface Runner {
 export interface RunnerProjectsRequest {
   projectIds: string[];
 }
+
+/** A stored credential as the API shows it: never the value, only whether it is set and when it changed. */
+export interface SecretMeta {
+  set: boolean;
+  updatedAt: string | null;
+}
+
+export type CheckStatus = "none" | "pending" | "ok" | "failed";
+
+/** The last "Test connection" run; it runs asynchronously, poll while pending. */
+export interface ConnectionCheck {
+  status: CheckStatus;
+  /** Failure code: unauthorized | not_found | unreachable | redirected | unexpected_status | bad_response | bad_url. */
+  code?: string;
+  /** On success the account login; on failure a short detail such as "HTTP 502". */
+  detail?: string;
+  requestedAt: string | null;
+  checkedAt: string | null;
+}
+
+export interface YouTrackConnection {
+  baseUrl: string;
+  token: SecretMeta;
+  updatedAt: string;
+  check: ConnectionCheck;
+}
+
+/** GET /api/integrations (Owner only). */
+export interface Integrations {
+  youtrack: YouTrackConnection | null;
+}
+
+/** PUT /api/integrations/youtrack: an empty token keeps the stored one (write-only). */
+export interface YouTrackRequest {
+  baseUrl: string;
+  token: string;
+}
+
+export interface ProjectRepository {
+  id: string;
+  owner: string;
+  name: string;
+  fullName: string;
+  integrationBranch: string;
+  /** Never written by automation (main, master). */
+  protectedBranches: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** GET /api/projects/{id}/integrations (Owner only); youtrackProject is "" when unbound. */
+export interface ProjectIntegrations {
+  projectId: string;
+  youtrackProject: string;
+  repositories: ProjectRepository[];
+}
+
+export interface RepositoryRequest {
+  owner: string;
+  name: string;
+  integrationBranch: string;
+}

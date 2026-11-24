@@ -1,9 +1,12 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -277,5 +280,49 @@ func TestListAndGetShowProjectNames(t *testing.T) {
 	v, err := f.svc.Get(t.Context(), owner, r.ID)
 	if err != nil || len(v.Projects) != 1 || v.Projects[0] != (ProjectRef{ID: "p1", Name: "Alpha"}) {
 		t.Fatalf("get = %+v, %v", v, err)
+	}
+}
+
+type fakeAttempts struct {
+	mu    sync.Mutex
+	calls []string
+	err   error
+}
+
+func (a *fakeAttempts) ReleaseRunner(_ context.Context, runnerID, reason string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls = append(a.calls, runnerID+" "+reason)
+	return a.err
+}
+
+// KIN-63: disable and revoke end the runner's attempts in the status change's transaction; enable and project
+// changes do not touch them, and a failure to release them fails the change.
+func TestDisableAndRevokeReleaseTheRunnersAttempts(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	att := &fakeAttempts{}
+	f.svc.Attempts = att
+	r := f.enrolled(t, keyA)
+	if _, err := f.svc.Approve(t.Context(), owner, r.ID, []string{"p1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.Disable(t.Context(), owner, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.Enable(t.Context(), owner, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	att.err = errors.New("database is locked")
+	if _, err := f.svc.Revoke(t.Context(), owner, r.ID); err == nil || f.audit.last().Kind == KindRevoked {
+		t.Fatalf("revoke with a failed release = %v, last audit %s", err, f.audit.last().Kind)
+	}
+	att.err = nil
+	if _, err := f.svc.Revoke(t.Context(), owner, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{r.ID + " disabled", r.ID + " revoked", r.ID + " revoked"}
+	if !slices.Equal(att.calls, want) {
+		t.Fatalf("releases = %v, want %v", att.calls, want)
 	}
 }

@@ -472,6 +472,39 @@ func (e *Execution) ExpireLeases(now time.Time) []string {
 	return ids
 }
 
+// Released is an attempt ReleaseRunner took from its runner: the runner must stop the process with this token.
+type Released struct {
+	StepID string
+	Fence  int64
+}
+
+// ReleaseRunner takes every step runnerID holds away from it at once (KIN-63: the Owner disabled or revoked the
+// runner). A RUNNING step or an UNKNOWN attempt fails with msg and is retried on another runner within
+// maxAttempts; a CLAIMED step never started, so it returns to READY without using the budget. The tokens are
+// released, so any later report of these attempts is stale. It returns the released attempts in step order.
+func (e *Execution) ReleaseRunner(runnerID, msg string, now time.Time, maxAttempts int) []Released {
+	if e.State != ExecutionRunning || runnerID == "" {
+		return nil
+	}
+	msg = truncate(strings.TrimSpace(msg), MaxReasonLen)
+	var out []Released
+	for i := range e.Steps {
+		s := &e.Steps[i]
+		if s.RunnerID != runnerID || !s.Holding() {
+			continue
+		}
+		out = append(out, Released{StepID: s.ID, Fence: s.Fence})
+		if s.State == StepClaimed {
+			s.move(StepReady)
+			s.RunnerID = ""
+			continue
+		}
+		// A step that uses up its budget fails the execution, which cancels the remaining steps (no longer held).
+		e.failAttempt(s, msg, now, maxAttempts)
+	}
+	return out
+}
+
 // HoldForApproval stops a CLAIMED or RUNNING step whose runner reported changes beyond the approved scope: the
 // attempt is cancelled (it does not use the retry budget), the claim is released so the old process's later
 // reports are stale, and the step WAITs with reason approval until ResumeStep after a new approval.

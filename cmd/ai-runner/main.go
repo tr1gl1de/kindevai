@@ -34,6 +34,8 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/runner/session/adapters/spoolevents"
 	sessionapp "github.com/tr1gl1de/kindevai/internal/runner/session/app"
 	sessiondomain "github.com/tr1gl1de/kindevai/internal/runner/session/domain"
+	"github.com/tr1gl1de/kindevai/internal/runner/workspace/adapters/gitcli"
+	workspaceapp "github.com/tr1gl1de/kindevai/internal/runner/workspace/app"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -131,6 +133,11 @@ func run(ctx context.Context, args []string, e *env) error {
 		return daemon(ctx, args[1:], e)
 	case "mock-agent": // the MockAgentAdapter's child process (KIN-23); started by the daemon, not by users
 		if code := mockagent.Main(args[1:], e.stdout, e.stderr); code != 0 {
+			return exitError(code)
+		}
+		return nil
+	case gitcli.HelperCommand: // git's credential helper (KIN-29); started by git during a fetch, not by users
+		if code := gitcli.HelperMain(args[1:], e.stdin, e.stdout); code != 0 {
 			return exitError(code)
 		}
 		return nil
@@ -280,6 +287,10 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	projects := fs.String("projects", os.Getenv("KINDEV_RUNNER_PROJECTS"),
 		"comma-separated project ids this runner accepts work for (checked by the runner itself); empty: every "+
 			"project the Owner granted it")
+	gitBaseURL := fs.String("git-base-url", envOr("KINDEV_RUNNER_GIT_BASE_URL", gitcli.DefaultBaseURL),
+		"where repositories are fetched from (owner/name -> <url>/owner/name.git); tokens are sent only to this host")
+	minFree := fs.Uint64("workspace-min-free-mib", workspaceapp.DefaultMinFree>>20,
+		"free space (MiB) the data dir's filesystem needs before a workspace is prepared")
 	measureSpace := fs.Bool("measure-space", false,
 		"allow measuring what takes space in the data dir and docker (I/O-limited, every 6 h; KIN-55)")
 	if err := fs.Parse(args); err != nil {
@@ -310,7 +321,12 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	if err != nil {
 		return fmt.Errorf("locating the ai-runner binary for the mock agent: %w", err)
 	}
+	ws, err := newWorkspaces(d.Path(), exe, *gitBaseURL, *minFree)
+	if err != nil {
+		return err
+	}
 	x := newExecutor(ch, d.Path(), exe, splitList(*projects), logger)
+	x.Workspaces = ws
 	defer x.Close() // running attempts keep running; the next start adopts them
 	if err := x.Recover(ctx); err != nil {
 		return fmt.Errorf("recovering running attempts: %w", err)
@@ -340,6 +356,13 @@ func newExecutor(ch *app.Channel, dataDir, exe string, projects []string, logger
 	}
 	ch.Commands, ch.Processes = x.Command, x
 	return x
+}
+
+func envOr(name, def string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return def
 }
 
 func splitList(s string) []string {

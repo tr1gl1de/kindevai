@@ -174,3 +174,87 @@ func TestConnectorRunsTheReporterWhileTheLinkIsUp(t *testing.T) {
 		t.Fatalf("sent %v", link.types)
 	}
 }
+
+// storageSender records the runner.storage payloads.
+type storageSender struct {
+	mu  sync.Mutex
+	got []protocol.Storage
+}
+
+func (s *storageSender) Send(_ context.Context, typ string, p any) error {
+	if typ == protocol.TypeStorage {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.got = append(s.got, p.(protocol.Storage))
+	}
+	return nil
+}
+
+func (s *storageSender) withConsumers() []protocol.SpaceConsumers {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []protocol.SpaceConsumers
+	for _, x := range s.got {
+		if x.Consumers != nil {
+			out = append(out, *x.Consumers)
+		}
+	}
+	return out
+}
+
+func TestReporterSendsSpaceConsumersOnlyWhenAllowedAndNotOnEveryLink(t *testing.T) {
+	t.Parallel()
+	waitUntil := func(cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for !cond() {
+			if time.Now().After(deadline) {
+				t.Fatal("timed out")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	link := func(r *Reporter, s *storageSender, until func() bool) {
+		t.Helper()
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- r.Report(ctx, s) }()
+		waitUntil(until)
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Not allowed: storage reports never carry consumers.
+	off := &storageSender{}
+	link(&Reporter{Probe: &fakeProbe{}, StorageEvery: time.Millisecond}, off,
+		func() bool { off.mu.Lock(); defer off.mu.Unlock(); return len(off.got) >= 3 })
+	if len(off.withConsumers()) != 0 {
+		t.Fatal("consumers sent without permission")
+	}
+
+	// Allowed: measured once, sent with the next storage report right after the measurement.
+	var mu sync.Mutex
+	measured := 0
+	r := &Reporter{Probe: &fakeProbe{}, StorageEvery: time.Hour, MeterEvery: time.Hour,
+		Meter: func(context.Context) protocol.SpaceConsumers {
+			mu.Lock()
+			defer mu.Unlock()
+			measured++
+			return protocol.SpaceConsumers{Items: []protocol.SpaceConsumer{{Category: protocol.ConsumerSpool, Bytes: 7}}}
+		}}
+	on := &storageSender{}
+	link(r, on, func() bool { return len(on.withConsumers()) == 1 })
+	if c := on.withConsumers()[0]; c.Items[0].Bytes != 7 {
+		t.Fatalf("consumers = %+v", c)
+	}
+	// A reconnect within MeterEvery does not measure again.
+	again := &storageSender{}
+	link(r, again, func() bool { again.mu.Lock(); defer again.mu.Unlock(); return len(again.got) >= 1 })
+	mu.Lock()
+	defer mu.Unlock()
+	if measured != 1 || len(again.withConsumers()) != 0 {
+		t.Fatalf("measured %d times, resent %d", measured, len(again.withConsumers()))
+	}
+}

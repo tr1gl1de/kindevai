@@ -158,3 +158,44 @@ func TestVolumesReplaceAndHourlyHistoryWithPurge(t *testing.T) {
 }
 
 var _ app.TelemetryRepo = (*sqlite.Repository)(nil)
+
+func TestSpaceConsumersReplaceAndMachineHistory(t *testing.T) {
+	t.Parallel()
+	r := sqlite.New(testDB(t))
+	ctx := t.Context()
+	if got, err := r.SpaceConsumers(ctx, "r1"); err != nil || got != nil {
+		t.Fatalf("never measured = %v, %v", got, err)
+	}
+	first, _ := domain.NewSpaceConsumers([]domain.SpaceConsumer{{Category: domain.ConsumerRepos, Bytes: 1}}, t0)
+	if err := r.ReplaceSpaceConsumers(ctx, "r1", first); err != nil {
+		t.Fatal(err)
+	}
+	second, _ := domain.NewSpaceConsumers([]domain.SpaceConsumer{
+		{Category: domain.ConsumerWorkspaces, Bytes: 7 << 30, Entries: 12, Partial: true},
+		{Category: domain.ConsumerSpool, Bytes: 4096, Entries: 3},
+	}, t0.Add(time.Hour))
+	if err := r.ReplaceSpaceConsumers(ctx, "r1", second); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.SpaceConsumers(ctx, "r1")
+	if err != nil || got == nil {
+		t.Fatalf("got %v, %v", got, err)
+	}
+	if !got.MeasuredAt.Equal(second.MeasuredAt) || len(got.Items) != 2 || got.Items[0] != second.Items[0] || got.Items[1] != second.Items[1] {
+		t.Fatalf("got %+v, want %+v", *got, second)
+	}
+
+	// The machine's own history only, oldest first.
+	for i, m := range []string{"r1", "r2", "r1"} {
+		if _, err := r.ReplaceVolumes(ctx, m, []domain.Volume{mustVolume(t, domain.RoleWorkspaces, 100, 50, t0.Add(time.Duration(i)*time.Hour))}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h, err := r.MachineSamples(ctx, "r1", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := h[domain.RoleWorkspaces]; len(h) != 1 || len(s) != 2 || !s[0].Hour.Equal(t0) || !s[1].Hour.Equal(t0.Add(2*time.Hour)) {
+		t.Fatalf("history = %+v", h)
+	}
+}

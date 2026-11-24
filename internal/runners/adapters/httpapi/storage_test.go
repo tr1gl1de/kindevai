@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,5 +85,54 @@ func TestStorageOverviewOwnerOnly(t *testing.T) {
 	}
 	if ov.Thresholds.WarningPercent != 75 || ov.Thresholds.MinHeadroomBytes != 2<<30 {
 		t.Fatalf("thresholds = %+v", ov.Thresholds)
+	}
+}
+
+func TestStorageMachineDetailOwnerOnlyWithHistoryAndConsumers(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, 100)
+	id := e.approvedRunner(t)
+	now := *e.now.Load()
+	_ = e.tel.Heartbeat(t.Context(), id, "s1")
+	v, _ := domain.NewVolume("/", domain.RoleWorkspaces, "/srv/runner", 100<<30, 40<<30, 41<<30, now)
+	if err := e.tel.Storage(t.Context(), id, "s1", []domain.Volume{v}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.tel.SpaceConsumers(t.Context(), id, "s1", []domain.SpaceConsumer{
+		{Category: domain.ConsumerWorkspaces, Bytes: 3 << 30, Entries: 1200, Partial: true}}); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/storage/machines/" + id
+	if w := e.do(t, "bob", "GET", path, nil); w.Code != http.StatusForbidden {
+		t.Fatalf("member = %d", w.Code)
+	}
+	if w := e.do(t, "owner", "GET", "/api/storage/machines/nope", nil); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown = %d", w.Code)
+	}
+	for _, q := range []string{"?days=14", "?days=x"} {
+		if w := e.do(t, "owner", "GET", path+q, nil); w.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("%s = %d", q, w.Code)
+		}
+	}
+	w := e.do(t, "owner", "GET", path+"?days=30", nil)
+	if w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("detail = %d %s", w.Code, w.Body)
+	}
+	d := decode[StorageMachineDetail](t, w)
+	if d.ID != id || d.Kind != "runner" || d.Days != 30 || len(d.Volumes) != 1 || d.Volumes[0].Level != "ok" {
+		t.Fatalf("detail = %+v", d)
+	}
+	h := d.History[domain.RoleWorkspaces]
+	if len(h) != 1 || h[0].UsedBytes != 60<<30 || h[0].TotalBytes != 100<<30 || !h[0].At.Equal(now.Truncate(time.Hour)) {
+		t.Fatalf("history = %+v", d.History)
+	}
+	if d.Consumers == nil || !d.Consumers.MeasuredAt.Equal(now) || len(d.Consumers.Items) != 1 ||
+		d.Consumers.Items[0] != (ConsumerView{Category: "workspaces", Bytes: 3 << 30, Entries: 1200, Partial: true}) {
+		t.Fatalf("consumers = %+v", d.Consumers)
+	}
+	// Default window is 7 days; the Control Plane has no consumers (null, not missing).
+	cp := e.do(t, "owner", "GET", "/api/storage/machines/control-plane", nil)
+	if cp.Code != http.StatusOK || decode[StorageMachineDetail](t, cp).Days != 7 || !strings.Contains(cp.Body.String(), `"consumers":null`) {
+		t.Fatalf("control plane = %d %s", cp.Code, cp.Body)
 	}
 }

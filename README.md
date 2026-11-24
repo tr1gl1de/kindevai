@@ -129,6 +129,11 @@ ai-runner fingerprint                                    # compare with the runn
   Control Plane committed and acknowledged them, so a disconnect or a restart of either side loses nothing. Every
   event carries its attempt's fencing token: a stale runner's events are rejected and it is told to cancel the
   process. Each session starts with `runner.reconcile` (running attempts, unacknowledged results, spool offsets).
+- Storage (Owner): the Overview shows every machine's disk space; **Infrastructure → Storage** (`/infrastructure/storage`)
+  adds the hourly fill history for 7 or 30 days with the 75/85/95% levels, every volume with both forecasts and the
+  space consumers. A runner measures its consumers (repos, workspaces and worktrees, CLI sessions, the event spool,
+  `docker system df`) only when started with `ai-runner run --measure-space`: every 6 h, metadata only, paced to
+  2 000 entries/s, at most 1 000 000 entries and 10 min, no symlinks, one filesystem. Nothing is ever deleted.
 
 ### Integrations and external calls
 

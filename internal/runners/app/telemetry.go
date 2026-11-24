@@ -56,8 +56,14 @@ type TelemetryRepo interface {
 	Volumes(ctx context.Context) (map[string][]domain.Volume, error)
 	// Samples returns the history since the given time: machine → volume role → hourly samples.
 	Samples(ctx context.Context, since time.Time) (map[string]map[string][]domain.Sample, error)
+	// MachineSamples returns one machine's history since the given time: volume role → hourly samples.
+	MachineSamples(ctx context.Context, machineID string, since time.Time) (map[string][]domain.Sample, error)
 	// PurgeSamples deletes history older than before and then the oldest rows beyond maxRows.
 	PurgeSamples(ctx context.Context, before time.Time, maxRows int) (int64, error)
+	// ReplaceSpaceConsumers stores a machine's latest space-consumer measurement (KIN-55).
+	ReplaceSpaceConsumers(ctx context.Context, machineID string, m domain.SpaceConsumers) error
+	// SpaceConsumers returns a machine's latest measurement, nil if it was never measured.
+	SpaceConsumers(ctx context.Context, machineID string) (*domain.SpaceConsumers, error)
 }
 
 // TelemetryRunners lists the enrolled runners (names and lifecycle status for the overview).
@@ -366,6 +372,58 @@ func (t *Telemetry) Overview(ctx context.Context, actor auth.Principal) (Overvie
 	slices.SortFunc(rs, func(a, b MachineOverview) int { return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.ID, b.ID)) })
 	out.Machines = append(out.Machines, rs...)
 	return out, nil
+}
+
+// SpaceConsumers stores a runner's space-consumer measurement (KIN-55). The runner measures only when its
+// operator allowed it; the Control Plane never asks for one. Stamped with the Control Plane's clock.
+func (t *Telemetry) SpaceConsumers(ctx context.Context, machineID, session string, items []domain.SpaceConsumer) error {
+	now := t.Now()
+	m, err := domain.NewSpaceConsumers(items, now)
+	if err != nil {
+		return err
+	}
+	return t.guarded("consumers", machineID, session, minReportGap, now, func() error {
+		return t.Repo.ReplaceSpaceConsumers(ctx, machineID, m)
+	})
+}
+
+// HistoryDays are the history windows of the Storage page.
+var HistoryDays = []int{7, 30}
+
+// MachineDetail is Infrastructure → Storage for one machine: its overview row (all volumes with both forecasts),
+// the hourly history of the window and the latest space-consumer measurement (nil if never measured).
+type MachineDetail struct {
+	MachineOverview
+	Days      int
+	History   map[string][]domain.Sample // volume role → hourly samples, oldest first
+	Consumers *domain.SpaceConsumers
+}
+
+// Machine builds the Storage drill-down of one machine of the overview (Owner only); days is 7 or 30.
+func (t *Telemetry) Machine(ctx context.Context, actor auth.Principal, machineID string, days int) (MachineDetail, error) {
+	if err := ownerOnly(actor); err != nil {
+		return MachineDetail{}, err
+	}
+	if !slices.Contains(HistoryDays, days) {
+		return MachineDetail{}, &domain.ValidationError{Field: "days", Code: "unsupported"}
+	}
+	ov, err := t.Overview(ctx, actor)
+	if err != nil {
+		return MachineDetail{}, err
+	}
+	i := slices.IndexFunc(ov.Machines, func(m MachineOverview) bool { return m.ID == machineID })
+	if i < 0 {
+		return MachineDetail{}, domain.ErrNotFound
+	}
+	h, err := t.Repo.MachineSamples(ctx, machineID, ov.GeneratedAt.AddDate(0, 0, -days))
+	if err != nil {
+		return MachineDetail{}, err
+	}
+	c, err := t.Repo.SpaceConsumers(ctx, machineID)
+	if err != nil {
+		return MachineDetail{}, err
+	}
+	return MachineDetail{MachineOverview: ov.Machines[i], Days: days, History: h, Consumers: c}, nil
 }
 
 // roleOrder lists the working volume (data, workspaces) before the WSL2 host volume.

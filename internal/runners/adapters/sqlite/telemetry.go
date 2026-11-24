@@ -202,8 +202,24 @@ func hourOf(t time.Time) string { return t.UTC().Truncate(time.Hour).Format(time
 
 // Samples returns the hourly history since the given time, oldest first.
 func (r *Repository) Samples(ctx context.Context, since time.Time) (map[string]map[string][]domain.Sample, error) {
+	return r.samples(ctx, "hour >= ?", hourOf(since))
+}
+
+// MachineSamples returns one machine's hourly history since the given time: volume role → samples, oldest first.
+func (r *Repository) MachineSamples(ctx context.Context, machineID string, since time.Time) (map[string][]domain.Sample, error) {
+	all, err := r.samples(ctx, "machine_id = ? AND hour >= ?", machineID, hourOf(since))
+	if err != nil {
+		return nil, err
+	}
+	if all[machineID] == nil {
+		return map[string][]domain.Sample{}, nil
+	}
+	return all[machineID], nil
+}
+
+func (r *Repository) samples(ctx context.Context, where string, args ...any) (map[string]map[string][]domain.Sample, error) {
 	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, `SELECT machine_id, role, hour, total_bytes, used_bytes
-		FROM storage_history WHERE hour >= ? ORDER BY machine_id, role, hour`, hourOf(since))
+		FROM storage_history WHERE `+where+` ORDER BY machine_id, role, hour`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("loading storage history: %w", err)
 	}
@@ -241,4 +257,50 @@ func (r *Repository) PurgeSamples(ctx context.Context, before time.Time, maxRows
 	}
 	m, _ := res.RowsAffected()
 	return n + m, nil
+}
+
+// ReplaceSpaceConsumers stores a machine's latest space-consumer measurement, replacing the previous one.
+func (r *Repository) ReplaceSpaceConsumers(ctx context.Context, machineID string, m domain.SpaceConsumers) error {
+	c := db.Conn(ctx, r.db)
+	if _, err := c.ExecContext(ctx, "DELETE FROM storage_consumers WHERE machine_id = ?", machineID); err != nil {
+		return fmt.Errorf("replacing space consumers: %w", err)
+	}
+	for _, x := range m.Items {
+		if _, err := c.ExecContext(ctx, `INSERT INTO storage_consumers(machine_id, category, bytes, entries, partial,
+			measured_at) VALUES (?, ?, ?, ?, ?, ?)`, machineID, x.Category, x.Bytes, x.Entries, x.Partial, ts(m.MeasuredAt)); err != nil {
+			return fmt.Errorf("replacing space consumers: %w", err)
+		}
+	}
+	return nil
+}
+
+// SpaceConsumers loads a machine's latest measurement; nil when it was never measured (or measured nothing).
+func (r *Repository) SpaceConsumers(ctx context.Context, machineID string) (*domain.SpaceConsumers, error) {
+	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, `SELECT category, bytes, entries, partial, measured_at
+		FROM storage_consumers WHERE machine_id = ?`, machineID)
+	if err != nil {
+		return nil, fmt.Errorf("loading space consumers: %w", err)
+	}
+	defer rows.Close()
+	var items []domain.SpaceConsumer
+	var at time.Time
+	for rows.Next() {
+		var x domain.SpaceConsumer
+		var measured string
+		if err := rows.Scan(&x.Category, &x.Bytes, &x.Entries, &x.Partial, &measured); err != nil {
+			return nil, fmt.Errorf("loading space consumers: %w", err)
+		}
+		if at, err = parseTS(measured); err != nil {
+			return nil, fmt.Errorf("loading space consumers: %w", err)
+		}
+		items = append(items, x)
+	}
+	if err := rows.Err(); err != nil || items == nil {
+		return nil, err
+	}
+	m, err := domain.NewSpaceConsumers(items, at)
+	if err != nil {
+		return nil, fmt.Errorf("loading space consumers: %w", err)
+	}
+	return &m, nil
 }

@@ -19,6 +19,7 @@ type TelemetrySink interface {
 	Heartbeat(ctx context.Context, runnerID, session string) error
 	Capabilities(ctx context.Context, runnerID, session string, c domain.Capabilities) error
 	Storage(ctx context.Context, machineID, session string, vs []domain.Volume) error
+	SpaceConsumers(ctx context.Context, machineID, session string, items []domain.SpaceConsumer) error
 }
 
 // TelemetryMessages handles runner.heartbeat, runner.capabilities and runner.storage (KIN-20). Payloads are
@@ -85,7 +86,22 @@ func TelemetryMessages(sink TelemetrySink, now func() time.Time, logger *slog.Lo
 				}
 				vs = append(vs, dv)
 			}
-			return stored(s, env.Type, sink.Storage(ctx, s.RunnerID, s.ID, vs))
+			var cs []domain.SpaceConsumer
+			if p.Consumers != nil {
+				if len(p.Consumers.Items) > domain.MaxConsumers {
+					return fmt.Errorf("%s: too many consumers", env.Type)
+				}
+				for _, c := range p.Consumers.Items {
+					cs = append(cs, domain.SpaceConsumer(c))
+				}
+				if _, err := domain.NewSpaceConsumers(cs, at); err != nil {
+					return err
+				}
+			}
+			if err := stored(s, env.Type, sink.Storage(ctx, s.RunnerID, s.ID, vs)); err != nil || p.Consumers == nil {
+				return err
+			}
+			return stored(s, env.Type, sink.SpaceConsumers(ctx, s.RunnerID, s.ID, cs))
 		},
 	}
 }

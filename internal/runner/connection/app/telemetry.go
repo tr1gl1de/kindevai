@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
@@ -26,7 +27,18 @@ type Reporter struct {
 	HeartbeatEvery time.Duration // default protocol.HeartbeatIntervalSeconds
 	StorageEvery   time.Duration // default protocol.StorageIntervalSeconds
 	Now            func() time.Time
+	// Meter measures space consumers (KIN-55); nil unless the operator allowed it (--measure-space). It runs at
+	// most every MeterEvery (default 6 h) across reconnects, and its result rides on the next runner.storage.
+	Meter      func(ctx context.Context) protocol.SpaceConsumers
+	MeterEvery time.Duration
+
+	mu           sync.Mutex
+	lastMeasured time.Time
+	pending      *protocol.SpaceConsumers
 }
+
+// DefaultMeterEvery is how often space consumers are measured when allowed.
+const DefaultMeterEvery = 6 * time.Hour
 
 // Report runs until ctx ends (nil) or a send fails (the link is gone; Wait reports why). It returns promptly on
 // cancellation even while a probe is still running.
@@ -102,14 +114,83 @@ func (r *Reporter) probes(ctx context.Context, s Sender) error {
 	}
 	st := time.NewTicker(stEvery)
 	defer st.Stop()
+	measured := make(chan struct{}, 1)
+	if r.Meter != nil {
+		go r.meter(ctx, measured)
+	}
 	for {
-		if err := send(protocol.TypeStorage, func() any { return r.Probe.Storage(ctx) }); err != nil {
+		c := r.take()
+		err := send(protocol.TypeStorage, func() any { s := r.Probe.Storage(ctx); s.Consumers = c; return s })
+		if err != nil || ctx.Err() != nil {
+			r.putBack(c) // not delivered: the next link sends it
 			return err
 		}
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-st.C:
+		case <-measured:
 		}
+	}
+}
+
+// meter measures whenever MeterEvery has passed since the last complete measurement and signals measured.
+func (r *Reporter) meter(ctx context.Context, measured chan<- struct{}) {
+	every := r.MeterEvery
+	if every <= 0 {
+		every = DefaultMeterEvery
+	}
+	now := r.Now
+	if now == nil {
+		now = time.Now
+	}
+	for {
+		r.mu.Lock()
+		wait := time.Duration(0)
+		if !r.lastMeasured.IsZero() {
+			wait = every - now().Sub(r.lastMeasured)
+		}
+		r.mu.Unlock()
+		if wait > 0 {
+			t := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return
+			case <-t.C:
+			}
+		}
+		c := r.Meter(ctx)
+		if ctx.Err() != nil {
+			return // cut short by the link going down: measure again on the next one
+		}
+		r.mu.Lock()
+		r.lastMeasured, r.pending = now(), &c
+		r.mu.Unlock()
+		select {
+		case measured <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// take returns the measurement waiting to be sent, if any.
+func (r *Reporter) take() *protocol.SpaceConsumers {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c := r.pending
+	r.pending = nil
+	return c
+}
+
+// putBack keeps an undelivered measurement unless a newer one arrived meanwhile.
+func (r *Reporter) putBack(c *protocol.SpaceConsumers) {
+	if c == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pending == nil {
+		r.pending = c
 	}
 }

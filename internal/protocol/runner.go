@@ -85,6 +85,7 @@ const (
 	ErrCodeUnsupportedProto  = "unsupported_protocol" // 426: subprotocol not offered
 	ErrCodeBrowserNotAllowed = "origin_not_allowed"   // 403: browsers (Origin header) may not connect
 	ErrCodeBusy              = "busy"                 // 503: connection limit reached
+	ErrCodeMisdirected       = "misdirected"          // 421: Host is not one of the Control Plane's public origins
 )
 
 // ErrAuthField means a transcript field is empty or could make the transcript ambiguous.

@@ -441,3 +441,17 @@ func TestRunnerEnrollmentEndToEnd(t *testing.T) {
 		t.Fatalf("after revoke: %v", err)
 	}
 }
+
+func TestParseAudiences(t *testing.T) {
+	t.Parallel()
+	got, err := parseAudiences(" https://CP.example.com:443/ , http://127.0.0.1:8080")
+	if err != nil || len(got) != 2 || got[0] != "https://cp.example.com" || got[1] != "http://127.0.0.1:8080" {
+		t.Fatalf("got %v %v", got, err)
+	}
+	if got, err := parseAudiences(""); err != nil || got != nil {
+		t.Fatalf("empty: %v %v", got, err)
+	}
+	if _, err := parseAudiences("cp.example.com"); err == nil {
+		t.Fatal("origin without scheme accepted")
+	}
+}

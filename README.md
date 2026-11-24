@@ -119,6 +119,9 @@ ai-runner fingerprint                                    # compare with the runn
   connection attempts per minute per address, 256 connections (32 still authenticating); browsers (an `Origin`
   header) are refused. Plain `ws://` is accepted only from loopback (in Docker also from the compose network,
   `KINDEV_RUNNER_PLAIN_WS_PEERS`); remote runners use the HTTPS profile, where Caddy proxies the WebSocket upgrade.
+  `--public-url` / `KINDEV_PUBLIC_URL` (e.g. `https://ai.example.com`) pins the origins runners may dial; a connection
+  addressed to another host is refused (421), so a relay cannot obtain a signature for itself. A revoked or disabled
+  runner that ignores the close frame is cut off after 1 s.
 
 ### Integrations and external calls
 

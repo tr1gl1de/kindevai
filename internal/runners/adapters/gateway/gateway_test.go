@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,6 +39,7 @@ func (projects) Lookup(_ context.Context, id string) (app.ProjectRef, error) {
 }
 
 type env struct {
+	h      *Handler
 	svc    *app.Service
 	hub    *app.Hub
 	srv    *httptest.Server
@@ -47,9 +49,10 @@ type env struct {
 }
 
 type opts struct {
-	cfg     Config
-	limiter *ratelimit.Limiter
-	server  func(*http.Server) // adjust the HTTP server before it starts
+	cfg      Config
+	messages map[string]MessageFunc
+	limiter  *ratelimit.Limiter
+	server   func(*http.Server) // adjust the HTTP server before it starts
 }
 
 // newEnv serves the gateway over a real SQLite database with one enrolled runner.
@@ -88,7 +91,7 @@ func newEnv(t *testing.T, o opts) *env {
 	}
 	h := &Handler{
 		Gateway: &app.Gateway{Runners: repo, Hub: hub, Rand: rand.Reader, Now: time.Now, NewID: rand.Text},
-		Limiter: o.limiter, Config: o.cfg,
+		Limiter: o.limiter, Config: o.cfg, Messages: o.messages,
 	}
 	mux := http.NewServeMux()
 	h.Register(mux)
@@ -99,7 +102,7 @@ func newEnv(t *testing.T, o opts) *env {
 	srv.Config.RegisterOnShutdown(hub.Shutdown)
 	srv.Start()
 	t.Cleanup(func() { hub.Shutdown(); srv.Close() })
-	return &env{svc: svc, hub: hub, srv: srv, url: "ws" + strings.TrimPrefix(srv.URL, "http") + protocol.ConnectPath,
+	return &env{h: h, svc: svc, hub: hub, srv: srv, url: "ws" + strings.TrimPrefix(srv.URL, "http") + protocol.ConnectPath,
 		runner: res.Runner.ID, key: priv}
 }
 
@@ -419,7 +422,10 @@ func TestHTTPChecksBeforeUpgrade(t *testing.T) {
 	if code, msg := status(http.Header{"Origin": {"https://evil.example"}}); code != http.StatusForbidden || msg != protocol.ErrCodeBrowserNotAllowed {
 		t.Fatalf("browser origin: %d %s", code, msg)
 	}
-	dial(t, e.url) // third attempt passes
+	// Refused requests above did not spend the per-address budget (burst 3); well-formed attempts do.
+	for range 3 {
+		dial(t, e.url)
+	}
 	if code, _ := status(nil); code != http.StatusTooManyRequests {
 		t.Fatalf("rate limit: %d", code)
 	}
@@ -493,5 +499,59 @@ func TestShutdownClosesSessions(t *testing.T) {
 	e.hub.Shutdown()
 	if code := closeCode(t, c); code != int(websocket.StatusGoingAway) {
 		t.Fatalf("close %d", code)
+	}
+}
+
+// A revoked runner that ignores the close frame is cut off anyway: nothing it sends afterwards is dispatched
+// and its TCP connection is gone within the close grace period.
+func TestRevokeCutsOffAnUncooperativeRunner(t *testing.T) {
+	t.Parallel()
+	var handled atomic.Int32
+	e := newEnv(t, opts{messages: map[string]MessageFunc{"runner.test": func(context.Context, app.Session, protocol.Envelope) error {
+		handled.Add(1)
+		return nil
+	}}})
+	e.approve(t)
+	c, _ := e.connect(t)
+	send(t, c, "runner.test", map[string]int{}) // dispatched while approved
+	waitFor(t, "the message to be handled", func() bool { return handled.Load() == 1 })
+	if _, err := e.svc.Revoke(t.Context(), owner, e.runner); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	send(t, c, "runner.test", map[string]int{}) // the runner never reads, so it never answers the close frame
+	waitFor(t, "the connection handler to end", func() bool { return e.h.Live() == 0 })
+	if d := time.Since(start); d > closeGrace+time.Second {
+		t.Fatalf("connection lingered %v", d)
+	}
+	if n := handled.Load(); n != 1 {
+		t.Fatalf("revoked runner's message was dispatched (%d)", n)
+	}
+}
+
+func TestForeignAudienceIsRefusedWhenOriginsAreConfigured(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, opts{cfg: Config{Audiences: []string{"https://cp.example.com"}}})
+	_, resp, err := websocket.Dial(t.Context(), e.url, &websocket.DialOptions{Subprotocols: []string{protocol.Subprotocol}})
+	if err == nil || resp == nil || resp.StatusCode != http.StatusMisdirectedRequest {
+		t.Fatalf("relay with its own Host: %v %v", resp, err)
+	}
+	ok := newEnv(t, opts{})
+	ok.h.Config.Audiences = []string{protocol.Audience(false, ok.srv.Listener.Addr().String())}
+	ok.approve(t)
+	ok.connect(t)
+}
+
+func TestWaitDrainsConnectionsAfterShutdown(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, opts{})
+	e.approve(t)
+	c, _ := e.connect(t)
+	e.hub.Shutdown()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	go func() { _ = closeCode(t, c) }() // a cooperative runner answers the close
+	if err := e.h.Wait(ctx); err != nil || e.h.Live() != 0 {
+		t.Fatalf("Wait = %v, live %d", err, e.h.Live())
 	}
 }

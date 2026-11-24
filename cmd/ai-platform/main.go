@@ -82,7 +82,14 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	plainPeers := fset.String("runner-plain-ws-peers", os.Getenv("KINDEV_RUNNER_PLAIN_WS_PEERS"),
 		"comma-separated CIDRs treated as this host for plain ws:// runner connections besides loopback "+
 			"(e.g. the Docker network when the port is published on 127.0.0.1 only); remote runners need wss://")
+	publicURL := fset.String("public-url", os.Getenv("KINDEV_PUBLIC_URL"),
+		"comma-separated public origins of the Control Plane (e.g. https://kindevai.example.com); when set, runner "+
+			"connections for any other host are refused")
 	if err := fset.Parse(args); err != nil {
+		return err
+	}
+	audiences, err := parseAudiences(*publicURL)
+	if err != nil {
 		return err
 	}
 	trusted, err := httpx.ParseTrustedProxies(*proxies)
@@ -119,7 +126,8 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	hub := runnersapp.NewHub()
 	modules := append(identity.Modules, newProjects(inst, identity, audit, hub, logger)...)
 	modules = append(modules, msg.HTTP, audit.HTTP, newIntegrations(inst, msg, audit, logger).HTTP)
-	modules = append(modules, newRunnerGateway(inst, hub, localPeers, logger))
+	gateway := newRunnerGateway(inst, hub, localPeers, audiences, logger)
+	modules = append(modules, gateway)
 	defer msg.start(ctx)() // deferred after inst.Close, so the dispatchers stop before the database closes
 
 	assets, built := web.Assets()
@@ -160,6 +168,10 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutting down: %w", err)
+	}
+	// Runner WebSockets are hijacked, so Shutdown does not wait for them; the hub already sent them "going away".
+	if err := gateway.Wait(shutdownCtx); err != nil {
+		logger.Warn("runner connections still open at shutdown", "count", gateway.Live())
 	}
 	if err := <-errc; !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serving: %w", err)

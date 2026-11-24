@@ -7,17 +7,20 @@
 package gateway
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/netip"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -41,6 +44,10 @@ type Config struct {
 	// PlainPeers are TCP peers treated like loopback for plain ws:// (e.g. Docker's gateway when the port is
 	// published on the host's 127.0.0.1 only). Everything else must arrive over TLS.
 	PlainPeers []netip.Prefix
+	// Audiences are the Control Plane origins runners may dial (e.g. "https://kindevai.example.com"). When set, a
+	// request for any other Host is refused (421), so a relay that dials with its own Host cannot get a challenge
+	// signed for itself. Empty: the audience is derived from the request (the runner still checks it).
+	Audiences []string
 }
 
 func (c Config) withDefaults() Config {
@@ -74,6 +81,8 @@ type Handler struct {
 	Messages map[string]MessageFunc // message types accepted after authorization; anything else closes 4400
 	Logger   *slog.Logger
 
+	live       sync.WaitGroup // connection handlers that have upgraded; Wait drains them on shutdown
+	active     atomic.Int64
 	once       sync.Once
 	cfg        Config
 	conns      chan struct{}
@@ -112,10 +121,6 @@ func acquire(sem chan struct{}) (release func(), ok bool) {
 func (h *Handler) connect(w http.ResponseWriter, r *http.Request) {
 	h.init()
 	client := httpx.ClientIP(r)
-	if h.Limiter != nil && !h.Limiter.Allow(client) {
-		httpx.WriteError(w, http.StatusTooManyRequests, "rate_limited", "too many connection attempts")
-		return
-	}
 	if err := h.transportAllowed(r); err != nil {
 		h.logger().Warn("runner connection refused", "client", client, "reason", err)
 		httpx.WriteError(w, http.StatusForbidden, protocol.ErrCodePlainRemote, err.Error())
@@ -128,6 +133,17 @@ func (h *Handler) connect(w http.ResponseWriter, r *http.Request) {
 	if !offers(r, protocol.Subprotocol) {
 		httpx.WriteError(w, http.StatusUpgradeRequired, protocol.ErrCodeUnsupportedProto,
 			"this Control Plane speaks the runner protocol "+protocol.Subprotocol+"; upgrade ai-runner")
+		return
+	}
+	audience := protocol.Audience(secure(r), r.Host)
+	if len(h.Config.Audiences) > 0 && !slices.Contains(h.Config.Audiences, audience) {
+		h.logger().Warn("runner connection for a foreign address refused", "client", client, "audience", printable(audience))
+		httpx.WriteError(w, http.StatusMisdirectedRequest, protocol.ErrCodeMisdirected, "this Control Plane is not "+printable(audience))
+		return
+	}
+	// Charged only for well-formed attempts, so stray requests cannot lock out runners sharing an address.
+	if h.Limiter != nil && !h.Limiter.Allow(client) {
+		httpx.WriteError(w, http.StatusTooManyRequests, "rate_limited", "too many connection attempts")
 		return
 	}
 	releaseConn, ok := acquire(h.conns)
@@ -146,7 +162,8 @@ func (h *Handler) connect(w http.ResponseWriter, r *http.Request) {
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Time{})
 	_ = rc.SetWriteDeadline(time.Time{})
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+	hj := &hijackRecorder{ResponseWriter: w}
+	c, err := websocket.Accept(hj, r, &websocket.AcceptOptions{
 		Subprotocols: []string{protocol.Subprotocol}, CompressionMode: websocket.CompressionDisabled,
 	})
 	if err != nil {
@@ -154,24 +171,35 @@ func (h *Handler) connect(w http.ResponseWriter, r *http.Request) {
 		h.logger().Warn("runner websocket upgrade failed", "client", client, "err", err)
 		return
 	}
+	h.live.Add(1)
+	h.active.Add(1)
+	defer func() { h.active.Add(-1); h.live.Done() }()
 	defer func() { _ = c.CloseNow() }()
 	c.SetReadLimit(protocol.MaxMessageBytes)
 
-	sess, ok := h.handshake(r.Context(), c, protocol.Audience(secure(r), r.Host), client)
+	// ctx ends the session (no more dispatching); closeGrace later the TCP connection is closed even when the
+	// runner never answers the close frame (the library would otherwise wait 5 s for it).
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	stop := func() {
+		cancel()
+		time.AfterFunc(closeGrace, hj.closeConn)
+	}
+	sess, ok := h.handshake(ctx, stop, c, audience, client)
 	releaseHandshake()
 	if !ok {
 		return
 	}
 	defer sess.Detach()
 	h.logger().Info("runner connected", "runner", sess.RunnerID, "session", sess.ID, "client", client)
-	err = h.serve(r.Context(), c, sess)
+	err = h.serve(ctx, c, sess)
 	h.logger().Info("runner disconnected", "runner", sess.RunnerID, "session", sess.ID, "reason", err)
 }
 
 func secure(r *http.Request) bool { return r.TLS != nil || httpx.ForwardedProto(r) == "https" }
 
-var errPlainRemote = errors.New("plain ws:// is accepted only from this host (loopback); remote runners must " +
-	"connect with wss:// through the HTTPS profile")
+var errPlainRemote = errors.New("plain ws:// (or a proxy forwarding without TLS) is accepted only from this host " +
+	"(loopback); remote runners must connect with wss:// through the HTTPS profile")
 
 // transportAllowed: TLS (directly or terminated by a trusted proxy) from anywhere; plain ws:// only from the TCP
 // peer loopback (or a configured local peer) and only when no proxy forwarded the request on someone's behalf.
@@ -242,7 +270,7 @@ func strict(raw json.RawMessage, v any) error {
 	return dec.Decode(v)
 }
 
-func (h *Handler) handshake(ctx context.Context, c *websocket.Conn, audience, client string) (app.Session, bool) {
+func (h *Handler) handshake(ctx context.Context, stop func(), c *websocket.Conn, audience, client string) (app.Session, bool) {
 	ch, err := h.Gateway.NewChallenge(audience)
 	if err != nil {
 		h.logger().Error("creating runner challenge", "err", err)
@@ -275,9 +303,13 @@ func (h *Handler) handshake(ctx context.Context, c *websocket.Conn, audience, cl
 	if err != nil {
 		sig = nil
 	}
+	// closeFn ends the session at once: stop dispatching messages, send the close code and tear the TCP
+	// connection down after closeGrace even if the runner never answers the close frame. It never blocks the
+	// caller (an Owner's revoke request).
 	closeFn := func(reason app.DisconnectReason) {
 		code, text := disconnectCode(reason)
-		go closeWith(c, code, text) // never block the caller (an Owner's revoke request)
+		stop()
+		go closeWith(c, code, text)
 	}
 	sess, err := h.Gateway.Authenticate(ctx, ch, app.Credentials{RunnerID: auth.RunnerID, Fingerprint: auth.Fingerprint,
 		Signature: sig}, closeFn)
@@ -325,15 +357,21 @@ func disconnectCode(r app.DisconnectReason) (int, string) {
 	return int(websocket.StatusGoingAway), "control plane is shutting down"
 }
 
-// serve runs an authorized session until it closes: a keepalive pinger and the message loop.
+// closeGrace bounds how long a closed session's TCP connection may linger waiting for the runner's close reply.
+const closeGrace = time.Second
+
+// serve runs an authorized session until it closes: a keepalive pinger and the message loop. ctx is cancelled
+// when the hub closes the session; from then on nothing is dispatched.
 func (h *Handler) serve(ctx context.Context, c *websocket.Conn, s app.Session) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	go h.keepalive(ctx, c)
 	for {
-		env, ok := read(ctx, c)
+		// Not ctx: cancelling a Read tears the connection down before the close frame is sent; stop bounds it.
+		env, ok := read(context.WithoutCancel(ctx), c)
 		if !ok {
 			return errors.New("connection closed")
+		}
+		if ctx.Err() != nil {
+			return errors.New("session closed by the Control Plane")
 		}
 		fn := h.Messages[env.Type]
 		if fn == nil {
@@ -377,4 +415,44 @@ func printable(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// Wait blocks until every upgraded connection handler has returned or ctx ends. Call it after the hub's
+// Shutdown, so the going-away close frames reach the runners before the process exits.
+func (h *Handler) Wait(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() { h.live.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Live is the number of upgraded connections still being served.
+func (h *Handler) Live() int { return int(h.active.Load()) }
+
+// hijackRecorder keeps the hijacked TCP connection, so a session can be cut off without waiting for the
+// runner's close reply.
+type hijackRecorder struct {
+	http.ResponseWriter
+	mu   sync.Mutex
+	conn net.Conn
+}
+
+func (h *hijackRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	c, brw, err := http.NewResponseController(h.ResponseWriter).Hijack()
+	h.mu.Lock()
+	h.conn = c
+	h.mu.Unlock()
+	return c, brw, err
+}
+
+func (h *hijackRecorder) closeConn() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.conn != nil {
+		_ = h.conn.Close()
+	}
 }

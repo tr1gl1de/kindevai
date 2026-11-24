@@ -72,7 +72,7 @@ describe("integrations page (owner)", () => {
     expect(await screen.findByText("Testing…")).toBeInTheDocument();
     expect(await screen.findByText("Connected as robot.", undefined, { timeout: 4000 })).toBeInTheDocument();
     await expectAccessible(container);
-  });
+  }, 15_000); // real polling plus two axe runs: the default 5s is too tight on a loaded machine
 
   it("shows server validation next to the field and keeps the token out of the next save", async () => {
     const bodies: unknown[] = [];

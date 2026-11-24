@@ -4,10 +4,13 @@ import { NavLink } from "react-router";
 import type { Me } from "../api/types";
 import { useLogout } from "../features/identity/api";
 import { LanguageSwitcher } from "../i18n/LanguageSwitcher";
+import { useAlerts } from "../features/alerts/api";
 
 export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
   const { t } = useTranslation();
   const logout = useLogout();
+  const alerts = useAlerts("active");
+  const open = alerts.data?.filter((a) => a.state === "OPEN").length ?? 0;
   return (
     <div className="shell">
       <a className="skip-link" href="#main">
@@ -21,6 +24,15 @@ export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
           </NavLink>
           <NavLink to="/projects">{t("nav.projects")}</NavLink>
           <NavLink to="/approvals">{t("nav.approvals")}</NavLink>
+          <NavLink to="/alerts">
+            {t("nav.alerts")}
+            {open > 0 && (
+              <span className="nav-count">
+                {open}
+                <span className="visually-hidden"> {t("nav.alertsOpen", { count: open })}</span>
+              </span>
+            )}
+          </NavLink>
           {me.role === "owner" && <NavLink to="/users">{t("nav.users")}</NavLink>}
           {me.role === "owner" && <NavLink to="/runners">{t("nav.runners")}</NavLink>}
           {me.role === "owner" && <NavLink to="/infrastructure/storage">{t("nav.storage")}</NavLink>}

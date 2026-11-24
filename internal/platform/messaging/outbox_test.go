@@ -619,3 +619,53 @@ func TestOutboxMissingHandlerDoesNotCloseCircuit(t *testing.T) {
 		t.Fatal("the probe slot was not released")
 	}
 }
+
+// KIN-40: messages that went dead only because no handler was registered yet are redelivered once their handler
+// exists; dead messages of still-unhandled topics and real failures stay dead.
+func TestOutboxRetryUnhandledRequeuesOnlyNowHandledTopics(t *testing.T) {
+	t.Parallel()
+	d, _ := newDB(t)
+	c := newClock()
+	o := messaging.NewOutbox(d, config(c))
+	for _, m := range []messaging.Message{
+		{Adapter: "alerts", Topic: "alerts.runner_unreachable", Key: "a", Payload: []byte(`{}`)},
+		{Adapter: "alerts", Topic: "alerts.nobody", Key: "b", Payload: []byte(`{}`)},
+		{Adapter: "github", Topic: "github.status", Key: "c", Payload: []byte(`{}`)},
+	} {
+		if err := o.Enqueue(t.Context(), m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	o.Handle("github.status", func(context.Context, messaging.Delivery) error {
+		return messaging.Permanent(errors.New("422"))
+	})
+	for range 2 { // two workers per poll
+		if _, err := o.Poll(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if dead, _ := o.Dead(t.Context(), 10); len(dead) != 3 {
+		t.Fatalf("dead = %+v, want 3", dead)
+	}
+	rec := &recorder{}
+	o.Handle("alerts.runner_unreachable", rec.deliver)
+	n, err := o.RetryUnhandled(t.Context())
+	if err != nil || n != 1 {
+		t.Fatalf("RetryUnhandled = %d, %v; want 1", n, err)
+	}
+	if _, err := o.Poll(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(rec.keys, []string{"a"}) {
+		t.Fatalf("delivered = %q, want [a]", rec.keys)
+	}
+	dead, _ := o.Dead(t.Context(), 10)
+	var left []string
+	for _, m := range dead {
+		left = append(left, m.Key)
+	}
+	slices.Sort(left)
+	if !slices.Equal(left, []string{"b", "c"}) {
+		t.Fatalf("still dead = %q, want [b c]", left)
+	}
+}

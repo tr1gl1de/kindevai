@@ -114,8 +114,13 @@ export function seedLocale(launch: TelegramLaunch | null, storageKey: string) {
   }
 }
 
-/** Splits a start parameter into its kind and token. */
-export function startTarget(startParam: string): { kind: "link" | "invite"; token: string } | null {
-  const m = /^(link|invite)_([A-Za-z0-9_-]{1,57})$/.exec(startParam);
-  return m ? { kind: m[1] as "link" | "invite", token: m[2]! } : null;
+export type StartKind = "link" | "invite" | "approval" | "alert";
+
+/**
+ * Splits a start parameter into its kind and token: link/invite flows before sign-in, approval/alert deep links
+ * from Telegram notifications (KIN-40) after it.
+ */
+export function startTarget(startParam: string): { kind: StartKind; token: string } | null {
+  const m = /^(link|invite|approval|alert)_([A-Za-z0-9_-]{1,57})$/.exec(startParam);
+  return m ? { kind: m[1] as StartKind, token: m[2]! } : null;
 }

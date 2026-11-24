@@ -475,3 +475,33 @@ func TestUnreportedEndIsListedWithItsResult(t *testing.T) {
 	ev.mu.Unlock()
 	waitFor(t, "reported", func() bool { return len(x.Attempts()) == 0 })
 }
+
+// KIN-63: a disabled or revoked runner stops every attempt itself (SIGTERM, SIGKILL after the grace period) and
+// StopAll returns only once the processes ended, so a revoked runner never exits leaving them behind.
+func TestStopAllTerminatesEveryAttemptAndWaits(t *testing.T) {
+	t.Parallel()
+	x, l, _, ev := newExecutor(domain.Policy{})
+	for _, step := range []string{"S1", "S2"} {
+		a := assignment("P1")
+		a.Step = step
+		if err := x.Assign(t.Context(), a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	x.StopAll(protocol.CancelRunnerRevoked)
+	for i := range 2 {
+		select {
+		case <-l.proc(i).exit:
+		default:
+			t.Fatalf("process %d still running after StopAll", i)
+		}
+		if s := l.proc(i).sent(); !slices.Equal(s, []bool{false, true}) {
+			t.Fatalf("process %d signals %v", i, s)
+		}
+	}
+	waitFor(t, "both failed", func() bool { return len(x.Attempts()) == 0 })
+	if e := ev.last(); e.kind != protocol.EventFailed || !strings.Contains(e.body, protocol.CancelRunnerRevoked) {
+		t.Fatalf("last event %+v", e)
+	}
+	x.StopAll(protocol.CancelRunnerRevoked) // nothing left: returns at once
+}

@@ -565,3 +565,21 @@ func TestSpaceConsumersAreValidatedAndNeverDropped(t *testing.T) {
 		t.Fatalf("a measurement right after another was dropped: %+v", got)
 	}
 }
+
+// KIN-60 AC: storage alerts resolve themselves: one recovery event when the volume falls below the recovery
+// threshold, none while it only dips under the warning level.
+func TestStorageRecoveryEventHasHysteresis(t *testing.T) {
+	t.Parallel()
+	f := newTelFixture(t)
+	r := f.approved(t, keyA)
+	for _, avail := range []int64{12, 28, 40, 40, 20, 50} { // high, 72% (no), 60% (recovered), again, warning, recovered
+		f.clock.add(time.Minute)
+		if err := f.tel.Storage(t.Context(), r.ID, "s1", []domain.Volume{volume(t, domain.RoleWorkspaces, 100*gib, avail*gib, f.clock.Now())}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []string{TopicStorageLevel, TopicStorageRecovered, TopicStorageLevel, TopicStorageRecovered}
+	if got := f.outbox.topics(); !slices.Equal(got, want) {
+		t.Fatalf("alerts = %v, want %v", got, want)
+	}
+}

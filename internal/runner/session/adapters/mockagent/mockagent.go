@@ -1,7 +1,8 @@
 // Package mockagent is the MockAgentAdapter's child process (KIN-23): a deterministic stand-in for an AI CLI that
-// runs as a real process (`ai-runner mock-agent --scenario <s> --attempt <n>`) in the attempt's working
-// directory. It prints a few lines, may fail, crash, hang or wait for a release file, and leaves its exit code in
-// result.json there, so a runner restarted meanwhile can still report how it ended.
+// runs as a real process (`ai-runner mock-agent --scenario <s> --attempt <n> --state <dir>`) in the attempt's
+// working directory. It prints a few lines, may fail, crash, hang or wait for a release file in the state
+// directory, and leaves its exit code in result.json there, so a runner restarted meanwhile can still report how
+// it ended.
 package mockagent
 
 import (
@@ -38,6 +39,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	scenario := fs.String("scenario", "success", "success|fail|flaky|crash|hang|gate")
 	attempt := fs.Int64("attempt", 1, "attempt fencing token")
 	poll := fs.Duration("poll", 20*time.Millisecond, "gate: how often to look for the release file")
+	state := fs.String("state", ".", "directory of the result and release files")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -46,17 +48,17 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	case "success":
 		fmt.Fprintln(stdout, "mock agent: reading the task")
 		fmt.Fprintln(stdout, "mock agent: done")
-		return finish(0)
+		return finish(*state, 0)
 	case "fail":
 		fmt.Fprintln(stderr, "mock agent: simulated failure")
-		return finish(1)
+		return finish(*state, 1)
 	case "flaky":
 		if *attempt <= 1 {
 			fmt.Fprintln(stderr, "mock agent: simulated failure on the first attempt")
-			return finish(1)
+			return finish(*state, 1)
 		}
 		fmt.Fprintln(stdout, "mock agent: succeeded on retry")
-		return finish(0)
+		return finish(*state, 0)
 	case "crash":
 		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
 		select {} // unreachable: SIGKILL cannot be caught
@@ -66,23 +68,23 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	case "gate":
 		fmt.Fprintln(stdout, "mock agent: waiting for release")
 		for {
-			if _, err := os.Stat(ReleaseFile); err == nil {
+			if _, err := os.Stat(filepath.Join(*state, ReleaseFile)); err == nil {
 				fmt.Fprintln(stdout, "mock agent: released")
-				return finish(0)
+				return finish(*state, 0)
 			}
 			time.Sleep(*poll)
 		}
 	}
 	fmt.Fprintf(stderr, "mock agent: unknown scenario %q\n", *scenario)
-	return finish(2)
+	return finish(*state, 2)
 }
 
 // finish records the exit code atomically (temp file + rename) and returns it.
-func finish(code int) int {
+func finish(state string, code int) int {
 	b, _ := json.Marshal(Result{ExitCode: code})
-	tmp := ResultFile + ".tmp"
+	tmp := filepath.Join(state, ResultFile+".tmp")
 	if err := os.WriteFile(tmp, b, 0o600); err == nil {
-		_ = os.Rename(tmp, ResultFile)
+		_ = os.Rename(tmp, filepath.Join(state, ResultFile))
 	}
 	return code
 }

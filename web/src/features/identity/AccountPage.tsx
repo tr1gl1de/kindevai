@@ -4,6 +4,7 @@ import { PageHeading } from "../../ui/feedback";
 import { useNotify } from "../../ui/notify";
 import { ChangePasswordForm } from "./ChangePasswordForm";
 import { TelegramLinkSection } from "../telegram/TelegramLinkSection";
+import { NotificationsSection } from "../alerts/NotificationsSection";
 
 export function AccountPage() {
   const { t } = useTranslation();
@@ -22,6 +23,7 @@ export function AccountPage() {
         }}
       />
       <TelegramLinkSection />
+      <NotificationsSection />
     </div>
   );
 }

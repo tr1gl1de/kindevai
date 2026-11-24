@@ -727,6 +727,29 @@ textarea {
   background: var(--warn-bg);
 }
 
+/* Alert Center (KIN-40) */
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.nav-count {
+  display: inline-block;
+  min-width: 1.5em;
+  margin-inline-start: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  font-size: 0.8rem;
+  text-align: center;
+}
+.checkbox-list {
+  display: grid;
+  gap: 8px;
+  border: 0;
+  padding: 0;
+  margin: 0 0 var(--space);
 /* Infrastructure → Storage and the Runners card (KIN-55) */
 .runner-counts {
   list-style: none;

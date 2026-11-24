@@ -124,6 +124,9 @@ func Permanent(err error) error {
 	return permanentError{err}
 }
 
+// IsPermanent reports whether err was marked with Permanent.
+func IsPermanent(err error) bool { return isPermanent(err) }
+
 func isPermanent(err error) bool {
 	var p permanentError
 	return errors.As(err, &p)

@@ -131,16 +131,16 @@ func (r runnerExecutions) CheckAttempt(ctx context.Context, runnerID, step strin
 	return attemptError(r.wf.CheckFence(ctx, step, runnerID, fence))
 }
 
-func (r runnerExecutions) StartAttempt(ctx context.Context, runnerID, step string, fence int64) error {
-	return attemptError(r.wf.StartStep(ctx, step, runnerID, fence))
+func (r runnerExecutions) StartAttempt(ctx context.Context, runnerID, step string, fence int64, at time.Time, agent string) error {
+	return attemptError(r.wf.StartStepAt(ctx, step, runnerID, fence, at, agent))
 }
 
-func (r runnerExecutions) CompleteAttempt(ctx context.Context, runnerID, step string, fence int64) error {
-	return attemptError(r.wf.CompleteStep(ctx, step, runnerID, fence))
+func (r runnerExecutions) CompleteAttempt(ctx context.Context, runnerID, step string, fence int64, at time.Time) error {
+	return attemptError(r.wf.CompleteStepAt(ctx, step, runnerID, fence, at))
 }
 
-func (r runnerExecutions) FailAttempt(ctx context.Context, runnerID, step string, fence int64, reason string) error {
-	return attemptError(r.wf.FailStep(ctx, step, runnerID, fence, reason))
+func (r runnerExecutions) FailAttempt(ctx context.Context, runnerID, step string, fence int64, reason string, at time.Time) error {
+	return attemptError(r.wf.FailStepAt(ctx, step, runnerID, fence, reason, at))
 }
 
 func attemptError(err error) error {

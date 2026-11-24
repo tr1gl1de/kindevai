@@ -220,7 +220,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var q app.ListQuery
+	q := app.ListQuery{TaskID: r.URL.Query().Get("taskId")}
 	switch r.URL.Query().Get("state") {
 	case "", "all":
 	case "pending":

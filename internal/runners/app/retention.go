@@ -23,6 +23,9 @@ type RetentionRepo interface {
 	DeleteEvents(ctx context.Context, refs []domain.EventRef) (int64, error)
 	// OutputUsage is the total of counted output bytes.
 	OutputUsage(ctx context.Context) (int64, error)
+	// DeleteRevokedCommands deletes up to limit commands, acknowledged or not, from the logs of revoked runners
+	// (KIN-72) and returns how many it deleted.
+	DeleteRevokedCommands(ctx context.Context, limit int) (int64, error)
 }
 
 // FinishedSteps is the workflow as the retention needs it: of the given steps, those whose execution finished
@@ -45,6 +48,8 @@ type RetentionReport struct {
 	OutputAttempts int   // attempts whose output was deleted
 	OutputBytes    int64 // their output bytes
 	Events         int64 // other events deleted
+	// RevokedCommands: commands deleted from the logs of revoked runners (KIN-72).
+	RevokedCommands int64
 }
 
 // Retention deletes recorded runner events by the policy (KIN-52). Records of a running execution are kept.
@@ -79,12 +84,16 @@ func (r *Retention) pause(ctx context.Context) error {
 	}
 }
 
-// Purge runs one pass: expired output, then the output limit, then expired events.
+// Purge runs one pass: the command logs of revoked runners, expired output, then the output limit, then expired
+// events.
 func (r *Retention) Purge(ctx context.Context) (RetentionReport, error) {
 	var rep RetentionReport
 	now := r.Now()
 	outputCutoff, eventCutoff := now.Add(-r.Policy.Output), now.Add(-r.Policy.Events)
-	err := r.purgeOutput(ctx, &rep, outputCutoff, func(finished time.Time) bool { return domain.Expired(finished, outputCutoff) }, nil)
+	err := r.purgeRevokedCommands(ctx, &rep)
+	if err == nil {
+		err = r.purgeOutput(ctx, &rep, outputCutoff, func(finished time.Time) bool { return domain.Expired(finished, outputCutoff) }, nil)
+	}
 	if err == nil {
 		err = r.enforceLimit(ctx, &rep, now)
 	}
@@ -93,7 +102,7 @@ func (r *Retention) Purge(ctx context.Context) (RetentionReport, error) {
 	}
 	if rep != (RetentionReport{}) {
 		r.logger().Info("runner events purged", "output_attempts", rep.OutputAttempts, "output_bytes", rep.OutputBytes,
-			"events", rep.Events)
+			"events", rep.Events, "revoked_commands", rep.RevokedCommands)
 	}
 	return rep, err
 }
@@ -114,6 +123,26 @@ func (r *Retention) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+		}
+	}
+}
+
+// purgeRevokedCommands empties the command logs of revoked runners (KIN-72). Revocation is final (KIN-17): the
+// runner never connects again, so its commands, acknowledged or not, can never be delivered, and their bodies may
+// hold sealed proxy passwords (runner.config.update, KIN-30). Nothing else reads the log, and KIN-63 already ended
+// the runner's attempts in the revocation's transaction, so deleting it settles nothing.
+func (r *Retention) purgeRevokedCommands(ctx context.Context, rep *RetentionReport) error {
+	for {
+		n, err := r.Repo.DeleteRevokedCommands(ctx, outputBatch)
+		if err != nil {
+			return err
+		}
+		rep.RevokedCommands += n
+		if n < outputBatch {
+			return nil
+		}
+		if err := r.pause(ctx); err != nil {
+			return err
 		}
 	}
 }

@@ -150,13 +150,13 @@ func (w *okWorkflow) rec(s string) error {
 func (w *okWorkflow) CheckAttempt(context.Context, string, string, int64) error {
 	return w.rec("check")
 }
-func (w *okWorkflow) StartAttempt(context.Context, string, string, int64) error {
+func (w *okWorkflow) StartAttempt(context.Context, string, string, int64, time.Time, string) error {
 	return w.rec("start")
 }
-func (w *okWorkflow) CompleteAttempt(context.Context, string, string, int64) error {
+func (w *okWorkflow) CompleteAttempt(context.Context, string, string, int64, time.Time) error {
 	return w.rec("complete")
 }
-func (w *okWorkflow) FailAttempt(context.Context, string, string, int64, string) error {
+func (w *okWorkflow) FailAttempt(context.Context, string, string, int64, string, time.Time) error {
 	return w.rec("fail")
 }
 

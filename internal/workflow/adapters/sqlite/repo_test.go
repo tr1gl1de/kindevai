@@ -463,21 +463,96 @@ func TestSchedulingAndListingQueries(t *testing.T) {
 	if ids, err := repo.ExecutionsHeldBy(ctx, "r1"); err != nil || len(ids) != 1 || ids[0] != e.ID {
 		t.Fatalf("held %v %v", ids, err)
 	}
-	list, err := repo.ListTasks(ctx, []string{"p1", "nope"}, 10)
+	list, err := repo.ListTasks(ctx, app.TaskFilter{ProjectIDs: []string{"p1", "nope"}}, 10)
 	if err != nil || len(list) != 2 {
 		t.Fatalf("list %+v %v", list, err)
 	}
-	if l, _ := repo.ListTasks(ctx, []string{"p1"}, 1); len(l) != 1 {
+	if l, _ := repo.ListTasks(ctx, app.TaskFilter{ProjectIDs: []string{"p1"}}, 1); len(l) != 1 {
 		t.Fatalf("limit %d", len(l))
 	}
-	if l, err := repo.ListTasks(ctx, nil, 10); err != nil || len(l) != 0 {
+	if l, err := repo.ListTasks(ctx, app.TaskFilter{}, 10); err != nil || len(l) != 0 {
 		t.Fatalf("no projects %v %v", l, err)
+	}
+	l, err := repo.ListTasks(ctx, app.TaskFilter{ProjectIDs: []string{"p1"}, States: []domain.TaskState{domain.TaskCreated, domain.TaskFailed}}, 10)
+	if err != nil || len(l) != 1 || l[0].ID != other.ID {
+		t.Fatalf("by state %+v %v", l, err)
+	}
+	if l, _ := repo.ListTasks(ctx, app.TaskFilter{TaskIDs: []string{task.ID}}, 10); len(l) != 1 || l[0].ID != task.ID {
+		t.Fatalf("by id %+v", l)
 	}
 	if got, err := repo.LatestExecution(ctx, task.ID); err != nil || got.ID != e.ID || len(got.Steps) != 3 {
 		t.Fatalf("latest %+v %v", got.ID, err)
 	}
 	if _, err := repo.LatestExecution(ctx, other.ID); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("latest of a task without executions: %v", err)
+	}
+}
+
+// Work periods, the agent and the incomplete mark survive a save and load; EachAttempt and ExecutionSpans feed the
+// task's agent time and calendar duration (KIN-25).
+func TestAgentTimeIsStored(t *testing.T) {
+	t.Parallel()
+	d, _ := testDB(t)
+	ctx := t.Context()
+	now := t0
+	svc := service(d, func() time.Time { return now })
+	repo := sqlite.New(d)
+	task, e := running(t, svc)
+	back, lint := e.StepByKey("backend").ID, e.StepByKey("lint").ID
+	for _, id := range []string{back, lint} {
+		if _, err := svc.Claim(ctx, id, "r1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.StartStepAt(ctx, id, "r1", 1, t0.Add(-time.Hour), "mock"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now = t0.Add(time.Minute)
+	if err := svc.CompleteStepAt(ctx, back, "r1", 1, t0.Add(-time.Hour+1500*time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.FailStepAt(ctx, lint, "r1", 1, "boom", time.Time{}); err != nil { // unusable time
+		t.Fatal(err)
+	}
+	got, err := repo.Execution(ctx, e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := got.Step(back).Attempts[0]
+	if a.Agent != "mock" || !a.WorkStart.Equal(t0.Add(-time.Hour)) || !a.WorkEnd.Equal(t0.Add(-time.Hour+1500*time.Millisecond)) || a.WorkIncomplete {
+		t.Fatalf("backend attempt %+v", a)
+	}
+	if l := got.Step(lint).Attempts[0]; !l.WorkIncomplete || l.WorkEnd != nil {
+		t.Fatalf("lint attempt %+v", l)
+	}
+	n := 0
+	err = repo.EachAttempt(ctx, app.TaskFilter{ProjectIDs: []string{"p1"}, States: []domain.TaskState{domain.TaskRunning}},
+		func(id string, a domain.Attempt) error {
+			if id != task.ID {
+				t.Errorf("attempt of %s", id)
+			}
+			n++
+			return nil
+		})
+	if err != nil || n != 2 {
+		t.Fatalf("EachAttempt %d %v", n, err)
+	}
+	if err := repo.EachAttempt(ctx, app.TaskFilter{TaskIDs: []string{"nope"}}, func(string, domain.Attempt) error {
+		t.Error("attempt of another task")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	spans, err := repo.ExecutionSpans(ctx, []string{task.ID, "nope"})
+	if err != nil || len(spans) != 1 || !spans[task.ID].Start.Equal(t0) || spans[task.ID].End != nil {
+		t.Fatalf("running span %+v %v", spans, err)
+	}
+	if _, err := svc.CancelTask(ctx, task.ID, "stop"); err != nil {
+		t.Fatal(err)
+	}
+	spans, _ = repo.ExecutionSpans(ctx, []string{task.ID})
+	if sp := spans[task.ID]; sp.End == nil || !sp.End.Equal(now) {
+		t.Fatalf("finished span %+v", sp)
 	}
 }
 

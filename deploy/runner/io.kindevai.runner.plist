@@ -26,6 +26,10 @@
     <key>SuccessfulExit</key>
     <false/>
   </dict>
+  <!-- KIN-64: unloading or restarting the agent stops only the daemon; attempt processes (own process groups)
+       keep running and the next start adopts them. To stop them too, disable the runner in the Dashboard. -->
+  <key>AbandonProcessGroup</key>
+  <true/>
   <key>ThrottleInterval</key>
   <integer>5</integer>
   <key>Umask</key>

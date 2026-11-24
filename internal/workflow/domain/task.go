@@ -77,6 +77,7 @@ var taskTransitions = map[TaskState][]TaskState{
 	TaskRunning:          {TaskVerifying, TaskBlocked, TaskFailed, TaskCancelled},
 	TaskVerifying:        {TaskRunning, TaskCompleted, TaskBlocked, TaskFailed, TaskCancelled},
 	TaskBlocked:          {TaskFailed, TaskCancelled},
+	TaskFailed:           {TaskAnalyzing}, // retry (KIN-25): a new revision of the plan, checked by policy and approvals again
 }
 
 // TaskTransitionAllowed reports whether the Task FSM has the edge from -> to.
@@ -84,7 +85,7 @@ func TaskTransitionAllowed(from, to TaskState) bool {
 	return slices.Contains(taskTransitions[from], to)
 }
 
-// Terminal reports a final task state.
+// Terminal reports a final task state (closed; only a FAILED task may be retried, which plans it again).
 func (s TaskState) Terminal() bool {
 	return s == TaskCompleted || s == TaskFailed || s == TaskCancelled
 }

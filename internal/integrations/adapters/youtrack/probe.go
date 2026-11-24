@@ -1,5 +1,5 @@
-// Package youtrack is the YouTrack REST adapter of the integrations context. For now it only tests a connection
-// (KIN-26) and reads issues for the intake (KIN-27). It runs from outbox deliveries and the poller, never from
+// Package youtrack is the YouTrack REST adapter of the integrations context: it tests a connection (KIN-26)
+// and reads issues for the intake (KIN-27). It runs from outbox deliveries and the poller, never from
 // HTTP handlers.
 package youtrack
 

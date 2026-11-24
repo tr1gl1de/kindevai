@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"slices"
 	"sync"
 	"time"
 
+	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	runnersgw "github.com/tr1gl1de/kindevai/internal/runners/adapters/gateway"
+	runnersdb "github.com/tr1gl1de/kindevai/internal/runners/adapters/sqlite"
 	runnersapp "github.com/tr1gl1de/kindevai/internal/runners/app"
 	workflowapp "github.com/tr1gl1de/kindevai/internal/workflow/app"
 )
@@ -114,4 +117,46 @@ func (r workflowReconciler) Reconciled(ctx context.Context, runnerID string, res
 			Result: a.Result != ""})
 	}
 	return r.wf.ReconcileRunner(ctx, runnerID, reports)
+}
+
+// wireAttemptLog gives the task API (KIN-25) the attempts' recorded runner events.
+func wireAttemptLog(wf *workflowapp.Service, inst *bootstrap.Installation) {
+	wf.Log = workflowAttemptLog{log: runnersapp.AttemptLog{Repo: runnersdb.New(inst.DB)}}
+}
+
+// workflowAttemptLog translates the runners context's recorded events into what the task UI shows. Bodies are
+// the runner's (untrusted) data: they are decoded into typed fields and served as text, never interpreted.
+type workflowAttemptLog struct{ log runnersapp.AttemptLog }
+
+func (l workflowAttemptLog) AttemptEvents(ctx context.Context, stepID string, fence, after int64, limit int) ([]workflowapp.AttemptEvent, error) {
+	evs, err := l.log.Events(ctx, stepID, fence, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]workflowapp.AttemptEvent, 0, len(evs))
+	for _, e := range evs {
+		v := workflowapp.AttemptEvent{Seq: e.AttemptSeq, Kind: e.Kind, At: e.RunnerAt}
+		switch e.Kind {
+		case protocol.EventOutput:
+			var o protocol.Output
+			if e.Body == nil || json.Unmarshal(e.Body, &o) != nil {
+				v.Omitted, v.Reason = true, e.Reason
+				break
+			}
+			v.Stream, v.Offset, v.Data = o.Stream, o.Offset, o.Data
+		case protocol.EventOutputDropped:
+			var d protocol.OutputDropped
+			if e.Body == nil || json.Unmarshal(e.Body, &d) != nil {
+				v.Omitted, v.Reason = true, e.Reason
+				break
+			}
+			v.Bytes = d.Bytes
+		case protocol.EventFailed:
+			var f protocol.Failure
+			_ = json.Unmarshal(e.Body, &f)
+			v.Reason = f.Reason
+		}
+		out = append(out, v)
+	}
+	return out, nil
 }

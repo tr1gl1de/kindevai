@@ -150,6 +150,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	// KIN-59: stored runner output in the Storage Overview, "output storage full" alerts.
 	reportOutputStorage(inst, msg, tel, channel, retention)
 	wireExecution(apv.Workflow, channel, gateway, tel, hub, logger)    // KIN-23 scheduler, leases, reconciliation
+	wireAttemptLog(apv.Workflow, inst)                                 // KIN-25 attempt events in the task UI
 	netSvc, netHTTP := newNetwork(inst, audit, integ, channel, logger) // KIN-30 network profiles
 	attachNetwork(gateway, netSvc, logger)
 	modules = append(modules, netHTTP)

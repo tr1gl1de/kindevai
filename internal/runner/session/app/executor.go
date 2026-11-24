@@ -264,7 +264,7 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 		x.logger().Error("recording the attempt's process", "step", a.Step, "err", err)
 	}
 	x.runs[k] = r
-	if err := r.stream.Emit(protocol.EventStarted, nil); err != nil {
+	if err := r.stream.Emit(protocol.EventStarted, protocol.Started{Agent: protocol.AdapterMock}); err != nil {
 		x.logger().Error("emitting started", "step", a.Step, "err", err)
 	}
 	x.watch(r)

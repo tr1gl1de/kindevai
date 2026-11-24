@@ -1,13 +1,15 @@
-// Package httpapi exposes the minimal task API of the workflow context (KIN-23; the full UI is KIN-25):
-// list and details of tasks with their plan revision, latest execution, steps and attempts, creating a manual
-// task, starting a mock run and cancelling. Members see their projects' tasks; the Owner and project admins
-// manage them.
+// Package httpapi exposes the task API of the workflow context (KIN-23, KIN-25): the task list filtered by project
+// and state with agent time, details of a task with its plan revision, latest execution, steps and attempts and
+// their agent time, an attempt's recorded events in bounded pages, creating a manual task, starting a mock run,
+// cancelling and retrying. Members see their projects' tasks; the Owner and project admins manage them.
 package httpapi
 
 import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
@@ -36,15 +38,44 @@ type TaskView struct {
 	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
-// AttemptView is one runner launch of a step.
+// AgentTimeView is a sum of agent time: milliseconds and none | running | complete | incomplete.
+type AgentTimeView struct {
+	Ms     int64  `json:"ms"`
+	Status string `json:"status"`
+}
+
+func agentTimeView(t domain.AgentTime) AgentTimeView {
+	return AgentTimeView{Ms: t.Total.Milliseconds(), Status: string(t.Status)}
+}
+
+// TimeView is a task's agent time and, separately, its calendar duration.
+type TimeView struct {
+	AgentMs     int64  `json:"agentMs"`
+	AgentStatus string `json:"agentStatus"`
+	CalendarMs  int64  `json:"calendarMs"`
+	Running     bool   `json:"running"` // an execution runs: the calendar duration counts up to now
+	Started     bool   `json:"started"` // the task has an execution
+}
+
+func timeView(t app.TaskTime) TimeView {
+	return TimeView{AgentMs: t.Agent.Total.Milliseconds(), AgentStatus: string(t.Agent.Status),
+		CalendarMs: t.Calendar.Milliseconds(), Running: t.Running, Started: t.Started}
+}
+
+// AttemptView is one runner launch of a step, with its agent and work period (runner clock).
 type AttemptView struct {
-	Number     int        `json:"number"`
-	RunnerID   string     `json:"runnerId"`
-	Fence      int64      `json:"fence"`
-	State      string     `json:"state"`
-	Error      string     `json:"error,omitempty"`
-	StartedAt  time.Time  `json:"startedAt"`
-	FinishedAt *time.Time `json:"finishedAt"`
+	Number        int        `json:"number"`
+	RunnerID      string     `json:"runnerId"`
+	Fence         int64      `json:"fence"`
+	State         string     `json:"state"`
+	Error         string     `json:"error,omitempty"`
+	StartedAt     time.Time  `json:"startedAt"`
+	FinishedAt    *time.Time `json:"finishedAt"`
+	Agent         string     `json:"agent,omitempty"`
+	WorkStartedAt *time.Time `json:"workStartedAt"`
+	WorkEndedAt   *time.Time `json:"workEndedAt"`
+	WorkStatus    string     `json:"workStatus"`
+	WorkMs        int64      `json:"workMs"`
 }
 
 // StepView is one step of an execution.
@@ -60,18 +91,20 @@ type StepView struct {
 	RunnerID   string        `json:"runnerId,omitempty"`
 	Fence      int64         `json:"fence"`
 	Attempts   []AttemptView `json:"attempts"`
+	AgentTime  AgentTimeView `json:"agentTime"`
 }
 
 // ExecutionView is a run of a plan revision.
 type ExecutionView struct {
-	ID           string     `json:"id"`
-	PlanRevision int        `json:"planRevision"`
-	PlanHash     string     `json:"planHash"`
-	State        string     `json:"state"`
-	Reason       string     `json:"reason,omitempty"`
-	CreatedAt    time.Time  `json:"createdAt"`
-	FinishedAt   *time.Time `json:"finishedAt"`
-	Steps        []StepView `json:"steps"`
+	ID           string        `json:"id"`
+	PlanRevision int           `json:"planRevision"`
+	PlanHash     string        `json:"planHash"`
+	State        string        `json:"state"`
+	Reason       string        `json:"reason,omitempty"`
+	CreatedAt    time.Time     `json:"createdAt"`
+	FinishedAt   *time.Time    `json:"finishedAt"`
+	Steps        []StepView    `json:"steps"`
+	AgentTime    AgentTimeView `json:"agentTime"`
 }
 
 // RevisionView is the task's current plan revision.
@@ -90,6 +123,40 @@ type DetailView struct {
 	Revision  *RevisionView  `json:"revision"`
 	Execution *ExecutionView `json:"execution"`
 	CanManage bool           `json:"canManage"`
+	Time      TimeView       `json:"time"`
+}
+
+// ListItemView is a task in the list with its time.
+type ListItemView struct {
+	TaskView
+	Time TimeView `json:"time"`
+}
+
+// ListView is GET /api/tasks: at most app.MaxTaskList tasks, newest first, and the agent time of every task the
+// filter selects.
+type ListView struct {
+	Tasks []ListItemView `json:"tasks"`
+	Total AgentTimeView  `json:"total"`
+}
+
+// EventView is one recorded runner event of an attempt. Data is the process's output as text, never markup.
+type EventView struct {
+	Seq     int64     `json:"seq"`
+	Kind    string    `json:"kind"`
+	At      time.Time `json:"at"`
+	Stream  string    `json:"stream,omitempty"`
+	Offset  int64     `json:"offset,omitempty"`
+	Data    string    `json:"data,omitempty"`
+	Bytes   int64     `json:"bytes,omitempty"`
+	Reason  string    `json:"reason,omitempty"`
+	Omitted bool      `json:"omitted,omitempty"`
+}
+
+// EventPageView is a page of an attempt's events: ask again with after=next (right away while more).
+type EventPageView struct {
+	Events []EventView `json:"events"`
+	Next   int64       `json:"next"`
+	More   bool        `json:"more"`
 }
 
 // CreateRequest is POST /api/tasks.
@@ -115,7 +182,11 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/tasks/{id}", h.get)
 	mux.HandleFunc("POST /api/tasks/{id}/mock-run", h.mockRun)
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", h.cancel)
+	mux.HandleFunc("POST /api/tasks/{id}/retry", h.retry)
+	mux.HandleFunc("GET /api/tasks/{id}/steps/{step}/attempts/{fence}/events", h.events)
 }
+
+func (h *Handler) now() time.Time { return h.Service.Now().UTC() }
 
 func (h *Handler) logger() *slog.Logger {
 	if h.Logger == nil {
@@ -163,16 +234,19 @@ func orEmpty(xs []string) []string {
 	return xs
 }
 
-func executionView(e domain.Execution) *ExecutionView {
+func executionView(e domain.Execution, now time.Time) *ExecutionView {
 	v := &ExecutionView{ID: e.ID, PlanRevision: e.PlanRevision, PlanHash: e.PlanHash, State: string(e.State),
-		Reason: e.Reason, CreatedAt: e.CreatedAt, FinishedAt: e.FinishedAt, Steps: make([]StepView, 0, len(e.Steps))}
+		Reason: e.Reason, CreatedAt: e.CreatedAt, FinishedAt: e.FinishedAt, Steps: make([]StepView, 0, len(e.Steps)),
+		AgentTime: agentTimeView(e.AgentTime(now))}
 	for _, s := range e.Steps {
 		sv := StepView{ID: s.ID, Key: s.Key, Title: s.Title, Repository: s.Repository, DependsOn: orEmpty(s.DependsOn),
 			State: string(s.State), WaitReason: string(s.WaitReason), Reason: s.Reason, RunnerID: s.RunnerID, Fence: s.Fence,
-			Attempts: make([]AttemptView, 0, len(s.Attempts))}
+			Attempts: make([]AttemptView, 0, len(s.Attempts)), AgentTime: agentTimeView(s.AgentTime(now))}
 		for _, a := range s.Attempts {
+			st, d := a.Work(now)
 			sv.Attempts = append(sv.Attempts, AttemptView{Number: a.Number, RunnerID: a.RunnerID, Fence: a.Fence,
-				State: string(a.State), Error: a.Error, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt})
+				State: string(a.State), Error: a.Error, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt, Agent: a.Agent,
+				WorkStartedAt: a.WorkStart, WorkEndedAt: a.WorkEnd, WorkStatus: string(st), WorkMs: d.Milliseconds()})
 		}
 		v.Steps = append(v.Steps, sv)
 	}
@@ -184,16 +258,24 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ts, err := h.Service.ListTasks(r.Context(), p, r.URL.Query().Get("projectId"))
+	q := app.TaskQuery{ProjectID: r.URL.Query().Get("projectId")}
+	for _, v := range r.URL.Query()["state"] {
+		for st := range strings.SplitSeq(v, ",") {
+			if st != "" {
+				q.States = append(q.States, domain.TaskState(st))
+			}
+		}
+	}
+	l, err := h.Service.ListTasks(r.Context(), p, q)
 	if err != nil {
 		h.fail(w, err)
 		return
 	}
-	out := make([]TaskView, 0, len(ts))
-	for _, t := range ts {
-		out = append(out, taskView(t))
+	out := ListView{Tasks: make([]ListItemView, 0, len(l.Tasks)), Total: agentTimeView(l.Total)}
+	for _, it := range l.Tasks {
+		out.Tasks = append(out.Tasks, ListItemView{TaskView: taskView(it.Task), Time: timeView(it.Time)})
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"tasks": out})
+	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
 func (h *Handler) detail(w http.ResponseWriter, r *http.Request, p auth.Principal, id string, status int) {
@@ -202,14 +284,14 @@ func (h *Handler) detail(w http.ResponseWriter, r *http.Request, p auth.Principa
 		h.fail(w, err)
 		return
 	}
-	v := DetailView{Task: taskView(d.Task), CanManage: d.CanManage}
+	v := DetailView{Task: taskView(d.Task), CanManage: d.CanManage, Time: timeView(d.Time)}
 	if d.Revision != nil {
 		rev := d.Revision
 		v.Revision = &RevisionView{Number: rev.Number(), Hash: rev.Hash(), Risk: string(rev.Risk()),
 			Summary: rev.Plan().Summary, CreatedBy: rev.CreatedBy(), CreatedAt: rev.CreatedAt()}
 	}
 	if d.Execution != nil {
-		v.Execution = executionView(*d.Execution)
+		v.Execution = executionView(*d.Execution, h.now())
 	}
 	httpx.WriteJSON(w, status, v)
 }
@@ -269,4 +351,54 @@ func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.detail(w, r, p, r.PathValue("id"), http.StatusOK)
+}
+
+func (h *Handler) retry(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	if _, err := h.Service.RetryTask(r.Context(), p, r.PathValue("id")); err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.detail(w, r, p, r.PathValue("id"), http.StatusOK)
+}
+
+func nonNegative(w http.ResponseWriter, field, s string) (int64, bool) {
+	if s == "" {
+		return 0, true
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n < 0 {
+		httpx.WriteJSON(w, http.StatusUnprocessableEntity, httpx.ErrorBody{Error: "validation", Message: "number", Field: field})
+		return 0, false
+	}
+	return n, true
+}
+
+func (h *Handler) events(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	fence, ok := nonNegative(w, "fence", r.PathValue("fence"))
+	if !ok {
+		return
+	}
+	after, ok := nonNegative(w, "after", r.URL.Query().Get("after"))
+	if !ok {
+		return
+	}
+	pg, err := h.Service.AttemptEvents(r.Context(), p, r.PathValue("id"), r.PathValue("step"), fence, after)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	out := EventPageView{Events: make([]EventView, 0, len(pg.Events)), Next: pg.Next, More: pg.More}
+	for _, e := range pg.Events {
+		out.Events = append(out.Events, EventView{Seq: e.Seq, Kind: e.Kind, At: e.At, Stream: e.Stream, Offset: e.Offset,
+			Data: e.Data, Bytes: e.Bytes, Reason: e.Reason, Omitted: e.Omitted})
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
 }

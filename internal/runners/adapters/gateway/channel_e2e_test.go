@@ -33,13 +33,13 @@ func (a *acceptAll) rec(s string) error {
 func (a *acceptAll) CheckAttempt(context.Context, string, string, int64) error {
 	return a.rec("check")
 }
-func (a *acceptAll) StartAttempt(context.Context, string, string, int64) error {
+func (a *acceptAll) StartAttempt(context.Context, string, string, int64, time.Time, string) error {
 	return a.rec("start")
 }
-func (a *acceptAll) CompleteAttempt(context.Context, string, string, int64) error {
+func (a *acceptAll) CompleteAttempt(context.Context, string, string, int64, time.Time) error {
 	return a.rec("complete")
 }
-func (a *acceptAll) FailAttempt(context.Context, string, string, int64, string) error {
+func (a *acceptAll) FailAttempt(context.Context, string, string, int64, string, time.Time) error {
 	return a.rec("fail")
 }
 func (a *acceptAll) history() []string {

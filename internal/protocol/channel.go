@@ -167,6 +167,12 @@ type OutputDropped struct {
 	Chunks int64 `json:"chunks"`
 }
 
+// Started is the body of execution.started (KIN-25): the agent (CLI adapter, e.g. "mock") that runs the attempt.
+// The Control Plane counts the attempt's agent time from this event's time to its terminal event's time.
+type Started struct {
+	Agent string `json:"agent,omitempty"`
+}
+
 // Failure is the body of execution.failed.
 type Failure struct {
 	Reason string `json:"reason"`

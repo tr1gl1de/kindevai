@@ -355,6 +355,13 @@ func TestMockExecutionEndToEnd(t *testing.T) {
 	if a := d.Execution.Steps[0].Attempts; len(a) != 1 || a[0].RunnerID != id || a[0].State != workflow.AttemptSucceeded {
 		t.Fatalf("attempts %+v", a)
 	}
+	// KIN-25: the attempt's agent time comes from the runner's started/completed events, with the agent.
+	if a := d.Execution.Steps[0].Attempts[0]; a.Agent != "mock" || a.WorkStart == nil || a.WorkEnd == nil {
+		t.Fatalf("work period %+v", a)
+	}
+	if d.Time.Agent.Status != workflow.WorkComplete || !d.Time.Started || d.Time.Running {
+		t.Fatalf("task time %+v", d.Time)
+	}
 	var output string
 	waitFor(t, "output stored", 5*time.Second, func() (bool, string) {
 		_ = cp.inst.DB.QueryRowContext(t.Context(), `SELECT COALESCE(group_concat(body, ''), '') FROM runner_attempt_events
@@ -444,6 +451,10 @@ func TestCancelKillsTheProcessGroup(t *testing.T) {
 	if d := cp.detail(t, task); d.Task.State != workflow.TaskCancelled || d.Execution.State != workflow.ExecutionCancelled {
 		t.Fatalf("after cancel: %s", describe(d))
 	}
+	// KIN-25: the killed process's end, reported after the cancellation, closes its agent time.
+	cp.waitTask(t, task, 30*time.Second, func(d workflowapp.TaskDetail) bool {
+		return d.Time.Agent.Status == workflow.WorkComplete
+	})
 }
 
 // Losing the runner: its lease runs out, the attempt is UNKNOWN and the task BLOCKED; nothing is started again

@@ -41,9 +41,11 @@ type ChannelRepo interface {
 // runner sends it again).
 type Executions interface {
 	CheckAttempt(ctx context.Context, runnerID, step string, fence int64) error
-	StartAttempt(ctx context.Context, runnerID, step string, fence int64) error
-	CompleteAttempt(ctx context.Context, runnerID, step string, fence int64) error
-	FailAttempt(ctx context.Context, runnerID, step string, fence int64, reason string) error
+	// StartAttempt, CompleteAttempt and FailAttempt get the event's time on the runner's clock (agent time, KIN-25);
+	// StartAttempt also the agent the runner reports.
+	StartAttempt(ctx context.Context, runnerID, step string, fence int64, at time.Time, agent string) error
+	CompleteAttempt(ctx context.Context, runnerID, step string, fence int64, at time.Time) error
+	FailAttempt(ctx context.Context, runnerID, step string, fence int64, reason string, at time.Time) error
 }
 
 // Reconciler receives the runner's runner.reconcile.response (KIN-23 resolves UNKNOWN attempts with it).
@@ -483,15 +485,18 @@ func (c *Channel) alert(ctx context.Context, topic, key string, payload map[stri
 }
 
 func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Event) error {
+	at := time.UnixMilli(e.At).UTC()
 	switch e.Kind {
 	case protocol.EventStarted:
-		return c.Executions.StartAttempt(ctx, runnerID, e.Step, e.Fence)
+		var s protocol.Started
+		_ = json.Unmarshal(e.Body, &s) // an unreadable body only loses the agent's name
+		return c.Executions.StartAttempt(ctx, runnerID, e.Step, e.Fence, at, s.Agent)
 	case protocol.EventCompleted:
-		return c.Executions.CompleteAttempt(ctx, runnerID, e.Step, e.Fence)
+		return c.Executions.CompleteAttempt(ctx, runnerID, e.Step, e.Fence, at)
 	case protocol.EventFailed:
 		var f protocol.Failure
 		_ = json.Unmarshal(e.Body, &f)
-		return c.Executions.FailAttempt(ctx, runnerID, e.Step, e.Fence, truncate(f.Reason, protocol.MaxReasonLen))
+		return c.Executions.FailAttempt(ctx, runnerID, e.Step, e.Fence, truncate(f.Reason, protocol.MaxReasonLen), at)
 	}
 	return c.Executions.CheckAttempt(ctx, runnerID, e.Step, e.Fence)
 }

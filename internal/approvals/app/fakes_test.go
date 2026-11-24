@@ -93,7 +93,8 @@ func (r *memRepo) List(_ context.Context, f Filter) ([]domain.Approval, error) {
 	var out []domain.Approval
 	for i := len(r.order) - 1; i >= 0; i-- {
 		a := r.approvals[r.order[i]]
-		if (f.AllProjects || slices.Contains(f.ProjectIDs, a.ProjectID)) && (len(f.States) == 0 || slices.Contains(f.States, a.State)) {
+		if (f.AllProjects || slices.Contains(f.ProjectIDs, a.ProjectID)) && (len(f.States) == 0 || slices.Contains(f.States, a.State)) &&
+			(f.TaskID == "" || f.TaskID == a.TaskID) {
 			out = append(out, a)
 		}
 	}

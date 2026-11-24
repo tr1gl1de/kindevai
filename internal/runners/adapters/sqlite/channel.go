@@ -178,3 +178,25 @@ func (r *Repository) AddOutput(ctx context.Context, step string, fence, n int64,
 	}
 	return domain.OutputStored, nil
 }
+
+// AttemptEvents returns the applied events of the attempt (step, fence) after the attempt_seq cursor, in order.
+func (r *Repository) AttemptEvents(ctx context.Context, step string, fence, after int64, limit int) ([]domain.AttemptEvent, error) {
+	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, `SELECT runner_id, attempt_seq, kind, body, reason, runner_at,
+		received_at FROM runner_attempt_events WHERE step_id = ? AND fence = ? AND outcome = 'applied' AND attempt_seq > ?
+		ORDER BY attempt_seq LIMIT ?`, step, fence, after, limit)
+	if err != nil {
+		return nil, fmt.Errorf("reading attempt events: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.AttemptEvent
+	for rows.Next() {
+		e := domain.AttemptEvent{Step: step, Fence: fence, Outcome: domain.OutcomeApplied}
+		var runnerAt, receivedAt int64
+		if err := rows.Scan(&e.RunnerID, &e.AttemptSeq, &e.Kind, &e.Body, &e.Reason, &runnerAt, &receivedAt); err != nil {
+			return nil, fmt.Errorf("reading attempt event: %w", err)
+		}
+		e.RunnerAt, e.ReceivedAt = time.UnixMilli(runnerAt).UTC(), time.UnixMilli(receivedAt).UTC()
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}

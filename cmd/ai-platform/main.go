@@ -159,6 +159,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	wireAttemptLog(apv.Workflow, inst)                                 // KIN-25 attempt events in the task UI
 	wireRunnerRelease(modules, apv.Workflow)                           // KIN-63 disable/revoke end the runner's attempts
 	netSvc, netHTTP := newNetwork(inst, audit, integ, channel, logger) // KIN-30 network profiles
+	netSvc.Outbox = msg.Outbox                                         // KIN-60 egress check alerts
 	attachCheckoutSource(channel, integ.GitHub)                        // KIN-29 worktree base + repository token
 	attachScopeCheck(channel, apv.Approvals)                           // KIN-51 changed files vs the approved scope
 	attachNetwork(gateway, netSvc, logger)
@@ -173,6 +174,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	defer intake.start(ctx)() // the YouTrack poller stops first
 	defer startTelemetry(ctx, tel, inst.Dir.Path())()
 	defer startRetention(ctx, inst, apv.Workflow, retention, logger)() // KIN-52
+	defer startAlertMonitors(ctx, inst, msg, logger)()                 // KIN-60
 	defer startScheduler(ctx, apv.Workflow, DefaultSchedulerInterval, logger)()
 
 	assets, built := web.Assets()

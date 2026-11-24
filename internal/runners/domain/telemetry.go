@@ -119,6 +119,9 @@ const (
 	WarningPercent  = 75 // warning
 	HighPercent     = 85 // cleanup recommended
 	CriticalPercent = 95 // critical: no new disk-heavy steps
+	// RecoveredPercent (KIN-60): a volume's alert resolves itself only once it is back under this, 5 points below
+	// the warning threshold, so a disk hovering around 75% does not raise and resolve alerts on every report.
+	RecoveredPercent = 70
 	// MinHeadroomBytes: less available space than this is critical whatever the percentage.
 	MinHeadroomBytes = int64(2) << 30
 	// StorageStaleAfter: metrics older than this (three missed reports at the 5-minute cadence) are stale.
@@ -193,6 +196,10 @@ func (v Volume) Level() Level {
 	}
 	return LevelOK
 }
+
+// Recovered reports whether the volume is clear of every level with the hysteresis margin: its level alert
+// resolves itself when it gets here.
+func (v Volume) Recovered() bool { return v.Level() == LevelOK && v.UsedPercent() < RecoveredPercent }
 
 // DiskHeavyAllowed is false at the critical level: the scheduler must not start disk-heavy steps there.
 func (v Volume) DiskHeavyAllowed() bool { return v.Level() != LevelCritical }

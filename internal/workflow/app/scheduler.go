@@ -239,7 +239,7 @@ func (s *Service) blockIfStuck(ctx context.Context, e *domain.Execution, t *doma
 	if t.State == stored.State && t.Reason == stored.Reason {
 		return nil
 	}
-	return s.Repo.SaveTask(ctx, t)
+	return s.saveTask(ctx, t)
 }
 
 // RenewRunnerLeases extends the lease of every RUNNING step the runner holds (its heartbeat, KIN-20). A CLAIMED

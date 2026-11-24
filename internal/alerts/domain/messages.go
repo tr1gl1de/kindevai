@@ -62,6 +62,29 @@ func RenderAlert(l Language, a Alert) string {
 			LangEN: fmt.Sprintf("Disk %s is %s%% full.", a.Subject, pct),
 			LangRU: fmt.Sprintf("Диск %s заполнен на %s%%.", a.Subject, pct),
 		}[l]
+	case KindEgressCheckFailed:
+		code := clip(a.Details["code"])
+		body = map[Language]string{
+			LangEN: fmt.Sprintf("Runner %s: egress check failed (%s).", subject, code),
+			LangRU: fmt.Sprintf("Раннер %s: проверка egress не прошла (%s).", subject, code),
+		}[l]
+	case KindCIFailed:
+		c := clip(a.Details["conclusion"])
+		body = map[Language]string{
+			LangEN: fmt.Sprintf("CI failed on %s (%s).", subject, c),
+			LangRU: fmt.Sprintf("CI упал на %s (%s).", subject, c),
+		}[l]
+	case KindIntegrationCircuitOpen:
+		body = map[Language]string{
+			LangEN: fmt.Sprintf("Integration %s is failing: calls suspended (circuit open).", subject),
+			LangRU: fmt.Sprintf("Интеграция %s не отвечает: вызовы приостановлены (circuit open).", subject),
+		}[l]
+	case KindTaskBlocked:
+		r := clip(a.Details["reason"])
+		body = map[Language]string{
+			LangEN: fmt.Sprintf("Task %s is blocked (%s).", subject, r),
+			LangRU: fmt.Sprintf("Задача %s заблокирована (%s).", subject, r),
+		}[l]
 	case KindRunnerOutputFull:
 		mib := clip(a.Details["limitMiB"])
 		body = map[Language]string{

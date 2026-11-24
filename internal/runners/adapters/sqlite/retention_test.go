@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"strings"
 	"testing"
@@ -205,5 +206,89 @@ func TestOutputDropsPerAttempt(t *testing.T) {
 	}
 	if drops, total, err := r.OutputDrops(t.Context(), since, 1); err != nil || total != 3 || len(drops) != 1 || drops[0].Step != "b" {
 		t.Errorf("limited: %+v %d %v", drops, total, err)
+	}
+}
+
+// addRunner enrolls runner id and brings it to status (approved, disabled or revoked) with n commands in its log,
+// the first acknowledged.
+func addRunner(t *testing.T, d *db.Transactor, r *sqlite.Repository, id string, status domain.Status, n int) {
+	t.Helper()
+	ctx := t.Context()
+	tok, _, _ := domain.NewEnrollmentToken(rand.Reader, "tok-"+id, "owner1", t0)
+	if err := r.CreateToken(ctx, tok); err != nil {
+		t.Fatal(err)
+	}
+	key, _ := newKey(t)
+	x := domain.Enroll(id, tok, key, domain.Metadata{Hostname: "h", OS: "linux", Arch: "amd64"}, t0)
+	if err := r.CreateRunner(ctx, x); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.EnsureChannel(ctx, id, "ep-"+id); err != nil {
+		t.Fatal(err)
+	}
+	for i := range n {
+		if err := d.InTx(ctx, func(ctx context.Context) error {
+			_, err := r.AppendCommand(ctx, id, domain.QueuedCommand{ID: fmt.Sprint("c", i), Kind: protocol.CommandConfigUpdate,
+				Body: []byte(`{"sealed":"secret"}`)}, t0)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.AckCommands(ctx, id, 1, t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.Approve([]string{"p1"}, "owner1", t0); err != nil {
+		t.Fatal(err)
+	}
+	switch status {
+	case domain.StatusDisabled:
+		if err := x.Disable(t0); err != nil {
+			t.Fatal(err)
+		}
+	case domain.StatusRevoked:
+		if err := x.Revoke("owner1", t0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.SaveRunner(ctx, x); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func commandCount(t *testing.T, d *db.Transactor, runnerID string) int {
+	t.Helper()
+	var n int
+	if err := d.DB.QueryRowContext(t.Context(), `SELECT count(*) FROM runner_commands WHERE runner_id = ?`, runnerID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// KIN-72: the retention empties the command logs of revoked runners (acknowledged or not, sealed proxy passwords
+// included) in batches; logs of approved and disabled runners stay as they are.
+func TestRetentionPurgesRevokedRunnerCommands(t *testing.T) {
+	t.Parallel()
+	d, r := withRunner(t)
+	tx := &db.Transactor{DB: d}
+	addRunner(t, tx, r, "live", domain.StatusApproved, 3)
+	addRunner(t, tx, r, "paused", domain.StatusDisabled, 3)
+	addRunner(t, tx, r, "gone", domain.StatusRevoked, app.RetentionBatch+5) // more than one delete batch
+	addRunner(t, tx, r, "gone2", domain.StatusRevoked, 2)
+	ret := &app.Retention{Repo: r, Steps: stepClock{}, Policy: domain.DefaultRetention(), Now: func() time.Time { return t0 }}
+	rep, err := ret.Purge(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]int{"live": 3, "paused": 3, "gone": 0, "gone2": 0} {
+		if got := commandCount(t, tx, id); got != want {
+			t.Errorf("%s: %d commands left, want %d", id, got, want)
+		}
+	}
+	if rep.RevokedCommands != app.RetentionBatch+7 {
+		t.Errorf("report %+v", rep)
+	}
+	if rep, err := ret.Purge(t.Context()); rep != (app.RetentionReport{}) || err != nil {
+		t.Errorf("second pass %+v %v", rep, err)
 	}
 }

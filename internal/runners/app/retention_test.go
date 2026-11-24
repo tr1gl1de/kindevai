@@ -32,6 +32,7 @@ type memRetentionRepo struct {
 	attempts map[string]*domain.AttemptOutput // step/fence
 	nextID   int64
 	maxBatch int
+	revoked  int64 // commands in the logs of revoked runners
 }
 
 func newMemRetentionRepo() *memRetentionRepo {
@@ -116,6 +117,15 @@ func (r *memRetentionRepo) DeleteAttemptOutput(_ context.Context, step string, f
 		return n, true, nil
 	}
 	return n, false, nil
+}
+
+func (r *memRetentionRepo) DeleteRevokedCommands(_ context.Context, limit int) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.batch(limit)
+	n := min(r.revoked, int64(limit))
+	r.revoked -= n
+	return n, nil
 }
 
 func (r *memRetentionRepo) OldEvents(_ context.Context, before time.Time, after domain.EventRef, limit int) ([]domain.EventRef, error) {
@@ -328,5 +338,26 @@ func TestRetentionEvictsOldestFinishedOutputOverLimit(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "output storage full") {
 		t.Fatalf("shortage not logged:\n%s", logs.String())
+	}
+}
+
+// KIN-72: a pass empties the command logs of revoked runners in bounded batches and reports it.
+func TestRetentionPurgesRevokedRunnerCommands(t *testing.T) {
+	t.Parallel()
+	repo := newMemRetentionRepo()
+	repo.revoked = 3*RetentionBatch + 1
+	var logs bytes.Buffer
+	rep, err := newRetention(repo, &fakeSteps{}, &logs).Purge(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.RevokedCommands != 3*RetentionBatch+1 || repo.revoked != 0 {
+		t.Errorf("report %+v, %d left", rep, repo.revoked)
+	}
+	if repo.maxBatch > RetentionBatch {
+		t.Errorf("batch of %d", repo.maxBatch)
+	}
+	if !strings.Contains(logs.String(), "revoked_commands=") {
+		t.Errorf("log %q", logs.String())
 	}
 }

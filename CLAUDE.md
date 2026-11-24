@@ -25,6 +25,9 @@ Everything goes through `make` (targets are no-ops until that part is scaffolded
 ## Git flow (hard rules)
 - Branch from `dev`: `feature/KIN-<n>-<slug>`. PRs target `dev` only: `gh pr create --base dev`.
 - Never push to, open PRs against, or merge into `main`/`master` — owner-only. A hook enforces this.
+- The agent merges its own PRs into `dev` once CI is green and review findings are fixed: `gh pr merge <n> --merge`
+  as a single plain command (the hook checks the PR base on GitHub and refuses anything but `dev`). Stacked PRs
+  are merged in order with merge commits, never squash, so later branches stay conflict-free.
 - Commit messages: `KIN-<n>: <imperative summary>`.
 - One task = one branch = one worktree. Parallel tasks run in separate worktrees (see `/task`); each worktree
   gets its own port/compose name in `.worktree.env` — never hardcode ports or shared paths.

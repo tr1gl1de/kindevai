@@ -158,6 +158,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	wireExecution(apv.Workflow, channel, gateway, tel, hub, logger)    // KIN-23 scheduler, leases, reconciliation
 	wireRunnerRelease(modules, apv.Workflow)                           // KIN-63 disable/revoke end the runner's attempts
 	netSvc, netHTTP := newNetwork(inst, audit, integ, channel, logger) // KIN-30 network profiles
+	attachCheckoutSource(channel, integ.GitHub)                        // KIN-29 worktree base + repository token
 	attachNetwork(gateway, netSvc, logger)
 	modules = append(modules, netHTTP)
 	maint, err := newMaintenance(ctx, inst, audit, apv.Workflow, logger) // KIN-41 maintenance mode

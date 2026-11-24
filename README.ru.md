@@ -62,6 +62,13 @@ SameSite=Strict (Secure при HTTPS); сессия завершается по�
 или при выходе. Все API, кроме health, setup и входа, требуют сессию; изменяющие запросы с чужого origin
 отклоняются, попытки входа ограничены по адресу и по учётной записи.
 
+### Проекты и доступ
+
+Owner создаёт проекты и выдаёт участие (`project_admin` или `member`); в MVP участниками управляет только Owner.
+Пользователь видит только свои проекты — любой другой отвечает `404`, так же как несуществующий. API:
+`GET/POST /api/projects`, `GET /api/projects/{id}`, `GET /api/projects/{id}/members`,
+`PUT/DELETE /api/projects/{id}/members/{login}`.
+
 ## Разработка
 
 ```bash

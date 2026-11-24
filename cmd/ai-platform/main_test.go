@@ -232,6 +232,12 @@ func TestLoginAfterSetupEndToEnd(t *testing.T) {
 	if code := get("/api/auth/me"); code != 200 {
 		t.Fatalf("me = %d", code)
 	}
+	if code := post("/api/projects", `{"name":"Web","slug":"web"}`); code != 201 {
+		t.Fatalf("create project = %d", code)
+	}
+	if code := get("/api/projects"); code != 200 {
+		t.Fatalf("list projects = %d", code)
+	}
 	if code := post("/api/auth/logout", ""); code != 204 {
 		t.Fatalf("logout = %d", code)
 	}

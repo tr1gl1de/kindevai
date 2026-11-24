@@ -97,7 +97,8 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	}
 	srv := &http.Server{
 		Handler: server.New(server.Options{
-			Version: version, Assets: assets, Logger: logger, Modules: identity.Modules, Middleware: identity.Middleware,
+			Version: version, Assets: assets, Logger: logger, Modules: append(identity.Modules, newProjects(inst, identity.Users, logger)),
+			Middleware: identity.Middleware,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,

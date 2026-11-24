@@ -216,6 +216,13 @@ const KNOWN_KINDS = new Set([
   "invitation.created",
   "invitation.revoked",
   "invitation.accepted",
+  "project.created",
+  "project.member_set",
+  "project.member_removed",
+  "auth.login_succeeded",
+  "auth.login_failed",
+  "auth.logout",
+  "setup.completed",
 ]);
 
 /** Translated name of a known kind; kinds added by later contexts show their identifier until translated. */
@@ -228,7 +235,8 @@ function kindLabel(t: T, kind: string): string {
 function actorLabel(t: T, e: AuditEvent): string {
   switch (e.actor.type) {
     case "system":
-      return t("audit.actor_system");
+      // A failed sign-in has no authenticated actor.
+      return e.actor.id === "anonymous" ? t("audit.actor_anonymous") : t("audit.actor_system");
     case "runner":
       return t("audit.actor_runner", { label: e.actor.label || e.actor.id });
     default:

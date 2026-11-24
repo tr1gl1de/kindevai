@@ -84,6 +84,7 @@ func newIdentity(ctx context.Context, inst *bootstrap.Installation, audit *audit
 		Repo:    sqlite.NewSetupRepository(inst.DB),
 		Hasher:  hasher,
 		Channel: tokenfile.New(tokenPath),
+		Audit:   audit.Service,
 		Now:     time.Now,
 		Rand:    rand.Reader,
 		NewID:   rand.Text,
@@ -107,6 +108,8 @@ func newIdentity(ctx context.Context, inst *bootstrap.Installation, audit *audit
 			Users:     sqlite.NewUserRepository(inst.DB),
 			Sessions:  sqlite.NewSessionRepository(inst.DB),
 			Passwords: hasher,
+			Tx:        db.Transactor{DB: inst.DB},
+			Audit:     audit.Service,
 			Now:       time.Now,
 			Rand:      rand.Reader,
 			Logger:    logger,
@@ -147,6 +150,8 @@ func newProjects(inst *bootstrap.Installation, id *identityModule, audit *auditM
 	svc := &projectsapp.Service{
 		Repo:  projectsdb.New(inst.DB),
 		Users: userDirectory{users},
+		Tx:    db.Transactor{DB: inst.DB},
+		Audit: audit.Service,
 		Now:   time.Now,
 		NewID: rand.Text,
 	}

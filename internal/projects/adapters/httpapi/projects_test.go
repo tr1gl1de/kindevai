@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	auditdb "github.com/tr1gl1de/kindevai/internal/audit/adapters/sqlite"
+	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
 	"github.com/tr1gl1de/kindevai/internal/projects/adapters/sqlite"
@@ -49,6 +52,13 @@ func (dir) ByIDs(_ context.Context, ids []string) (map[string]app.UserRef, error
 // stack serves the projects API; the test principal comes from X-Test-User (stands in for the identity middleware).
 func stack(t *testing.T) http.Handler {
 	t.Helper()
+	h, _ := stackWith(t, nil)
+	return h
+}
+
+// stackWith is stack with its database; log replaces the real audit service when not nil.
+func stackWith(t *testing.T, log func(*sql.DB) app.AuditLog) (http.Handler, *sql.DB) {
+	t.Helper()
 	d, err := db.Open(t.Context(), filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +74,12 @@ func stack(t *testing.T) http.Handler {
 		}
 	}
 	var n atomic.Int64
-	svc := &app.Service{Repo: sqlite.New(d), Users: dir{}, Now: time.Now, NewID: func() string { return fmt.Sprint("p", n.Add(1)) }}
+	var audit app.AuditLog = &auditapp.Service{Repo: auditdb.New(d), Now: time.Now}
+	if log != nil {
+		audit = log(d)
+	}
+	svc := &app.Service{Repo: sqlite.New(d), Users: dir{}, Tx: db.Transactor{DB: d}, Audit: audit, Now: time.Now,
+		NewID: func() string { return fmt.Sprint("p", n.Add(1)) }}
 	mux := http.NewServeMux()
 	(&Handler{Service: svc}).Register(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -72,7 +87,7 @@ func stack(t *testing.T) http.Handler {
 			r = r.WithContext(auth.WithPrincipal(r.Context(), auth.Principal{UserID: u.ID, Login: u.Login, Owner: u.Owner}))
 		}
 		mux.ServeHTTP(w, r)
-	})
+	}), d
 }
 
 func do(t *testing.T, h http.Handler, user, method, target, body string) (int, map[string]any, []any) {

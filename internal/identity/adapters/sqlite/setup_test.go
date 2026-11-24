@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	auditdb "github.com/tr1gl1de/kindevai/internal/audit/adapters/sqlite"
+	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/identity/app"
 	"github.com/tr1gl1de/kindevai/internal/identity/domain"
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
@@ -46,7 +48,8 @@ func (c *memChannel) get() string            { c.mu.Lock(); defer c.mu.Unlock();
 var ids atomic.Int64
 
 func service(d *sql.DB, ch *memChannel) *app.SetupService {
-	return &app.SetupService{Repo: NewSetupRepository(d), Hasher: plainHasher{}, Channel: ch, Now: time.Now,
+	return &app.SetupService{Repo: NewSetupRepository(d), Hasher: plainHasher{}, Channel: ch,
+		Audit: &auditapp.Service{Repo: auditdb.New(d), Now: time.Now}, Now: time.Now,
 		Rand: rand.Reader, NewID: func() string { return fmt.Sprint("u", ids.Add(1)) }}
 }
 

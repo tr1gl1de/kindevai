@@ -82,8 +82,10 @@ at `GET /api/integrations/status`, and dead messages at `GET /api/messaging/{out
 ### Audit log
 
 Security-relevant actions are recorded in an append-only audit log in the same transaction as the action itself:
-account created, disabled, enabled, password reset or changed, and invitations created, revoked or accepted (later
-contexts — runners, approvals, integrations — add theirs). Records cannot be changed or deleted (database triggers
+first-run setup completed; sign-in, failed sign-in (address and reason; the login only if that account exists,
+never the password; attempts refused by the rate limiter are not recorded) and sign-out; account created, disabled,
+enabled, password reset or changed; invitations created, revoked or accepted; project created and member role set or
+removed (later contexts — runners, approvals, integrations — add theirs). Records cannot be changed or deleted (database triggers
 refuse it, and there is no API for it); values that look like passwords or tokens are stored as `[redacted]`. The
 Owner reads the log on the **Audit log** page or at `GET /api/audit?actor=&project=&kind=&from=&to=&before=&limit=`
 (newest first, `next` is the cursor for the following page); other users get `403`. No automatic retention in the MVP.

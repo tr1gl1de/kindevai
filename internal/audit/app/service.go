@@ -31,6 +31,9 @@ func UserActor(p auth.Principal) Actor { return User(p.UserID, p.Login) }
 // User is an account acting by id, labelled with its login.
 func User(id, login string) Actor { return Actor{Type: domain.ActorUser, ID: id, Label: login} }
 
+// Anonymous is an unauthenticated caller, such as a failed sign-in attempt.
+func Anonymous() Actor { return Actor{Type: domain.ActorSystem, ID: "anonymous", Label: "anonymous"} }
+
 // System is the Control Plane acting on its own.
 func System() Actor { return Actor{Type: domain.ActorSystem, Label: "system"} }
 

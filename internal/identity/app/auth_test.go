@@ -116,14 +116,15 @@ func newAuthFixture() *authFixture {
 		"owner": {ID: "u1", Login: "owner", PasswordHash: "h:correct horse battery", Role: domain.RoleOwner},
 		"gone":  {ID: "u2", Login: "gone", PasswordHash: "h:correct horse battery", Role: domain.RoleUser, Disabled: true},
 	}}
-	f.svc = &AuthService{Users: users, Sessions: f.sessions, Passwords: f.verifier, Now: f.clock.Now, Rand: rand.Reader}
+	f.svc = &AuthService{Users: users, Sessions: f.sessions, Passwords: f.verifier, Tx: directTx{}, Audit: &memAudit{},
+		Now: f.clock.Now, Rand: rand.Reader}
 	return f
 }
 
 func TestLoginAndAuthenticate(t *testing.T) {
 	t.Parallel()
 	f := newAuthFixture()
-	tok, u, err := f.svc.Login(t.Context(), " Owner ", "correct horse battery")
+	tok, u, err := f.svc.Login(t.Context(), " Owner ", "correct horse battery", "192.0.2.1")
 	if err != nil || u.ID != "u1" || tok == "" {
 		t.Fatalf("Login = %q %+v %v", tok, u, err)
 	}
@@ -150,7 +151,7 @@ func TestLoginFailuresLookAlike(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := newAuthFixture()
-			if _, _, err := f.svc.Login(t.Context(), tt.login, tt.pw); !errors.Is(err, domain.ErrInvalidCredentials) {
+			if _, _, err := f.svc.Login(t.Context(), tt.login, tt.pw, "192.0.2.1"); !errors.Is(err, domain.ErrInvalidCredentials) {
 				t.Fatalf("err = %v", err)
 			}
 			if len(f.sessions.byHash) != 0 {
@@ -159,7 +160,7 @@ func TestLoginFailuresLookAlike(t *testing.T) {
 		})
 	}
 	f := newAuthFixture()
-	_, _, _ = f.svc.Login(t.Context(), "nobody", "pw-pw-pw-pw-pw")
+	_, _, _ = f.svc.Login(t.Context(), "nobody", "pw-pw-pw-pw-pw", "192.0.2.1")
 	if f.verifier.dummy != 1 {
 		t.Fatal("unknown login did not spend a dummy hash (timing leak)")
 	}
@@ -168,7 +169,7 @@ func TestLoginFailuresLookAlike(t *testing.T) {
 func TestAuthenticateRejects(t *testing.T) {
 	t.Parallel()
 	f := newAuthFixture()
-	tok, _, _ := f.svc.Login(t.Context(), "owner", "correct horse battery")
+	tok, _, _ := f.svc.Login(t.Context(), "owner", "correct horse battery", "192.0.2.1")
 	if _, err := f.svc.Authenticate(t.Context(), ""); !errors.Is(err, domain.ErrUnauthenticated) {
 		t.Fatalf("empty token: %v", err)
 	}
@@ -187,7 +188,7 @@ func TestAuthenticateRejects(t *testing.T) {
 func TestAuthenticateTouchesAtMostOncePerMinute(t *testing.T) {
 	t.Parallel()
 	f := newAuthFixture()
-	tok, _, _ := f.svc.Login(t.Context(), "owner", "correct horse battery")
+	tok, _, _ := f.svc.Login(t.Context(), "owner", "correct horse battery", "192.0.2.1")
 	for range 5 {
 		_, _ = f.svc.Authenticate(t.Context(), tok)
 	}
@@ -204,7 +205,7 @@ func TestAuthenticateTouchesAtMostOncePerMinute(t *testing.T) {
 func TestLogoutRevokesSession(t *testing.T) {
 	t.Parallel()
 	f := newAuthFixture()
-	tok, _, _ := f.svc.Login(t.Context(), "owner", "correct horse battery")
+	tok, _, _ := f.svc.Login(t.Context(), "owner", "correct horse battery", "192.0.2.1")
 	if err := f.svc.Logout(t.Context(), tok); err != nil {
 		t.Fatal(err)
 	}
@@ -216,9 +217,9 @@ func TestLogoutRevokesSession(t *testing.T) {
 func TestLoginPurgesExpiredSessions(t *testing.T) {
 	t.Parallel()
 	f := newAuthFixture()
-	_, _, _ = f.svc.Login(t.Context(), "owner", "correct horse battery")
+	_, _, _ = f.svc.Login(t.Context(), "owner", "correct horse battery", "192.0.2.1")
 	f.clock.t = f.clock.t.Add(domain.SessionMaxAge)
-	_, _, _ = f.svc.Login(t.Context(), "owner", "correct horse battery")
+	_, _, _ = f.svc.Login(t.Context(), "owner", "correct horse battery", "192.0.2.1")
 	if f.sessions.purged != 1 || len(f.sessions.byHash) != 1 {
 		t.Fatalf("purged = %d, left = %d", f.sessions.purged, len(f.sessions.byHash))
 	}
@@ -238,7 +239,7 @@ func TestLoginSurvivesPurgeFailure(t *testing.T) {
 	t.Parallel()
 	f := newAuthFixture()
 	f.sessions.purgeErr = errors.New("database is locked")
-	if _, _, err := f.svc.Login(t.Context(), "owner", "correct horse battery"); err != nil {
+	if _, _, err := f.svc.Login(t.Context(), "owner", "correct horse battery", "192.0.2.1"); err != nil {
 		t.Fatalf("login failed because cleanup failed: %v", err)
 	}
 }
@@ -246,10 +247,15 @@ func TestLoginSurvivesPurgeFailure(t *testing.T) {
 func TestAuthenticateWhenSessionVanishesDuringTouch(t *testing.T) {
 	t.Parallel()
 	f := newAuthFixture()
-	tok, _, _ := f.svc.Login(t.Context(), "owner", "correct horse battery")
+	tok, _, _ := f.svc.Login(t.Context(), "owner", "correct horse battery", "192.0.2.1")
 	f.clock.t = f.clock.t.Add(2 * time.Minute)
 	f.sessions.touchGone = true // logged out concurrently
 	if _, err := f.svc.Authenticate(t.Context(), tok); !errors.Is(err, domain.ErrUnauthenticated) {
 		t.Fatalf("err = %v, want ErrUnauthenticated", err)
 	}
 }
+
+// directTx runs fn without a transaction (the session fakes have none; rollback is covered on SQLite).
+type directTx struct{}
+
+func (directTx) InTx(ctx context.Context, fn func(context.Context) error) error { return fn(ctx) }

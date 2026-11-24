@@ -10,6 +10,7 @@ import (
 
 	"github.com/tr1gl1de/kindevai/internal/identity/app"
 	"github.com/tr1gl1de/kindevai/internal/identity/domain"
+	"github.com/tr1gl1de/kindevai/internal/platform/db"
 )
 
 const (
@@ -25,20 +26,12 @@ type SetupRepository struct{ db *sql.DB }
 // NewSetupRepository returns a repository on d.
 func NewSetupRepository(d *sql.DB) *SetupRepository { return &SetupRepository{db: d} }
 
-// InTx runs fn in an immediate (write-locked) transaction.
-func (r *SetupRepository) InTx(ctx context.Context, fn func(app.SetupTx) error) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck // no-op after Commit
-	if err := fn(&setupTx{tx: tx}); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
-	return nil
+// InTx runs fn in an immediate (write-locked) transaction; fn's ctx carries it (db.Conn), so other contexts'
+// repositories, such as the audit log, write in the same transaction.
+func (r *SetupRepository) InTx(ctx context.Context, fn func(context.Context, app.SetupTx) error) error {
+	return db.Transactor{DB: r.db}.InTx(ctx, func(ctx context.Context) error {
+		return fn(ctx, &setupTx{tx: db.Conn(ctx, r.db)})
+	})
 }
 
 // State reads the setup state without a write transaction.
@@ -50,7 +43,7 @@ type querier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
-type setupTx struct{ tx *sql.Tx }
+type setupTx struct{ tx db.Executor }
 
 func (t *setupTx) SetupState(ctx context.Context) (domain.SetupState, error) {
 	return readState(ctx, t.tx)

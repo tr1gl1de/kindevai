@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	auditdb "github.com/tr1gl1de/kindevai/internal/audit/adapters/sqlite"
+	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/identity/adapters/sqlite"
 	"github.com/tr1gl1de/kindevai/internal/identity/app"
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
@@ -20,13 +23,16 @@ import (
 
 type authEnv struct {
 	h     http.Handler
-	db    interface{ Close() error }
+	db    *sql.DB
 	authn *AuthHandler
 }
 
 func authStack(t *testing.T, burst int) http.Handler { return authStackEnv(t, burst).h }
 
-func authStackEnv(t *testing.T, burst int) authEnv {
+func authStackEnv(t *testing.T, burst int) authEnv { return authStackWith(t, burst, nil) }
+
+// authStackWith is authStackEnv whose audit log is log(d) instead of the real one when log is not nil.
+func authStackWith(t *testing.T, burst int, log func(*sql.DB) app.AuditLog) authEnv {
 	t.Helper()
 	d, err := db.Open(t.Context(), filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -41,8 +47,12 @@ func authStackEnv(t *testing.T, burst int) authEnv {
 	if _, err := d.ExecContext(t.Context(), "INSERT INTO users(id, login, password_hash, platform_role, created_at) VALUES ('u1', 'owner', ?, 'owner', '2026-11-24T00:00:00.000000000Z')", hash); err != nil {
 		t.Fatal(err)
 	}
+	var audit app.AuditLog = &auditapp.Service{Repo: auditdb.New(d), Now: time.Now}
+	if log != nil {
+		audit = log(d)
+	}
 	svc := &app.AuthService{Users: sqlite.NewUserRepository(d), Sessions: sqlite.NewSessionRepository(d),
-		Passwords: hasher, Now: time.Now, Rand: rand.Reader}
+		Passwords: hasher, Tx: db.Transactor{DB: d}, Audit: audit, Now: time.Now, Rand: rand.Reader}
 	lim := func() *ratelimit.Limiter {
 		return ratelimit.New(ratelimit.Config{Burst: burst, Every: time.Minute, MaxKeys: 100}, time.Now)
 	}

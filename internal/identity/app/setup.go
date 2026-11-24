@@ -9,13 +9,14 @@ import (
 	"strings"
 	"time"
 
+	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/identity/domain"
 )
 
-// SetupRepository runs fn inside one serialised write transaction (an error rolls everything back) and
-// reads the state without taking the write lock.
+// SetupRepository runs fn inside one serialised write transaction (an error rolls everything back; fn's ctx
+// carries the transaction, so the audit log joins it) and reads the state without taking the write lock.
 type SetupRepository interface {
-	InTx(ctx context.Context, fn func(SetupTx) error) error
+	InTx(ctx context.Context, fn func(ctx context.Context, tx SetupTx) error) error
 	State(ctx context.Context) (domain.SetupState, error)
 }
 
@@ -43,6 +44,7 @@ type SetupService struct {
 	Repo    SetupRepository
 	Hasher  PasswordHasher
 	Channel TokenChannel
+	Audit   AuditLog
 	Now     func() time.Time
 	Rand    io.Reader
 	NewID   func() string
@@ -59,7 +61,7 @@ type CompleteSetupInput struct {
 
 // Prepare runs at start-up: in setup mode it issues a fresh token; otherwise it removes any leftover token.
 func (s *SetupService) Prepare(ctx context.Context) (setupRequired bool, err error) {
-	err = s.Repo.InTx(ctx, func(tx SetupTx) error {
+	err = s.Repo.InTx(ctx, func(ctx context.Context, tx SetupTx) error {
 		st, err := tx.SetupState(ctx)
 		if err != nil {
 			return err
@@ -95,7 +97,7 @@ func (s *SetupService) Status(ctx context.Context) (setupRequired bool, err erro
 	if st.Token != nil && !st.Token.Expired(s.Now()) {
 		return true, nil
 	}
-	err = s.Repo.InTx(ctx, func(tx SetupTx) error {
+	err = s.Repo.InTx(ctx, func(ctx context.Context, tx SetupTx) error {
 		st, err := tx.SetupState(ctx) // re-check under the write lock
 		if err != nil {
 			return err
@@ -169,7 +171,7 @@ func (s *SetupService) Complete(ctx context.Context, in CompleteSetupInput) (dom
 	}
 	now := s.Now()
 	owner := domain.User{ID: s.NewID(), Login: login, PasswordHash: hash, Role: domain.RoleOwner, CreatedAt: now}
-	err = s.Repo.InTx(ctx, func(tx SetupTx) error {
+	err = s.Repo.InTx(ctx, func(ctx context.Context, tx SetupTx) error {
 		st, err := tx.SetupState(ctx)
 		if err != nil {
 			return err
@@ -177,7 +179,11 @@ func (s *SetupService) Complete(ctx context.Context, in CompleteSetupInput) (dom
 		if err := st.Verify(in.Token, now); err != nil {
 			return err
 		}
-		return tx.CompleteSetup(ctx, owner, name, now)
+		if err := tx.CompleteSetup(ctx, owner, name, now); err != nil {
+			return err
+		}
+		return record(ctx, s.Audit, auditapp.Entry{Actor: auditapp.User(owner.ID, string(owner.Login)), Kind: KindSetupCompleted,
+			Subject: userSubject(owner.ID), Details: map[string]string{"platform_name": string(name)}})
 	})
 	if err != nil {
 		return domain.User{}, err

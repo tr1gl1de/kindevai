@@ -24,6 +24,8 @@ func newService() *Service {
 	return &Service{
 		Repo:  newMemRepo(),
 		Users: memUsers{"owner": ownerU, "alice": aliceU, "bob": bobU},
+		Tx:    directTx{},
+		Audit: &memAudit{},
 		Now:   func() time.Time { return time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC) },
 		NewID: func() string { return fmt.Sprint("p", n.Add(1)) },
 	}

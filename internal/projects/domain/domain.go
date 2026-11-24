@@ -95,6 +95,7 @@ type Membership struct {
 // Actor is who performs an action.
 type Actor struct {
 	UserID string
+	Login  string // for the audit log's actor label
 	Owner  bool
 }
 

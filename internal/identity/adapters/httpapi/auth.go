@@ -149,7 +149,7 @@ func (h *AuthHandler) login(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	token, u, err := h.Service.Login(r.Context(), in.Login, in.Password)
+	token, u, err := h.Service.Login(r.Context(), in.Login, in.Password, client)
 	switch {
 	case errors.Is(err, domain.ErrInvalidCredentials):
 		if account != "" {
@@ -165,7 +165,7 @@ func (h *AuthHandler) login(w http.ResponseWriter, r *http.Request) {
 	}
 	// A new login replaces the browser's previous session instead of leaving it valid.
 	if c, err := r.Cookie(SessionCookie); err == nil && c.Value != "" {
-		if err := h.Service.Logout(r.Context(), c.Value); err != nil {
+		if err := h.Service.Revoke(r.Context(), c.Value); err != nil {
 			h.logger().Warn("revoking previous session", "err", err)
 		}
 	}

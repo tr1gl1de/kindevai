@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	auditdb "github.com/tr1gl1de/kindevai/internal/audit/adapters/sqlite"
+	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/identity/adapters/sqlite"
 	"github.com/tr1gl1de/kindevai/internal/identity/app"
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
@@ -33,6 +36,13 @@ func (c *memChannel) get() string            { c.mu.Lock(); defer c.mu.Unlock();
 
 func setupStack(t *testing.T, burst int) (http.Handler, *memChannel) {
 	t.Helper()
+	h, ch, _ := setupStackWith(t, burst, nil)
+	return h, ch
+}
+
+// setupStackWith is setupStack with its database; log replaces the real audit log when not nil.
+func setupStackWith(t *testing.T, burst int, log func(*sql.DB) app.AuditLog) (http.Handler, *memChannel, *sql.DB) {
+	t.Helper()
 	d, err := db.Open(t.Context(), filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -42,15 +52,19 @@ func setupStack(t *testing.T, burst int) (http.Handler, *memChannel) {
 		t.Fatal(err)
 	}
 	ch := &memChannel{}
-	svc := &app.SetupService{Repo: sqlite.NewSetupRepository(d), Hasher: plainHasher{}, Channel: ch, Now: time.Now,
-		Rand: rand.Reader, NewID: func() string { return "u1" }}
+	var audit app.AuditLog = &auditapp.Service{Repo: auditdb.New(d), Now: time.Now}
+	if log != nil {
+		audit = log(d)
+	}
+	svc := &app.SetupService{Repo: sqlite.NewSetupRepository(d), Hasher: plainHasher{}, Channel: ch, Audit: audit,
+		Now: time.Now, Rand: rand.Reader, NewID: func() string { return "u1" }}
 	if _, err := svc.Prepare(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	lim := ratelimit.New(ratelimit.Config{Burst: burst, Every: time.Minute, MaxKeys: 100}, time.Now)
 	mux := http.NewServeMux()
 	(&SetupHandler{Service: svc, Limiter: lim}).Register(mux)
-	return mux, ch
+	return mux, ch, d
 }
 
 type req struct {

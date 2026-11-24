@@ -27,19 +27,21 @@ func (s *GitHubService) CIAlerts(ctx context.Context, r domain.Repository, e dom
 	switch domain.CIOutcomeOf(r, e) {
 	case domain.CIFailed:
 		topic = TopicCIFailed
-	case domain.CIPassed:
+	case domain.CIPassed, domain.CIClosed:
 		topic = TopicCIPassed
 	default:
 		return nil
 	}
+	pr := domain.CIPullRequest(r, e)
 	b, err := json.Marshal(map[string]any{"projectId": r.ProjectID, "repository": r.FullName(), "branch": e.Branch,
-		"pullRequest": e.PullRequest, "headSha": e.HeadSHA, "conclusion": e.Conclusion})
+		"pullRequest": pr, "headSha": e.HeadSHA, "conclusion": e.Conclusion})
 	if err != nil {
 		return err
 	}
-	// One event per (ref, commit, conclusion); hashed, as branch and repository names may exceed the key limit.
-	sum := sha256.Sum256([]byte(r.FullName() + "\x00" + e.Branch + "\x00" + strconv.Itoa(e.PullRequest) + "\x00" +
-		e.HeadSHA + "\x00" + e.Conclusion))
+	// One event per webhook delivery (the inbox already dropped redeliveries), so a re-run failing again on the
+	// same commit raises again; hashed, as branch and repository names may exceed the key limit.
+	sum := sha256.Sum256([]byte(e.Delivery + "\x00" + r.FullName() + "\x00" + e.Branch + "\x00" + strconv.Itoa(pr) +
+		"\x00" + e.HeadSHA + "\x00" + e.Conclusion))
 	key := "ci/" + hex.EncodeToString(sum[:])
 	if err := s.Outbox.Enqueue(ctx, messaging.Message{Adapter: AdapterAlerts, Topic: topic, Key: key, Payload: b}); err != nil {
 		return fmt.Errorf("enqueueing %s: %w", topic, err)

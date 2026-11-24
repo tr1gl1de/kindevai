@@ -293,6 +293,8 @@ type GitHubEvent struct {
 	Status         string `json:"status,omitempty"`     // checks: queued | in_progress | completed
 	Conclusion     string `json:"conclusion,omitempty"` // checks: success | failure | ...
 	Name           string `json:"name,omitempty"`       // check_run name
+	// Delivery is the webhook delivery id, set by the inbox handler (not stored in the payload).
+	Delivery string `json:"-"`
 }
 
 type ghRef struct {
@@ -387,19 +389,19 @@ const (
 	CINone   CIOutcome = iota // not a CI result the Alert Center follows
 	CIFailed                  // a completed check suite failed or timed out
 	CIPassed                  // a completed check suite succeeded
+	CIClosed                  // a pull request was closed: its CI no longer matters
 )
 
 // CIOutcomeOf classifies a completed check suite on the repository's integration branch or on a pull request.
 // Other conclusions (cancelled, neutral, skipped, action_required, stale) neither raise nor resolve an alert.
 func CIOutcomeOf(r Repository, e GitHubEvent) CIOutcome {
+	if e.Event == EventPullRequest && e.Action == "closed" && e.PullRequest > 0 {
+		return CIClosed
+	}
 	if e.Event != EventCheckSuite || e.Action != "completed" {
 		return CINone
 	}
-	branch := r.IntegrationBranch
-	if branch == "" {
-		branch = DefaultIntegrationBranch
-	}
-	if e.PullRequest <= 0 && e.Branch != branch {
+	if e.PullRequest <= 0 && e.Branch != r.integrationBranch() {
 		return CINone
 	}
 	switch e.Conclusion {
@@ -409,4 +411,20 @@ func CIOutcomeOf(r Repository, e GitHubEvent) CIOutcome {
 		return CIPassed
 	}
 	return CINone
+}
+
+func (r Repository) integrationBranch() string {
+	if r.IntegrationBranch == "" {
+		return DefaultIntegrationBranch
+	}
+	return r.IntegrationBranch
+}
+
+// CIPullRequest is the PR a CI outcome belongs to, 0 for the integration branch itself: a suite on the
+// integration branch is about that branch even when the branch heads a PR (e.g. dev → main).
+func CIPullRequest(r Repository, e GitHubEvent) int {
+	if e.Event == EventCheckSuite && e.Branch == r.integrationBranch() {
+		return 0
+	}
+	return e.PullRequest
 }

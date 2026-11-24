@@ -46,6 +46,9 @@ func (m *CircuitMonitor) Poll(ctx context.Context) error {
 		m.open = map[string]bool{}
 	}
 	for _, s := range m.Health.Snapshot() {
+		if s.Adapter == AdapterAlerts {
+			continue // its events would wait behind its own open circuit; the dead-letter view shows its failures
+		}
 		was, known := m.open[s.Adapter]
 		var topic string
 		switch {

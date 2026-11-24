@@ -43,3 +43,13 @@ func TestRetentionPurgesClosedAlertsInBatches(t *testing.T) {
 		t.Fatalf("retention = %v", app.AlertRetention)
 	}
 }
+
+// Review: exactly one full batch ends after one more (empty) call.
+func TestRetentionExactBatch(t *testing.T) {
+	t.Parallel()
+	p := &purger{left: app.RetentionBatch}
+	r := &app.Retention{Repo: p, Now: time.Now}
+	if n, err := r.Purge(t.Context()); err != nil || n != app.RetentionBatch || len(p.limits) != 2 {
+		t.Fatalf("purged %d in %d calls, %v", n, len(p.limits), err)
+	}
+}

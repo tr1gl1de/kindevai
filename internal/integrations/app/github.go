@@ -568,6 +568,7 @@ func (s *GitHubService) HandleGitHubEvent(ctx context.Context, in messaging.Inbo
 	if err := json.Unmarshal(in.Payload, &e); err != nil || e.Event == "" {
 		return messaging.Permanent(errors.New("malformed github event"))
 	}
+	e.Delivery = in.DeliveryID
 	a, err := s.Store.GitHubApp(ctx)
 	switch {
 	case errors.Is(err, domain.ErrNotConfigured):

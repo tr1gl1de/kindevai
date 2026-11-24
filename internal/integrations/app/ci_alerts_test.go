@@ -2,6 +2,8 @@ package app_test
 
 import (
 	"encoding/json"
+	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/tr1gl1de/kindevai/internal/integrations/app"
@@ -43,5 +45,38 @@ func TestCIAlertsFollowCompletedCheckSuites(t *testing.T) {
 	}
 	if m := e.out.msgs[1]; m.Topic != app.TopicCIPassed || m.Key == e.out.msgs[0].Key {
 		t.Fatalf("passed event %+v", m)
+	}
+}
+
+// Review: a re-run failing again on the same commit raises again (each webhook delivery is its own event); a suite
+// on the integration branch keeps the branch key even when it heads a PR; a closed PR resolves its CI alert.
+func TestCIAlertsRerunsBranchKeyAndClosedPR(t *testing.T) {
+	t.Parallel()
+	e := newGitHubEnv(t)
+	repo := domain.Repository{ID: "r1", ProjectID: "p1", Owner: "acme", Name: "api", IntegrationBranch: "dev"}
+	suite := func(delivery, branch string, pr int, conclusion string) domain.GitHubEvent {
+		return domain.GitHubEvent{Event: domain.EventCheckSuite, Action: "completed", Repository: "acme/api",
+			Branch: branch, PullRequest: pr, HeadSHA: "abc", Status: "completed", Conclusion: conclusion, Delivery: delivery}
+	}
+	closed := domain.GitHubEvent{Event: domain.EventPullRequest, Action: "closed", Repository: "acme/api", Branch: "fix",
+		PullRequest: 4, Delivery: "d5"}
+	for _, ev := range []domain.GitHubEvent{suite("d1", "fix", 4, "failure"), suite("d2", "fix", 4, "success"),
+		suite("d3", "fix", 4, "failure"), suite("d4", "dev", 9, "failure"), closed} {
+		if err := e.gh.CIAlerts(t.Context(), repo, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.out.mu.Lock()
+	defer e.out.mu.Unlock()
+	var got []string
+	for _, m := range e.out.msgs {
+		var p struct{ PullRequest int }
+		_ = json.Unmarshal(m.Payload, &p)
+		got = append(got, m.Topic+"/"+strconv.Itoa(p.PullRequest))
+	}
+	want := []string{app.TopicCIFailed + "/4", app.TopicCIPassed + "/4", app.TopicCIFailed + "/4", app.TopicCIFailed + "/0",
+		app.TopicCIPassed + "/4"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
 	}
 }

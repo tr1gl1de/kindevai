@@ -1,8 +1,11 @@
 package app_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,5 +54,43 @@ func TestCircuitMonitorReportsTransitions(t *testing.T) {
 	slices.Sort(keys)
 	if len(slices.Compact(keys)) != 3 {
 		t.Fatalf("keys not unique: %v", keys)
+	}
+}
+
+// Review: the poll interval must stay below the default breaker cooldown, or a short opening could be missed.
+func TestCircuitIntervalBelowCooldown(t *testing.T) {
+	t.Parallel()
+	if cd := (messaging.Config{}).WithDefaults().BreakerCooldown; app.CircuitInterval >= cd {
+		t.Fatalf("interval %v >= cooldown %v", app.CircuitInterval, cd)
+	}
+}
+
+type failingOutbox struct {
+	outbox
+	fail bool
+}
+
+func (o *failingOutbox) Enqueue(ctx context.Context, m messaging.Message) error {
+	if o.fail {
+		return errors.New("db busy")
+	}
+	return o.outbox.Enqueue(ctx, m)
+}
+
+// Review: an event that could not be enqueued is retried at the next poll; the alerts adapter itself is skipped.
+func TestCircuitMonitorRetriesAndSkipsItself(t *testing.T) {
+	t.Parallel()
+	h := &health{states: map[string]messaging.State{"github": messaging.StateCircuitOpen, app.AdapterAlerts: messaging.StateCircuitOpen}}
+	out := &failingOutbox{fail: true}
+	m := &app.CircuitMonitor{Health: h, Outbox: out, Now: time.Now}
+	if err := m.Poll(t.Context()); err == nil {
+		t.Fatal("enqueue failure not reported")
+	}
+	out.fail = false
+	if err := m.Poll(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.msgs) != 1 || out.msgs[0].Topic != app.TopicCircuitOpen || !strings.Contains(string(out.msgs[0].Payload), "github") {
+		t.Fatalf("events = %+v", out.msgs)
 	}
 }

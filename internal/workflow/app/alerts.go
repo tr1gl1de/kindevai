@@ -46,7 +46,8 @@ func (s *Service) saveTask(ctx context.Context, t *domain.Task) error {
 	if err != nil {
 		return err
 	}
-	key := "task/" + t.ID + "/" + topic + "/" + strconv.FormatInt(t.UpdatedAt.UnixNano(), 10)
+	// The aggregate version (incremented by every save) makes each transition's event unique.
+	key := "task/" + t.ID + "/" + topic + "/v" + strconv.FormatInt(t.Version, 10)
 	if err := s.Outbox.Enqueue(ctx, messaging.Message{Adapter: AdapterAlerts, Topic: topic, Key: key, Payload: b}); err != nil {
 		return fmt.Errorf("enqueueing %s: %w", topic, err)
 	}

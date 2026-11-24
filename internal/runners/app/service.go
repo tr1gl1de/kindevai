@@ -81,6 +81,8 @@ type Service struct {
 	Now      func() time.Time
 	NewID    func() string
 	Logger   *slog.Logger
+	// Sessions closes live gateway connections when a runner is disabled or revoked (nil: no gateway wired).
+	Sessions Disconnector
 }
 
 // TokenView is an enrollment token with its state at the time of the call.
@@ -372,6 +374,14 @@ func (s *Service) change(ctx context.Context, actor auth.Principal, id, kind str
 		return RunnerView{}, err
 	}
 	s.logger().Info("runner changed", "runner", id, "event", kind, "by", actor.UserID)
+	if s.Sessions != nil { // after the commit, so a reconnect already sees the new status
+		switch kind {
+		case KindDisabled:
+			s.Sessions.Disconnect(id, ReasonDisabled)
+		case KindRevoked:
+			s.Sessions.Disconnect(id, ReasonRevoked)
+		}
+	}
 	return s.view(ctx, r, map[string]string{})
 }
 

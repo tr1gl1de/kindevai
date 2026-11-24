@@ -219,3 +219,15 @@ func (c *counterRand) Read(b []byte) (int, error) {
 	}
 	return len(b), nil
 }
+
+func (r *memRepo) MarkSeen(_ context.Context, id string, at time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	run, ok := r.runners[id]
+	if !ok {
+		return domain.ErrNotFound
+	}
+	run.LastSeenAt = &at
+	r.runners[id] = run
+	return nil
+}

@@ -19,7 +19,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
+	"github.com/tr1gl1de/kindevai/internal/protocol"
 )
 
 func TestServeHealthAndShutdown(t *testing.T) {
@@ -386,7 +389,7 @@ func TestRunnerEnrollmentEndToEnd(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &created); code != 201 || err != nil || created.Token == "" {
 		t.Fatalf("create token = %d %s", code, body)
 	}
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	enroll := `{"token":"` + created.Token + `","publicKey":"` + base64.StdEncoding.EncodeToString(pub) + `","hostname":"wsl-box","os":"linux","arch":"amd64","version":"0.1.0"}`
 	code, body = call(t, "POST", base+"/api/runners/enroll", enroll) // no session
 	var reg struct{ RunnerID, Status string }
@@ -398,5 +401,57 @@ func TestRunnerEnrollmentEndToEnd(t *testing.T) {
 	}
 	if code, body := owner("POST", "/api/runners/"+reg.RunnerID+"/approve", `{"projectIds":["`+project.ID+`"]}`); code != 200 || !strings.Contains(body, `"approved"`) {
 		t.Fatalf("approve = %d %s", code, body)
+	}
+
+	// The approved runner connects over the WebSocket gateway (no dashboard session) and revocation closes it.
+	ws, _, err := websocket.Dial(t.Context(), "ws"+strings.TrimPrefix(base, "http")+protocol.ConnectPath,
+		&websocket.DialOptions{Subprotocols: []string{protocol.Subprotocol}})
+	if err != nil {
+		t.Fatalf("dial gateway: %v", err)
+	}
+	defer ws.CloseNow()
+	readMsg := func() (protocol.Envelope, error) {
+		_, b, err := ws.Read(t.Context())
+		var e protocol.Envelope
+		if err == nil {
+			err = json.Unmarshal(b, &e)
+		}
+		return e, err
+	}
+	m, err := readMsg()
+	var ch protocol.Challenge
+	if err != nil || m.Type != protocol.TypeChallenge || json.Unmarshal(m.Payload, &ch) != nil {
+		t.Fatalf("challenge: %+v %v", m, err)
+	}
+	transcript, _ := protocol.AuthTranscript(protocol.AuthFields{RunnerID: reg.RunnerID, Audience: ch.Audience,
+		Nonce: ch.Nonce, ExpiresAt: ch.ExpiresAt, ConnectionID: ch.ConnectionID})
+	payload, _ := json.Marshal(protocol.Authenticate{Version: 1, RunnerID: reg.RunnerID,
+		Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(priv, transcript))})
+	frame, _ := json.Marshal(protocol.Envelope{Type: protocol.TypeAuthenticate, Payload: payload})
+	if err := ws.Write(t.Context(), websocket.MessageText, frame); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := readMsg(); err != nil || m.Type != protocol.TypeAuthorized {
+		t.Fatalf("authorized: %+v %v", m, err)
+	}
+	if code, body := owner("POST", "/api/runners/"+reg.RunnerID+"/revoke", ""); code != 200 {
+		t.Fatalf("revoke = %d %s", code, body)
+	}
+	if _, err := readMsg(); websocket.CloseStatus(err) != protocol.CloseRevoked {
+		t.Fatalf("after revoke: %v", err)
+	}
+}
+
+func TestParseAudiences(t *testing.T) {
+	t.Parallel()
+	got, err := parseAudiences(" https://CP.example.com:443/ , http://127.0.0.1:8080")
+	if err != nil || len(got) != 2 || got[0] != "https://cp.example.com" || got[1] != "http://127.0.0.1:8080" {
+		t.Fatalf("got %v %v", got, err)
+	}
+	if got, err := parseAudiences(""); err != nil || got != nil {
+		t.Fatalf("empty: %v %v", got, err)
+	}
+	if _, err := parseAudiences("cp.example.com"); err == nil {
+		t.Fatal("origin without scheme accepted")
 	}
 }

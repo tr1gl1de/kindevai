@@ -167,7 +167,7 @@ func newIdentity(ctx context.Context, inst *bootstrap.Installation, audit *audit
 
 // newProjects wires the projects bounded context, the identity invitations that grant its memberships and the
 // runners context, whose runners are granted projects.
-func newProjects(inst *bootstrap.Installation, id *identityModule, audit *auditModule, logger *slog.Logger) []server.Module {
+func newProjects(inst *bootstrap.Installation, id *identityModule, audit *auditModule, hub *runnersapp.Hub, logger *slog.Logger) []server.Module {
 	users := id.Users
 	svc := &projectsapp.Service{
 		Repo:  projectsdb.New(inst.DB),
@@ -205,6 +205,7 @@ func newProjects(inst *bootstrap.Installation, id *identityModule, audit *auditM
 			Now:      time.Now,
 			NewID:    rand.Text,
 			Logger:   logger,
+			Sessions: hub, // disable/revoke close the runner's live gateway connection
 		},
 		Limiter: ratelimit.New(ratelimit.Config{Burst: 10, Every: time.Minute, MaxKeys: 10_000}, time.Now),
 		Logger:  logger,

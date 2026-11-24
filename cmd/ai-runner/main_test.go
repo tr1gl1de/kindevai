@@ -26,6 +26,7 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/domain"
 	"github.com/tr1gl1de/kindevai/internal/runner/platform/secfile"
+	runnersgw "github.com/tr1gl1de/kindevai/internal/runners/adapters/gateway"
 	runnershttp "github.com/tr1gl1de/kindevai/internal/runners/adapters/httpapi"
 	runnersdb "github.com/tr1gl1de/kindevai/internal/runners/adapters/sqlite"
 	runnersapp "github.com/tr1gl1de/kindevai/internal/runners/app"
@@ -35,6 +36,7 @@ import (
 type controlPlane struct {
 	url string
 	svc *runnersapp.Service
+	hub *runnersapp.Hub
 }
 
 func newControlPlane(t *testing.T) *controlPlane {
@@ -51,14 +53,28 @@ func newControlPlane(t *testing.T) *controlPlane {
 		"INSERT INTO users(id, login, password_hash, platform_role, created_at) VALUES ('owner1', 'owner', 'h', 'owner', 'x')"); err != nil {
 		t.Fatal(err)
 	}
-	svc := &runnersapp.Service{Repo: runnersdb.New(d), Tx: db.Transactor{DB: d},
-		Audit: &auditapp.Service{Repo: auditdb.New(d), Now: time.Now}, Rand: rand.Reader, Now: time.Now, NewID: rand.Text}
+	if _, err := d.ExecContext(t.Context(),
+		"INSERT INTO projects(id, slug, name, created_at) VALUES ('p1', 'alpha', 'Alpha', 'x')"); err != nil {
+		t.Fatal(err)
+	}
+	hub := runnersapp.NewHub()
+	svc := &runnersapp.Service{Repo: runnersdb.New(d), Projects: projectsStub{}, Tx: db.Transactor{DB: d},
+		Audit: &auditapp.Service{Repo: auditdb.New(d), Now: time.Now}, Rand: rand.Reader, Now: time.Now, NewID: rand.Text,
+		Sessions: hub}
 	mux := http.NewServeMux()
 	(&runnershttp.Handler{Service: svc,
 		Limiter: ratelimit.New(ratelimit.Config{Burst: 100, Every: time.Minute, MaxKeys: 10}, time.Now)}).Register(mux)
+	(&runnersgw.Handler{Gateway: &runnersapp.Gateway{Runners: runnersdb.New(d), Hub: hub, Rand: rand.Reader, Now: time.Now,
+		NewID: rand.Text}}).Register(mux)
 	ts := httptest.NewServer(mux)
-	t.Cleanup(ts.Close)
-	return &controlPlane{url: ts.URL, svc: svc}
+	t.Cleanup(func() { hub.Shutdown(); ts.Close() })
+	return &controlPlane{url: ts.URL, svc: svc, hub: hub}
+}
+
+type projectsStub struct{}
+
+func (projectsStub) Lookup(_ context.Context, id string) (runnersapp.ProjectRef, error) {
+	return runnersapp.ProjectRef{ID: id, Name: id}, nil
 }
 
 var owner = auth.Principal{UserID: "owner1", Login: "owner", Owner: true}
@@ -314,5 +330,53 @@ func TestServiceTemplates(t *testing.T) {
 			!strings.Contains(s, "RestartPreventExitStatus=78") {
 			t.Errorf("%s lacks hardening", name)
 		}
+	}
+}
+
+// AC: `ai-runner run` keeps an authenticated connection once the runner is approved, and revocation closes the session and stops the daemon with EX_CONFIG.
+func TestRunConnectsAfterApprovalAndStopsWhenRevoked(t *testing.T) {
+	t.Parallel()
+	cp := newControlPlane(t)
+	dataDir := filepath.Join(t.TempDir(), "d")
+	r := cli(t.Context(), dataDir, cp.token(t), nil, "enroll", "--server", cp.url)
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	runners, err := cp.svc.List(t.Context(), owner)
+	if err != nil || len(runners) != 1 {
+		t.Fatalf("runners %v %v", runners, err)
+	}
+	id := runners[0].Runner.ID
+	done := make(chan result, 1)
+	go func() { done <- cli(t.Context(), dataDir, "", nil, "run") }()
+
+	waitUntil := func(what string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for !cond() {
+			select {
+			case r := <-done:
+				t.Fatalf("daemon exited while waiting for %s: %v\n%s", what, r.err, r.stderr)
+			case <-time.After(10 * time.Millisecond):
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s", what)
+			}
+		}
+	}
+	if _, err := cp.svc.Approve(t.Context(), owner, id, []string{"p1"}); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil("the runner to connect", func() bool { return cp.hub.Online(id) })
+	if _, err := cp.svc.Revoke(t.Context(), owner, id); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case r := <-done:
+		if !errors.Is(r.err, domain.ErrRunnerRevoked) || exitCode(r.err) != exitConfig {
+			t.Fatalf("run = %v (exit %d)\n%s", r.err, exitCode(r.err), r.stderr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not stop after revocation")
 	}
 }

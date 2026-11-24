@@ -16,6 +16,13 @@ services:
     environment:
       # Only the reverse proxy on this compose network may set X-Forwarded-For (per-client rate limits behind Caddy).
       KINDEV_TRUSTED_PROXIES: ${KINDEV_SUBNET:-172.29.240.0/24}
+      # A runner on this host reaches the loopback-published port through Docker's gateway (the .1 address of the
+      # subnet), so plain ws:// is accepted from it like from loopback (KIN-19). Safe only while the port below is
+      # published on 127.0.0.1; adjust it together with KINDEV_SUBNET. Remote runners always use wss:// via Caddy.
+      KINDEV_RUNNER_PLAIN_WS_PEERS: ${KINDEV_RUNNER_PLAIN_WS_PEERS:-172.29.240.1/32}
+      # Optional hardening: the public origin(s) runners dial, e.g. https://ai.example.com,http://127.0.0.1:8080.
+      # When set, runner connections addressed to any other host are refused (relay protection).
+      KINDEV_PUBLIC_URL: ${KINDEV_PUBLIC_URL:-}
     volumes:
       - data:/data
     ports:

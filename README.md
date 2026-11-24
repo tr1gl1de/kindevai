@@ -107,8 +107,21 @@ ai-runner fingerprint                                    # compare with the runn
   `repos/ workspaces/ sessions/ events/ proxy/`, all mode 0700; one process at a time (lock file).
 - Services: `deploy/runner/kindevai-runner.service` (systemd system service with its own user),
   `kindevai-runner-user.service` (systemd user service, e.g. WSL2, so AI CLIs use your logins) and
-  `io.kindevai.runner.plist` (macOS launchd agent); install steps are in each file. `ai-runner run` currently checks
-  the key and registration and waits; the WSS connection to the Control Plane arrives with KIN-19.
+  `io.kindevai.runner.plist` (macOS launchd agent); install steps are in each file.
+- `ai-runner run` keeps an outbound WebSocket to `wss://<server>/runner/connect` (`ws://` only for a Control Plane on
+  loopback). Each connection is authenticated by challenge-response: the Control Plane sends a single-use 32-byte
+  nonce bound to the connection id and its own address, the runner signs
+  `kindevai-runner-auth/1\n<runner id>\n<audience>\n<nonce>\n<expiry>\n<connection id>` with its Ed25519 key, and
+  only an **approved** runner is let in (pending/disabled are refused and retried, revoked stops the daemon with exit
+  code 78). Disabling or revoking a runner closes its live connection immediately. The runner reconnects with jittered
+  exponential backoff (1 s … 60 s); a TLS verification failure or a challenge for another address stops it (78).
+- Limits on the Control Plane: 64 KiB per message, 10 s to authenticate, ping every 30 s (15 s to answer), 30
+  connection attempts per minute per address, 256 connections (32 still authenticating); browsers (an `Origin`
+  header) are refused. Plain `ws://` is accepted only from loopback (in Docker also from the compose network,
+  `KINDEV_RUNNER_PLAIN_WS_PEERS`); remote runners use the HTTPS profile, where Caddy proxies the WebSocket upgrade.
+  `--public-url` / `KINDEV_PUBLIC_URL` (e.g. `https://ai.example.com`) pins the origins runners may dial; a connection
+  addressed to another host is refused (421), so a relay cannot obtain a signature for itself. A revoked or disabled
+  runner that ignores the close frame is cut off after 1 s.
 
 ### Integrations and external calls
 

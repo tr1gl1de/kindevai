@@ -248,3 +248,29 @@ func TestEnrollmentAuditIsStoredWithoutTheToken(t *testing.T) {
 		t.Fatalf("kinds = %v, want %v", kinds, want)
 	}
 }
+
+func TestMarkSeen(t *testing.T) {
+	t.Parallel()
+	d := testDB(t)
+	r := sqlite.New(d)
+	ctx := t.Context()
+	tok, _, _ := domain.NewEnrollmentToken(rand.Reader, "t1", "owner1", t0)
+	if err := r.CreateToken(ctx, tok); err != nil {
+		t.Fatal(err)
+	}
+	key, _ := newKey(t)
+	if err := r.CreateRunner(ctx, domain.Enroll("r1", tok, key, domain.Metadata{Hostname: "h", OS: "linux", Arch: "amd64"}, t0)); err != nil {
+		t.Fatal(err)
+	}
+	seen := t0.Add(time.Hour)
+	if err := r.MarkSeen(ctx, "r1", seen); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.Runner(ctx, "r1")
+	if err != nil || got.LastSeenAt == nil || !got.LastSeenAt.Equal(seen) {
+		t.Fatalf("lastSeenAt = %v, %v", got.LastSeenAt, err)
+	}
+	if err := r.MarkSeen(ctx, "nope", seen); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("unknown runner = %v", err)
+	}
+}

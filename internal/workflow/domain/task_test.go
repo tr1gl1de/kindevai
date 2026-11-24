@@ -285,3 +285,17 @@ func TestRetitleFollowsTheYouTrackSummaryUntilTheTaskIsFinished(t *testing.T) {
 		t.Fatalf("finished task renamed: changed=%v err=%v title=%q", changed, err, task.Title)
 	}
 }
+
+func TestRejectPlanReturnsTheTaskToAnalysis(t *testing.T) {
+	t.Parallel()
+	task := Task{ID: "t", State: TaskAwaitingApproval, PlanRevision: 2}
+	if err := task.RejectPlan(1, t0); !errors.Is(err, ErrStaleRevision) || task.State != TaskAwaitingApproval {
+		t.Fatalf("rejecting an old revision = %v", err)
+	}
+	if err := task.RejectPlan(2, t0); err != nil || task.State != TaskAnalyzing || task.PlanRevision != 2 {
+		t.Fatalf("reject = %v, task %+v", err, task)
+	}
+	if err := task.RejectPlan(2, t0); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("rejecting an analyzing task = %v", err)
+	}
+}

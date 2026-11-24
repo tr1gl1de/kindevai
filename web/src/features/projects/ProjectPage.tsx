@@ -12,6 +12,7 @@ import { useNotify } from "../../ui/notify";
 import { useMembers, useProject, useRemoveMember, useSetMember } from "./api";
 import { ProjectIntegrationsPanel } from "../integrations/ProjectIntegrationsPanel";
 import { ProjectYouTrackPanel } from "../integrations/ProjectYouTrackPanel";
+import { RiskPolicyPanel } from "../approvals/RiskPolicyPanel";
 import { NotFoundPage } from "./NotFoundPage";
 import { RoleLabel } from "./RoleLabel";
 
@@ -37,6 +38,9 @@ export function ProjectPage({ me }: { me: Me }) {
       <Members project={p} canManage={me.role === "owner"} />
       <ProjectYouTrackPanel project={p} isOwner={me.role === "owner"} />
       {me.role === "owner" && <ProjectIntegrationsPanel project={p} />}
+      {(me.role === "owner" || p.myRole === "project_admin") && (
+        <RiskPolicyPanel projectId={p.id} canEdit={me.role === "owner"} />
+      )}
     </>
   );
 }

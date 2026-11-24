@@ -611,6 +611,41 @@ legend {
   margin-top: 1.5rem;
 }
 
+/* Approval Center (KIN-24) */
+textarea {
+  resize: vertical;
+}
+.filter-group {
+  border: none;
+  padding: 0;
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: var(--space) 0;
+}
+.filter-group .button[aria-pressed="true"] {
+  font-weight: 700;
+  border-width: 2px;
+}
+.risk-L2,
+.risk-L3,
+.approval-pending {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+}
+.approval-rejected {
+  border-color: var(--danger);
+}
+.paths {
+  margin: 0;
+  padding-left: 1.2em;
+  overflow-wrap: anywhere;
+}
+.policy-rules {
+  display: grid;
+  gap: var(--space);
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
 textarea {
   min-height: 8rem;
   resize: vertical;

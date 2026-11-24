@@ -59,7 +59,7 @@ func (projects) Repositories(_ context.Context, id string) ([]string, error) {
 var ids atomic.Int64
 
 func service(d *sql.DB, now func() time.Time) *app.Service {
-	return &app.Service{Repo: sqlite.New(d), Projects: projects{}, Tx: db.Transactor{DB: d}, Now: now,
+	return &app.Service{Repo: sqlite.New(d), Projects: projects{}, Policy: asProposed{}, Tx: db.Transactor{DB: d}, Now: now,
 		NewID: func() string { return fmt.Sprintf("id-%d", ids.Add(1)) }}
 }
 
@@ -84,7 +84,7 @@ func running(t *testing.T, svc *app.Service) (domain.Task, domain.Execution) {
 	if _, err := svc.StartAnalysis(ctx, task.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.SubmitPlan(ctx, task.ID, plan(), domain.RiskL1, "planner"); err != nil {
+	if _, err := svc.SubmitPlan(ctx, task.ID, plan(), "planner"); err != nil {
 		t.Fatal(err)
 	}
 	e, err := svc.StartExecution(ctx, task.ID)
@@ -188,7 +188,9 @@ func TestPlanRevisionsAreStoredCanonicallyAndImmutable(t *testing.T) {
 	ctx := t.Context()
 	task, _ := svc.CreateTask(ctx, "p1", "Login", "", "u1")
 	_, _ = svc.StartAnalysis(ctx, task.ID)
-	rev, err := svc.SubmitPlan(ctx, task.ID, plan(), domain.RiskL2, "planner")
+	p := plan()
+	p.Risk = domain.RiskL2
+	rev, err := svc.SubmitPlan(ctx, task.ID, p, "planner")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,4 +427,11 @@ func TestCancelTaskIsAtomic(t *testing.T) {
 	if got, _ := svc.Execution(ctx, e.ID); got.State != domain.ExecutionCancelled || got.FinishedAt == nil {
 		t.Fatalf("execution = %+v", got)
 	}
+}
+
+// asProposed is a policy that keeps the planner's risk.
+type asProposed struct{}
+
+func (asProposed) EffectiveRisk(_ context.Context, _ string, p domain.Plan) (domain.Risk, error) {
+	return p.Risk, nil
 }

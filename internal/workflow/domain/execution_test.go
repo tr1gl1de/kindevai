@@ -377,7 +377,7 @@ func TestExecutionInvariantsUnderRandomOperations(t *testing.T) {
 			s := e.Steps[rng.IntN(len(e.Steps))]
 			r := runners[rng.IntN(len(runners))]
 			fence := s.Fence - int64(rng.IntN(2)) // sometimes stale
-			switch rng.IntN(8) {
+			switch rng.IntN(9) {
 			case 0, 1:
 				_, _ = e.Claim(s.ID, r, now, ttl)
 			case 2:
@@ -392,6 +392,8 @@ func TestExecutionInvariantsUnderRandomOperations(t *testing.T) {
 				e.ExpireLeases(now)
 			case 7:
 				_ = e.ResumeStep(s.ID, now)
+			case 8:
+				_ = e.HoldForApproval(s.ID, s.RunnerID, fence, "scope", now)
 			}
 			active := 0
 			for _, st := range e.Steps {
@@ -487,5 +489,53 @@ func TestReportsToAClosedExecutionAreStale(t *testing.T) {
 	_ = e.Cancel("stop", t0)
 	if _, err := e.Renew(id, "r1", l.Fence, t0, ttl); !errors.Is(err, ErrStaleFence) {
 		t.Fatalf("renew after cancel = %v (the runner must stop its process)", err)
+	}
+}
+
+func TestHoldForApprovalStopsTheStepWithoutUsingTheRetryBudget(t *testing.T) {
+	t.Parallel()
+	e := newExecution(t, 2)
+	id := e.StepByKey("backend").ID
+	l, err := e.Claim(id, "r1", t0, ttl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A claimed step that never started may be held too.
+	if err := e.HoldForApproval(id, "r1", l.Fence, "changed files outside the approved scope", t0); err != nil {
+		t.Fatalf("hold a claimed step = %v", err)
+	}
+	if err := e.ResumeStep(id, t0); err != nil {
+		t.Fatal(err)
+	}
+	l, _ = e.Claim(id, "r1", t0, ttl)
+	if err := e.Start(id, "r1", l.Fence, t0, ttl); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.HoldForApproval(id, "r2", l.Fence, "x", t0); !errors.Is(err, ErrStaleFence) {
+		t.Fatalf("hold by a runner without the claim = %v", err)
+	}
+	if err := e.HoldForApproval(id, "r1", l.Fence, "changed files outside the approved scope", t0); err != nil {
+		t.Fatal(err)
+	}
+	s := e.StepByKey("backend")
+	last := s.Attempts[len(s.Attempts)-1]
+	if s.State != StepWaiting || s.WaitReason != WaitApproval || s.RunnerID != "" || s.LeaseExpiresAt != nil ||
+		last.State != AttemptCancelled {
+		t.Fatalf("held step = %+v", s)
+	}
+	if err := e.Succeed(id, "r1", l.Fence, t0); !errors.Is(err, ErrStaleFence) {
+		t.Fatalf("a held step's old process must not report success: %v", err)
+	}
+	if _, err := e.Claim(id, "r1", t0, ttl); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatal("a held step cannot be claimed before the approval")
+	}
+	if err := e.ResumeStep(id, t0); err != nil || stepState(t, &e, "backend") != StepReady {
+		t.Fatalf("resume after approval = %v", err)
+	}
+	// Cancelled attempts do not count: with a budget of 2 the step still gets a retry after one real failure.
+	l, _ = e.Claim(id, "r1", t0, ttl)
+	_ = e.Start(id, "r1", l.Fence, t0, ttl)
+	if err := e.Fail(id, "r1", l.Fence, "boom", t0, 2); err != nil || stepState(t, &e, "backend") != StepReady {
+		t.Fatalf("first real failure must be retried: %v, %s", err, stepState(t, &e, "backend"))
 	}
 }

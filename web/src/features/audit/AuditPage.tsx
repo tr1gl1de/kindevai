@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import { useMemo, useRef, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router";
@@ -206,7 +207,7 @@ function Filters({
   );
 }
 
-type T = ReturnType<typeof useTranslation>["t"];
+type T = TFunction;
 
 /** Translated name of a kind; a kind without a label yet (added by a later task) shows its identifier. */
 function kindLabel(t: T, kind: string): string {

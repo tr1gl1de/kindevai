@@ -54,10 +54,27 @@ type Projects interface {
 	Repositories(ctx context.Context, projectID string) ([]string, error)
 }
 
+// RiskPolicy is the deterministic Policy Evaluator (approvals context, KIN-24). The planner's proposed risk is
+// never trusted on its own: the effective risk of a revision always comes from here, and a result below the
+// proposal is refused.
+type RiskPolicy interface {
+	EffectiveRisk(ctx context.Context, projectID string, plan domain.Plan) (domain.Risk, error)
+}
+
+// Events receives workflow domain events inside the use case's transaction; an error rolls the use case back.
+// The approvals context requests approvals for a new revision and retires those of older revisions or of a
+// closed task.
+type Events interface {
+	PlanAccepted(ctx context.Context, t domain.Task, rev domain.PlanRevision) error
+	TaskClosed(ctx context.Context, t domain.Task) error // CANCELLED or FAILED
+}
+
 // Service implements the workflow use cases.
 type Service struct {
 	Repo        Repository
 	Projects    Projects
+	Policy      RiskPolicy // required for SubmitPlan
+	Events      Events     // optional
 	Tx          TxRunner
 	Now         func() time.Time
 	NewID       func() string
@@ -153,14 +170,29 @@ func (s *Service) StartAnalysis(ctx context.Context, taskID string) (domain.Task
 	})
 }
 
-// SubmitPlan stores plan as the task's next immutable revision and routes the task by risk, the effective level
-// after policy (L0/L1 READY, L2/L3 AWAITING_APPROVAL). The DAG is validated against the project's repositories.
-func (s *Service) SubmitPlan(ctx context.Context, taskID string, plan domain.Plan, risk domain.Risk, author string) (domain.PlanRevision, error) {
+// SubmitPlan stores plan as the task's next immutable revision and routes the task by its effective risk, which
+// the Policy Evaluator computes from the plan (it may only raise the planner's proposal): L0/L1 READY, L2/L3
+// AWAITING_APPROVAL. The DAG is validated against the project's repositories. Approvals of older revisions are
+// retired by the Events listener in the same transaction.
+func (s *Service) SubmitPlan(ctx context.Context, taskID string, plan domain.Plan, author string) (domain.PlanRevision, error) {
+	if s.Policy == nil {
+		return domain.PlanRevision{}, errors.New("workflow: risk policy not configured")
+	}
 	var rev domain.PlanRevision
 	_, err := s.updateTask(ctx, taskID, func(ctx context.Context, t *domain.Task, now time.Time) error {
 		repos, err := s.Projects.Repositories(ctx, t.ProjectID)
 		if err != nil {
 			return fmt.Errorf("project %s: %w", t.ProjectID, err)
+		}
+		if err := t.CanAcceptPlan(); err != nil {
+			return err
+		}
+		if err := domain.ValidatePlan(plan, repos); err != nil {
+			return err
+		}
+		risk, err := s.Policy.EffectiveRisk(ctx, t.ProjectID, plan.Normalize())
+		if err != nil {
+			return fmt.Errorf("evaluating plan risk: %w", err)
 		}
 		if rev, err = domain.NewPlanRevision(t.ID, t.PlanRevision+1, plan, risk, repos, author, now); err != nil {
 			return err
@@ -168,7 +200,13 @@ func (s *Service) SubmitPlan(ctx context.Context, taskID string, plan domain.Pla
 		if err := t.AcceptPlan(rev.Number(), rev.Risk(), now); err != nil {
 			return err
 		}
-		return s.Repo.CreateRevision(ctx, rev)
+		if err := s.Repo.CreateRevision(ctx, rev); err != nil {
+			return err
+		}
+		if s.Events != nil {
+			return s.Events.PlanAccepted(ctx, *t, rev)
+		}
+		return nil
 	})
 	if err != nil {
 		return domain.PlanRevision{}, err
@@ -241,7 +279,13 @@ func (s *Service) syncTask(ctx context.Context, e *domain.Execution, now time.Ti
 	if err := t.Transition(to, r, now); err != nil {
 		return err
 	}
-	return s.Repo.SaveTask(ctx, &t)
+	if err := s.Repo.SaveTask(ctx, &t); err != nil {
+		return err
+	}
+	if to == domain.TaskFailed && s.Events != nil {
+		return s.Events.TaskClosed(ctx, t)
+	}
+	return nil
 }
 
 // Claim gives runnerID the READY step with a new fencing token and a lease, only while the task is RUNNING (not
@@ -350,6 +394,11 @@ func (s *Service) CancelTask(ctx context.Context, taskID, reason string) (domain
 		if err := t.Transition(domain.TaskCancelled, domain.Reason{Detail: reason}, now); err != nil {
 			return err
 		}
+		if s.Events != nil {
+			if err := s.Events.TaskClosed(ctx, *t); err != nil {
+				return err
+			}
+		}
 		e, err := s.Repo.RunningExecution(ctx, t.ID)
 		if errors.Is(err, domain.ErrNotFound) {
 			return nil
@@ -361,5 +410,104 @@ func (s *Service) CancelTask(ctx context.Context, taskID, reason string) (domain
 			return err
 		}
 		return s.Repo.SaveExecution(ctx, &e)
+	})
+}
+
+// Revision returns a stored plan revision of a task.
+func (s *Service) Revision(ctx context.Context, taskID string, number int) (domain.PlanRevision, error) {
+	return s.Repo.Revision(ctx, taskID, number)
+}
+
+// currentRevision checks that (revision, hash) is the task's current plan revision.
+func (s *Service) currentRevision(ctx context.Context, t *domain.Task, revision int, hash string) error {
+	if revision != t.PlanRevision {
+		return domain.ErrStaleRevision
+	}
+	rev, err := s.Repo.Revision(ctx, t.ID, revision)
+	if err != nil {
+		return err
+	}
+	if rev.Hash() != hash {
+		return domain.ErrStaleRevision
+	}
+	return nil
+}
+
+// ApprovePlan applies the Owner's execute approval of (revision, planHash): AWAITING_APPROVAL -> READY. Anything
+// but the current revision and its hash is domain.ErrStaleRevision. The approvals context records the decision.
+func (s *Service) ApprovePlan(ctx context.Context, taskID string, revision int, hash string) (domain.Task, error) {
+	return s.updateTask(ctx, taskID, func(ctx context.Context, t *domain.Task, now time.Time) error {
+		if err := s.currentRevision(ctx, t, revision, hash); err != nil {
+			return err
+		}
+		return t.Approve(revision, now)
+	})
+}
+
+// RejectPlan applies the Owner's rejection of (revision, planHash): AWAITING_APPROVAL -> ANALYZING for a new plan.
+func (s *Service) RejectPlan(ctx context.Context, taskID string, revision int, hash string) (domain.Task, error) {
+	return s.updateTask(ctx, taskID, func(ctx context.Context, t *domain.Task, now time.Time) error {
+		if err := s.currentRevision(ctx, t, revision, hash); err != nil {
+			return err
+		}
+		return t.RejectPlan(revision, now)
+	})
+}
+
+// StepInfo is a step with the task and plan revision it runs under (its approved scope is in the revision).
+type StepInfo struct {
+	Task      domain.Task
+	Execution domain.Execution
+	Step      domain.Step
+	Revision  domain.PlanRevision
+}
+
+// PlanStep returns the plan step of the revision with the step's key.
+func (i StepInfo) PlanStep() (domain.PlanStep, bool) {
+	for _, p := range i.Revision.Plan().Steps {
+		if p.Key == i.Step.Key {
+			return p, true
+		}
+	}
+	return domain.PlanStep{}, false
+}
+
+// StepInfo returns the step with its task and plan revision.
+func (s *Service) StepInfo(ctx context.Context, stepID string) (StepInfo, error) {
+	e, err := s.Repo.ExecutionByStep(ctx, stepID)
+	if err != nil {
+		return StepInfo{}, err
+	}
+	st := e.Step(stepID)
+	if st == nil {
+		return StepInfo{}, domain.ErrNotFound
+	}
+	t, err := s.Repo.Task(ctx, e.TaskID)
+	if err != nil {
+		return StepInfo{}, err
+	}
+	rev, err := s.Repo.Revision(ctx, e.TaskID, e.PlanRevision)
+	if err != nil {
+		return StepInfo{}, err
+	}
+	return StepInfo{Task: t, Execution: e, Step: *st, Revision: rev}, nil
+}
+
+// HoldStep stops a step whose runner changed files beyond the approved scope until a new approval: the attempt is
+// cancelled and the step WAITs with reason approval. runnerID and fence come from the authenticated runner report.
+func (s *Service) HoldStep(ctx context.Context, stepID, runnerID string, fence int64, msg string) error {
+	return s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
+		return e.HoldForApproval(stepID, runnerID, fence, msg, now)
+	})
+}
+
+// ResumeHeldStep returns a step held for approval (WAITING approval) to READY after the Owner approved the
+// extended scope; a step waiting for anything else is domain.ErrInvalidTransition.
+func (s *Service) ResumeHeldStep(ctx context.Context, stepID string) error {
+	return s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
+		if st := e.Step(stepID); st != nil && (st.State != domain.StepWaiting || st.WaitReason != domain.WaitApproval) {
+			return fmt.Errorf("step %s is not held for approval: %w", st.Key, domain.ErrInvalidTransition)
+		}
+		return e.ResumeStep(stepID, now)
 	})
 }

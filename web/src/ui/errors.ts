@@ -37,6 +37,10 @@ export function errorMessage(t: TFunction, e: unknown): string {
       return t("intake.not_bound");
     case "invalid_transition":
       return t("runners.invalid_transition");
+    case "stale_revision":
+    case "already_decided":
+    case "not_ready":
+      return t(`approvals.err_${e.code}`);
     case "telegram_not_configured":
     case "telegram_auth_invalid":
     case "telegram_auth_expired":
@@ -94,6 +98,10 @@ const validationKeys = new Set([
   "youtrack_login_format",
   "poll_interval_range",
   "webhook_secret_range",
+  "pattern_format",
+  "too_many_patterns",
+  "comment_required",
+  "comment_format",
   "app_id_format",
   "private_key_format",
   "webhook_secret_short",

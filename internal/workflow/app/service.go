@@ -511,3 +511,34 @@ func (s *Service) ResumeHeldStep(ctx context.Context, stepID string) error {
 		return e.ResumeStep(stepID, now)
 	})
 }
+
+// FinishedSteps returns, of stepIDs, the steps whose execution has finished with the time it finished; a step
+// that does not exist (its task was deleted) maps to the zero time. Steps of a running execution are absent: the
+// runners context keeps their records for fencing and reconciliation (KIN-52 retention).
+func (s *Service) FinishedSteps(ctx context.Context, stepIDs []string) (map[string]time.Time, error) {
+	out := map[string]time.Time{}
+	wanted, known := map[string]bool{}, map[string]bool{}
+	for _, id := range stepIDs {
+		wanted[id] = true
+	}
+	for _, id := range stepIDs {
+		if known[id] {
+			continue
+		}
+		e, err := s.Repo.ExecutionByStep(ctx, id)
+		if errors.Is(err, domain.ErrNotFound) {
+			known[id], out[id] = true, time.Time{}
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, st := range e.Steps { // one load answers for every step of the execution
+			known[st.ID] = true
+			if e.FinishedAt != nil && wanted[st.ID] {
+				out[st.ID] = *e.FinishedAt
+			}
+		}
+	}
+	return out, nil
+}

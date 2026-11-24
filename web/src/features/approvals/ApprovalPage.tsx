@@ -188,14 +188,9 @@ function Decision({ d, waitsForVerification }: { d: ApprovalDetail; waitsForVeri
   const ref = useRef<HTMLTextAreaElement>(null);
 
   if (a.state !== "pending") return null;
-  if (!d.canDecide) {
-    return (
-      <p className="muted page-section">
-        {waitsForVerification && `${t("approvals.integrateWait")} `}
-        {t("approvals.ownerOnly")}
-      </p>
-    );
-  }
+  // Merging into dev is decided after verification: until then there is nothing to approve.
+  if (waitsForVerification) return <p className="warning page-section">{t("approvals.integrateWait")}</p>;
+  if (!d.canDecide) return <p className="muted page-section">{t("approvals.ownerOnly")}</p>;
 
   async function submit(approve: boolean, ev?: FormEvent) {
     ev?.preventDefault();
@@ -224,7 +219,6 @@ function Decision({ d, waitsForVerification }: { d: ApprovalDetail; waitsForVeri
   return (
     <form noValidate className="card form-card page-section" aria-labelledby="decide-title" onSubmit={(e) => void submit(true, e)}>
       <h2 id="decide-title">{t("approvals.decideTitle")}</h2>
-      {waitsForVerification && <p className="warning">{t("approvals.integrateWait")}</p>}
       <FormAlert message={error} />
       <TextAreaField
         ref={ref}

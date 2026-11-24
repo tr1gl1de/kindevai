@@ -135,16 +135,22 @@ describe("approval center (owner)", () => {
     expect(comment).toHaveValue("split the migration");
   });
 
-  it("explains that merging into dev waits for verification", async () => {
+  it("decides merging into dev only after verification", async () => {
+    let state = "READY";
     server.use(
       http.get("/api/auth/me", () => json(owner)),
-      http.get("/api/approvals/a3", () => json(detail(integ, true, "READY"))),
+      http.get("/api/approvals/a3", () => json(detail(integ, true, state))),
       http.post("/api/approvals/a3/approve", () => apiError(409, "not_ready")),
     );
-    await renderApp("/approvals/a3");
+    const first = await renderApp("/approvals/a3");
     await screen.findByRole("heading", { level: 1, name: "Add billing tables" });
     expect(screen.getByText(/after the task has passed verification/i)).toBeInTheDocument();
-    await userEvent.setup().click(screen.getByRole("button", { name: "Approve revision 2" }));
+    expect(screen.queryByRole("button", { name: "Approve revision 2" })).not.toBeInTheDocument();
+    first.unmount();
+
+    state = "VERIFYING"; // the page still shows VERIFYING, but the task moved on meanwhile: the server refuses
+    await renderApp("/approvals/a3");
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Approve revision 2" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(/not ready/i);
   });
 

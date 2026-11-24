@@ -1,9 +1,9 @@
 package redact
 
 import (
+	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestSecretKey(t *testing.T) {
@@ -187,14 +187,66 @@ func TestScrubEdgeCases(t *testing.T) {
 	}
 }
 
-// 64 KiB of adversarial text stays well within a request's budget.
+// raceEnabled is set by race_test.go when the race detector is on.
+var raceEnabled bool
+
+// adversarialInput is n bytes of text dense in pairs, JSON fields and auth schemes: every word takes a slow path.
+func adversarialInput(n int) string {
+	const unit = "a=b&token=x9 \"k\":\"v\" Bearer "
+	return strings.Repeat(unit, n/len(unit))
+}
+
+// allocatedBytes returns the heap bytes one call of f allocates, averaged over runs.
+func allocatedBytes(f func()) uint64 {
+	const runs = 5
+	f() // warm up lazily built state
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range runs {
+		f()
+	}
+	runtime.ReadMemStats(&after)
+	return (after.TotalAlloc - before.TotalAlloc) / runs
+}
+
+// Scrubbing is linear in the input with a small constant. Work is measured in allocated bytes, which (unlike
+// wall-clock time) does not depend on machine load: 4x the input may cost at most 8x the bytes (a quadratic
+// scrub costs 16x), and without the race detector, which makes sync.Pool drop cached regexp machines at random,
+// at most maxBytesPerInputByte. BenchmarkScrub tracks the speed.
+// Not parallel: it reads process-wide allocation counters, which parallel tests would inflate.
 func TestScrubLargeInput(t *testing.T) {
-	t.Parallel()
-	in := strings.Repeat("a=b&token=x9 \"k\":\"v\" Bearer ", 64<<10/27)
-	start := time.Now()
-	_ = Text(in)
-	_ = Credentials(in)
-	if d := time.Since(start); d > 2*time.Second {
-		t.Fatalf("scrubbing 64 KiB took %s", d)
+	const maxBytesPerInputByte = 32
+	small, large := adversarialInput(16<<10), adversarialInput(64<<10)
+	for name, f := range map[string]func(string) string{"Text": Text, "Credentials": Credentials} {
+		smallBytes := allocatedBytes(func() { _ = f(small) })
+		largeBytes := allocatedBytes(func() { _ = f(large) })
+		if largeBytes > 8*smallBytes {
+			t.Errorf("%s allocated %d bytes on %d bytes of input and %d on 4x as much: not linear",
+				name, smallBytes, len(small), largeBytes)
+		}
+		if !raceEnabled && largeBytes > maxBytesPerInputByte*uint64(len(large)) {
+			t.Errorf("%s on %d bytes allocated %d bytes, want <= %d per input byte",
+				name, len(large), largeBytes, maxBytesPerInputByte)
+		}
+	}
+}
+
+// Checking a field name must not allocate per call: scrub runs it for every pair in a large text.
+// Not parallel: testing.AllocsPerRun reads process-wide allocation counters.
+func TestSecretKeyDoesNotAllocate(t *testing.T) {
+	for _, key := range []string{"token", "X-Api-Key", "client_secret", "Authorization", "page.size", "X-Very-Long-Vendor-Specific-Security-Token-Name"} {
+		if n := testing.AllocsPerRun(100, func() { _ = SecretKey(key) }); n > 0 {
+			t.Errorf("SecretKey(%q) allocates %.0f times per call, want 0", key, n)
+		}
+	}
+}
+
+func BenchmarkScrub(b *testing.B) {
+	in := adversarialInput(64 << 10)
+	b.SetBytes(int64(len(in)))
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = Text(in)
+		_ = Credentials(in)
 	}
 }

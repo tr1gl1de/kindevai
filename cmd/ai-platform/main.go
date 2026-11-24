@@ -102,13 +102,14 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 		logger.Info("installation loaded", "data_dir", inst.Dir.Path(), "installation_id", inst.ID)
 	}
 
-	identity, err := newIdentity(ctx, inst, logger)
+	audit := newAudit(inst, logger)
+	identity, err := newIdentity(ctx, inst, audit, logger)
 	if err != nil {
 		return err
 	}
 	msg := newMessaging(inst, logger)
-	modules := append(identity.Modules, newProjects(inst, identity, logger)...)
-	modules = append(modules, msg.HTTP)
+	modules := append(identity.Modules, newProjects(inst, identity, audit, logger)...)
+	modules = append(modules, msg.HTTP, audit.HTTP)
 	defer msg.start(ctx)() // deferred after inst.Close, so the dispatchers stop before the database closes
 
 	assets, built := web.Assets()

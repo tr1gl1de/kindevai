@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	auditdb "github.com/tr1gl1de/kindevai/internal/audit/adapters/sqlite"
+	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/identity/app"
 	"github.com/tr1gl1de/kindevai/internal/identity/domain"
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
@@ -117,7 +119,7 @@ func TestConcurrentAcceptsYieldExactlyOneAccount(t *testing.T) {
 	seedProject(t, d, "p1")
 	svc := &app.InvitationsService{
 		Invitations: NewInvitationRepository(d), Accounts: NewUserRepository(d), Projects: projectsPort{d},
-		Tx: db.Transactor{DB: d}, Hasher: plainHasher{}, Rand: rand.Reader, Now: time.Now, NewID: rand.Text,
+		Tx: db.Transactor{DB: d}, Audit: &auditapp.Service{Repo: auditdb.New(d), Now: time.Now}, Hasher: plainHasher{}, Rand: rand.Reader, Now: time.Now, NewID: rand.Text,
 	}
 	_, token, err := svc.Create(t.Context(), auth.Principal{UserID: "owner", Owner: true}, "p1", "member", 1)
 	if err != nil {
@@ -147,6 +149,9 @@ func TestConcurrentAcceptsYieldExactlyOneAccount(t *testing.T) {
 	if ok != 1 || users != 1 || members != 1 {
 		t.Fatalf("successes %d, users %d, memberships %d; want 1 each", ok, users, members)
 	}
+	if n := auditCount(t, d, "invitation.accepted"); n != 1 {
+		t.Fatalf("%d invitation.accepted audit events, want exactly 1 (losers roll theirs back)", n)
+	}
 }
 
 func TestAcceptRollsBackOnGrantFailure(t *testing.T) {
@@ -156,7 +161,7 @@ func TestAcceptRollsBackOnGrantFailure(t *testing.T) {
 	seedProject(t, d, "p1")
 	svc := &app.InvitationsService{
 		Invitations: NewInvitationRepository(d), Accounts: NewUserRepository(d), Projects: projectsPort{d},
-		Tx: db.Transactor{DB: d}, Hasher: plainHasher{}, Rand: rand.Reader, Now: time.Now, NewID: rand.Text,
+		Tx: db.Transactor{DB: d}, Audit: &auditapp.Service{Repo: auditdb.New(d), Now: time.Now}, Hasher: plainHasher{}, Rand: rand.Reader, Now: time.Now, NewID: rand.Text,
 	}
 	_, token, err := svc.Create(t.Context(), auth.Principal{UserID: "owner", Owner: true}, "p1", "bogus_role", 1)
 	if err != nil {
@@ -170,7 +175,22 @@ func TestAcceptRollsBackOnGrantFailure(t *testing.T) {
 	if users != 0 {
 		t.Fatal("user survived the rolled-back acceptance")
 	}
+	if n := auditCount(t, d, "invitation.accepted"); n != 0 {
+		t.Fatalf("audit event survived the rolled-back acceptance: %d", n)
+	}
+	if n := auditCount(t, d, "invitation.created"); n != 1 {
+		t.Fatalf("invitation.created events = %d, want 1", n)
+	}
 	if _, err := svc.Preview(t.Context(), token); err != nil {
 		t.Fatalf("invitation must stay pending: %v", err)
 	}
+}
+
+func auditCount(t *testing.T, d *sql.DB, kind string) int {
+	t.Helper()
+	var n int
+	if err := d.QueryRowContext(t.Context(), "SELECT count(*) FROM audit_events WHERE kind = ?", kind).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }

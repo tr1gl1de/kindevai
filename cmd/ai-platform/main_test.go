@@ -242,6 +242,19 @@ func TestLoginAfterSetupEndToEnd(t *testing.T) {
 	if code := get("/api/integrations/status"); code != 200 {
 		t.Fatalf("integrations status = %d (messaging module not wired)", code)
 	}
+	if code := post("/api/users", `{"login":"carol"}`); code != 201 {
+		t.Fatalf("create user = %d", code)
+	}
+	req, _ := http.NewRequestWithContext(t.Context(), "GET", base+"/api/audit?kind=user", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audit, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(audit), `"user.created"`) || !strings.Contains(string(audit), `"carol"`) {
+		t.Fatalf("audit = %d %s (audit module not wired or user creation not recorded)", resp.StatusCode, audit)
+	}
 	if code := post("/api/auth/logout", ""); code != 204 {
 		t.Fatalf("logout = %d", code)
 	}

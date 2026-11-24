@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"strings"
+
+	"github.com/tr1gl1de/kindevai/internal/platform/redact"
 )
 
 // Size limits of stored messages. Adapters store a small projection of a webhook body (ids, refs, event type)
@@ -16,30 +17,11 @@ const (
 	maxKeyBytes      = 256
 )
 
-const redacted = "[redacted]"
-
 func checkField(name, v string, maxLen int) error {
 	if v == "" || len(v) > maxLen {
 		return fmt.Errorf("%w: %s must be 1..%d bytes", ErrInvalidMessage, name, maxLen)
 	}
 	return nil
-}
-
-// secretField reports a JSON object key that names a credential (password, token, secret, API/private key,
-// authorization or cookie header), ignoring case and separators.
-func secretField(key string) bool {
-	k := strings.NewReplacer("_", "", "-", "", ".", "", " ", "").Replace(strings.ToLower(key))
-	switch k {
-	case "authorization", "proxyauthorization", "cookie", "setcookie", "passwd", "credentials", "credential",
-		"jwt", "bearer", "dsn", "session", "sessionid", "otp", "pin":
-		return true
-	}
-	for _, s := range []string{"password", "passphrase", "secret", "token", "apikey", "privatekey"} {
-		if strings.HasSuffix(k, s) {
-			return true
-		}
-	}
-	return false
 }
 
 func decodePayload(p []byte) (any, error) {
@@ -60,7 +42,7 @@ func findSecret(v any, path string) string {
 	switch t := v.(type) {
 	case map[string]any:
 		for k, child := range t {
-			if secretField(k) {
+			if redact.SecretKey(k) {
 				return path + "." + k
 			}
 			if p := findSecret(child, path+"."+k); p != "" {
@@ -77,20 +59,20 @@ func findSecret(v any, path string) string {
 	return ""
 }
 
-// redact replaces the values of secret-looking fields in place.
-func redact(v any) {
+// redactSecrets replaces the values of secret-looking fields in place.
+func redactSecrets(v any) {
 	switch t := v.(type) {
 	case map[string]any:
 		for k, child := range t {
-			if secretField(k) {
-				t[k] = redacted
+			if redact.SecretKey(k) {
+				t[k] = redact.Placeholder
 				continue
 			}
-			redact(child)
+			redactSecrets(child)
 		}
 	case []any:
 		for _, child := range t {
-			redact(child)
+			redactSecrets(child)
 		}
 	}
 }
@@ -119,7 +101,7 @@ func inboxPayload(p []byte) ([]byte, error) {
 	if findSecret(v, "$") == "" {
 		return p, nil
 	}
-	redact(v)
+	redactSecrets(v)
 	out, err := json.Marshal(v)
 	if err != nil {
 		return nil, fmt.Errorf("re-encoding redacted payload: %w", err)

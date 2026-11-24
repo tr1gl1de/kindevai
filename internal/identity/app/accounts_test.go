@@ -228,3 +228,23 @@ func TestChangeOwnPassword(t *testing.T) {
 		t.Fatalf("other sessions not revoked while keeping the current one: %v %v", rev.all, rev.keeps)
 	}
 }
+
+func TestReenableAlsoClearsStraySessions(t *testing.T) {
+	t.Parallel()
+	s, _, rev := accountsFixture()
+	if err := s.SetDisabled(t.Context(), ownerP, "u-bob", false); err != nil {
+		t.Fatal(err)
+	}
+	if len(rev.all) != 1 || rev.all[0] != "u-bob" {
+		t.Fatalf("re-enable must revoke sessions created during a disable race: %v", rev.all)
+	}
+}
+
+func TestOwnerPasswordIsNotResetThroughAccounts(t *testing.T) {
+	t.Parallel()
+	s, _, _ := accountsFixture()
+	var ve *domain.ValidationError
+	if _, err := s.ResetPassword(t.Context(), ownerP, "u-owner"); !errors.As(err, &ve) || ve.Code != "owner_cannot_be_reset" {
+		t.Fatalf("err = %v", err)
+	}
+}

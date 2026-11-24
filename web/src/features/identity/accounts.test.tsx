@@ -67,7 +67,7 @@ describe("users page (owner)", () => {
         return json({ user: u, temporaryPassword: "Tmp7pass8word9xy" }, 201);
       }),
     );
-    const { container } = await renderApp("/users");
+    const { container, client } = await renderApp("/users");
     const user = userEvent.setup();
     expect(await screen.findByRole("heading", { level: 1, name: "Users" })).toBeInTheDocument();
     await expectAccessible(container);
@@ -81,9 +81,13 @@ describe("users page (owner)", () => {
     const secret = await screen.findByRole("region", { name: "Temporary password for carol" });
     expect(within(secret).getByText("Tmp7pass8word9xy")).toBeInTheDocument();
     expect(within(secret).getByText(/shown only once/i)).toBeInTheDocument();
+    expect(within(secret).getByRole("heading", { name: "Temporary password for carol" })).toHaveFocus();
     expect(await screen.findByRole("cell", { name: "carol" })).toBeInTheDocument();
+    // One secret at a time: new creates/resets wait until this one is acknowledged.
+    expect(within(form).getByRole("button", { name: "Create user" })).toBeDisabled();
     await user.click(within(secret).getByRole("button", { name: "Done" }));
     expect(screen.queryByText("Tmp7pass8word9xy")).not.toBeInTheDocument();
+    expect(JSON.stringify(client.getMutationCache().getAll().map((m) => m.state.data))).not.toContain("Tmp7pass8word9xy");
   });
 
   it("disables with confirmation and resets passwords", async () => {
@@ -134,4 +138,20 @@ describe("change password from the menu", () => {
     await user.click(screen.getByRole("button", { name: "Save password" }));
     await expectStatus("Password changed. Other sessions were signed out.");
   });
+});
+
+it("tells the owner when copying is not possible", async () => {
+  server.use(
+    http.get("/api/auth/me", () => json(owner)),
+    http.get("/api/users", () => json([])),
+    http.post("/api/users", () => json({ user: { ...carol, mustChangePassword: true }, temporaryPassword: "Tmp7pass8word9xy" }, 201)),
+  );
+  await renderApp("/users");
+  const user = userEvent.setup();
+  // user-event installs its own clipboard stub in setup(); remove it afterwards to simulate an insecure context.
+  Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+  await user.type(await screen.findByLabelText("Login"), "carol");
+  await user.click(screen.getByRole("button", { name: "Create user" }));
+  await user.click(await screen.findByRole("button", { name: "Copy" }));
+  await expectStatus(/select the password and copy it manually/i);
 });

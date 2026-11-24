@@ -46,7 +46,7 @@ func accountsStack(t *testing.T) http.Handler {
 	accounts := &app.AccountsService{Accounts: users, Sessions: sessions, Hasher: hasher, Rand: rand.Reader, Now: time.Now, NewID: rand.Text}
 	mux := http.NewServeMux()
 	authn.Register(mux)
-	(&AccountsHandler{Service: accounts, Limiter: lim()}).Register(mux)
+	(&AccountsHandler{Service: accounts, Limiter: ratelimit.New(ratelimit.Config{Burst: 5, Every: time.Minute, MaxKeys: 100}, time.Now)}).Register(mux)
 	mux.HandleFunc("GET /api/projects", func(w http.ResponseWriter, r *http.Request) { httpx.WriteJSON(w, 200, []string{}) })
 	return authn.Middleware(mux)
 }
@@ -168,5 +168,32 @@ func TestAccountsAPIIsOwnerOnly(t *testing.T) {
 	}
 	if rec := doCall(t, h, call{method: "POST", target: "/api/users/nope/disable", cookie: owner}); rec.Code != 404 {
 		t.Fatalf("unknown user = %d", rec.Code)
+	}
+}
+
+func TestPasswordChangeLimitsOnlyFailures(t *testing.T) {
+	t.Parallel()
+	h := accountsStack(t)
+	owner, _ := login(t, h, "owner", "correct horse battery")
+	pw := "correct horse battery"
+	for i, next := range []string{"first new phrase", "second new phrase", "third new phrase", "fourth new phrase", "fifth new phrase", "sixth new phrase", "seventh new phrase"} {
+		rec := doCall(t, h, call{method: "POST", target: "/api/auth/password", cookie: owner,
+			body: `{"currentPassword":"` + pw + `","newPassword":"` + next + `"}`})
+		if rec.Code != 204 {
+			t.Fatalf("successful change %d = %d (successes must not be rate limited)", i, rec.Code)
+		}
+		pw = next
+	}
+	limited := false
+	for range 12 {
+		rec := doCall(t, h, call{method: "POST", target: "/api/auth/password", cookie: owner,
+			body: `{"currentPassword":"guess","newPassword":"whatever phrase"}`})
+		if rec.Code == 429 {
+			limited = true
+			break
+		}
+	}
+	if !limited {
+		t.Fatal("repeated wrong current passwords were never rate limited")
 	}
 }

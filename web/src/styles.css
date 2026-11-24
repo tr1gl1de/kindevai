@@ -460,6 +460,9 @@ select[aria-invalid="true"] {
   flex-wrap: wrap;
   gap: 4px;
 }
+.secret h2:focus {
+  outline: none;
+}
 .secret {
   border: 2px solid var(--accent);
   margin: var(--space) 0;
@@ -475,9 +478,11 @@ select[aria-invalid="true"] {
   user-select: all;
   word-break: break-all;
 }
-.nav-small {
-  display: inline-flex;
-  align-items: center;
-  min-height: var(--tap);
-  padding: 0 8px;
+.nav {
+  flex-wrap: wrap;
+}
+@media (min-width: 601px) {
+  .nav-account {
+    margin-left: auto;
+  }
 }

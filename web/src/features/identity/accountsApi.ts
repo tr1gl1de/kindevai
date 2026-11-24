@@ -13,6 +13,7 @@ export function useCreateUser() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (req: CreateUserRequest) => api<TemporaryPasswordResult>("POST", "/api/users", req),
+    gcTime: 0, // the response carries a one-time password: do not keep it in the mutation cache
     onSuccess: () => qc.invalidateQueries({ queryKey: usersKey }),
   });
 }
@@ -30,6 +31,7 @@ export function useResetPassword() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api<TemporaryPasswordResult>("POST", `/api/users/${encodeURIComponent(id)}/reset-password`),
+    gcTime: 0, // one-time password in the response
     onSuccess: () => qc.invalidateQueries({ queryKey: usersKey }),
   });
 }

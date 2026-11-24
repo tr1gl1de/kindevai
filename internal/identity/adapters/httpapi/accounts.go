@@ -16,7 +16,7 @@ import (
 // AccountsHandler serves account management (Owner) and the self-service password change.
 type AccountsHandler struct {
 	Service *app.AccountsService
-	Limiter *ratelimit.Limiter // password-change attempts per account
+	Limiter *ratelimit.Limiter // failed password-change attempts per account (successes are free)
 	Logger  *slog.Logger
 }
 
@@ -101,7 +101,8 @@ func (h *AccountsHandler) changePassword(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	if !h.Limiter.Allow(p.UserID) {
+	if !h.Limiter.Peek(p.UserID) {
+		h.logger().Warn("password change rate limited", "user", p.Login)
 		rateLimited(w)
 		return
 	}
@@ -114,6 +115,9 @@ func (h *AccountsHandler) changePassword(w http.ResponseWriter, r *http.Request)
 		keep = domain.HashSessionToken(c.Value)
 	}
 	if err := h.Service.ChangePassword(r.Context(), p, in.CurrentPassword, in.NewPassword, keep); err != nil {
+		if errors.Is(err, domain.ErrInvalidCredentials) {
+			h.Limiter.Allow(p.UserID) // only wrong current passwords count (guessing with a stolen session)
+		}
 		h.fail(w, err, "newPassword")
 		return
 	}

@@ -18,7 +18,7 @@ export async function renderWithI18n(ui: ReactElement, locale: Locale = "en") {
 export async function renderApp(route = "/", locale: Locale = "en") {
   const client = createQueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const i18n = await createI18n({ lng: locale });
-  return render(
+  const result = render(
     <QueryClientProvider client={client}>
       <I18nextProvider i18n={i18n}>
         <MemoryRouter initialEntries={[route]}>
@@ -27,6 +27,7 @@ export async function renderApp(route = "/", locale: Locale = "en") {
       </I18nextProvider>
     </QueryClientProvider>,
   );
+  return { client, ...result };
 }
 
 /** Fails with a readable list if axe finds WCAG A/AA violations. */

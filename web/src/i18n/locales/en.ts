@@ -78,6 +78,7 @@ export const en = {
     user_disabled: "This user is disabled.",
     password_reused: "Choose a password different from the current one.",
     owner_cannot_be_disabled: "The owner account cannot be disabled.",
+    owner_cannot_be_reset: "The owner changes their own password on the account page.",
   },
   account: {
     forcedTitle: "Set your password",
@@ -103,6 +104,7 @@ export const en = {
     tempText: "Give it to {{login}} over a safe channel. It is shown only once; they must change it at first sign-in.",
     copy: "Copy",
     copied: "Copied to the clipboard.",
+    copyFailed: "Copying is not available here. Select the password and copy it manually.",
     done: "Done",
     status: "Status",
     actions: "Actions",

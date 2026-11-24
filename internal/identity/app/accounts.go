@@ -108,10 +108,10 @@ func (s *AccountsService) SetDisabled(ctx context.Context, actor auth.Principal,
 	if err := s.Accounts.SetDisabled(ctx, userID, disabled); err != nil {
 		return fmt.Errorf("updating account: %w", err)
 	}
-	if disabled {
-		if err := s.Sessions.DeleteByUser(ctx, userID, nil); err != nil {
-			return fmt.Errorf("revoking sessions: %w", err)
-		}
+	// Revoke on disable, and again on re-enable: a login that raced with the disable could have created a
+	// session after the first revocation, which must not come back to life.
+	if err := s.Sessions.DeleteByUser(ctx, userID, nil); err != nil {
+		return fmt.Errorf("revoking sessions: %w", err)
 	}
 	return nil
 }
@@ -121,8 +121,13 @@ func (s *AccountsService) ResetPassword(ctx context.Context, actor auth.Principa
 	if err := ownerOnly(actor); err != nil {
 		return "", err
 	}
-	if _, err := s.Accounts.ByID(ctx, userID); err != nil {
+	u, err := s.Accounts.ByID(ctx, userID)
+	if err != nil {
 		return "", err
+	}
+	if u.Role == domain.RoleOwner {
+		// The Owner changes their own password with the current one; a reset would also sign the Owner out.
+		return "", &domain.ValidationError{Field: "user", Code: "owner_cannot_be_reset"}
 	}
 	temp, hash, err := s.temporary(ctx)
 	if err != nil {

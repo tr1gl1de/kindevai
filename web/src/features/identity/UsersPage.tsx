@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { isApiError } from "../../api/client";
 import type { Account } from "../../api/types";
@@ -31,6 +31,7 @@ export function UsersPage() {
         notify(t("users.disabledDone", { login: c.user.login }));
       } else {
         const r = await reset.mutateAsync(c.user.id);
+        reset.reset(); // drop the response (with the password) from the mutation
         setSecret({ login: c.user.login, password: r.temporaryPassword });
       }
     } catch (err) {
@@ -53,8 +54,8 @@ export function UsersPage() {
   return (
     <>
       <PageHeading>{t("users.title")}</PageHeading>
-      {secret && <TemporaryPassword {...secret} onDone={() => setSecret(null)} />}
-      <NewUser onCreated={(login, password) => setSecret({ login, password })} />
+      {secret && <TemporaryPassword key={secret.password} {...secret} onDone={() => setSecret(null)} />}
+      <NewUser blocked={secret !== null} onCreated={(login, password) => setSecret({ login, password })} />
       <FormAlert message={actionError} />
       {users.isPending && <Loading />}
       {users.isError && <ErrorState message={errorMessage(t, users.error)} onRetry={() => void users.refetch()} />}
@@ -96,6 +97,7 @@ export function UsersPage() {
                         type="button"
                         className="button subtle"
                         aria-label={t("users.resetLabel", { login: u.login })}
+                        disabled={secret !== null}
                         onClick={() => setConfirm({ kind: "reset", user: u })}
                       >
                         {t("users.reset")}
@@ -123,7 +125,7 @@ export function UsersPage() {
   );
 }
 
-function NewUser({ onCreated }: { onCreated: (login: string, password: string) => void }) {
+function NewUser({ blocked, onCreated }: { blocked: boolean; onCreated: (login: string, password: string) => void }) {
   const { t } = useTranslation();
   const create = useCreateUser();
   const { errors, show, clear, register } = useFieldErrors(["login"] as const);
@@ -139,6 +141,7 @@ function NewUser({ onCreated }: { onCreated: (login: string, password: string) =
     }
     try {
       const r = await create.mutateAsync({ login: login.trim() });
+      create.reset(); // drop the response (with the password) from the mutation
       onCreated(r.user?.login ?? login.trim(), r.temporaryPassword);
       setLogin("");
     } catch (err) {
@@ -166,7 +169,7 @@ function NewUser({ onCreated }: { onCreated: (login: string, password: string) =
         }}
       />
       <div className="form-actions">
-        <button type="submit" className="button primary" disabled={create.isPending}>
+        <button type="submit" className="button primary" disabled={create.isPending || blocked}>
           {create.isPending ? t("form.submitting") : t("users.create")}
         </button>
       </div>
@@ -179,9 +182,13 @@ function TemporaryPassword({ login, password, onDone }: { login: string; passwor
   const { t } = useTranslation();
   const notify = useNotify();
   const title = t("users.tempTitle", { login });
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => heading.current?.focus(), []); // announce and bring the one-time secret into view
   return (
     <section className="card secret" aria-label={title}>
-      <h2>{title}</h2>
+      <h2 ref={heading} tabIndex={-1}>
+        {title}
+      </h2>
       <p>{t("users.tempText", { login })}</p>
       <p>
         <code className="secret-value">{password}</code>
@@ -191,7 +198,15 @@ function TemporaryPassword({ login, password, onDone }: { login: string; passwor
           type="button"
           className="button"
           onClick={() => {
-            void navigator.clipboard?.writeText(password).then(() => notify(t("users.copied")));
+            const clip = typeof navigator !== "undefined" ? navigator.clipboard : undefined;
+            if (!clip) {
+              notify(t("users.copyFailed"));
+              return;
+            }
+            clip.writeText(password).then(
+              () => notify(t("users.copied")),
+              () => notify(t("users.copyFailed")),
+            );
           }}
         >
           {t("users.copy")}

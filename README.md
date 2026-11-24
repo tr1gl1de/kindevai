@@ -81,6 +81,9 @@ No `.env` is needed. The plain-HTTP port is published on the host's loopback onl
 the `https` profile (DNS for `DOMAIN` must point to the host). Data and the encryption key live in the `data`
 volume — back it up as a whole. The image is distroless, runs as a non-root user with a read-only root
 filesystem, and has a built-in health check (`ai-platform health`).
+Behind Caddy, per-client rate limits use `X-Forwarded-For` only from the compose network
+(`KINDEV_TRUSTED_PROXIES`, default `172.29.240.0/24`; change `KINDEV_SUBNET` if it collides). Base images are
+pinned by digest. Without `DOMAIN` the https profile serves `https://localhost` with Caddy's internal CA.
 
 ## Development
 

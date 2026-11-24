@@ -301,3 +301,11 @@ func TestSetupTokenCommand(t *testing.T) {
 		t.Fatalf("stdout = %q", out.String())
 	}
 }
+
+func TestServeRejectsBadTrustedProxies(t *testing.T) {
+	t.Parallel()
+	err := run(t.Context(), []string{"serve", "--addr", "127.0.0.1:0", "--data-dir", t.TempDir(), "--trusted-proxies", "nope"}, io.Discard, io.Discard, nil)
+	if err == nil || !strings.Contains(err.Error(), "trusted proxy") {
+		t.Fatalf("err = %v", err)
+	}
+}

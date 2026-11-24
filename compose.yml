@@ -13,14 +13,18 @@ services:
       args:
         VERSION: ${KINDEV_VERSION:-local}
     restart: unless-stopped
+    environment:
+      # Only the reverse proxy on this compose network may set X-Forwarded-For (per-client rate limits behind Caddy).
+      KINDEV_TRUSTED_PROXIES: ${KINDEV_SUBNET:-172.29.240.0/24}
     volumes:
       - data:/data
     ports:
-      # Loopback only: the plain-HTTP profile must never become a public endpoint by default.
+      # Loopback only, in both profiles: never a public plain-HTTP endpoint. With the https profile it stays
+      # available on the host for local diagnostics; public traffic goes through Caddy.
       - "127.0.0.1:${KINDEV_PORT:-8080}:8080"
     read_only: true
     tmpfs:
-      - /tmp # SQLite temp files with a read-only root filesystem
+      - /tmp:size=64m,mode=1777 # SQLite temp files with a read-only root filesystem
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
@@ -28,13 +32,13 @@ services:
 
   caddy:
     profiles: [https]
-    image: caddy:2.10-alpine
+    image: caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
     restart: unless-stopped
     depends_on:
       cp:
         condition: service_healthy
     environment:
-      DOMAIN: ${DOMAIN:-}
+      DOMAIN: ${DOMAIN:-}  # public hostname; without it Caddy serves https://localhost (local testing only)
     ports:
       - "80:80"
       - "443:443"
@@ -45,6 +49,12 @@ services:
       - caddy_config:/config
     cap_drop: [ALL]
     cap_add: [NET_BIND_SERVICE]
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${KINDEV_SUBNET:-172.29.240.0/24}
 
 volumes:
   data:

@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -50,5 +51,52 @@ func TestDecodeJSON(t *testing.T) {
 				t.Fatalf("dst = %+v", dst)
 			}
 		})
+	}
+}
+
+func TestTrustedProxies(t *testing.T) {
+	t.Parallel()
+	tp, err := ParseTrustedProxies("172.29.240.0/24, 10.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseTrustedProxies("not-a-cidr"); err == nil {
+		t.Fatal("want error for a bad CIDR")
+	}
+	tests := []struct {
+		name, peer, xff, want string
+	}{
+		{"untrusted peer keeps its address", "203.0.113.9:1", "1.2.3.4", "203.0.113.9"},
+		{"trusted proxy forwards the client", "172.29.240.5:1", "198.51.100.7", "198.51.100.7"},
+		{"spoofed prefix is ignored", "172.29.240.5:1", "127.0.0.1, 198.51.100.7", "198.51.100.7"},
+		{"chain of trusted proxies", "172.29.240.5:1", "198.51.100.7, 10.0.0.1", "198.51.100.7"},
+		{"trusted proxy without header", "172.29.240.5:1", "", "172.29.240.5"},
+		{"garbage header", "172.29.240.5:1", "nonsense", "172.29.240.5"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got string
+			h := tp.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got = ClientIP(r) }))
+			r := httptest.NewRequestWithContext(t.Context(), "GET", "/", nil)
+			r.RemoteAddr = tt.peer
+			if tt.xff != "" {
+				r.Header.Set("X-Forwarded-For", tt.xff)
+			}
+			h.ServeHTTP(httptest.NewRecorder(), r)
+			if got != tt.want {
+				t.Fatalf("ClientIP = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	var empty TrustedProxies
+	var got string
+	h := empty.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got = ClientIP(r) }))
+	r := httptest.NewRequestWithContext(t.Context(), "GET", "/", nil)
+	r.RemoteAddr = "172.29.240.5:1"
+	r.Header.Set("X-Forwarded-For", "198.51.100.7")
+	h.ServeHTTP(httptest.NewRecorder(), r)
+	if got != "172.29.240.5" {
+		t.Fatalf("no trusted proxies configured, but header was used: %q", got)
 	}
 }

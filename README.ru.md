@@ -81,6 +81,9 @@ docker compose exec cp ai-platform setup-token        # setup token для пе�
 (DNS для `DOMAIN` должен указывать на хост). Данные и ключ шифрования лежат в volume `data` — сохраняйте его
 целиком. Образ distroless, работает от непривилегированного пользователя с read-only корневой ФС и встроенной
 проверкой здоровья (`ai-platform health`).
+За Caddy ограничения частоты по клиенту используют `X-Forwarded-For` только от сети compose
+(`KINDEV_TRUSTED_PROXIES`, по умолчанию `172.29.240.0/24`; при конфликте задайте `KINDEV_SUBNET`). Базовые образы
+закреплены по digest. Без `DOMAIN` профиль https отдаёт `https://localhost` с внутренним CA Caddy.
 
 ## Разработка
 

@@ -30,8 +30,19 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+      - name: Validate Compose profiles
+        run: |
+          docker compose config -q
+          DOMAIN=ai.example.com docker compose --profile https config -q
+          # Only Caddy may publish non-loopback ports.
+          DOMAIN=ai.example.com docker compose --profile https config --format json \
+            | jq -e '[.services.cp.ports[] | select(.host_ip != "127.0.0.1")] | length == 0'
+          DOMAIN=ai.example.com docker compose --profile https config --format json \
+            | jq -e '[.services.caddy.ports[].target] | sort == [80, 443, 443]'
       - name: Build Control Plane image (no push)
         run: docker build --build-arg VERSION=ci-${GITHUB_SHA::7} -t kindevai:ci .
       - name: Smoke test the image

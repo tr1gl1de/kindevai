@@ -4,10 +4,12 @@ package httpx
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strings"
 )
@@ -83,4 +85,70 @@ func ClientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// TrustedProxies are reverse proxies (e.g. the Caddy container) whose X-Forwarded-For is believed. Requests from
+// any other peer keep their TCP address, so a client can never pick its own IP for rate limiting.
+type TrustedProxies []netip.Prefix
+
+// ParseTrustedProxies parses a comma-separated list of CIDRs or single IPs. Empty means none.
+func ParseTrustedProxies(s string) (TrustedProxies, error) {
+	var out TrustedProxies
+	for _, f := range strings.Split(s, ",") {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		if !strings.Contains(f, "/") {
+			a, err := netip.ParseAddr(f)
+			if err != nil {
+				return nil, fmt.Errorf("trusted proxy %q: %w", f, err)
+			}
+			out = append(out, netip.PrefixFrom(a, a.BitLen()))
+			continue
+		}
+		p, err := netip.ParsePrefix(f)
+		if err != nil {
+			return nil, fmt.Errorf("trusted proxy %q: %w", f, err)
+		}
+		out = append(out, p.Masked())
+	}
+	return out, nil
+}
+
+func (tp TrustedProxies) trusted(a netip.Addr) bool {
+	a = a.Unmap()
+	for _, p := range tp {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// Middleware rewrites RemoteAddr to the real client when the request comes through a trusted proxy: it walks
+// X-Forwarded-For from the right and takes the first address that is not itself a trusted proxy.
+func (tp TrustedProxies) Middleware(next http.Handler) http.Handler {
+	if len(tp) == 0 {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peer, err := netip.ParseAddrPort(r.RemoteAddr)
+		if err == nil && tp.trusted(peer.Addr()) {
+			hops := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+			for i := len(hops) - 1; i >= 0; i-- {
+				a, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
+				if err != nil {
+					break
+				}
+				if !tp.trusted(a) {
+					r2 := r.Clone(r.Context())
+					r2.RemoteAddr = netip.AddrPortFrom(a.Unmap(), 0).String()
+					r = r2
+					break
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }

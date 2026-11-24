@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
+	"github.com/tr1gl1de/kindevai/internal/platform/httpx"
 	"github.com/tr1gl1de/kindevai/internal/server"
 	"github.com/tr1gl1de/kindevai/web"
 )
@@ -75,7 +76,13 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	addr := fset.String("addr", "127.0.0.1:8080", "listen address")
 	dataDir := fset.String("data-dir", defaultDataDir(), "data directory (SQLite, keys, artifacts); created if missing")
 	keyFile := fset.String("key-file", "", "encryption key file (default <data-dir>/secrets/master.key)")
+	proxies := fset.String("trusted-proxies", os.Getenv("KINDEV_TRUSTED_PROXIES"),
+		"comma-separated CIDRs of reverse proxies whose X-Forwarded-For is trusted (e.g. the Caddy network)")
 	if err := fset.Parse(args); err != nil {
+		return err
+	}
+	trusted, err := httpx.ParseTrustedProxies(*proxies)
+	if err != nil {
 		return err
 	}
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
@@ -107,7 +114,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	srv := &http.Server{
 		Handler: server.New(server.Options{
 			Version: version, Assets: assets, Logger: logger, Modules: append(identity.Modules, newProjects(inst, identity.Users, logger)),
-			Middleware: identity.Middleware,
+			Middleware: func(h http.Handler) http.Handler { return trusted.Middleware(identity.Middleware(h)) },
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,

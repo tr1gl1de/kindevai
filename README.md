@@ -147,6 +147,11 @@ ai-runner fingerprint                                    # compare with the runn
   after 5 s. A lost runner's attempt becomes `UNKNOWN` when its 60 s lease (renewed by heartbeats) runs out and
   nothing is started again until the runner reconciles: a live process continues (a restarted runner adopts it from
   its journal under `attempts/`), a gone one fails and is retried once.
+- Storage (Owner): the Overview shows every machine's disk space; **Infrastructure → Storage** (`/infrastructure/storage`)
+  adds the hourly fill history for 7 or 30 days with the 75/85/95% levels, every volume with both forecasts and the
+  space consumers. A runner measures its consumers (repos, workspaces and worktrees, CLI sessions, the event spool,
+  `docker system df`) only when started with `ai-runner run --measure-space`: every 6 h, metadata only, paced to
+  2 000 entries/s, at most 1 000 000 entries and 10 min, no symlinks, one filesystem. Nothing is ever deleted.
 
 ### Integrations and external calls
 

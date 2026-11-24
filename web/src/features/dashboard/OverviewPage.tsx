@@ -5,6 +5,7 @@ import { errorMessage } from "../../ui/errors";
 import { useMe } from "../identity/api";
 import { useProjects } from "../projects/api";
 import { StorageOverviewCard } from "../runners/StorageOverviewCard";
+import { RunnersCard } from "./RunnersCard";
 
 /** Landing page: what is set up and what is still missing (the platform never pretends to be ready). */
 export function OverviewPage() {
@@ -26,10 +27,7 @@ export function OverviewPage() {
           )}
           <Link to="/projects">{t("overview.openProjects")}</Link>
         </section>
-        <section className="card warn" aria-labelledby="ov-runners">
-          <h2 id="ov-runners">{t("overview.runnersTitle")}</h2>
-          <p>{t("overview.runnersEmpty")}</p>
-        </section>
+        {owner && <RunnersCard />}
         <section className="card warn" aria-labelledby="ov-integrations">
           <h2 id="ov-integrations">{t("overview.integrationsTitle")}</h2>
           <p>{t("overview.integrationsEmpty")}</p>

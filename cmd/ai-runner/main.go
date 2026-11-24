@@ -277,6 +277,8 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	projects := fs.String("projects", os.Getenv("KINDEV_RUNNER_PROJECTS"),
 		"comma-separated project ids this runner accepts work for (checked by the runner itself); empty: every "+
 			"project the Owner granted it")
+	measureSpace := fs.Bool("measure-space", false,
+		"allow measuring what takes space in the data dir and docker (I/O-limited, every 6 h; KIN-55)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -310,8 +312,11 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	if err := x.Recover(ctx); err != nil {
 		return fmt.Errorf("recovering running attempts: %w", err)
 	}
-	conn := &app.Connector{Dialer: controlplane.New(), Logger: logger, Handlers: []app.LinkHandler{ch,
-		&app.Reporter{Probe: probe.New(d.Path())}}} // KIN-20 heartbeat, capabilities, storage
+	rep := &app.Reporter{Probe: probe.New(d.Path())} // KIN-20 heartbeat, capabilities, storage
+	if *measureSpace {                               // KIN-55: only with the operator's explicit permission
+		rep.Meter = probe.NewSpaceMeter(d.Path()).Measure
+	}
+	conn := &app.Connector{Dialer: controlplane.New(), Logger: logger, Handlers: []app.LinkHandler{ch, rep}}
 	return conn.Run(ctx, en, id)
 }
 

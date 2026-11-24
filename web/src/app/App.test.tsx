@@ -137,7 +137,7 @@ describe("app shell", () => {
     expect(within(nav).getByRole("link", { name: "Projects" })).toBeInTheDocument();
     expect(screen.getByText("owner")).toBeInTheDocument();
     // Integrations and runners are not configured yet: the overview says so instead of pretending to be ready.
-    expect(screen.getByText(/no runners connected/i)).toBeInTheDocument();
+    expect(await screen.findByText(/no runners enrolled yet/i)).toBeInTheDocument();
     await expectAccessible(container);
     await userEvent.setup().click(screen.getByRole("button", { name: "Sign out" }));
     expect(await screen.findByRole("heading", { level: 1, name: "Sign in" })).toBeInTheDocument();

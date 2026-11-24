@@ -19,6 +19,7 @@ type TelemetrySink interface {
 	Heartbeat(ctx context.Context, runnerID, session string) error
 	Capabilities(ctx context.Context, runnerID, session string, c domain.Capabilities) error
 	Storage(ctx context.Context, machineID, session string, vs []domain.Volume) error
+	SpaceConsumers(ctx context.Context, machineID, session string, items []domain.SpaceConsumer) error
 }
 
 // TelemetryMessages handles runner.heartbeat, runner.capabilities and runner.storage (KIN-20). Payloads are
@@ -85,9 +86,33 @@ func TelemetryMessages(sink TelemetrySink, now func() time.Time, logger *slog.Lo
 				}
 				vs = append(vs, dv)
 			}
-			return stored(s, env.Type, sink.Storage(ctx, s.RunnerID, s.ID, vs))
+			if err := stored(s, env.Type, sink.Storage(ctx, s.RunnerID, s.ID, vs)); err != nil || p.Consumers == nil {
+				return err
+			}
+			// The optional measurement (KIN-55) never costs the volume report or the connection: one this Control
+			// Plane does not understand (e.g. a newer runner's category) is logged and dropped.
+			cs, err := consumers(p.Consumers.Items, at)
+			if err != nil {
+				logger.Warn("dropping runner space consumers", "runner", s.RunnerID, "err", err)
+				return nil
+			}
+			return stored(s, env.Type, sink.SpaceConsumers(ctx, s.RunnerID, s.ID, cs))
 		},
 	}
+}
+
+func consumers(items []protocol.SpaceConsumer, at time.Time) ([]domain.SpaceConsumer, error) {
+	if len(items) > domain.MaxConsumers {
+		return nil, &domain.ValidationError{Field: "consumers", Code: "too_many"}
+	}
+	cs := make([]domain.SpaceConsumer, 0, len(items))
+	for _, c := range items {
+		cs = append(cs, domain.SpaceConsumer(c))
+	}
+	if _, err := domain.NewSpaceConsumers(cs, at); err != nil {
+		return nil, err
+	}
+	return cs, nil
 }
 
 // decode accepts a JSON object (or no payload) and ignores unknown fields.

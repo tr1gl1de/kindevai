@@ -29,6 +29,8 @@ export function errorMessage(t: TFunction, e: unknown): string {
       return t("invite.invitation_expired");
     case "invitation_not_found":
       return t("errors.not_found");
+    case "invalid_transition":
+      return t("runners.invalid_transition");
     default:
       return t("errors.unknown");
   }
@@ -53,6 +55,8 @@ const validationKeys = new Set([
   "project_not_found",
   "ttl_out_of_range",
   "invitation_not_pending",
+  "projects_required",
+  "token_not_pending",
 ]);
 
 /** Message for a server validation code, or undefined if unknown. */

@@ -34,6 +34,11 @@ func User(id, login string) Actor { return Actor{Type: domain.ActorUser, ID: id,
 // Anonymous is an unauthenticated caller, such as a failed sign-in attempt.
 func Anonymous() Actor { return Actor{Type: domain.ActorSystem, ID: "anonymous", Label: "anonymous"} }
 
+// Runner is an enrolled runner machine acting by id, labelled with its hostname.
+func Runner(id, hostname string) Actor {
+	return Actor{Type: domain.ActorRunner, ID: id, Label: hostname}
+}
+
 // System is the Control Plane acting on its own.
 func System() Actor { return Actor{Type: domain.ActorSystem, Label: "system"} }
 

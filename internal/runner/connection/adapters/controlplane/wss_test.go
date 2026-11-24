@@ -121,7 +121,7 @@ func TestDialMapsHTTPRefusals(t *testing.T) {
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
-			if domain.Fatal(err) != (tc.want != ErrUnexpected) {
+			if domain.Fatal(err) == errors.Is(tc.want, ErrUnexpected) {
 				t.Fatalf("fatal = %v for %v", domain.Fatal(err), err)
 			}
 		})

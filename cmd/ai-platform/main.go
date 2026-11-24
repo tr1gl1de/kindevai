@@ -36,6 +36,7 @@ const usage = `usage: ai-platform <command> [flags]
 
 commands:
   serve     run the Control Plane (default 127.0.0.1:8080, data in ./data)
+  health    check a running Control Plane (used by the Docker HEALTHCHECK)
   version   print the version
 `
 
@@ -48,6 +49,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, ready cha
 	switch args[0] {
 	case "serve":
 		return serve(ctx, args[1:], stderr, ready)
+	case "health":
+		return health(ctx, args[1:], stderr)
 	case "version":
 		fmt.Fprintln(stdout, version)
 		return nil
@@ -131,6 +134,33 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	}
 	if err := <-errc; !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serving: %w", err)
+	}
+	return nil
+}
+
+// health exits non-zero unless the Control Plane answers 200 on its health endpoint.
+func health(ctx context.Context, args []string, stderr io.Writer) error {
+	fset := flag.NewFlagSet("health", flag.ContinueOnError)
+	fset.SetOutput(stderr)
+	url := fset.String("url", "http://127.0.0.1:8080/api/health", "health endpoint")
+	timeout := fset.Duration("timeout", 3*time.Second, "request timeout")
+	if err := fset.Parse(args); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, *timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, *url, nil)
+	if err != nil {
+		return fmt.Errorf("health: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("health: %w", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("health: status %d", resp.StatusCode)
 	}
 	return nil
 }

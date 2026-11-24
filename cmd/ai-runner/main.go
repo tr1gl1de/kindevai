@@ -91,6 +91,7 @@ commands:
                the token is read from the prompt, stdin or --token-file, never from arguments
   fingerprint  print the key fingerprint to compare with the runner's card in Dashboard -> Runners
   run          run the daemon (systemd/launchd services start this)
+  test-network check the proxy, egress IP and required endpoints with the network profile from the Control Plane
   version      print the version
 
 common flags:
@@ -110,6 +111,8 @@ func run(ctx context.Context, args []string, e *env) error {
 		return fingerprint(ctx, args[1:], e)
 	case "run":
 		return daemon(ctx, args[1:], e)
+	case "test-network":
+		return testNetwork(ctx, args[1:], e)
 	case "version":
 		fmt.Fprintf(e.stdout, "ai-runner %s %s/%s\n", version, runtime.GOOS, runtime.GOARCH)
 		return nil
@@ -275,8 +278,10 @@ func daemon(ctx context.Context, args []string, e *env) error {
 		return err
 	}
 	defer closeSpool()
+	agent := networkAgent(d, logger) // KIN-30 network profiles and Test Network
+	ch.Commands = withNetwork(agent, ch.Commands)
 	conn := &app.Connector{Dialer: controlplane.New(), Logger: logger, Handlers: []app.LinkHandler{ch,
-		&app.Reporter{Probe: probe.New(d.Path())}}} // KIN-20 heartbeat, capabilities, storage
+		&app.Reporter{Probe: probe.New(d.Path())}, networkLink{agent}}} // KIN-20 heartbeat, capabilities, storage
 	return conn.Run(ctx, en, id)
 }
 

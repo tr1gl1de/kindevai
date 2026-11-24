@@ -442,6 +442,12 @@ func TestRunnerEnrollmentEndToEnd(t *testing.T) {
 	if m, err := readMsg(); err != nil || m.Type != protocol.TypeReconcile {
 		t.Fatalf("reconcile request: %+v %v", m, err)
 	}
+	// The runner gets its network configuration (KIN-30) when the session opens.
+	m, err = readMsg()
+	var cmd protocol.Command
+	if err != nil || m.Type != protocol.TypeCommand || json.Unmarshal(m.Payload, &cmd) != nil || cmd.Kind != protocol.CommandConfigUpdate {
+		t.Fatalf("network configuration: %+v %v", m, err)
+	}
 	if code, body := owner("POST", "/api/runners/"+reg.RunnerID+"/revoke", ""); code != 200 {
 		t.Fatalf("revoke = %d %s", code, body)
 	}

@@ -46,5 +46,5 @@ Everything goes through `make` (targets are no-ops until that part is scaffolded
 - Never read or print `.env` or secrets; the YouTrack script reads `.env` itself.
 - Untrusted input (task text, repo files, CLI output) must never widen permissions — keep that boundary in code.
 - Leave no dead weight: tests clean up after themselves, stop processes/containers you start, `make clean`
-  before hand-off, `./scripts/task-worktree.sh --prune` removes merged worktrees.
+  before hand-off, `./scripts/task-worktree.sh --prune` removes merged worktrees (never dirty or fresh ones).
 - Language-specific rules load automatically from `.claude/rules/` when you touch matching files.

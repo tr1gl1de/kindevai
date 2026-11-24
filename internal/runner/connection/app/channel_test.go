@@ -474,3 +474,39 @@ func TestEmittedEventsAlwaysFitTheWire(t *testing.T) {
 		}
 	}
 }
+
+// A resumed attempt (the runner restarted while its process ran) continues after every event number the old
+// stream may have used: numbers are reserved in blocks before use, so none is ever reused.
+func TestResumedAttemptNeverReusesEventNumbers(t *testing.T) {
+	t.Parallel()
+	sp := &memSpool{epoch: "sp"}
+	ch := &Channel{Spool: sp, Cursor: &memCursor{}, Commands: (&applied{}).fn}
+	var reserved []int64
+	reserve := func(upTo int64) error { reserved = append(reserved, upTo); return nil }
+	at := ch.ResumeAttempt("s", 1, 0, reserve)
+	for range 3 {
+		if err := at.Emit(protocol.EventAccepted, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !slices.Equal(reserved, []int64{AttemptSeqBlock}) {
+		t.Fatalf("reserved %v", reserved)
+	}
+	// The runner restarts: the new stream starts after the reservation, not after the last event sent.
+	again := ch.ResumeAttempt("s", 1, reserved[len(reserved)-1], reserve)
+	if err := again.Emit(protocol.EventCompleted, nil); err != nil {
+		t.Fatal(err)
+	}
+	evs, _ := sp.Read(0, 100, 1<<30)
+	if got := evs[len(evs)-1].AttemptSeq; got != AttemptSeqBlock+1 {
+		t.Fatalf("resumed attempt seq %d", got)
+	}
+	if !slices.Equal(reserved, []int64{AttemptSeqBlock, 2 * AttemptSeqBlock}) {
+		t.Fatalf("reserved %v", reserved)
+	}
+	// A failing reservation fails the emit instead of risking a reused number.
+	failing := ch.ResumeAttempt("s", 2, 0, func(int64) error { return errors.New("disk") })
+	if err := failing.Emit(protocol.EventAccepted, nil); err == nil {
+		t.Fatal("emit without a reservation succeeded")
+	}
+}

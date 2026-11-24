@@ -435,3 +435,48 @@ type asProposed struct{}
 func (asProposed) EffectiveRisk(_ context.Context, _ string, p domain.Plan) (domain.Risk, error) {
 	return p.Risk, nil
 }
+
+// The scheduler's and the task API's queries.
+func TestSchedulingAndListingQueries(t *testing.T) {
+	t.Parallel()
+	d, _ := testDB(t)
+	ctx := t.Context()
+	svc := service(d, fixed)
+	repo := sqlite.New(d)
+	task, e := running(t, svc)
+	other, err := svc.CreateTask(ctx, "p1", "Other", "", "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids, err := repo.RunningExecutions(ctx); err != nil || len(ids) != 1 || ids[0] != e.ID {
+		t.Fatalf("running %v %v", ids, err)
+	}
+	if ids, err := repo.TasksInState(ctx, domain.TaskCreated); err != nil || len(ids) != 1 || ids[0] != other.ID {
+		t.Fatalf("created %v %v", ids, err)
+	}
+	if ids, _ := repo.ExecutionsHeldBy(ctx, "r1"); len(ids) != 0 {
+		t.Fatalf("held before claim %v", ids)
+	}
+	if _, err := svc.Claim(ctx, e.StepByKey("backend").ID, "r1"); err != nil {
+		t.Fatal(err)
+	}
+	if ids, err := repo.ExecutionsHeldBy(ctx, "r1"); err != nil || len(ids) != 1 || ids[0] != e.ID {
+		t.Fatalf("held %v %v", ids, err)
+	}
+	list, err := repo.ListTasks(ctx, []string{"p1", "nope"}, 10)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("list %+v %v", list, err)
+	}
+	if l, _ := repo.ListTasks(ctx, []string{"p1"}, 1); len(l) != 1 {
+		t.Fatalf("limit %d", len(l))
+	}
+	if l, err := repo.ListTasks(ctx, nil, 10); err != nil || len(l) != 0 {
+		t.Fatalf("no projects %v %v", l, err)
+	}
+	if got, err := repo.LatestExecution(ctx, task.ID); err != nil || got.ID != e.ID || len(got.Steps) != 3 {
+		t.Fatalf("latest %+v %v", got.ID, err)
+	}
+	if _, err := repo.LatestExecution(ctx, other.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("latest of a task without executions: %v", err)
+	}
+}

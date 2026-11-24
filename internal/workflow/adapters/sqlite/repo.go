@@ -370,3 +370,72 @@ func (r *Repository) ExpiredLeaseExecutions(ctx context.Context, now time.Time) 
 	}
 	return ids, rows.Err()
 }
+
+func (r *Repository) ids(ctx context.Context, op, q string, args ...any) ([]string, error) {
+	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("%s: %w", op, err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// RunningExecutions lists the ids of every running execution, oldest first.
+func (r *Repository) RunningExecutions(ctx context.Context) ([]string, error) {
+	return r.ids(ctx, "listing running executions",
+		`SELECT id FROM executions WHERE state = 'RUNNING' ORDER BY created_at, id`)
+}
+
+// TasksInState lists the ids of the tasks in state, oldest first.
+func (r *Repository) TasksInState(ctx context.Context, state domain.TaskState) ([]string, error) {
+	return r.ids(ctx, "listing tasks by state", `SELECT id FROM tasks WHERE state = ? ORDER BY created_at, id`, state)
+}
+
+// ExecutionsHeldBy lists the running executions with a step whose current claim (or unknown attempt) is the
+// runner's.
+func (r *Repository) ExecutionsHeldBy(ctx context.Context, runnerID string) ([]string, error) {
+	return r.ids(ctx, "listing executions held by a runner", `SELECT DISTINCT e.id FROM executions e
+		JOIN workflow_steps s ON s.execution_id = e.id
+		WHERE e.state = 'RUNNING' AND s.runner_id = ? ORDER BY e.id`, runnerID)
+}
+
+// ListTasks returns the tasks of the projects, newest first, at most limit.
+func (r *Repository) ListTasks(ctx context.Context, projectIDs []string, limit int) ([]domain.Task, error) {
+	if len(projectIDs) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(projectIDs)+1)
+	for _, id := range projectIDs {
+		args = append(args, id)
+	}
+	args = append(args, limit)
+	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, "SELECT "+taskCols+" FROM tasks WHERE project_id IN (?"+
+		strings.Repeat(", ?", len(projectIDs)-1)+") ORDER BY created_at DESC, id DESC LIMIT ?", args...)
+	if err != nil {
+		return nil, fmt.Errorf("listing tasks: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// LatestExecution loads the task's most recent execution.
+func (r *Repository) LatestExecution(ctx context.Context, taskID string) (domain.Execution, error) {
+	return r.loadExecution(ctx, "SELECT "+execCols+
+		" FROM executions WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", taskID)
+}

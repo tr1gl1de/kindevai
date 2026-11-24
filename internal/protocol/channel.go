@@ -96,14 +96,40 @@ type Event struct {
 	Body       json.RawMessage `json:"body,omitempty"`
 }
 
-// Assign is the body of execution.assign (filled in by KIN-23): the attempt to run, never a shell string.
+// Assign is the body of execution.assign (KIN-23): the attempt to run as typed fields, never a shell string. The
+// runner checks it again before launching (project allowlist, known adapter, repository and scope format), so a
+// compromised or buggy Control Plane cannot make it run another project's work.
 type Assign struct {
-	Step  string `json:"step"`
-	Fence int64  `json:"fence"`
+	Step       string   `json:"step"`
+	Fence      int64    `json:"fence"`
+	Execution  string   `json:"execution"`
+	Task       string   `json:"task"`
+	Project    string   `json:"project"`
+	Repository string   `json:"repository"` // "owner/name"
+	Scope      []string `json:"scope"`      // repository-relative paths the step may change
+	Adapter    string   `json:"adapter"`    // AdapterMock until the CLI adapters (KIN-32)
+	Scenario   string   `json:"scenario,omitempty"`
 }
 
-// Cancel is the body of execution.cancel. Reason "stale_fence": the Control Plane rejected the attempt's events
-// because a newer token exists; the runner must stop that process.
+// Agent adapters a runner may be assigned.
+const AdapterMock = "mock"
+
+// Mock scenarios (AdapterMock): deterministic behaviours of the mock agent process.
+const (
+	ScenarioSuccess = "success" // prints a few lines, exits 0
+	ScenarioFail    = "fail"    // exits 1 on every attempt
+	ScenarioFlaky   = "flaky"   // fails on the first attempt (fence 1), succeeds on a retry
+	ScenarioCrash   = "crash"   // kills itself with SIGKILL (no result)
+	ScenarioHang    = "hang"    // runs until it is cancelled
+	ScenarioGate    = "gate"    // waits until the file "release" appears in its working directory, then exits 0
+)
+
+// MockScenarios lists every scenario.
+var MockScenarios = []string{ScenarioSuccess, ScenarioFail, ScenarioFlaky, ScenarioCrash, ScenarioHang, ScenarioGate}
+
+// Cancel is the body of execution.cancel: the runner stops the attempt's whole process group. Reason
+// "stale_fence": the Control Plane rejected the attempt's events because a newer token exists; "cancelled": the
+// task or execution was cancelled.
 type Cancel struct {
 	Step   string `json:"step"`
 	Fence  int64  `json:"fence"`
@@ -112,6 +138,20 @@ type Cancel struct {
 
 // CancelStaleFence is Cancel.Reason for an attempt whose token was superseded.
 const CancelStaleFence = "stale_fence"
+
+// CancelCancelled is Cancel.Reason for an attempt of a cancelled task or execution.
+const CancelCancelled = "cancelled"
+
+// AssignCommandID and CancelCommandID are the deterministic command ids of an attempt's assignment and
+// cancellation: a repeated use case appends nothing, and the stale-fence cancel and a task cancel share one.
+func AssignCommandID(step string, fence int64) string {
+	return fmt.Sprintf("assign/%s/%d", step, fence)
+}
+
+// CancelCommandID: see AssignCommandID.
+func CancelCommandID(step string, fence int64) string {
+	return fmt.Sprintf("cancel/%s/%d", step, fence)
+}
 
 // Output is the body of execution.output: a chunk of a process stream at byte Offset of that stream.
 type Output struct {

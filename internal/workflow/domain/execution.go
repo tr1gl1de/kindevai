@@ -103,6 +103,15 @@ type Step struct {
 // WaitingForNetwork is what the UI shows as WAITING_FOR_NETWORK.
 func (s *Step) WaitingForNetwork() bool { return s.State == StepWaiting && s.WaitReason == WaitNetwork }
 
+// AttemptUnknown reports a step WAITING on an attempt whose outcome is unknown (its runner was lost): it must be
+// reconciled before the step may run again.
+func (s *Step) AttemptUnknown() bool { return s.unknownAttempt() }
+
+// Holding reports a step whose runner may have a process for it: CLAIMED, RUNNING or an unknown attempt.
+func (s *Step) Holding() bool {
+	return s.RunnerID != "" && (s.State == StepClaimed || s.State == StepRunning || s.unknownAttempt())
+}
+
 func (s *Step) unknownAttempt() bool {
 	a := s.lastAttempt()
 	return s.State == StepWaiting && a != nil && a.State == AttemptUnknown

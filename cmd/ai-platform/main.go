@@ -142,11 +142,12 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	integ := newIntegrations(inst, msg, audit, ghURL, logger)
 	intake := newYouTrackIntake(inst, msg, integ, identity, logger)
 	apv := newApprovals(inst, msg, audit, integ, logger)
-	modules = append(modules, msg.HTTP, audit.HTTP, integ.HTTP, intake.HTTP, apv.HTTP)
+	modules = append(modules, msg.HTTP, audit.HTTP, integ.HTTP, intake.HTTP, apv.HTTP, apv.Tasks)
 	modules = append(modules, newAlerts(inst, msg, audit, identity.Users, "", logger)) // KIN-40
 	gateway := newRunnerGateway(inst, hub, tel, localPeers, audiences, logger)
 	channel := newRunnerChannel(inst, apv.Workflow, retention, logger)
 	attachRunnerChannel(gateway, channel)
+	wireExecution(apv.Workflow, channel, gateway, tel, hub, logger)    // KIN-23 scheduler, leases, reconciliation
 	netSvc, netHTTP := newNetwork(inst, audit, integ, channel, logger) // KIN-30 network profiles
 	attachNetwork(gateway, netSvc, logger)
 	modules = append(modules, netHTTP)
@@ -155,6 +156,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	defer intake.start(ctx)() // the YouTrack poller stops first
 	defer startTelemetry(ctx, tel, inst.Dir.Path())()
 	defer startRetention(ctx, inst, apv.Workflow, retention, logger)() // KIN-52
+	defer startScheduler(ctx, apv.Workflow, DefaultSchedulerInterval, logger)()
 
 	assets, built := web.Assets()
 	if !built {

@@ -133,6 +133,19 @@ API: `GET /api/integrations`, `PUT|DELETE /api/integrations/youtrack`, `POST /ap
 `GET /api/projects/{id}/integrations`, `PUT /api/projects/{id}/integrations/youtrack`,
 `POST /api/projects/{id}/repositories`, `PUT|DELETE /api/projects/{id}/repositories/{repoId}`.
 
+### Approvals and risk policy
+
+Every plan revision gets its effective risk from a deterministic **Policy Evaluator**: the project's rules (paths,
+migrations, auth/security, database schema — globs, `**` matches any folders) can only raise the level the AI proposed,
+never lower it. L0/L1 plans go straight to READY and are merged into dev by policy; L2/L3 plans wait in the
+**Approvals** page for the Owner, plus a separate *merge into dev* request decided after verification. A decision
+names the plan revision and its `planHash`; a newer revision supersedes pending approvals and approving an older one
+returns 409. A running step that changes files outside its approved scope (or above the approved risk) is stopped
+until the Owner approves the extra files. Only the Owner decides and edits the policy; Project Admins see their
+projects' approvals and policy. API: `GET /api/approvals?state=pending|decided|all`, `GET /api/approvals/{id}`,
+`POST /api/approvals/{id}/{approve|reject}` (`planRevision`, `planHash`, `comment` — required to reject),
+`GET/PUT /api/projects/{id}/risk-policy`.
+
 ### Audit log
 
 Security-relevant actions are recorded in an append-only audit log in the same transaction as the action itself:

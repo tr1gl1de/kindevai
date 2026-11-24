@@ -1,0 +1,145 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/tr1gl1de/kindevai/internal/protocol"
+	"github.com/tr1gl1de/kindevai/internal/runner/session/domain"
+)
+
+type fakeWorkspaces struct {
+	mu       sync.Mutex
+	reqs     []WorkspaceRequest
+	finished []string
+	err      error
+}
+
+func (w *fakeWorkspaces) Prepare(_ context.Context, r WorkspaceRequest) (string, protocol.WorkspacePrepared, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.reqs = append(w.reqs, r)
+	if w.err != nil {
+		return "", protocol.WorkspacePrepared{}, w.err
+	}
+	return "/ws/" + r.Step, protocol.WorkspacePrepared{Repository: r.Repository, Branch: "feature/" + r.Task + "-" + r.Step,
+		Base: r.Base, BaseSHA: "abc", Instructions: []protocol.InstructionFile{{Path: "AGENTS.md", SHA256: "h"}}}, nil
+}
+
+func (w *fakeWorkspaces) Finish(_ context.Context, step string, fence int64) (*protocol.WorkspaceChanges, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.finished = append(w.finished, jkey(step, fence))
+	return &protocol.WorkspaceChanges{BaseSHA: "abc", HeadSHA: "def", Files: []protocol.ChangedFile{{Path: "a.go", Status: "M"}},
+		FilesTotal: 1}, nil
+}
+
+func (w *fakeWorkspaces) done() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.Clone(w.finished)
+}
+
+func repoAssignment() domain.Assignment {
+	a := assignment("P1")
+	a.Base, a.Token = "dev", domain.NewSecret("ghs_tok")
+	return a
+}
+
+func TestAssignmentWithABaseRunsInItsWorktree(t *testing.T) {
+	t.Parallel()
+	x, l, j, ev := newExecutor(domain.Policy{})
+	ws := &fakeWorkspaces{}
+	x.Workspaces = ws
+	if err := x.Assign(t.Context(), repoAssignment()); err != nil {
+		t.Fatal(err)
+	}
+	if s := l.launched[0]; s.Workdir != "/ws/S1" || s.Dir != "/work/S1-1" {
+		t.Fatalf("launch %+v", s)
+	}
+	if r := ws.reqs[0]; r.Base != "dev" || r.Task != "T1" || r.Repository != "acme/app" || r.Token.Reveal() != "ghs_tok" {
+		t.Fatalf("workspace request %+v", r)
+	}
+	if recs, _ := j.List(); len(recs) != 1 || recs[0].Workdir != "/ws/S1" {
+		t.Fatalf("journal %+v", recs)
+	}
+	l.proc(0).end(domain.Exit{Code: 0})
+	waitFor(t, "completed", func() bool { return slices.Contains(ev.kinds(), protocol.EventCompleted) })
+	want := []string{protocol.EventAccepted, protocol.EventWorkspacePrepared, protocol.EventOutput, protocol.EventStarted,
+		protocol.EventWorkspaceChanges, protocol.EventCompleted}
+	if k := ev.kinds(); !slices.Equal(k, want) {
+		t.Fatalf("events %v", k)
+	}
+	if !slices.Equal(ws.done(), []string{"S1-1"}) {
+		t.Fatalf("finished %v", ws.done())
+	}
+	for _, e := range ev.evs {
+		if strings.Contains(e.body, "ghs_tok") {
+			t.Fatalf("token in event %s", e.kind)
+		}
+	}
+}
+
+func TestWorkspaceFailureFailsTheAttemptWithoutLaunching(t *testing.T) {
+	t.Parallel()
+	x, l, j, ev := newExecutor(domain.Policy{})
+	x.Workspaces = &fakeWorkspaces{err: errors.New("not enough free disk space")}
+	if err := x.Assign(t.Context(), repoAssignment()); err != nil {
+		t.Fatal(err)
+	}
+	if l.count() != 0 {
+		t.Fatal("launched without a workspace")
+	}
+	if e := ev.last(); e.kind != protocol.EventFailed || !strings.Contains(e.body, "workspace") {
+		t.Fatalf("%+v", e)
+	}
+	if done, _ := j.Finished("S1", 1); !done {
+		t.Fatal("attempt not finished")
+	}
+}
+
+func TestAssignmentWithoutABaseKeepsTheEmptyDirectory(t *testing.T) {
+	t.Parallel()
+	x, l, _, _ := newExecutor(domain.Policy{})
+	ws := &fakeWorkspaces{}
+	x.Workspaces = ws
+	if err := x.Assign(t.Context(), assignment("P1")); err != nil {
+		t.Fatal(err)
+	}
+	if s := l.launched[0]; s.Workdir != "" || len(ws.reqs) != 0 {
+		t.Fatalf("launch %+v, workspace requests %d", s, len(ws.reqs))
+	}
+}
+
+func TestAssignmentSecretIsRedacted(t *testing.T) {
+	t.Parallel()
+	a := repoAssignment()
+	if s := strings.Join([]string{a.Token.String(), a.Token.GoString()}, " "); strings.Contains(s, "ghs_") {
+		t.Fatal(s)
+	}
+}
+
+// A preparation cut short by the connection's end is not the attempt's failure: the command is re-sent.
+func TestInterruptedPreparationIsRetried(t *testing.T) {
+	t.Parallel()
+	x, l, j, ev := newExecutor(domain.Policy{})
+	x.Workspaces = &fakeWorkspaces{err: context.Canceled}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := x.Assign(ctx, repoAssignment()); err == nil {
+		t.Fatal("no error: the command would not be re-sent")
+	}
+	if l.count() != 0 || slices.Contains(ev.kinds(), protocol.EventFailed) {
+		t.Fatalf("events %v", ev.kinds())
+	}
+	if recs, _ := j.List(); len(recs) != 0 {
+		t.Fatal("record left")
+	}
+	if done, _ := j.Finished("S1", 1); done {
+		t.Fatal("attempt finished")
+	}
+}

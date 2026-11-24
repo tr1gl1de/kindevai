@@ -149,6 +149,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	attachRunnerChannel(gateway, channel)
 	wireExecution(apv.Workflow, channel, gateway, tel, hub, logger)    // KIN-23 scheduler, leases, reconciliation
 	netSvc, netHTTP := newNetwork(inst, audit, integ, channel, logger) // KIN-30 network profiles
+	attachCheckoutSource(channel, integ.GitHub)                        // KIN-29 worktree base + repository token
 	attachNetwork(gateway, netSvc, logger)
 	modules = append(modules, netHTTP)
 	modules = append(modules, gateway)

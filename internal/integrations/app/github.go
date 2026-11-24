@@ -598,6 +598,34 @@ func (s *GitHubService) HandleGitHubEvent(ctx context.Context, in messaging.Inbo
 	return nil
 }
 
+// CheckoutSource is where a runner checks a repository out from (KIN-29).
+type CheckoutSource struct {
+	Branch string        // the integration branch: the base of the attempt's work branch
+	Token  domain.Secret // zero when the App is not installed on the repository (public repositories)
+}
+
+// CheckoutSource returns the registered repository's integration branch and, when the App is installed on it, a
+// token for that repository only. A repository not registered for the project is domain.ErrNotFound.
+func (s *GitHubService) CheckoutSource(ctx context.Context, projectID, fullName string) (CheckoutSource, error) {
+	r, err := s.Store.RepositoryByFullName(ctx, fullName)
+	if err != nil {
+		return CheckoutSource{}, err
+	}
+	if r.ProjectID != projectID {
+		return CheckoutSource{}, domain.ErrNotFound
+	}
+	src := CheckoutSource{Branch: r.IntegrationBranch}
+	tok, err := s.RepositoryToken(ctx, projectID, fullName)
+	switch {
+	case errors.Is(err, domain.ErrNotInstalled):
+	case err != nil:
+		return CheckoutSource{}, err
+	default:
+		src.Token = tok
+	}
+	return src, nil
+}
+
 // RepositoryToken returns an installation token that can reach only the given repository, for adapters acting
 // for a project (no actor: callers are trusted adapters). A repository not registered for that project is
 // domain.ErrNotFound, so one project's work never gets a token for another project's repository.

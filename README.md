@@ -147,6 +147,18 @@ ai-runner fingerprint                                    # compare with the runn
   after 5 s. A lost runner's attempt becomes `UNKNOWN` when its 60 s lease (renewed by heartbeats) runs out and
   nothing is started again until the runner reconciles: a live process continues (a restarted runner adopts it from
   its journal under `attempts/`), a gone one fails and is retried once.
+- Workspaces (runner): when the step's repository is registered for the project, the attempt runs in its own git
+  worktree under `workspaces/` on the branch `feature/<task>-<step>` (never main/master), started from the
+  repository's integration branch fetched into a bare cache under `repos/`; the base commit is recorded. The Control
+  Plane adds the branch and a short-lived installation token for that repository to the assignment only when it is
+  sent; the runner hands the token to git only through its credential helper (`ai-runner git-credential`, a unix
+  socket the runner serves during the fetch) and only for the host of `--git-base-url` (default
+  `https://github.com`, `KINDEV_RUNNER_GIT_BASE_URL`): never in arguments, environment, files or the remote URL.
+  Instruction files (`AGENTS.md`, `CLAUDE.md`, `.claude/{agents,skills,rules,commands,settings*}`, `.codex/`,
+  `.mcp.json`) are reported with their SHA-256 as untrusted data (symlinks are not followed, nothing is parsed).
+  When the attempt ends, uncommitted work is committed to the branch, the changed files against the base and any
+  changed instruction file are reported, and the worktree is removed; the branch stays. One writer per workspace;
+  a workspace needs `--workspace-min-free-mib` (default 2048) free on the data dir's filesystem.
 - Storage (Owner): the Overview shows every machine's disk space; **Infrastructure → Storage** (`/infrastructure/storage`)
   adds the hourly fill history for 7 or 30 days with the 75/85/95% levels, every volume with both forecasts and the
   space consumers. A runner measures its consumers (repos, workspaces and worktrees, CLI sessions, the event spool,

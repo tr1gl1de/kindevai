@@ -4,6 +4,7 @@
 export
 
 GO_PKGS ?= ./...
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 HAS_GO  := $(wildcard go.mod)
 HAS_WEB := $(wildcard web/package.json)
 
@@ -14,10 +15,11 @@ help: ## list targets
 
 build: ## build web assets then Go binaries
 ifneq ($(HAS_WEB),)
+	@[ -d web/node_modules ] || npm --prefix web ci
 	npm --prefix web run build
 endif
 ifneq ($(HAS_GO),)
-	go build -o bin/ ./cmd/...
+	go build -ldflags "-X main.version=$(VERSION)" -o bin/ ./cmd/...
 endif
 
 test: ## unit tests: Go (race, shuffled, uncached) + web
@@ -55,11 +57,11 @@ endif
 cover: ## coverage report to coverage.out
 	go test -race -count=1 -coverprofile=coverage.out $(GO_PKGS) && go tool cover -func=coverage.out | tail -1
 
-dev: ## run control plane on this worktree's port
-	@echo "port $${KINDEV_PORT:-8080}, data $${KINDEV_DATA_DIR:-./data}"
+dev: ## run control plane on this worktree's port (web: npm --prefix web run dev in another shell)
+	go run ./cmd/ai-platform serve --addr 127.0.0.1:$${KINDEV_PORT:-8080}
 
 clean: ## remove build/test leftovers of this worktree (keeps data/ and .env)
-	rm -rf bin/ coverage.* *.test *.out web/dist web/coverage
+	rm -rf bin/ coverage.* *.test *.out web/dist/app web/coverage
 ifneq ($(COMPOSE_TEST),)
 	docker compose -f $(COMPOSE_TEST) down -v --remove-orphans 2>/dev/null || true
 endif

@@ -147,6 +147,14 @@ ai-runner fingerprint                                    # compare with the runn
   after 5 s. A lost runner's attempt becomes `UNKNOWN` when its 60 s lease (renewed by heartbeats) runs out and
   nothing is started again until the runner reconciles: a live process continues (a restarted runner adopts it from
   its journal under `attempts/`), a gone one fails and is retried once.
+- Tasks & Executions (`/tasks`, KIN-25): the task list filtered by project and state, and a task page with the plan
+  revision, steps by stage, attempts (runner, CLI) and each attempt's output and events, read by polling in bounded
+  pages. The Owner and project admins create tasks, plan them with the mock planner, cancel them and retry a failed
+  one (`POST /api/tasks/{id}/retry`: the current plan becomes a new revision, checked by the risk policy again).
+  **Agent time** is the time the agents' CLI processes ran (from the runner's `execution.started` to its
+  completed/failed event, on the runner's clock, recorded once per attempt); it is shown per attempt, step, task and
+  for the list's filter, apart from the task's calendar duration. A period without an end (a lost process) or a usable
+  time is shown as "accounting incomplete", never as a complete record.
 - Storage (Owner): the Overview shows every machine's disk space; **Infrastructure → Storage** (`/infrastructure/storage`)
   adds the hourly fill history for 7 or 30 days with the 75/85/95% levels, every volume with both forecasts and the
   space consumers. A runner measures its consumers (repos, workspaces and worktrees, CLI sessions, the event spool,

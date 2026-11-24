@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,14 +40,14 @@ func (s *recSender) count(typ string) int {
 	return n
 }
 
-type fakeProbe struct{ storageCalls int }
+type fakeProbe struct{ storageCalls atomic.Int64 }
 
 func (p *fakeProbe) Capabilities(context.Context) protocol.Capabilities {
 	return protocol.Capabilities{OS: "linux", Arch: "amd64"}
 }
 
 func (p *fakeProbe) Storage(context.Context) protocol.Storage {
-	p.storageCalls++
+	p.storageCalls.Add(1)
 	return protocol.Storage{Volumes: []protocol.Volume{{ID: "/", Role: protocol.VolumeWorkspaces, TotalBytes: 10}}}
 }
 
@@ -58,7 +59,7 @@ func TestReporterSendsCapabilitiesStorageThenPeriodicHeartbeats(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- r.Report(ctx, s) }()
 	deadline := time.Now().Add(5 * time.Second)
-	for s.count(protocol.TypeHeartbeat) < 3 {
+	for s.count(protocol.TypeHeartbeat) < 3 || s.count(protocol.TypeStorage) < 1 { // probes run apart from heartbeats
 		if time.Now().After(deadline) {
 			t.Fatal("no periodic heartbeats")
 		}
@@ -256,5 +257,35 @@ func TestReporterSendsSpaceConsumersOnlyWhenAllowedAndNotOnEveryLink(t *testing.
 	defer mu.Unlock()
 	if measured != 1 || len(again.withConsumers()) != 0 {
 		t.Fatalf("measured %d times, resent %d", measured, len(again.withConsumers()))
+	}
+}
+
+// Review finding: a scan cut short by the link going down is not restarted on every reconnect.
+func TestInterruptedMeasurementIsRetriedOnlyAfterABackoff(t *testing.T) {
+	t.Parallel()
+	started := make(chan struct{}, 4)
+	r := &Reporter{Probe: &fakeProbe{}, StorageEvery: time.Hour, MeterEvery: time.Hour,
+		Meter: func(ctx context.Context) protocol.SpaceConsumers {
+			started <- struct{}{}
+			<-ctx.Done() // a long walk the link outlives
+			return protocol.SpaceConsumers{}
+		}}
+	for i := range 2 {
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- r.Report(ctx, &storageSender{}) }()
+		if i == 0 {
+			<-started
+		} else {
+			select {
+			case <-started:
+				t.Fatal("measurement restarted right after a reconnect")
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
 	}
 }

@@ -130,7 +130,11 @@ type walker struct {
 	batch      int
 	seen       int64 // entries of every category so far
 	sincePause int
+	inodes     map[[2]uint64]struct{} // hard-linked files already counted (git object stores, worktrees)
 }
+
+// maxInodes bounds the hard-link set; beyond it further links are counted again (the result is approximate).
+const maxInodes = 100_000
 
 var errStop = errors.New("measurement limit reached")
 
@@ -157,7 +161,9 @@ func (w *walker) walk(root string, rootInfo fs.FileInfo) (total, entries int64, 
 			}
 		}
 		entries++
-		total += usage(fi)
+		if !w.counted(fi) {
+			total += usage(fi)
+		}
 		return nil
 	})
 	return total, entries, err == nil
@@ -177,6 +183,25 @@ func (w *walker) step() error {
 		}
 	}
 	return nil
+}
+
+// counted reports whether fi is a hard link to a file already measured (and remembers it otherwise).
+func (w *walker) counted(fi fs.FileInfo) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || fi.IsDir() || st.Nlink < 2 {
+		return false
+	}
+	key := [2]uint64{uint64(st.Dev), st.Ino} //nolint:unconvert,gosec // int32 on darwin, uint64 on linux
+	if _, ok := w.inodes[key]; ok {
+		return true
+	}
+	if w.inodes == nil {
+		w.inodes = map[[2]uint64]struct{}{}
+	}
+	if len(w.inodes) < maxInodes {
+		w.inodes[key] = struct{}{}
+	}
+	return false
 }
 
 func device(fi fs.FileInfo) (uint64, bool) {

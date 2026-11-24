@@ -32,10 +32,14 @@ type Reporter struct {
 	Meter      func(ctx context.Context) protocol.SpaceConsumers
 	MeterEvery time.Duration
 
-	mu           sync.Mutex
-	lastMeasured time.Time
-	pending      *protocol.SpaceConsumers
+	mu      sync.Mutex
+	nextAt  time.Time // when the meter may run next; zero: at once
+	pending *protocol.SpaceConsumers
 }
+
+// MeterRetry is the wait after a measurement cut short by the link going down, so a flapping link does not
+// restart a full scan on every reconnect.
+const MeterRetry = 30 * time.Minute
 
 // DefaultMeterEvery is how often space consumers are measured when allowed.
 const DefaultMeterEvery = 6 * time.Hour
@@ -134,7 +138,8 @@ func (r *Reporter) probes(ctx context.Context, s Sender) error {
 	}
 }
 
-// meter measures whenever MeterEvery has passed since the last complete measurement and signals measured.
+// meter measures when due (MeterEvery after the last complete measurement, MeterRetry after an interrupted one)
+// and signals measured.
 func (r *Reporter) meter(ctx context.Context, measured chan<- struct{}) {
 	every := r.MeterEvery
 	if every <= 0 {
@@ -147,8 +152,8 @@ func (r *Reporter) meter(ctx context.Context, measured chan<- struct{}) {
 	for {
 		r.mu.Lock()
 		wait := time.Duration(0)
-		if !r.lastMeasured.IsZero() {
-			wait = every - now().Sub(r.lastMeasured)
+		if !r.nextAt.IsZero() {
+			wait = r.nextAt.Sub(now())
 		}
 		r.mu.Unlock()
 		if wait > 0 {
@@ -160,12 +165,15 @@ func (r *Reporter) meter(ctx context.Context, measured chan<- struct{}) {
 			case <-t.C:
 			}
 		}
+		r.mu.Lock()
+		r.nextAt = now().Add(MeterRetry)
+		r.mu.Unlock()
 		c := r.Meter(ctx)
 		if ctx.Err() != nil {
-			return // cut short by the link going down: measure again on the next one
+			return // cut short by the link going down: retried after MeterRetry
 		}
 		r.mu.Lock()
-		r.lastMeasured, r.pending = now(), &c
+		r.nextAt, r.pending = now().Add(every), &c
 		r.mu.Unlock()
 		select {
 		case measured <- struct{}{}:

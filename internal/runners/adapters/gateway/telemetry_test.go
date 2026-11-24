@@ -99,6 +99,27 @@ func TestStorageReportCarriesAnOptionalSpaceConsumerMeasurement(t *testing.T) {
 	}
 }
 
+// Review finding: a measurement this Control Plane does not understand must not cost the volume report or the link.
+func TestInvalidSpaceConsumersAreDroppedKeepingVolumesAndTheConnection(t *testing.T) {
+	t.Parallel()
+	s := &sink{}
+	e := newEnv(t, opts{messages: TelemetryMessages(s, time.Now, nil)})
+	e.approve(t)
+	c, _ := e.connect(t)
+	vols := []protocol.Volume{{ID: "/", Role: protocol.VolumeWorkspaces, Path: "/r", TotalBytes: 100, AvailableBytes: 40, FreeBytes: 45}}
+	send(t, c, protocol.TypeStorage, protocol.Storage{Volumes: vols, Consumers: &protocol.SpaceConsumers{
+		Items: []protocol.SpaceConsumer{{Category: "xcode_derived_data", Bytes: 1}}}})
+	send(t, c, protocol.TypeStorage, protocol.Storage{Volumes: vols, Consumers: &protocol.SpaceConsumers{
+		Items: make([]protocol.SpaceConsumer, 9)}})
+	send(t, c, protocol.TypeHeartbeat, protocol.Heartbeat{})
+	waitFor(t, "volumes and a heartbeat after the invalid measurements", func() bool { b, _, v := s.count(); return b == 1 && v == 2 })
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.cons) != 0 {
+		t.Fatalf("invalid consumers stored: %+v", s.cons)
+	}
+}
+
 func TestInvalidTelemetryClosesTheConnection(t *testing.T) {
 	t.Parallel()
 	cases := map[string]struct {
@@ -113,10 +134,6 @@ func TestInvalidTelemetryClosesTheConnection(t *testing.T) {
 			Role: protocol.VolumeData, TotalBytes: 2, AvailableBytes: 1}}}},
 		"too many volumes": {protocol.TypeStorage, protocol.Storage{Volumes: make([]protocol.Volume, 9)}},
 		"not an object":    {protocol.TypeHeartbeat, "beat"},
-		"consumers with an unknown category": {protocol.TypeStorage, protocol.Storage{Consumers: &protocol.SpaceConsumers{
-			Items: []protocol.SpaceConsumer{{Category: "home", Bytes: 1}}}}},
-		"too many consumers": {protocol.TypeStorage, protocol.Storage{Consumers: &protocol.SpaceConsumers{
-			Items: make([]protocol.SpaceConsumer, 9)}}},
 		"long version": {protocol.TypeCapabilities, protocol.Capabilities{OS: "linux", Arch: "amd64",
 			Tools: []protocol.Tool{{Name: "git", Version: strings.Repeat("9", 200)}}}},
 	}

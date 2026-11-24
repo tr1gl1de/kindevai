@@ -550,7 +550,7 @@ func TestStorageMachineDetailHasHistoryVolumesAndConsumers(t *testing.T) {
 	}
 }
 
-func TestSpaceConsumersAreValidatedAndThrottled(t *testing.T) {
+func TestSpaceConsumersAreValidatedAndNeverDropped(t *testing.T) {
 	t.Parallel()
 	f := newTelFixture(t)
 	ctx := t.Context()
@@ -561,7 +561,7 @@ func TestSpaceConsumersAreValidatedAndThrottled(t *testing.T) {
 	_ = f.tel.SpaceConsumers(ctx, "r1", "s1", []domain.SpaceConsumer{{Category: domain.ConsumerRepos, Bytes: 1}})
 	f.clock.add(time.Second)
 	_ = f.tel.SpaceConsumers(ctx, "r1", "s1", []domain.SpaceConsumer{{Category: domain.ConsumerRepos, Bytes: 2}})
-	if got, _ := f.trepo.SpaceConsumers(ctx, "r1"); got.Items[0].Bytes != 1 {
-		t.Fatalf("flood stored: %+v", got)
+	if got, _ := f.trepo.SpaceConsumers(ctx, "r1"); got.Items[0].Bytes != 2 {
+		t.Fatalf("a measurement right after another was dropped: %+v", got)
 	}
 }

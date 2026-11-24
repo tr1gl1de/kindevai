@@ -328,22 +328,37 @@ func (t *Telemetry) Overview(ctx context.Context, actor auth.Principal) (Overvie
 	if err := ownerOnly(actor); err != nil {
 		return Overview{}, err
 	}
+	ov, _, err := t.overview(ctx, "")
+	return ov, err
+}
+
+// overview builds the overview of every machine, or of machine only (then it also returns only's 30-day history,
+// so one machine's drill-down never loads every machine's history).
+func (t *Telemetry) overview(ctx context.Context, only string) (Overview, map[string][]domain.Sample, error) {
 	now := t.Now()
 	runners, err := t.Runners.Runners(ctx)
 	if err != nil {
-		return Overview{}, err
+		return Overview{}, nil, err
 	}
 	tel, err := t.Repo.Telemetry(ctx)
 	if err != nil {
-		return Overview{}, err
+		return Overview{}, nil, err
 	}
 	vols, err := t.Repo.Volumes(ctx)
 	if err != nil {
-		return Overview{}, err
+		return Overview{}, nil, err
 	}
-	hist, err := t.Repo.Samples(ctx, now.AddDate(0, 0, -30))
+	since := now.AddDate(0, 0, -30)
+	var hist map[string]map[string][]domain.Sample
+	if only == "" {
+		hist, err = t.Repo.Samples(ctx, since)
+	} else {
+		var h map[string][]domain.Sample
+		h, err = t.Repo.MachineSamples(ctx, only, since)
+		hist = map[string]map[string][]domain.Sample{only: h}
+	}
 	if err != nil {
-		return Overview{}, err
+		return Overview{}, nil, err
 	}
 	build := func(m MachineOverview) MachineOverview {
 		online := m.Availability == domain.AvailabilityOnline
@@ -357,12 +372,14 @@ func (t *Telemetry) Overview(ctx context.Context, actor auth.Principal) (Overvie
 		slices.SortFunc(m.Volumes, func(a, b VolumeOverview) int { return cmp.Compare(roleOrder(a.Role), roleOrder(b.Role)) })
 		return m
 	}
-	out := Overview{GeneratedAt: now, Machines: []MachineOverview{
-		build(MachineOverview{ID: domain.ControlPlaneMachine, Kind: MachineControlPlane, Availability: domain.AvailabilityOnline}),
-	}}
+	out := Overview{GeneratedAt: now, Machines: []MachineOverview{}}
+	if only == "" || only == domain.ControlPlaneMachine {
+		out.Machines = append(out.Machines, build(MachineOverview{ID: domain.ControlPlaneMachine, Kind: MachineControlPlane,
+			Availability: domain.AvailabilityOnline}))
+	}
 	var rs []MachineOverview
 	for _, r := range runners {
-		if r.Status != domain.StatusApproved && r.Status != domain.StatusDisabled {
+		if r.Status != domain.StatusApproved && r.Status != domain.StatusDisabled || only != "" && r.ID != only {
 			continue
 		}
 		p := presence(tel[r.ID], now)
@@ -371,7 +388,7 @@ func (t *Telemetry) Overview(ctx context.Context, actor auth.Principal) (Overvie
 	}
 	slices.SortFunc(rs, func(a, b MachineOverview) int { return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.ID, b.ID)) })
 	out.Machines = append(out.Machines, rs...)
-	return out, nil
+	return out, hist[only], nil
 }
 
 // SpaceConsumers stores a runner's space-consumer measurement (KIN-55). The runner measures only when its
@@ -382,9 +399,8 @@ func (t *Telemetry) SpaceConsumers(ctx context.Context, machineID, session strin
 	if err != nil {
 		return err
 	}
-	return t.guarded("consumers", machineID, session, minReportGap, now, func() error {
-		return t.Repo.ReplaceSpaceConsumers(ctx, machineID, m)
-	})
+	// Not throttled: a runner measures at most every few hours, and a dropped measurement would be lost for that long.
+	return t.Tx.InTx(ctx, func(ctx context.Context) error { return t.Repo.ReplaceSpaceConsumers(ctx, machineID, m) })
 }
 
 // HistoryDays are the history windows of the Storage page.
@@ -407,23 +423,26 @@ func (t *Telemetry) Machine(ctx context.Context, actor auth.Principal, machineID
 	if !slices.Contains(HistoryDays, days) {
 		return MachineDetail{}, &domain.ValidationError{Field: "days", Code: "unsupported"}
 	}
-	ov, err := t.Overview(ctx, actor)
-	if err != nil {
-		return MachineDetail{}, err
-	}
-	i := slices.IndexFunc(ov.Machines, func(m MachineOverview) bool { return m.ID == machineID })
-	if i < 0 {
+	if machineID == "" {
 		return MachineDetail{}, domain.ErrNotFound
 	}
-	h, err := t.Repo.MachineSamples(ctx, machineID, ov.GeneratedAt.AddDate(0, 0, -days))
+	ov, hist, err := t.overview(ctx, machineID)
 	if err != nil {
 		return MachineDetail{}, err
+	}
+	if len(ov.Machines) != 1 {
+		return MachineDetail{}, domain.ErrNotFound
+	}
+	from := ov.GeneratedAt.AddDate(0, 0, -days).Truncate(time.Hour)
+	h := make(map[string][]domain.Sample, len(hist))
+	for role, ss := range hist {
+		h[role] = slices.DeleteFunc(slices.Clone(ss), func(s domain.Sample) bool { return s.Hour.Before(from) })
 	}
 	c, err := t.Repo.SpaceConsumers(ctx, machineID)
 	if err != nil {
 		return MachineDetail{}, err
 	}
-	return MachineDetail{MachineOverview: ov.Machines[i], Days: days, History: h, Consumers: c}, nil
+	return MachineDetail{MachineOverview: ov.Machines[0], Days: days, History: h, Consumers: c}, nil
 }
 
 // roleOrder lists the working volume (data, workspaces) before the WSL2 host volume.

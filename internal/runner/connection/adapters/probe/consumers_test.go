@@ -159,3 +159,23 @@ func TestParseDockerSize(t *testing.T) {
 		}
 	}
 }
+
+// Review finding: hard links (git object stores shared with worktrees) are counted once.
+func TestSpaceMeterCountsHardLinkedFilesOnce(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "repos", "a.git", "objects", "pack"), 512<<10)
+	if err := os.MkdirAll(filepath.Join(dir, "workspaces", "w1"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(dir, "repos", "a.git", "objects", "pack"), filepath.Join(dir, "workspaces", "w1", "pack")); err != nil {
+		t.Fatal(err)
+	}
+	got := byCategory((&SpaceMeter{DataDir: dir, LookPath: noDocker}).Measure(t.Context()))
+	if r := got[protocol.ConsumerRepos]; r.Bytes < 512<<10 {
+		t.Fatalf("repos = %+v", r)
+	}
+	if ws := got[protocol.ConsumerWorkspaces]; ws.Bytes >= 512<<10 || ws.Entries != 3 {
+		t.Fatalf("workspaces counted the hard link again: %+v", ws)
+	}
+}

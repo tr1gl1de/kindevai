@@ -223,6 +223,26 @@ Subscribe the App to the events Push, Pull request, Check suite and Check run, s
 Owner API: `PUT|DELETE /api/integrations/github`, `POST /api/integrations/github/check`,
 `POST /api/projects/{id}/repositories/{repoId}/sync`.
 
+### Network profiles and Test Network
+
+**Dashboard → Network** (Owner) manages network profiles: an upstream proxy (`http://`, `https://` or `socks5://`,
+entered as a URL — credentials in it are taken out — or as fields over the API), the expected public egress IPv4/IPv6,
+the enforcement mode (`off`, `monitor`, `strict`), DNS policy (runner resolver or remote DNS through the proxy),
+fail-closed and an allowlist of destinations (host, `*.suffix` or CIDR with ports). The proxy password is stored
+encrypted in the credentials vault and never returned; audit entries record only that it changed.
+
+Profiles are assigned along **System → Runner → Project → CLI**. A lower level may switch the proxy but never relaxes
+security: enforcement, DNS and fail-closed only tighten and an allowlist only narrows, so strict egress set for the
+whole installation cannot be lifted below. Allowlists refuse `*`, top-level wildcards, `0.0.0.0/0`, `::/0`, overly
+wide prefixes and loopback/link-local/multicast ranges. Every change re-delivers each runner's resolved profiles with
+the `runner.config.update` command (the password sealed in the command log and opened only on the authenticated
+session; the runner keeps it in a `0600` file and never logs it).
+
+**Test Network** runs a preflight on a runner — proxy reachability and authentication, the observed egress IP from the
+diagnostic endpoint (default `https://api64.ipify.org`, configurable per profile) compared with the expected one, and
+reachability of the AI providers, GitHub and YouTrack — and shows the result, failure reason and time. On the runner
+machine itself: `ai-runner test-network`. Enforcing strict egress in a sandbox comes with KIN-31.
+
 ### Approvals and risk policy
 
 Every plan revision gets its effective risk from a deterministic **Policy Evaluator**: the project's rules (paths,

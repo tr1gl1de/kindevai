@@ -59,10 +59,14 @@ type Channel struct {
 	Repo       ChannelRepo
 	Executions Executions
 	Reconciler Reconciler // optional
-	Tx         TxRunner
-	Now        func() time.Time
-	NewID      func() string
-	Logger     *slog.Logger
+	// Prepare, if set, transforms a command's stored body right before it is sent on the runner's authenticated
+	// session (KIN-30 opens sealed proxy passwords there, so they never sit in the log in plaintext). On an error
+	// the stored body is sent: the stream must not stall.
+	Prepare func(ctx context.Context, runnerID string, q domain.QueuedCommand) (json.RawMessage, error)
+	Tx      TxRunner
+	Now     func() time.Time
+	NewID   func() string
+	Logger  *slog.Logger
 	// Window bounds unacknowledged commands in flight (default 32), AckTimeout re-sends from the last ACK when
 	// nothing was acknowledged for that long (default 30s). PollInterval is how often a session looks for commands
 	// committed by other transactions (default 1s; a Send also wakes it).
@@ -193,8 +197,17 @@ func (c *Channel) streamCommands(ctx context.Context, s Session, wake chan struc
 					return err
 				}
 				for _, q := range cmds {
+					body := q.Body
+					if c.Prepare != nil {
+						if b, err := c.Prepare(ctx, s.RunnerID, q); err != nil {
+							c.Logger.Warn("preparing runner command failed; sending it as stored", "runner", s.RunnerID,
+								"command", q.ID, "kind", q.Kind, "err", err)
+						} else {
+							body = b
+						}
+					}
 					if err := s.Send(ctx, protocol.TypeCommand, protocol.Command{Epoch: st.CommandEpoch, Seq: q.Seq,
-						Base: st.CommandAcked, ID: q.ID, Kind: q.Kind, Body: q.Body}); err != nil {
+						Base: st.CommandAcked, ID: q.ID, Kind: q.Kind, Body: body}); err != nil {
 						return err
 					}
 					sent = q.Seq

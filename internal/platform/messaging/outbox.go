@@ -210,6 +210,29 @@ func (o *Outbox) Dead(ctx context.Context, limit int) ([]DeadMessage, error) {
 // Retry puts a dead message back into the queue with a fresh attempt budget and the same idempotency key.
 func (o *Outbox) Retry(ctx context.Context, id int64) error { return o.q.retry(ctx, id) }
 
+// maxUnhandledScan bounds how many dead messages RetryUnhandled looks at in one call.
+const maxUnhandledScan = 10_000
+
+// RetryUnhandled puts back every dead message that died only because its topic had no handler and whose topic
+// has one now (call it after registering the handlers, before Run). It returns how many were requeued.
+func (o *Outbox) RetryUnhandled(ctx context.Context) (int, error) {
+	dead, err := o.q.listDead(ctx, maxUnhandledScan)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, m := range dead {
+		if m.LastError != errMissingHandler.Error() || o.handler(m.Topic) == nil {
+			continue
+		}
+		if err := o.q.retry(ctx, m.ID); err != nil && !errors.Is(err, ErrNotFound) {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
 // Purge deletes done messages older than Config.Retention and dead ones older than Config.DeadRetention.
 func (o *Outbox) Purge(ctx context.Context) (int64, error) { return o.q.purge(ctx) }
 

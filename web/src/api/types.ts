@@ -515,3 +515,34 @@ export interface RiskPolicy {
   custom: boolean;
   rules: RiskRule[];
 }
+
+// Alert Center (KIN-40).
+export type AlertSeverity = "info" | "warning" | "critical";
+export type AlertState = "OPEN" | "ACKNOWLEDGED" | "DISMISSED" | "RESOLVED";
+export type AlertAction = "acknowledge" | "dismiss" | "resolve";
+
+export interface Alert {
+  id: string;
+  projectId?: string;
+  projectName?: string;
+  kind: string;
+  severity: AlertSeverity;
+  subject: string;
+  details: Record<string, string>;
+  state: AlertState;
+  occurrences: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  ackedAt: string | null;
+  closedAt: string | null;
+  canManage: boolean;
+}
+
+export type NotificationType = "approval_requested" | "alert_raised" | "task_finished";
+
+export interface NotificationPreferences {
+  language: "en" | "ru";
+  disabled: NotificationType[];
+  types?: NotificationType[];
+  telegramLinked?: boolean;
+}

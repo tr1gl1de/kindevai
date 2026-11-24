@@ -21,6 +21,10 @@ export const handlers = [
       webhookHeader: "X-Kindevai-Webhook-Secret", links: [], health: { state: "ok", consecutiveFailures: 0, lastFailureAt: null } }),
   ),
   http.get("/api/telegram/link", () => json({ configured: false, identity: null, request: null })),
+  http.get("/api/alerts", () => json([])),
+  http.get("/api/notifications/preferences", () =>
+    json({ language: "en", disabled: [], types: ["approval_requested", "alert_raised", "task_finished"], telegramLinked: false }),
+  ),
   http.get("/api/storage/overview", () =>
     json({ generatedAt: "2026-11-24T12:00:00Z", machines: [],
       thresholds: { warningPercent: 75, highPercent: 85, criticalPercent: 95, minHeadroomBytes: 2147483648 } }),

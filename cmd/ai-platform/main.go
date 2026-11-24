@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
 	"github.com/tr1gl1de/kindevai/internal/server"
 	"github.com/tr1gl1de/kindevai/web"
 )
@@ -34,7 +35,7 @@ func main() {
 const usage = `usage: ai-platform <command> [flags]
 
 commands:
-  serve     run the Control Plane (default 127.0.0.1:8080)
+  serve     run the Control Plane (default 127.0.0.1:8080, data in ./data)
   version   print the version
 `
 
@@ -63,10 +64,27 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	fset := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fset.SetOutput(stderr)
 	addr := fset.String("addr", "127.0.0.1:8080", "listen address")
+	dataDir := fset.String("data-dir", "./data", "data directory (SQLite, keys, artifacts); created if missing")
+	keyFile := fset.String("key-file", "", "encryption key file (default <data-dir>/secrets/master.key)")
 	if err := fset.Parse(args); err != nil {
 		return err
 	}
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
+
+	inst, err := bootstrap.Run(ctx, bootstrap.Options{DataDir: *dataDir, KeyFile: *keyFile})
+	if err != nil {
+		return fmt.Errorf("bootstrap: %w", err)
+	}
+	defer func() {
+		if cerr := inst.Close(); cerr != nil {
+			logger.Error("closing installation", "err", cerr)
+		}
+	}()
+	if inst.Fresh {
+		logger.Info("new installation created", "data_dir", inst.Dir.Path(), "installation_id", inst.ID)
+	} else {
+		logger.Info("installation loaded", "data_dir", inst.Dir.Path(), "installation_id", inst.ID)
+	}
 
 	assets, built := web.Assets()
 	if !built {

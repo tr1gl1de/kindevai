@@ -6,9 +6,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
 )
 
 func TestServeHealthAndShutdown(t *testing.T) {
@@ -18,7 +22,10 @@ func TestServeHealthAndShutdown(t *testing.T) {
 	ready := make(chan net.Addr, 1)
 	var stderr bytes.Buffer
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, []string{"serve", "--addr", "127.0.0.1:0"}, io.Discard, &stderr, ready) }()
+	dataDir := filepath.Join(t.TempDir(), "data")
+	go func() {
+		done <- run(ctx, []string{"serve", "--addr", "127.0.0.1:0", "--data-dir", dataDir}, io.Discard, &stderr, ready)
+	}()
 
 	var addr net.Addr
 	select {
@@ -38,6 +45,12 @@ func TestServeHealthAndShutdown(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"status":"ok"`) {
 		t.Fatalf("health = %d %s", resp.StatusCode, body)
+	}
+
+	for _, p := range []string{bootstrap.DBPath(dataDir), bootstrap.KeyPath(dataDir)} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("bootstrap did not create %s: %v", p, err)
+		}
 	}
 
 	cancel()
@@ -82,8 +95,25 @@ func TestRunCommands(t *testing.T) {
 
 func TestServeBadAddr(t *testing.T) {
 	t.Parallel()
-	err := run(t.Context(), []string{"serve", "--addr", "256.0.0.1:99999"}, io.Discard, io.Discard, nil)
+	err := run(t.Context(), []string{"serve", "--addr", "256.0.0.1:99999", "--data-dir", t.TempDir()}, io.Discard, io.Discard, nil)
 	if err == nil {
 		t.Fatal("want listen error")
+	}
+}
+
+func TestServeFailsWhenKeyMissingForExistingDB(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	inst, err := bootstrap.Run(t.Context(), bootstrap.Options{DataDir: dataDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = inst.Close()
+	if err := os.Remove(bootstrap.KeyPath(dataDir)); err != nil {
+		t.Fatal(err)
+	}
+	err = run(t.Context(), []string{"serve", "--addr", "127.0.0.1:0", "--data-dir", dataDir}, io.Discard, io.Discard, nil)
+	if err == nil || !strings.Contains(err.Error(), "encryption key") {
+		t.Fatalf("err = %v, want a clear encryption key error", err)
 	}
 }

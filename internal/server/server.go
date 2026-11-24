@@ -2,14 +2,14 @@
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"path"
-	"slices"
 	"strings"
+
+	"github.com/tr1gl1de/kindevai/internal/platform/httpx"
 )
 
 // Options configures the HTTP handler.
@@ -17,6 +17,12 @@ type Options struct {
 	Version string
 	Assets  fs.FS // site root with index.html; see web.Assets
 	Logger  *slog.Logger
+	Modules []Module // bounded-context HTTP adapters
+}
+
+// Module registers a bounded context's API routes (under /api/).
+type Module interface {
+	Register(mux *http.ServeMux)
 }
 
 // New returns the root HTTP handler.
@@ -25,46 +31,17 @@ func New(opts Options) http.Handler {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/api/health", allow([]string{http.MethodGet, http.MethodHead}, func(w http.ResponseWriter, r *http.Request) {
-		WriteJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": opts.Version})
+	mux.Handle("/api/health", httpx.Allow([]string{http.MethodGet, http.MethodHead}, func(w http.ResponseWriter, r *http.Request) {
+		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": opts.Version})
 	}))
+	for _, m := range opts.Modules {
+		m.Register(mux)
+	}
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
-		WriteError(w, http.StatusNotFound, "not_found", "unknown API endpoint")
+		httpx.WriteError(w, http.StatusNotFound, "not_found", "unknown API endpoint")
 	})
 	mux.Handle("/", spa(opts.Assets))
 	return securityHeaders(mux)
-}
-
-// allow wraps an API handler so other methods get a JSON 405 with an Allow header instead of falling
-// through to the catch-all 404.
-func allow(methods []string, h http.HandlerFunc) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !slices.Contains(methods, r.Method) {
-			w.Header().Set("Allow", strings.Join(methods, ", "))
-			WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
-			return
-		}
-		h(w, r)
-	})
-}
-
-// WriteJSON writes v as a JSON response with the given status.
-func WriteJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v) // the client is gone if this fails; nothing useful to do
-}
-
-// ErrorBody is the JSON shape of every API error.
-type ErrorBody struct {
-	Error   string `json:"error"`
-	Message string `json:"message"`
-}
-
-// WriteError writes a JSON error with a stable machine code and a human message.
-func WriteError(w http.ResponseWriter, status int, code, msg string) {
-	WriteJSON(w, status, ErrorBody{Error: code, Message: msg})
 }
 
 // spa serves static files from assets and falls back to index.html for client-side routes.

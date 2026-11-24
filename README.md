@@ -46,6 +46,15 @@ On first start `serve` creates `./data` (`--data-dir` to change it) with the SQL
 if the database exists but the key is missing or different, the Control Plane refuses to start and never generates
 a replacement. Only one process can use a data directory at a time.
 
+### First-run setup
+
+A new installation starts in setup mode. Creating the first Owner requires a one-time **setup token**, which is
+never shown in logs or over HTTP: it is written to `data/secrets/setup-token` (mode 0600; the log only prints the
+path). Read it on the host (`cat data/secrets/setup-token`, or `docker compose exec … cat /data/secrets/setup-token`),
+then enter it in the Dashboard wizard together with the Owner login, password (12+ characters) and platform name.
+The token expires after an hour and is renewed automatically; after setup it is deleted and setup can never be
+run again, including after a restart.
+
 ## Development
 
 ```bash

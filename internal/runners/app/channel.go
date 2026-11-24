@@ -28,8 +28,9 @@ type ChannelRepo interface {
 	SaveEventCursor(ctx context.Context, runnerID, epoch string, last int64) error
 	EventSeen(ctx context.Context, runnerID, step string, fence, attemptSeq int64) (bool, error)
 	RecordEvent(ctx context.Context, e domain.AttemptEvent) error
-	// AddOutput counts n output bytes for the attempt if they fit under max; false when they do not.
-	AddOutput(ctx context.Context, step string, fence, n, max int64) (bool, error)
+	// AddOutput counts n output bytes for the attempt at now if they fit both limits; the verdict says which
+	// limit they would exceed otherwise.
+	AddOutput(ctx context.Context, step string, fence, n int64, limits domain.OutputLimits, now time.Time) (domain.OutputVerdict, error)
 }
 
 // Executions is the workflow as the channel needs it. runnerID comes from the authenticated session. Errors:
@@ -72,10 +73,14 @@ type Channel struct {
 	Window       int
 	AckTimeout   time.Duration
 	PollInterval time.Duration
+	// MaxStoredOutput bounds all stored output (default domain.DefaultRetention().MaxOutputBytes); output beyond
+	// it is acknowledged and recorded without its body until the retention frees space (KIN-52).
+	MaxStoredOutput int64
 
-	once  sync.Once
-	mu    sync.Mutex
-	wakes map[string]chan struct{} // runnerID → the live session's sender
+	once     sync.Once
+	fullWarn time.Time // last "output storage full" warning (at most one per minute)
+	mu       sync.Mutex
+	wakes    map[string]chan struct{} // runnerID → the live session's sender
 }
 
 // commandBatch: commands loaded per read; with ≤64 KiB per command it bounds a sender's memory to ~256 KiB.
@@ -95,6 +100,9 @@ func (c *Channel) init() {
 		}
 		if c.PollInterval <= 0 {
 			c.PollInterval = time.Second
+		}
+		if c.MaxStoredOutput <= 0 {
+			c.MaxStoredOutput = domain.DefaultRetention().MaxOutputBytes
 		}
 	})
 }
@@ -341,12 +349,16 @@ func (c *Channel) applyEvent(ctx context.Context, runnerID string, e protocol.Ev
 		Body: e.Body, Outcome: domain.OutcomeApplied, RunnerAt: time.UnixMilli(e.At).UTC(), ReceivedAt: c.Now().UTC()}
 	err = c.toWorkflow(ctx, runnerID, e)
 	if err == nil && (e.Kind == protocol.EventOutput || e.Kind == protocol.EventOutputDropped) {
-		fits, aerr := c.Repo.AddOutput(ctx, e.Step, e.Fence, int64(len(e.Body)), domain.MaxAttemptOutput)
+		limits := domain.OutputLimits{Attempt: domain.MaxAttemptOutput, Total: c.MaxStoredOutput}
+		v, aerr := c.Repo.AddOutput(ctx, e.Step, e.Fence, int64(len(e.Body)), limits, rec.ReceivedAt)
 		if aerr != nil {
 			return aerr
 		}
-		if !fits {
-			rec.Body, rec.Reason = nil, "output_limit"
+		if v != domain.OutputStored {
+			rec.Body, rec.Reason = nil, v.Reason()
+		}
+		if v == domain.OutputOverTotal {
+			c.warnFull(runnerID, e.Step, rec.ReceivedAt)
 		}
 	}
 	switch {
@@ -368,6 +380,20 @@ func (c *Channel) applyEvent(ctx context.Context, runnerID string, e protocol.Ev
 		rec.Body = nil // a rejected event keeps no payload: a runner cannot store data under attempts it does not hold
 	}
 	return c.Repo.RecordEvent(ctx, rec)
+}
+
+// warnFull logs that output is being dropped because the output storage is full, at most once a minute.
+func (c *Channel) warnFull(runnerID, step string, now time.Time) {
+	c.mu.Lock()
+	quiet := !c.fullWarn.IsZero() && now.Sub(c.fullWarn) < time.Minute
+	if !quiet {
+		c.fullWarn = now
+	}
+	c.mu.Unlock()
+	if !quiet {
+		c.Logger.Warn("runner output storage full: output of running attempts is dropped until retention frees space",
+			"runner", runnerID, "step", step, "limit_bytes", c.MaxStoredOutput)
+	}
 }
 
 func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Event) error {

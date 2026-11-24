@@ -246,7 +246,14 @@ func (h *Handler) write(ctx context.Context, c *websocket.Conn, typ string, payl
 	if err != nil {
 		return fmt.Errorf("encoding %s: %w", typ, err)
 	}
-	ctx, cancel := context.WithTimeout(ctx, h.cfg.WriteTimeout)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Once a write is under way the caller's cancellation must not reach it: the library tears the TCP connection
+	// down when a write's context ends — even just after the frame was flushed — so closing a session (whose
+	// context is the caller's) would lose the close frame it is about to send (KIN-54). The write is bounded by
+	// WriteTimeout instead, and a closed session's connection by closeGrace.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), h.cfg.WriteTimeout)
 	defer cancel()
 	return c.Write(ctx, websocket.MessageText, b)
 }

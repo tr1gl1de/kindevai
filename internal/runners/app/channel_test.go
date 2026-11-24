@@ -1,10 +1,12 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"slices"
 	"strings"
@@ -113,15 +115,19 @@ func (r *memChannelRepo) RecordEvent(_ context.Context, e domain.AttemptEvent) e
 	return nil
 }
 
-func (r *memChannelRepo) AddOutput(_ context.Context, step string, fence, n, max int64) (bool, error) {
+func (r *memChannelRepo) AddOutput(_ context.Context, step string, fence, n int64, l domain.OutputLimits, _ time.Time) (domain.OutputVerdict, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	k := fmt.Sprintf("%s/%d", step, fence)
-	if r.output[k]+n > max {
-		return false, nil
+	var total int64
+	for _, b := range r.output {
+		total += b
 	}
-	r.output[k] += n
-	return true, nil
+	v := l.Verdict(r.output[k], total, n)
+	if v == domain.OutputStored {
+		r.output[k] += n
+	}
+	return v, nil
 }
 
 type passTx struct{}
@@ -585,6 +591,30 @@ func TestAttemptOutputIsCapped(t *testing.T) {
 	rec := e.repo.events[evKey("s1", 1, 1)]
 	if rec.Body != nil || rec.Reason != "output_limit" || !slices.Equal(acks(f), []int64{1}) {
 		t.Fatalf("record %+v", rec)
+	}
+}
+
+// Output beyond the Control Plane-wide limit is acknowledged, recorded without its body and logged.
+func TestOutputOverStorageLimitIsDropped(t *testing.T) {
+	t.Parallel()
+	e := newChannelEnv()
+	var logs bytes.Buffer
+	e.ch.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	e.ch.MaxStoredOutput = domain.MaxAttemptOutput
+	e.wf.fence["s1"], e.wf.state["s1"] = 1, "running"
+	e.repo.output["old/1"] = domain.MaxAttemptOutput - 5
+	sess, f := newSession("r1")
+	body, _ := json.Marshal(protocol.Output{Stream: "stdout", Data: "more than five bytes"})
+	for i := int64(1); i <= 2; i++ {
+		ev := protocol.Event{Epoch: "sp", Seq: i, Step: "s1", Fence: 1, AttemptSeq: i, Kind: protocol.EventOutput, At: 1, Body: body}
+		_ = handle(t, e.ch, sess, protocol.TypeEvent, ev)
+	}
+	rec := e.repo.events[evKey("s1", 1, 1)]
+	if rec.Body != nil || rec.Reason != "output_storage_limit" || rec.Outcome != domain.OutcomeApplied || !slices.Equal(acks(f), []int64{1, 2}) {
+		t.Fatalf("record %+v, acks %v", rec, acks(f))
+	}
+	if n := strings.Count(logs.String(), "output storage full"); n != 1 {
+		t.Fatalf("logged %d warnings (throttled to one):\n%s", n, logs.String())
 	}
 }
 

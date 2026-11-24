@@ -114,14 +114,24 @@ func TestEventCursorAndRecords(t *testing.T) {
 	if r.RecordEvent(ctx, ev) == nil {
 		t.Fatal("an attempt event was recorded twice")
 	}
-	if ok, _ := r.AddOutput(ctx, "s", 2, 60, 100); !ok {
-		t.Fatal("first output refused")
+	l := domain.OutputLimits{Attempt: 100, Total: 150}
+	for i, c := range []struct {
+		step string
+		n    int64
+		want domain.OutputVerdict
+	}{
+		{"s", 60, domain.OutputStored},
+		{"s", 50, domain.OutputOverAttempt},
+		{"s", 40, domain.OutputStored}, // up to the attempt's cap
+		{"other", 60, domain.OutputOverTotal},
+		{"other", 50, domain.OutputStored}, // up to the total limit
+	} {
+		if v, err := r.AddOutput(ctx, c.step, 2, c.n, l, t0); v != c.want || err != nil {
+			t.Fatalf("output %d: %v %v, want %v", i, v, err, c.want)
+		}
 	}
-	if ok, _ := r.AddOutput(ctx, "s", 2, 50, 100); ok {
-		t.Fatal("output over the cap accepted")
-	}
-	if ok, _ := r.AddOutput(ctx, "s", 2, 40, 100); !ok {
-		t.Fatal("output up to the cap refused")
+	if used, err := r.OutputUsage(ctx); used != 150 || err != nil {
+		t.Fatalf("usage %d %v", used, err)
 	}
 }
 

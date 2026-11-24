@@ -10,6 +10,7 @@ import { ProjectsPage } from "../features/projects/ProjectsPage";
 import { AccountPage } from "../features/identity/AccountPage";
 import { ForcedPasswordChange } from "../features/identity/ForcedPasswordChange";
 import { UsersPage } from "../features/identity/UsersPage";
+import { AuditPage } from "../features/audit/AuditPage";
 import { PageNotFound } from "./PageNotFound";
 import { ErrorState, Loading } from "../ui/feedback";
 import { NotifyProvider } from "../ui/notify";
@@ -60,6 +61,7 @@ function Gate() {
           <Route path="/projects/:id" element={<ProjectPage me={me.data} />} />
           <Route path="/account/password" element={<AccountPage />} />
           {me.data.role === "owner" && <Route path="/users" element={<UsersPage />} />}
+          {me.data.role === "owner" && <Route path="/audit" element={<AuditPage />} />}
           <Route path="*" element={<PageNotFound />} />
         </Routes>
     </AppShell>

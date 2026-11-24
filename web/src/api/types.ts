@@ -127,3 +127,40 @@ export interface AcceptInvitationRequest {
   login: string;
   password: string;
 }
+
+export interface AuditActor {
+  type: "user" | "system" | "runner";
+  id: string;
+  /** Login (or name) at the time of the event. */
+  label: string;
+}
+
+/** One append-only audit record; values that look like secrets arrive as "[redacted]". */
+export interface AuditEvent {
+  id: number;
+  at: string;
+  actor: AuditActor;
+  /** "<namespace>.<action>", e.g. "invitation.accepted". */
+  kind: string;
+  projectId?: string;
+  /** "<type>:<id>" of what was acted on. */
+  subject?: string;
+  details?: Record<string, string>;
+}
+
+/** GET /api/audit: newest first; next is the `before` cursor of the following page, null on the last one. */
+export interface AuditPage {
+  events: AuditEvent[];
+  next: string | null;
+}
+
+/** Query of GET /api/audit; empty fields do not filter. kind is a full kind or a namespace ("invitation"). */
+export interface AuditFilter {
+  actor?: string;
+  project?: string;
+  kind?: string;
+  /** RFC 3339, inclusive. */
+  from?: string;
+  /** RFC 3339, exclusive. */
+  to?: string;
+}

@@ -494,3 +494,39 @@ select[aria-invalid="true"] {
     margin-left: auto;
   }
 }
+
+/* Audit log */
+@media (min-width: 601px) {
+  .filters {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    align-items: start;
+  }
+  .filters .form-actions,
+  .filters .form-alert {
+    grid-column: 1 / -1;
+  }
+}
+.audit-details {
+  margin: 4px 0 0;
+  font-size: 0.875rem;
+}
+.audit-details div {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.audit-details dt {
+  font-weight: 600;
+}
+.audit-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.list-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space);
+  margin-top: var(--space);
+}

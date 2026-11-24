@@ -84,6 +84,7 @@ type Service struct {
 	Runners     RunnerPool // required for Schedule
 	Dispatcher  Dispatcher // runner commands; required for Schedule, optional otherwise
 	Access      Access     // project visibility for the task API (KIN-23)
+	Outbox      Outbox     // alert hooks (KIN-60); nil: none
 	Tx          TxRunner
 	Now         func() time.Time
 	NewID       func() string
@@ -143,7 +144,7 @@ func (s *Service) RetitleTask(ctx context.Context, taskID, title string) (bool, 
 		if changed, err = t.Retitle(title, s.now()); err != nil || !changed {
 			return err
 		}
-		return s.Repo.SaveTask(ctx, &t)
+		return s.saveTask(ctx, &t)
 	})
 	return changed, err
 }
@@ -164,7 +165,7 @@ func (s *Service) updateTask(ctx context.Context, id string, fn func(ctx context
 		if err := fn(ctx, &t, s.now()); err != nil {
 			return err
 		}
-		return s.Repo.SaveTask(ctx, &t)
+		return s.saveTask(ctx, &t)
 	})
 	if err != nil {
 		return domain.Task{}, err
@@ -329,7 +330,7 @@ func (s *Service) syncTask(ctx context.Context, e *domain.Execution, now time.Ti
 	if err := t.Transition(to, r, now); err != nil {
 		return err
 	}
-	if err := s.Repo.SaveTask(ctx, &t); err != nil {
+	if err := s.saveTask(ctx, &t); err != nil {
 		return err
 	}
 	if to == domain.TaskFailed && s.Events != nil {

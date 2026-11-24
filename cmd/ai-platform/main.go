@@ -149,6 +149,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	attachRunnerChannel(gateway, channel)
 	wireExecution(apv.Workflow, channel, gateway, tel, hub, logger)    // KIN-23 scheduler, leases, reconciliation
 	netSvc, netHTTP := newNetwork(inst, audit, integ, channel, logger) // KIN-30 network profiles
+	netSvc.Outbox = msg.Outbox                                         // KIN-60 egress check alerts
 	attachNetwork(gateway, netSvc, logger)
 	modules = append(modules, netHTTP)
 	modules = append(modules, gateway)
@@ -156,6 +157,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	defer intake.start(ctx)() // the YouTrack poller stops first
 	defer startTelemetry(ctx, tel, inst.Dir.Path())()
 	defer startRetention(ctx, inst, apv.Workflow, retention, logger)() // KIN-52
+	defer startAlertMonitors(ctx, inst, msg, logger)()                 // KIN-60
 	defer startScheduler(ctx, apv.Workflow, DefaultSchedulerInterval, logger)()
 
 	assets, built := web.Assets()

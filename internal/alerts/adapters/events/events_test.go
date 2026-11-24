@@ -1,0 +1,166 @@
+package events_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/tr1gl1de/kindevai/internal/alerts/adapters/events"
+	alertsdb "github.com/tr1gl1de/kindevai/internal/alerts/adapters/sqlite"
+	"github.com/tr1gl1de/kindevai/internal/alerts/app"
+	"github.com/tr1gl1de/kindevai/internal/alerts/domain"
+	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
+	"github.com/tr1gl1de/kindevai/internal/platform/auth"
+	"github.com/tr1gl1de/kindevai/internal/platform/db"
+	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
+)
+
+type nobody struct{}
+
+func (nobody) Visible(context.Context, auth.Principal) ([]app.ProjectRef, error) { return nil, nil }
+func (nobody) Name(context.Context, string) (string, error)                      { return "", nil }
+func (nobody) Members(context.Context, string) ([]string, error)                 { return nil, nil }
+func (nobody) Owners(context.Context) ([]string, error)                          { return nil, nil }
+func (nobody) TelegramChat(context.Context, string) (int64, bool, error)         { return 0, false, nil }
+func (nobody) Pending(context.Context, string) (bool, error)                     { return false, nil }
+func (nobody) Record(context.Context, auditapp.Entry) error                      { return nil }
+func (nobody) Enqueue(context.Context, messaging.Message) error                  { return nil }
+
+type env struct {
+	h    events.Handlers
+	repo *alertsdb.Repository
+	n    int
+}
+
+func newEnv(t *testing.T) *env {
+	t.Helper()
+	d, err := db.Open(t.Context(), filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	if _, err := db.Migrate(t.Context(), d, db.Migrations()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(t.Context(), "INSERT INTO projects(id, slug, name, created_at) VALUES ('p1', 'alpha', 'Alpha', 'x')"); err != nil {
+		t.Fatal(err)
+	}
+	e := &env{repo: alertsdb.New(d)}
+	ids := 0
+	e.h = events.Handlers{Svc: &app.Service{Repo: e.repo, Projects: nobody{}, People: nobody{}, Approvals: nobody{},
+		Tx: db.Transactor{DB: d}, Audit: nobody{}, Outbox: nobody{}, Now: time.Now,
+		NewID: func() string { ids++; return "a" + string(rune('0'+ids)) }}}
+	return e
+}
+
+// deliver hands a payload to a handler as a fresh outbox delivery.
+func (e *env) deliver(t *testing.T, fn func(context.Context, messaging.Delivery) error, topic string, p any) error {
+	t.Helper()
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.n++
+	return fn(t.Context(), messaging.Delivery{Topic: topic, Key: topic + "/" + string(rune('a'+e.n)), Payload: b})
+}
+
+func (e *env) active(t *testing.T, key string) (domain.Alert, bool) {
+	t.Helper()
+	a, err := e.repo.Active(t.Context(), key)
+	if errors.Is(err, domain.ErrNotFound) {
+		return a, false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a, true
+}
+
+// KIN-60 AC: each source raises its alert (dedup per subject, right scope and kind) and its paired event resolves it.
+func TestSourcesRaiseAndResolve(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name             string
+		raise, resolve   func(events.Handlers) func(context.Context, messaging.Delivery) error
+		raiseP, resolveP any
+		key, project     string
+		kind             domain.Kind
+	}{
+		{"egress",
+			func(h events.Handlers) func(context.Context, messaging.Delivery) error { return h.EgressCheckFailed },
+			func(h events.Handlers) func(context.Context, messaging.Delivery) error { return h.EgressCheckPassed },
+			map[string]any{"runnerId": "r1", "testId": "t1", "code": "egress_ip_mismatch"}, map[string]any{"runnerId": "r1"},
+			"runner/r1/egress", "", domain.KindEgressCheckFailed},
+		{"ci on branch",
+			func(h events.Handlers) func(context.Context, messaging.Delivery) error { return h.CIFailed },
+			func(h events.Handlers) func(context.Context, messaging.Delivery) error { return h.CIPassed },
+			map[string]any{"projectId": "p1", "repository": "acme/shop", "branch": "dev", "conclusion": "failure"},
+			map[string]any{"projectId": "p1", "repository": "acme/shop", "branch": "dev"},
+			"ci/acme/shop/branch/dev", "p1", domain.KindCIFailed},
+		{"ci on pr",
+			func(h events.Handlers) func(context.Context, messaging.Delivery) error { return h.CIFailed },
+			func(h events.Handlers) func(context.Context, messaging.Delivery) error { return h.CIPassed },
+			map[string]any{"projectId": "p1", "repository": "acme/shop", "branch": "fix", "pullRequest": 7, "conclusion": "timed_out"},
+			map[string]any{"projectId": "p1", "repository": "acme/shop", "branch": "fix", "pullRequest": 7},
+			"ci/acme/shop/pr/7", "p1", domain.KindCIFailed},
+		{"circuit",
+			func(h events.Handlers) func(context.Context, messaging.Delivery) error { return h.CircuitOpen },
+			func(h events.Handlers) func(context.Context, messaging.Delivery) error { return h.CircuitClosed },
+			map[string]any{"adapter": "youtrack", "failures": 5}, map[string]any{"adapter": "youtrack"},
+			"integration/youtrack/circuit", "", domain.KindIntegrationCircuitOpen},
+		{"blocked task",
+			func(h events.Handlers) func(context.Context, messaging.Delivery) error { return h.TaskBlocked },
+			func(h events.Handlers) func(context.Context, messaging.Delivery) error { return h.TaskUnblocked },
+			map[string]any{"projectId": "p1", "taskId": "t9", "reason": "runner"}, map[string]any{"taskId": "t9"},
+			"task/t9/blocked", "p1", domain.KindTaskBlocked},
+		{"storage recovered",
+			func(h events.Handlers) func(context.Context, messaging.Delivery) error { return h.StorageLevel },
+			func(h events.Handlers) func(context.Context, messaging.Delivery) error { return h.StorageRecovered },
+			map[string]any{"machineId": "m1", "role": "data", "level": "high", "usedPercent": 88},
+			map[string]any{"machineId": "m1", "role": "data"},
+			"storage/m1/data", "", domain.KindStorageLevel},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			for range 2 { // a repeat is grouped into the same alert
+				if err := e.deliver(t, c.raise(e.h), "raise", c.raiseP); err != nil {
+					t.Fatal(err)
+				}
+			}
+			a, ok := e.active(t, c.key)
+			if !ok || a.Kind != c.kind || a.ProjectID != c.project || a.Occurrences != 2 {
+				t.Fatalf("alert %+v, active %v", a, ok)
+			}
+			if err := e.deliver(t, c.resolve(e.h), "resolve", c.resolveP); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := e.active(t, c.key); ok {
+				t.Fatal("still active after the source recovered")
+			}
+			got, err := e.repo.Get(t.Context(), a.ID)
+			if err != nil || got.State != domain.StateResolved || got.ClosedBy != "" {
+				t.Fatalf("closed alert %+v, %v", got, err)
+			}
+		})
+	}
+}
+
+// Malformed events can never succeed: they are permanent failures, not retried.
+func TestSourcesRejectIncompleteEvents(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	for name, fn := range map[string]func(context.Context, messaging.Delivery) error{
+		"egress": e.h.EgressCheckFailed, "ci": e.h.CIFailed, "circuit": e.h.CircuitOpen, "blocked": e.h.TaskBlocked,
+		"egressOK": e.h.EgressCheckPassed, "ciOK": e.h.CIPassed, "circuitOK": e.h.CircuitClosed,
+		"unblocked": e.h.TaskUnblocked, "storageOK": e.h.StorageRecovered,
+	} {
+		if err := e.deliver(t, fn, name, map[string]any{}); !messaging.IsPermanent(err) {
+			t.Errorf("%s: err = %v, want permanent", name, err)
+		}
+	}
+}

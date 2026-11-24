@@ -53,3 +53,33 @@ func TestRenderApproval(t *testing.T) {
 		t.Fatalf("ru = %q", ru)
 	}
 }
+
+// KIN-60: every new source has its own text in both languages, built only from the listed fields.
+func TestRenderAlertNewSources(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		kind    domain.Kind
+		subject string
+		details map[string]string
+		en, ru  string
+	}{
+		{domain.KindEgressCheckFailed, "r1", map[string]string{"code": "egress_ip_mismatch"}, "egress check failed", "проверка egress"},
+		{domain.KindCIFailed, "acme/shop#7", map[string]string{"conclusion": "failure"}, "CI failed", "CI упал"},
+		{domain.KindIntegrationCircuitOpen, "youtrack", nil, "suspended", "приостановлены"},
+		{domain.KindTaskBlocked, "t1", map[string]string{"reason": "runner"}, "is blocked", "заблокирована"},
+	}
+	for _, c := range cases {
+		a, err := domain.NewAlert("a", domain.Occurrence{Kind: c.kind, Severity: domain.SeverityWarning, DedupKey: "k",
+			Subject: c.subject, Details: c.details}, t0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		en, ru := domain.RenderAlert(domain.LangEN, a), domain.RenderAlert(domain.LangRU, a)
+		if !strings.Contains(en, c.en) || !strings.Contains(en, c.subject) {
+			t.Errorf("%s en = %q", c.kind, en)
+		}
+		if !strings.Contains(ru, c.ru) || !strings.Contains(ru, c.subject) {
+			t.Errorf("%s ru = %q", c.kind, ru)
+		}
+	}
+}

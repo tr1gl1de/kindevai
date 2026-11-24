@@ -285,10 +285,10 @@ type GitHubEvent struct {
 	Action         string `json:"action,omitempty"`
 	Repository     string `json:"repository,omitempty"` // owner/name
 	InstallationID int64  `json:"installationId,omitempty"`
-	Branch         string `json:"branch,omitempty"`  // push: the pushed branch; pull_request/check_suite: the head branch
-	Base           string `json:"base,omitempty"`    // pull_request: the target branch
-	HeadSHA        string `json:"headSha,omitempty"` // push: "after"; pull_request/checks: the head commit
-	PullRequest    int    `json:"pullRequest,omitempty"`
+	Branch         string `json:"branch,omitempty"`      // push: the pushed branch; pull_request/check_suite: the head branch
+	Base           string `json:"base,omitempty"`        // pull_request: the target branch
+	HeadSHA        string `json:"headSha,omitempty"`     // push: "after"; pull_request/checks: the head commit
+	PullRequest    int    `json:"pullRequest,omitempty"` // pull_request; check_suite: the first PR of the suite
 	Merged         bool   `json:"merged,omitempty"`
 	Status         string `json:"status,omitempty"`     // checks: queued | in_progress | completed
 	Conclusion     string `json:"conclusion,omitempty"` // checks: success | failure | ...
@@ -317,10 +317,13 @@ type ghPayload struct {
 		Base   ghRef `json:"base"`
 	} `json:"pull_request"`
 	CheckSuite *struct {
-		HeadBranch string `json:"head_branch"`
-		HeadSHA    string `json:"head_sha"`
-		Status     string `json:"status"`
-		Conclusion string `json:"conclusion"`
+		HeadBranch   string `json:"head_branch"`
+		HeadSHA      string `json:"head_sha"`
+		Status       string `json:"status"`
+		Conclusion   string `json:"conclusion"`
+		PullRequests []struct {
+			Number int `json:"number"`
+		} `json:"pull_requests"`
 	} `json:"check_suite"`
 	CheckRun *struct {
 		Name       string `json:"name"`
@@ -359,6 +362,9 @@ func ParseGitHubEvent(event string, body []byte) (GitHubEvent, error) {
 		if p.CheckSuite != nil {
 			e.Branch, e.HeadSHA = short(p.CheckSuite.HeadBranch), short(p.CheckSuite.HeadSHA)
 			e.Status, e.Conclusion = short(p.CheckSuite.Status), short(p.CheckSuite.Conclusion)
+			if len(p.CheckSuite.PullRequests) > 0 && p.CheckSuite.PullRequests[0].Number > 0 {
+				e.PullRequest = p.CheckSuite.PullRequests[0].Number
+			}
 		}
 	case EventCheckRun:
 		if p.CheckRun != nil {
@@ -373,3 +379,34 @@ func ParseGitHubEvent(event string, body []byte) (GitHubEvent, error) {
 }
 
 func short(s string) string { return truncate(strings.TrimSpace(s), 200) }
+
+// CIOutcome is what a webhook event says about CI for the Alert Center (KIN-60).
+type CIOutcome int
+
+const (
+	CINone   CIOutcome = iota // not a CI result the Alert Center follows
+	CIFailed                  // a completed check suite failed or timed out
+	CIPassed                  // a completed check suite succeeded
+)
+
+// CIOutcomeOf classifies a completed check suite on the repository's integration branch or on a pull request.
+// Other conclusions (cancelled, neutral, skipped, action_required, stale) neither raise nor resolve an alert.
+func CIOutcomeOf(r Repository, e GitHubEvent) CIOutcome {
+	if e.Event != EventCheckSuite || e.Action != "completed" {
+		return CINone
+	}
+	branch := r.IntegrationBranch
+	if branch == "" {
+		branch = DefaultIntegrationBranch
+	}
+	if e.PullRequest <= 0 && e.Branch != branch {
+		return CINone
+	}
+	switch e.Conclusion {
+	case "failure", "timed_out":
+		return CIFailed
+	case "success":
+		return CIPassed
+	}
+	return CINone
+}

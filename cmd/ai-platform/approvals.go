@@ -52,6 +52,7 @@ func newApprovals(inst *bootstrap.Installation, msg *messagingModule, audit *aud
 		Access:   taskAccess{projectsSvc},
 		Policy:   hooks,
 		Events:   hooks,
+		Outbox:   msg.Outbox, // KIN-60 BLOCKED alerts
 		Tx:       tx,
 		Now:      time.Now,
 		NewID:    rand.Text,

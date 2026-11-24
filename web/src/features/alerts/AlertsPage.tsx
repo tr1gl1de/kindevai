@@ -51,6 +51,14 @@ export function useAlertText() {
         return t("alerts.kind_runner_unreachable", { subject: a.subject });
       case "storage_level":
         return t("alerts.kind_storage_level", { subject: a.subject, usedPercent: a.details.usedPercent ?? "?" });
+      case "egress_check_failed":
+        return t("alerts.kind_egress_check_failed", { subject: a.subject, code: a.details.code ?? "?" });
+      case "ci_failed":
+        return t("alerts.kind_ci_failed", { subject: a.subject, conclusion: a.details.conclusion ?? "?" });
+      case "integration_circuit_open":
+        return t("alerts.kind_integration_circuit_open", { subject: a.subject });
+      case "task_blocked":
+        return t("alerts.kind_task_blocked", { subject: a.subject, reason: a.details.reason ?? "?" });
       default:
         return t("alerts.kind_other", { kind: a.kind, subject: a.subject });
     }

@@ -61,6 +61,11 @@ type Kind string
 const (
 	KindRunnerUnreachable Kind = "runner_unreachable"
 	KindStorageLevel      Kind = "storage_level"
+	// KIN-60 sources.
+	KindEgressCheckFailed      Kind = "egress_check_failed"      // a runner's Test Network of its effective profile failed
+	KindCIFailed               Kind = "ci_failed"                // CI failed on a project's integration branch or a PR
+	KindIntegrationCircuitOpen Kind = "integration_circuit_open" // an external adapter's circuit breaker opened
+	KindTaskBlocked            Kind = "task_blocked"             // a task is BLOCKED
 )
 
 // Limits of stored alert fields.

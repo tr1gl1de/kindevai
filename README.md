@@ -152,6 +152,45 @@ the initiator). API: `GET|PUT /api/integrations/youtrack/intake`, `PUT|DELETE /a
 `PUT /api/projects/{id}/integrations/youtrack/trigger` (Owner); `GET /api/projects/{id}/youtrack`,
 `POST /api/projects/{id}/youtrack/runs` (members).
 
+#### GitHub App
+
+The platform talks to GitHub only as a **GitHub App** (fine-grained PATs are post-MVP). On the **Integrations** page
+the Owner enters the App ID, the App's private key (`.pem`) and the webhook secret (16+ characters); both credentials
+go into the encrypted vault and are write-only. Minimal App permissions — grant only these:
+
+| Repository permission | Access |
+|---|---|
+| Contents | read and write |
+| Pull requests | read and write |
+| Checks | read |
+| Metadata | read |
+
+Do **not** grant Administration or Workflows: agents must not change repository settings or `.github/workflows`.
+Subscribe the App to the events Push, Pull request, Check suite and Check run, set the webhook URL to
+`https://<your host>/api/webhooks/github`, and install it only on the repositories the platform works in.
+
+- **Installation tokens** are minted on demand from the App's JWT, restricted to the one repository being worked on
+  and to the minimal permissions above,
+  cached in memory only (at most 50 minutes and never within 5 minutes of expiry) and never stored or logged.
+  A project can only obtain a token for a repository registered to that project.
+- **Repository state:** after the App is configured, a repository is registered, or **Refresh** is pressed, the
+  platform reads (in the background, via the outbox) whether the App is installed, the default branch and whether
+  `main`/`master` are protected by a ruleset or branch protection. Unprotected `main`/`master` show a warning — add a
+  ruleset that only you can bypass.
+- **main/master guard:** independently of GitHub settings, every GitHub request passes a guard in code: only the
+  platform's known writes are allowed (default deny — no GraphQL, settings or branch protection changes), and a write
+  is refused when it targets `main` or `master` (ref update, pull request base, merge, file commit, including commits
+  without an explicit branch). Only the Owner, by hand, promotes to `main`/`master`.
+- **Webhooks** (`POST /api/webhooks/github`, no session) are verified with `X-Hub-Signature-256` (HMAC-SHA256,
+  constant-time compare) before anything else — unsigned or forged deliveries get 401 —, scoped to registered
+  repositories of the right installation (others are acknowledged and dropped), reduced to a small event and stored in
+  the durable inbox, deduplicated by `X-GitHub-Delivery`. Bodies are limited to 5 MB, at most 4 are read at once.
+- The GitHub API URL is `--github-api-url` / `KINDEV_GITHUB_API_URL` (default `https://api.github.com`; GitHub
+  Enterprise Server: `https://<host>/api/v3`).
+
+Owner API: `PUT|DELETE /api/integrations/github`, `POST /api/integrations/github/check`,
+`POST /api/projects/{id}/repositories/{repoId}/sync`.
+
 ### Audit log
 
 Security-relevant actions are recorded in an append-only audit log in the same transaction as the action itself:

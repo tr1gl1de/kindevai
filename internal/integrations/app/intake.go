@@ -129,11 +129,6 @@ func (e *StatusError) Permanent() bool {
 	return e.Status >= 400 && e.Status < 500 && e.Status != 408 && e.Status != 429
 }
 
-// Inbox stores inbound events (messaging.Inbox).
-type Inbox interface {
-	Receive(ctx context.Context, e messaging.InboundEvent) (bool, error)
-}
-
 // Health is the adapters' health registry (messaging.Health).
 type Health interface {
 	Allow(adapter string) bool
@@ -819,7 +814,7 @@ func (in *Intake) SetWebhookSecret(ctx context.Context, actor auth.Principal, se
 	var sec domain.Secret
 	if secret != "" {
 		var err error
-		if sec, err = domain.NewWebhookSecret(secret); err != nil {
+		if sec, err = domain.NewYouTrackWebhookSecret(secret); err != nil {
 			return err
 		}
 	}

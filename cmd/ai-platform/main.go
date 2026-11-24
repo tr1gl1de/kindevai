@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tr1gl1de/kindevai/internal/integrations/adapters/github"
+	integrations "github.com/tr1gl1de/kindevai/internal/integrations/domain"
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
 	"github.com/tr1gl1de/kindevai/internal/platform/httpx"
 	"github.com/tr1gl1de/kindevai/internal/server"
@@ -78,8 +80,14 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	keyFile := fset.String("key-file", "", "encryption key file (default <data-dir>/secrets/master.key)")
 	proxies := fset.String("trusted-proxies", os.Getenv("KINDEV_TRUSTED_PROXIES"),
 		"comma-separated CIDRs of reverse proxies whose X-Forwarded-For is trusted (e.g. the Caddy network)")
+	githubAPI := fset.String("github-api-url", envOr("KINDEV_GITHUB_API_URL", github.DefaultBaseURL),
+		"GitHub REST API base URL (GitHub Enterprise Server: https://<host>/api/v3)")
 	if err := fset.Parse(args); err != nil {
 		return err
+	}
+	ghURL, err := integrations.NewBaseURL(*githubAPI)
+	if err != nil {
+		return fmt.Errorf("--github-api-url: %w", err)
 	}
 	trusted, err := httpx.ParseTrustedProxies(*proxies)
 	if err != nil {
@@ -109,7 +117,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	}
 	msg := newMessaging(inst, logger)
 	modules := append(identity.Modules, newProjects(inst, identity, audit, logger)...)
-	integ := newIntegrations(inst, msg, audit, logger)
+	integ := newIntegrations(inst, msg, audit, ghURL, logger)
 	intake := newYouTrackIntake(inst, msg, integ, identity, logger)
 	modules = append(modules, msg.HTTP, audit.HTTP, integ.HTTP, intake.HTTP)
 	defer msg.start(ctx)()    // deferred after inst.Close, so the dispatchers stop before the database closes
@@ -213,4 +221,12 @@ func defaultDataDir() string {
 		return v
 	}
 	return "./data"
+}
+
+// envOr returns the environment variable, or def when it is unset or empty.
+func envOr(name, def string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return def
 }

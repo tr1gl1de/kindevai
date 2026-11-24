@@ -193,7 +193,7 @@ func (h *IntakeHandler) putWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Secret == "" { // removing goes through DELETE
-		h.fail(w, &domain.ValidationError{Field: "webhookSecret", Code: "webhook_secret_format"})
+		h.fail(w, &domain.ValidationError{Field: "webhookSecret", Code: "webhook_secret_range"})
 		return
 	}
 	if err := h.Intake.SetWebhookSecret(r.Context(), p, req.Secret); err != nil {

@@ -58,10 +58,10 @@ func TestIntakeValueValidation(t *testing.T) {
 	if DefaultIntakeSettings().PollInterval != 60*time.Second {
 		t.Error("default poll interval must be 60s")
 	}
-	if _, err := NewWebhookSecret("short"); code(err) != "webhook_secret_format" {
+	if _, err := NewYouTrackWebhookSecret("short"); code(err) != "webhook_secret_range" {
 		t.Errorf("short webhook secret = %v", err)
 	}
-	if s, err := NewWebhookSecret(strings.Repeat("k", 32)); err != nil || s.Reveal() != strings.Repeat("k", 32) {
+	if s, err := NewYouTrackWebhookSecret(strings.Repeat("k", 32)); err != nil || s.Reveal() != strings.Repeat("k", 32) {
 		t.Errorf("webhook secret = %v", err)
 	}
 }

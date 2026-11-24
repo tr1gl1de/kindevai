@@ -93,7 +93,12 @@ const validationKeys = new Set([
   "tag_format",
   "youtrack_login_format",
   "poll_interval_range",
+  "webhook_secret_range",
+  "app_id_format",
+  "private_key_format",
+  "webhook_secret_short",
   "webhook_secret_format",
+  "key_required_for_app",
 ]);
 
 /** Message for a server validation code, or undefined if unknown. */

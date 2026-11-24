@@ -100,6 +100,9 @@ type Service struct {
 	Now      func() time.Time
 	NewID    func() string
 	Logger   *slog.Logger
+	// RepositoryAdded runs inside the transaction that registers a repository (GitHubService.RepositoryAdded reads
+	// it from GitHub); nil does nothing.
+	RepositoryAdded func(ctx context.Context, r domain.Repository) error
 }
 
 // YouTrackView is the connection as the Owner sees it: the token only as metadata.
@@ -404,6 +407,9 @@ func (s *Service) projectIntegrations(ctx context.Context, p ProjectRef) (Projec
 	if err != nil {
 		return ProjectIntegrations{}, fmt.Errorf("loading repositories: %w", err)
 	}
+	for i := range rs {
+		rs[i].GitHub.Sync = rs[i].GitHub.Sync.At(s.Now())
+	}
 	return ProjectIntegrations{Project: p, YouTrackProject: sn, Repositories: rs}, nil
 }
 
@@ -472,6 +478,14 @@ func (s *Service) AddRepository(ctx context.Context, actor auth.Principal, proje
 	err = s.inTx(ctx, func(ctx context.Context) error {
 		if err := s.Store.CreateRepository(ctx, r); err != nil {
 			return err
+		}
+		if s.RepositoryAdded != nil {
+			if err := s.RepositoryAdded(ctx, r); err != nil {
+				return err
+			}
+			if r, err = s.Store.Repository(ctx, p.ID, r.ID); err != nil {
+				return fmt.Errorf("reloading repository: %w", err)
+			}
 		}
 		return s.record(ctx, auditapp.UserActor(actor), KindRepositoryAdded, p.ID, repoSubject(r.ID), repoDetails(r))
 	})

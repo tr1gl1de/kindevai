@@ -14,6 +14,7 @@ import { useNotify } from "../../ui/notify";
 import { useProjects } from "../projects/api";
 import { IntakeSettingsSection } from "./IntakeSettingsSection";
 import { useCheckYouTrack, useDisconnectYouTrack, useIntegrations, useSaveYouTrack } from "./api";
+import { GitHubSettings } from "./GitHubSettings";
 
 /** Message for a field-level validation code from the integrations API. */
 export function fieldError(t: TFunction, code: string | undefined): string {
@@ -38,6 +39,10 @@ export function IntegrationsPage() {
         )}
       </section>
       {integrations.data?.youtrack && <IntakeSettingsSection />}
+      <section aria-labelledby="github-title" className="section">
+        <h2 id="github-title">{t("github.title")}</h2>
+        {integrations.isSuccess && <GitHubSettings key={integrations.data.github?.updatedAt ?? "none"} app={integrations.data.github ?? null} />}
+      </section>
       <ProjectLinks />
     </>
   );

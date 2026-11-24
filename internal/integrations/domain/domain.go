@@ -226,36 +226,17 @@ func NewYouTrackConnection(baseURL string, now time.Time) YouTrackConnection {
 const CheckTimeout = 2 * time.Minute
 
 // CheckRunning reports a pending test younger than CheckTimeout.
-func (c YouTrackConnection) CheckRunning(now time.Time) bool {
-	return c.Check.Status == CheckPending && c.Check.RequestedAt != nil && now.Sub(*c.Check.RequestedAt) <= CheckTimeout
-}
+func (c YouTrackConnection) CheckRunning(now time.Time) bool { return c.Check.Running(now) }
 
 // CheckAt is the test as it should be shown at now: a pending test past CheckTimeout reads as failed with "timeout".
-func (c YouTrackConnection) CheckAt(now time.Time) Check {
-	ch := c.Check
-	if ch.Status == CheckPending && !c.CheckRunning(now) {
-		ch.Status, ch.Code = CheckFailed, "timeout"
-	}
-	return ch
-}
+func (c YouTrackConnection) CheckAt(now time.Time) Check { return c.Check.At(now) }
 
 // StartCheck marks a new connection test as pending.
-func (c *YouTrackConnection) StartCheck(id string, now time.Time) {
-	c.Check = Check{Status: CheckPending, ID: id, RequestedAt: &now}
-}
+func (c *YouTrackConnection) StartCheck(id string, now time.Time) { c.Check.Start(id, now) }
 
 // FinishCheck records the result of test id; a result of a superseded or finished test is ignored (false).
 func (c *YouTrackConnection) FinishCheck(id string, r CheckResult, now time.Time) bool {
-	if c.Check.Status != CheckPending || c.Check.ID != id {
-		return false
-	}
-	c.Check.Status, c.Check.Code = CheckFailed, r.Code
-	if r.OK {
-		c.Check.Status, c.Check.Code = CheckOK, ""
-	}
-	c.Check.Detail = truncate(r.Detail, MaxCheckDetail)
-	c.Check.CheckedAt = &now
-	return true
+	return c.Check.Finish(id, r, now)
 }
 
 // ResetCheck forgets the last test, e.g. because the URL or token changed.
@@ -292,6 +273,7 @@ type Repository struct {
 	IntegrationBranch string
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+	GitHub            GitHubState // read from GitHub by the App (KIN-28)
 }
 
 // NewRepository validates a registration; an empty branch means DefaultIntegrationBranch.
@@ -307,7 +289,8 @@ func NewRepository(id, projectID, owner, name, branch string, now time.Time) (Re
 	case !repoNameRE.MatchString(name) || name == "." || name == "..":
 		return Repository{}, invalid("name", "repo_name_format")
 	}
-	r := Repository{ID: id, ProjectID: projectID, Owner: owner, Name: name, CreatedAt: now}
+	r := Repository{ID: id, ProjectID: projectID, Owner: owner, Name: name, CreatedAt: now,
+		GitHub: GitHubState{Protection: ProtectionUnknown, Sync: Check{Status: CheckNone}}}
 	if strings.TrimSpace(branch) == "" {
 		branch = DefaultIntegrationBranch
 	}
@@ -329,10 +312,8 @@ func (r *Repository) SetIntegrationBranch(branch string, now time.Time) error {
 	if !validBranch(branch) {
 		return invalid("integrationBranch", "branch_format")
 	}
-	for _, p := range protectedBranches {
-		if strings.EqualFold(branch, p) {
-			return invalid("integrationBranch", "branch_protected")
-		}
+	if IsProtectedBranch(branch) {
+		return invalid("integrationBranch", "branch_protected")
 	}
 	r.IntegrationBranch, r.UpdatedAt = branch, now
 	return nil

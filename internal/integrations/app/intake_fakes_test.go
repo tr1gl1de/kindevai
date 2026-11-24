@@ -304,14 +304,14 @@ func (s *source) put(is domain.IssueSnapshot) {
 	s.issues[is.ID] = is
 }
 
-// inbox records events with (source, delivery id) deduplication, like messaging.Inbox.
-type inbox struct {
+// intakeInbox records events with (source, delivery id) deduplication, like messaging.Inbox.
+type intakeInbox struct {
 	mu     sync.Mutex
 	seen   map[string]bool
 	events []messaging.InboundEvent
 }
 
-func (i *inbox) Receive(_ context.Context, e messaging.InboundEvent) (bool, error) {
+func (i *intakeInbox) Receive(_ context.Context, e messaging.InboundEvent) (bool, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	k := e.Source + "\x00" + e.DeliveryID
@@ -410,7 +410,7 @@ type intakeEnv struct {
 	istore *intakeStore
 	tasks  *tasks
 	src    *source
-	in     *inbox
+	in     *intakeInbox
 	health *health
 }
 
@@ -426,7 +426,7 @@ func newIntakeEnv(t *testing.T) *intakeEnv {
 	e.istore = newIntakeStore(e.store)
 	e.tasks = &tasks{titles: map[string]string{}, issues: map[string]string{}, by: map[string]string{}}
 	e.src = &source{issues: map[string]domain.IssueSnapshot{}}
-	e.in = &inbox{seen: map[string]bool{}}
+	e.in = &intakeInbox{seen: map[string]bool{}}
 	e.health = &health{}
 	e.intake = &app.Intake{
 		Integrations: e.svc,

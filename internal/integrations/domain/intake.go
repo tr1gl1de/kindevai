@@ -89,10 +89,10 @@ func NewPollInterval(seconds int) (time.Duration, error) {
 	return time.Duration(seconds) * time.Second, nil
 }
 
-// NewWebhookSecret validates the webhook shared secret: 32–200 printable ASCII characters without spaces.
-func NewWebhookSecret(s string) (Secret, error) {
+// NewYouTrackWebhookSecret validates the webhook shared secret: 32–200 printable ASCII characters without spaces.
+func NewYouTrackWebhookSecret(s string) (Secret, error) {
 	if len(s) < 32 || len(s) > 200 || strings.ContainsFunc(s, func(r rune) bool { return r <= ' ' || r > '~' }) {
-		return Secret{}, invalid("webhookSecret", "webhook_secret_format")
+		return Secret{}, invalid("webhookSecret", "webhook_secret_range")
 	}
 	return Secret{v: s}, nil
 }

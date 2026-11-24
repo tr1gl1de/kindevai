@@ -63,13 +63,13 @@ func Open(dir string) (*Dir, error) {
 	}
 	for _, sub := range subdirs {
 		if err := secfile.EnsureDir(filepath.Join(abs, sub)); err != nil {
-			_ = f.Close()
+			_ = release(f)
 			return nil, fmt.Errorf("data dir: %w", err)
 		}
 	}
 	for _, dir := range []string{abs, filepath.Join(abs, "keys")} { // only safe while we hold the lock
 		if err := secfile.RemoveStaleTemps(dir); err != nil {
-			_ = f.Close()
+			_ = release(f)
 			return nil, err
 		}
 	}
@@ -95,13 +95,20 @@ func (d *Dir) KeyPath() string { return filepath.Join(d.path, "keys", "ed25519.p
 // ConfigPath is the registration/config file.
 func (d *Dir) ConfigPath() string { return filepath.Join(d.path, "config.json") }
 
-// Close releases the lock.
+// Close releases the lock. It unlocks explicitly before closing: a child forked by os/exec elsewhere in the process
+// shares the lock's open file description until it execs, and closing only our descriptor would leave the lock held
+// until then (KIN-58).
 func (d *Dir) Close() error {
 	if d.lock == nil {
 		return nil
 	}
-	if err := d.lock.Close(); err != nil {
+	if err := release(d.lock); err != nil {
 		return fmt.Errorf("releasing data dir lock: %w", err)
 	}
 	return nil
+}
+
+// release unlocks and closes the lock file.
+func release(f *os.File) error {
+	return errors.Join(syscall.Flock(int(f.Fd()), syscall.LOCK_UN), f.Close()) //nolint:gosec // G115: fd fits int
 }

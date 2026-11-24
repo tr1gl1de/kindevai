@@ -86,12 +86,19 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 		logger.Info("installation loaded", "data_dir", inst.Dir.Path(), "installation_id", inst.ID)
 	}
 
+	identity, err := newIdentity(ctx, inst, logger)
+	if err != nil {
+		return err
+	}
+
 	assets, built := web.Assets()
 	if !built {
 		logger.Warn("web UI not built into this binary; serving placeholder page")
 	}
 	srv := &http.Server{
-		Handler:           server.New(server.Options{Version: version, Assets: assets, Logger: logger}),
+		Handler: server.New(server.Options{
+			Version: version, Assets: assets, Logger: logger, Modules: identity,
+		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,

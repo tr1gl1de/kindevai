@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -115,5 +116,77 @@ func TestServeFailsWhenKeyMissingForExistingDB(t *testing.T) {
 	err = run(t.Context(), []string{"serve", "--addr", "127.0.0.1:0", "--data-dir", dataDir}, io.Discard, io.Discard, nil)
 	if err == nil || !strings.Contains(err.Error(), "encryption key") {
 		t.Fatalf("err = %v, want a clear encryption key error", err)
+	}
+}
+
+// startServe runs `serve` on a random port and returns its base URL and a stop function.
+func startServe(t *testing.T, dataDir string) (string, func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	ready := make(chan net.Addr, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, []string{"serve", "--addr", "127.0.0.1:0", "--data-dir", dataDir}, io.Discard, io.Discard, ready)
+	}()
+	select {
+	case addr := <-ready:
+		stop := func() {
+			cancel()
+			if err := <-done; err != nil {
+				t.Errorf("serve: %v", err)
+			}
+		}
+		return "http://" + addr.String(), stop
+	case err := <-done:
+		cancel()
+		t.Fatalf("serve exited: %v", err)
+	case <-time.After(10 * time.Second):
+		cancel()
+		t.Fatal("serve did not start")
+	}
+	return "", nil
+}
+
+func call(t *testing.T, method, url, body string) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequestWithContext(t.Context(), method, url, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
+}
+
+func TestFirstRunSetupEndToEnd(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	base, stop := startServe(t, dataDir)
+	tokenFile := filepath.Join(dataDir, "secrets", "setup-token")
+	tok, err := os.ReadFile(tokenFile)
+	if err != nil {
+		t.Fatalf("setup token file: %v", err)
+	}
+	if code, body := call(t, "GET", base+"/api/setup/status", ""); code != 200 || !strings.Contains(body, `"setupRequired":true`) {
+		t.Fatalf("status = %d %s", code, body)
+	}
+	payload := `{"token":"` + strings.TrimSpace(string(tok)) + `","login":"owner","password":"correct horse battery","platformName":"Acme"}`
+	if code, body := call(t, "POST", base+"/api/setup", payload); code != 201 {
+		t.Fatalf("setup = %d %s", code, body)
+	}
+	stop()
+
+	base, stop = startServe(t, dataDir)
+	defer stop()
+	if code, body := call(t, "GET", base+"/api/setup/status", ""); !strings.Contains(body, `"setupRequired":false`) {
+		t.Fatalf("status after restart = %d %s", code, body)
+	}
+	if code, _ := call(t, "POST", base+"/api/setup", payload); code != 409 {
+		t.Fatalf("setup after restart = %d, want 409", code)
+	}
+	if _, err := os.Stat(tokenFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("setup token file still present after setup")
 	}
 }

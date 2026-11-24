@@ -107,7 +107,10 @@ ai-runner fingerprint                                    # compare with the runn
   `repos/ workspaces/ sessions/ events/ proxy/`, all mode 0700; one process at a time (lock file).
 - Services: `deploy/runner/kindevai-runner.service` (systemd system service with its own user),
   `kindevai-runner-user.service` (systemd user service, e.g. WSL2, so AI CLIs use your logins) and
-  `io.kindevai.runner.plist` (macOS launchd agent); install steps are in each file.
+  `io.kindevai.runner.plist` (macOS launchd agent); install steps are in each file. Stopping or restarting the
+  service stops only the daemon (`KillMode=process`, launchd `AbandonProcessGroup`): running attempts keep going and
+  the next start adopts them, recognising each process by its pid and start time so a reused pid is never taken for
+  it. To stop the attempts as well, disable the runner in the Dashboard or use `systemctl kill` (KIN-64).
 - `ai-runner run` keeps an outbound WebSocket to `wss://<server>/runner/connect` (`ws://` only for a Control Plane on
   loopback). Each connection is authenticated by challenge-response: the Control Plane sends a single-use 32-byte
   nonce bound to the connection id and its own address, the runner signs

@@ -228,3 +228,21 @@ func TestLevelRaised(t *testing.T) {
 		t.Fatalf("err = %v, want ValidationError", err)
 	}
 }
+
+// KIN-60: a volume counts as recovered (its alert resolves) only below RecoveredPercent, under the warning
+// threshold, so a disk hovering around 75% does not flap.
+func TestVolumeRecoveredHasHysteresis(t *testing.T) {
+	t.Parallel()
+	const g = int64(1) << 30
+	for _, c := range []struct {
+		avail int64
+		want  bool
+	}{{20 * g, false}, {28 * g, false}, {31 * g, true}, {60 * g, true}} {
+		if got := vol(100*g, c.avail).Recovered(); got != c.want {
+			t.Errorf("avail %d GiB: Recovered = %v", c.avail/g, got)
+		}
+	}
+	if got := vol(2*g, 1*g).Recovered(); got {
+		t.Error("a small disk under the absolute headroom is not recovered")
+	}
+}

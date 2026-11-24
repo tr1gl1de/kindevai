@@ -202,6 +202,8 @@ func TestParseGitHubEvent(t *testing.T) {
 			domain.GitHubEvent{Event: "pull_request", Action: "closed", Repository: "acme/api", PullRequest: 5, Merged: true, Branch: "feature/x", Base: "dev", HeadSHA: "h1"}},
 		"suite": {"check_suite", `{"action":"completed","repository":{"full_name":"acme/api"},"check_suite":{"head_branch":"dev","head_sha":"s","status":"completed","conclusion":"failure"}}`,
 			domain.GitHubEvent{Event: "check_suite", Action: "completed", Repository: "acme/api", Branch: "dev", HeadSHA: "s", Status: "completed", Conclusion: "failure"}},
+		"suite of a PR": {"check_suite", `{"action":"completed","repository":{"full_name":"acme/api"},"check_suite":{"head_branch":"fix","head_sha":"s","status":"completed","conclusion":"success","pull_requests":[{"number":12},{"number":13}]}}`,
+			domain.GitHubEvent{Event: "check_suite", Action: "completed", Repository: "acme/api", Branch: "fix", HeadSHA: "s", Status: "completed", Conclusion: "success", PullRequest: 12}},
 		"run": {"check_run", `{"action":"created","repository":{"full_name":"acme/api"},"check_run":{"name":"ci","head_sha":"s","status":"queued"}}`,
 			domain.GitHubEvent{Event: "check_run", Action: "created", Repository: "acme/api", Name: "ci", HeadSHA: "s", Status: "queued"}},
 		"ping": {"ping", `{"zen":"z","hook_id":1}`, domain.GitHubEvent{Event: "ping"}},
@@ -217,5 +219,38 @@ func TestParseGitHubEvent(t *testing.T) {
 		if _, err := domain.ParseGitHubEvent(tc[0], []byte(tc[1])); err == nil {
 			t.Errorf("%s accepted", name)
 		}
+	}
+}
+
+// KIN-60: which completed check suites are CI outcomes the Alert Center follows (the integration branch or a PR).
+func TestCIOutcome(t *testing.T) {
+	t.Parallel()
+	repo := domain.Repository{Owner: "acme", Name: "api", IntegrationBranch: "dev"}
+	suite := func(branch string, pr int, conclusion string) domain.GitHubEvent {
+		return domain.GitHubEvent{Event: domain.EventCheckSuite, Action: "completed", Repository: "acme/api",
+			Branch: branch, PullRequest: pr, Status: "completed", Conclusion: conclusion}
+	}
+	for name, tc := range map[string]struct {
+		e    domain.GitHubEvent
+		want domain.CIOutcome
+	}{
+		"dev failed":    {suite("dev", 0, "failure"), domain.CIFailed},
+		"dev timed out": {suite("dev", 0, "timed_out"), domain.CIFailed},
+		"dev green":     {suite("dev", 0, "success"), domain.CIPassed},
+		"pr failed":     {suite("fix", 4, "failure"), domain.CIFailed},
+		"pr green":      {suite("fix", 4, "success"), domain.CIPassed},
+		"other branch":  {suite("fix", 0, "failure"), domain.CINone},
+		"cancelled":     {suite("dev", 0, "cancelled"), domain.CINone},
+		"neutral":       {suite("dev", 0, "neutral"), domain.CINone},
+		"requested":     {domain.GitHubEvent{Event: domain.EventCheckSuite, Action: "requested", Branch: "dev"}, domain.CINone},
+		"check run":     {domain.GitHubEvent{Event: domain.EventCheckRun, Action: "completed", Conclusion: "failure"}, domain.CINone},
+		"push":          {domain.GitHubEvent{Event: domain.EventPush, Branch: "dev"}, domain.CINone},
+	} {
+		if got := domain.CIOutcomeOf(repo, tc.e); got != tc.want {
+			t.Errorf("%s: %v, want %v", name, got, tc.want)
+		}
+	}
+	if got := domain.CIOutcomeOf(domain.Repository{Owner: "a", Name: "b"}, suite("dev", 0, "failure")); got != domain.CIFailed {
+		t.Errorf("default integration branch: %v", got)
 	}
 }

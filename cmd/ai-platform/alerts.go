@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	alertsevents "github.com/tr1gl1de/kindevai/internal/alerts/adapters/events"
@@ -21,6 +22,7 @@ import (
 	identity "github.com/tr1gl1de/kindevai/internal/identity/domain"
 	integrationsdb "github.com/tr1gl1de/kindevai/internal/integrations/adapters/sqlite"
 	integrationsapp "github.com/tr1gl1de/kindevai/internal/integrations/app"
+	networkapp "github.com/tr1gl1de/kindevai/internal/network/app"
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
@@ -30,6 +32,7 @@ import (
 	runnersapp "github.com/tr1gl1de/kindevai/internal/runners/app"
 	"github.com/tr1gl1de/kindevai/internal/server"
 	workflownotify "github.com/tr1gl1de/kindevai/internal/workflow/adapters/notify"
+	workflowapp "github.com/tr1gl1de/kindevai/internal/workflow/app"
 )
 
 // newAlerts wires the Alert Center (KIN-40): the monitors' and approvals' outbox events become alerts and
@@ -54,6 +57,16 @@ func newAlerts(inst *bootstrap.Installation, msg *messagingModule, audit *auditM
 	msg.Outbox.Handle(runnersapp.TopicRunnerUnreachable, ev.RunnerUnreachable)
 	msg.Outbox.Handle(runnersapp.TopicRunnerRecovered, ev.RunnerRecovered)
 	msg.Outbox.Handle(runnersapp.TopicStorageLevel, ev.StorageLevel)
+	// KIN-60 sources.
+	msg.Outbox.Handle(runnersapp.TopicStorageRecovered, ev.StorageRecovered)
+	msg.Outbox.Handle(networkapp.TopicEgressCheckFailed, ev.EgressCheckFailed)
+	msg.Outbox.Handle(networkapp.TopicEgressCheckPassed, ev.EgressCheckPassed)
+	msg.Outbox.Handle(integrationsapp.TopicCIFailed, ev.CIFailed)
+	msg.Outbox.Handle(integrationsapp.TopicCIPassed, ev.CIPassed)
+	msg.Outbox.Handle(alertsapp.TopicCircuitOpen, ev.CircuitOpen)
+	msg.Outbox.Handle(alertsapp.TopicCircuitClosed, ev.CircuitClosed)
+	msg.Outbox.Handle(workflowapp.TopicTaskBlocked, ev.TaskBlocked)
+	msg.Outbox.Handle(workflowapp.TopicTaskUnblocked, ev.TaskUnblocked)
 	msg.Outbox.Handle(runnersapp.TopicRunnerOutputFull, ev.RunnerOutputFull)           // KIN-59
 	msg.Outbox.Handle(runnersapp.TopicRunnerOutputRecovered, ev.RunnerOutputRecovered) // KIN-59
 	msg.Outbox.Handle(approvalsapp.TopicApprovalRequested, ev.ApprovalRequested)
@@ -64,6 +77,21 @@ func newAlerts(inst *bootstrap.Installation, msg *messagingModule, audit *auditM
 	}
 	msg.Outbox.Handle(alertsapp.TopicTelegramSend, (&alertstg.Sender{Bot: bot, APIBase: telegramAPI, Logger: logger}).Deliver)
 	return &alertshttp.Handler{Service: svc, Logger: logger}
+}
+
+// alertRetentionPause lets other writers in between alert retention batches.
+const alertRetentionPause = 10 * time.Millisecond
+
+// startAlertMonitors runs the integration circuit monitor and the retention of closed alerts (KIN-60) until ctx
+// ends; the returned stop waits for both loops.
+func startAlertMonitors(ctx context.Context, inst *bootstrap.Installation, msg *messagingModule, logger *slog.Logger) (stop func()) {
+	circuits := &alertsapp.CircuitMonitor{Health: msg.Outbox.Health(), Outbox: msg.Outbox, Now: time.Now, Logger: logger}
+	retention := &alertsapp.Retention{Repo: alertsdb.New(inst.DB), Now: time.Now, Logger: logger, Pause: alertRetentionPause}
+	ctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	wg.Go(func() { circuits.Run(ctx) })
+	wg.Go(func() { retention.Run(ctx) })
+	return func() { cancel(); wg.Wait() }
 }
 
 // alertProjects gives the alerts context the projects context's app API.

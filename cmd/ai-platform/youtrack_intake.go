@@ -39,6 +39,7 @@ func newYouTrackIntake(inst *bootstrap.Installation, msg *messagingModule, integ
 	wf := &workflowapp.Service{
 		Repo:     workflowdb.New(inst.DB),
 		Projects: workflowProjects{projects: projectsSvc, integrations: integ.Service},
+		Outbox:   msg.Outbox, // KIN-60 BLOCKED alerts
 		Tx:       db.Transactor{DB: inst.DB},
 		Now:      time.Now,
 		NewID:    rand.Text,

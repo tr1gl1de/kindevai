@@ -149,3 +149,44 @@ func TestPreferencesDefaultAndSave(t *testing.T) {
 		t.Fatalf("got = %+v", got)
 	}
 }
+
+// KIN-60: closed alerts older than the cutoff are deleted in batches; active and recent ones stay.
+func TestDeleteClosedBefore(t *testing.T) {
+	t.Parallel()
+	r := sqlite.New(testDB(t))
+	ctx := t.Context()
+	old, recent := t0.Add(-100*24*time.Hour), t0.Add(-time.Hour)
+	for i, c := range []struct {
+		at     time.Time
+		closed bool
+	}{{old, true}, {old, true}, {old, true}, {old, false}, {recent, true}} {
+		id := "a" + string(rune('0'+i))
+		a := alert(t, id, "", "k"+id, c.at)
+		if err := r.Create(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		if c.closed {
+			if err := a.Resolve("", c.at); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Save(ctx, a); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	cutoff := t0.Add(-90 * 24 * time.Hour)
+	if n, err := r.DeleteClosed(ctx, cutoff, 2); err != nil || n != 2 {
+		t.Fatalf("first batch = %d, %v", n, err)
+	}
+	if n, err := r.DeleteClosed(ctx, cutoff, 2); err != nil || n != 1 {
+		t.Fatalf("second batch = %d, %v", n, err)
+	}
+	for _, id := range []string{"a3", "a4"} {
+		if _, err := r.Get(ctx, id); err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+	}
+	if _, err := r.Get(ctx, "a0"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("a0 not purged: %v", err)
+	}
+}

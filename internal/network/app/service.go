@@ -18,6 +18,7 @@ import (
 	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/network/domain"
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
+	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 )
 
@@ -102,6 +103,18 @@ type AuditLog interface {
 	Record(ctx context.Context, e auditapp.Entry) error
 }
 
+// Alert hooks (KIN-60): the outcome of a Test Network of a runner's effective profile, for the Alert Center.
+const (
+	AdapterAlerts          = "alerts"
+	TopicEgressCheckFailed = "alerts.egress_check_failed"
+	TopicEgressCheckPassed = "alerts.egress_check_passed" //nolint:gosec // G101: a topic name, not a credential
+)
+
+// Outbox stores outgoing messages in the caller's transaction.
+type Outbox interface {
+	Enqueue(ctx context.Context, m messaging.Message) error
+}
+
 // Service implements the network use cases.
 type Service struct {
 	Repo     Repo
@@ -112,6 +125,7 @@ type Service struct {
 	Commands Commands
 	Tx       TxRunner
 	Audit    AuditLog
+	Outbox   Outbox // alert hooks; nil: none
 	// YouTrackURL returns the configured YouTrack base URL ("" when none); it is a required endpoint.
 	YouTrackURL func(ctx context.Context) string
 	Now         func() time.Time
@@ -790,6 +804,9 @@ func (s *Service) RecordResult(ctx context.Context, runnerID string, r protocol.
 		if err := s.Repo.SaveTest(ctx, t); err != nil {
 			return err
 		}
+		if err := s.egressAlert(ctx, t); err != nil {
+			return err
+		}
 		ref, err := s.Runners.Runner(ctx, runnerID)
 		if err != nil {
 			return err
@@ -798,4 +815,25 @@ func (s *Service) RecordResult(ctx context.Context, runnerID string, r protocol.
 			Subject: "network_test:" + t.ID, Details: map[string]string{"status": string(t.Status), "code": t.Code,
 				"observedIpv4": t.ObservedIPv4, "observedIpv6": t.ObservedIPv6}})
 	})
+}
+
+// egressAlert tells the Alert Center how a completed test of the runner's effective profile went (a test of another
+// profile says nothing about the runner's egress). Keyed by the test, so a redelivery is not counted twice.
+func (s *Service) egressAlert(ctx context.Context, t domain.Test) error {
+	if s.Outbox == nil || t.ProfileID != "" {
+		return nil
+	}
+	topic, body := TopicEgressCheckPassed, map[string]string{"runnerId": t.RunnerID, "testId": t.ID}
+	if t.Status != domain.TestOK {
+		topic, body["code"] = TopicEgressCheckFailed, t.Code
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	if err := s.Outbox.Enqueue(ctx, messaging.Message{Adapter: AdapterAlerts, Topic: topic,
+		Key: "network-test/" + t.ID, Payload: b}); err != nil {
+		return fmt.Errorf("enqueueing %s: %w", topic, err)
+	}
+	return nil
 }

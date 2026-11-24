@@ -30,10 +30,11 @@ func checkField(name, v string, maxLen int) error {
 func secretField(key string) bool {
 	k := strings.NewReplacer("_", "", "-", "", ".", "", " ", "").Replace(strings.ToLower(key))
 	switch k {
-	case "authorization", "proxyauthorization", "cookie", "setcookie", "passwd", "credentials":
+	case "authorization", "proxyauthorization", "cookie", "setcookie", "passwd", "credentials", "credential",
+		"jwt", "bearer", "dsn", "session", "sessionid", "otp", "pin":
 		return true
 	}
-	for _, s := range []string{"password", "secret", "token", "apikey", "privatekey"} {
+	for _, s := range []string{"password", "passphrase", "secret", "token", "apikey", "privatekey"} {
 		if strings.HasSuffix(k, s) {
 			return true
 		}

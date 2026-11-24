@@ -3,6 +3,7 @@ package messaging_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -517,5 +518,104 @@ func TestOutboxCircuitBreakerPerAdapter(t *testing.T) {
 	}
 	if stats["youtrack"].Pending != 0 || stats["github"].Pending != 0 {
 		t.Fatalf("stats = %+v", stats)
+	}
+}
+
+// Review: a graceful shutdown during a delivery is not a failure: the attempt is given back, the adapter's
+// health is unchanged and the message is due again at once.
+func TestOutboxShutdownDuringDeliveryKeepsAttempt(t *testing.T) {
+	t.Parallel()
+	d, _ := newDB(t)
+	o := messaging.NewOutbox(d, messaging.Config{PollInterval: time.Hour})
+	started := make(chan struct{})
+	o.Handle("youtrack.comment", func(ctx context.Context, _ messaging.Delivery) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	if err := o.Enqueue(t.Context(), msg("k")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- o.Run(ctx) }()
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("delivery did not start")
+	}
+	cancel()
+	<-done
+	if n := count(t, d, "SELECT count(*) FROM outbox_events WHERE status = 'pending' AND attempts = 0 AND last_error IS NULL"); n != 1 {
+		t.Fatal("shutdown consumed the attempt")
+	}
+	if s := o.Health().Status("youtrack"); s.State != messaging.StateOK {
+		t.Fatalf("shutdown counted as an outage: %+v", s)
+	}
+	o2 := messaging.NewOutbox(d, messaging.Config{})
+	o2.Handle("youtrack.comment", func(context.Context, messaging.Delivery) error { return nil })
+	if n, err := o2.Poll(t.Context()); err != nil || n != 1 {
+		t.Fatalf("Poll after restart = %d, %v; want the message due at once", n, err)
+	}
+}
+
+// Review: while one adapter is half-open (a single probe in flight), its backlog must not hide other adapters'
+// due messages from the same claim.
+func TestOutboxHalfOpenAdapterDoesNotStarveOthers(t *testing.T) {
+	t.Parallel()
+	d, _ := newDB(t)
+	c := newClock()
+	cfg := config(c)
+	cfg.BreakerThreshold = 1
+	cfg.BreakerCooldown = time.Minute
+	o := messaging.NewOutbox(d, cfg)
+	var gh atomic.Int32
+	o.Handle("youtrack.comment", func(context.Context, messaging.Delivery) error { return errors.New("503") })
+	o.Handle("github.status", func(context.Context, messaging.Delivery) error { gh.Add(1); return nil })
+	if err := o.Enqueue(t.Context(), msg("first")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := o.Poll(t.Context()); err != nil { // fails -> circuit open
+		t.Fatal(err)
+	}
+	for i := range 20 {
+		if err := o.Enqueue(t.Context(), msg(fmt.Sprint("backlog-", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.Advance(time.Second)
+	if err := o.Enqueue(t.Context(), messaging.Message{Adapter: "github", Topic: "github.status", Payload: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(time.Minute) // cooldown over: youtrack is half-open, its backlog sorts first
+	if n, err := o.Poll(t.Context()); err != nil || n != 2 {
+		t.Fatalf("Poll = %d, %v; want the youtrack probe plus the github message", n, err)
+	}
+	if gh.Load() != 1 {
+		t.Fatal("github message starved behind the half-open youtrack backlog")
+	}
+}
+
+// Review: a message without a handler says nothing about the adapter, so it must not close an open circuit.
+func TestOutboxMissingHandlerDoesNotCloseCircuit(t *testing.T) {
+	t.Parallel()
+	d, _ := newDB(t)
+	c := newClock()
+	cfg := config(c)
+	cfg.BreakerThreshold = 1
+	o := messaging.NewOutbox(d, cfg)
+	o.Health().Failure("youtrack", errors.New("503"))
+	c.Advance(time.Hour)
+	if err := o.Enqueue(t.Context(), messaging.Message{Adapter: "youtrack", Topic: "youtrack.unknown", Payload: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := o.Poll(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if s := o.Health().Status("youtrack"); s.State != messaging.StateCircuitOpen {
+		t.Fatalf("state = %s, want still circuit_open", s.State)
+	}
+	if !o.Health().Allow("youtrack") {
+		t.Fatal("the probe slot was not released")
 	}
 }

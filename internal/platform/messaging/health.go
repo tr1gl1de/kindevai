@@ -160,6 +160,7 @@ func (h *Health) Snapshot() []AdapterStatus {
 
 // truncate bounds an error text to MaxErrorBytes on a UTF-8 boundary.
 func truncate(s string) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
 	if len(s) <= MaxErrorBytes {
 		return s
 	}

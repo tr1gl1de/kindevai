@@ -103,6 +103,12 @@ func (o *Outbox) claim(ctx context.Context, limit int) ([]record, error) {
 func (o *Outbox) deliver(ctx context.Context, r record) error {
 	err := o.call(ctx, r)
 	switch {
+	case err != nil && ctx.Err() != nil:
+		// The dispatcher is stopping: neither the message nor the adapter failed.
+		o.health.abandon(r.endpoint)
+		return o.q.giveBack(ctx, r)
+	case errors.Is(err, errMissingHandler):
+		o.health.abandon(r.endpoint) // no call was made, so this says nothing about the adapter
 	case err == nil, isPermanent(err):
 		o.health.Success(r.endpoint) // the system answered, so it is reachable
 	default:
@@ -116,18 +122,23 @@ func (o *Outbox) deliver(ctx context.Context, r record) error {
 	return ferr
 }
 
-var errNoHandler = Permanent(errors.New("no handler for topic"))
+// errMissingHandler: no handler is registered for the topic (a message goes dead; Retry after deploying one).
+var errMissingHandler = errors.New("no handler for topic")
+
+// errPanic replaces a handler panic; the panic value is not stored or logged, it may hold request data.
+var errPanic = errors.New("handler panic")
 
 func (o *Outbox) call(ctx context.Context, r record) (err error) {
 	h := o.handler(r.topic)
 	if h == nil {
-		return errNoHandler
+		return Permanent(errMissingHandler)
 	}
 	ctx, cancel := context.WithTimeout(ctx, o.q.cfg.DeliveryTimeout)
 	defer cancel()
 	defer func() {
 		if p := recover(); p != nil {
-			err = fmt.Errorf("handler panic: %v", p)
+			o.q.cfg.Logger.Error("outbox handler panic", "id", r.id, "topic", r.topic)
+			err = errPanic
 		}
 	}()
 	return h(ctx, Delivery{ID: r.id, Adapter: r.endpoint, Topic: r.topic, Key: r.key, Payload: r.payload, Attempt: r.attempts})

@@ -213,3 +213,34 @@ func TestInboxDeadAndRetry(t *testing.T) {
 		t.Fatalf("stats = %+v, %v", stats, err)
 	}
 }
+
+// Review: a graceful shutdown while processing gives the attempt back and leaves the event due at once.
+func TestInboxShutdownDuringProcessingKeepsAttempt(t *testing.T) {
+	t.Parallel()
+	d, _ := newDB(t)
+	in := messaging.NewInbox(d, messaging.Config{PollInterval: time.Hour})
+	started := make(chan struct{})
+	in.Handle("github.push", func(ctx context.Context, _ messaging.InboundEvent) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	for _, id := range []string{"d-1", "d-2"} {
+		if _, err := in.Receive(t.Context(), event(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- in.Run(ctx) }()
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("processing did not start")
+	}
+	cancel()
+	<-done
+	if n := count(t, d, "SELECT count(*) FROM inbox_events WHERE status = 'pending' AND attempts = 0"); n != 2 {
+		t.Fatalf("events due at once after shutdown = %d, want 2", n)
+	}
+}

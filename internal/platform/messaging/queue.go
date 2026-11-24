@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,7 +21,9 @@ var (
 	inboxTable  = table{name: "inbox_events", endpoint: "source", key: "delivery_id"}
 )
 
-type queries struct{ insert, candidates, claim, done, reschedule, dead, listDead, retry, purge, stats string }
+type queries struct {
+	insert, candidates, claim, giveBack, done, reschedule, dead, listDead, retry, purge, stats string
+}
 
 // sqlFor fills the statement templates; only the compile-time table definitions above are substituted.
 func sqlFor(t table) queries {
@@ -30,8 +33,10 @@ func sqlFor(t table) queries {
 			VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT({e}, {k}) DO NOTHING`),
 		candidates: r.Replace(`SELECT id, {e}, topic, {k}, payload, attempts FROM {t}
 			WHERE status = 'pending' AND next_attempt_at <= ? AND {e} NOT IN (SELECT value FROM json_each(?))
+			AND id NOT IN (SELECT value FROM json_each(?))
 			ORDER BY next_attempt_at, id LIMIT ?`),
 		claim:      r.Replace(`UPDATE {t} SET attempts = attempts + 1, next_attempt_at = ?, updated_at = ? WHERE id = ?`),
+		giveBack:   r.Replace(`UPDATE {t} SET attempts = attempts - 1, next_attempt_at = ?, updated_at = ? WHERE id = ? AND status = 'pending'`),
 		done:       r.Replace(`UPDATE {t} SET status = 'done', last_error = NULL, updated_at = ? WHERE id = ? AND status = 'pending'`),
 		reschedule: r.Replace(`UPDATE {t} SET next_attempt_at = ?, last_error = ?, updated_at = ? WHERE id = ? AND status = 'pending'`),
 		dead:       r.Replace(`UPDATE {t} SET status = 'dead', last_error = ?, updated_at = ? WHERE id = ? AND status = 'pending'`),
@@ -113,32 +118,42 @@ func (q *queue) insert(ctx context.Context, endpoint, topic, key string, payload
 
 // claim leases up to limit due messages. Messages of blocked endpoints are skipped in SQL; admit is asked per
 // remaining candidate (it may start a circuit probe) and release undoes an admit if the claim is not committed.
+// When admit refuses an endpoint (a probe is already in flight) the query is repeated without it, so one
+// endpoint's backlog cannot hide the others' due messages.
 func (q *queue) claim(ctx context.Context, limit int, blocked []string, admit func(string) bool, release func(string)) ([]record, error) {
-	if blocked == nil {
-		blocked = []string{}
-	}
-	skip, err := json.Marshal(blocked)
-	if err != nil {
-		return nil, fmt.Errorf("claiming messages: %w", err)
-	}
 	var out []record
-	err = db.Transactor{DB: q.d}.InTx(ctx, func(ctx context.Context) error {
+	err := db.Transactor{DB: q.d}.InTx(ctx, func(ctx context.Context) error {
 		out = out[:0]
 		now := q.cfg.Now()
 		conn := db.Conn(ctx, q.d)
-		// Over-fetch so messages of adapters that are probing (one call at a time) do not starve the others.
-		cands, err := candidates(ctx, conn, q.sql.candidates, ms(now), string(skip), limit*4)
-		if err != nil {
-			return err
-		}
-		for _, r := range cands {
-			if len(out) == limit {
+		skip := append([]string{}, blocked...)
+		taken := []int64{}
+		for range 4 {
+			skipJSON, _ := json.Marshal(skip)   // []string cannot fail to encode
+			takenJSON, _ := json.Marshal(taken) // []int64 cannot fail to encode
+			cands, err := candidates(ctx, conn, q.sql.candidates, ms(now), string(skipJSON), string(takenJSON), limit*4)
+			if err != nil {
+				return err
+			}
+			refused := false
+			for _, r := range cands {
+				if len(out) == limit {
+					break
+				}
+				if slices.Contains(skip, r.endpoint) {
+					continue
+				}
+				if admit != nil && !admit(r.endpoint) {
+					skip = append(skip, r.endpoint)
+					refused = true
+					continue
+				}
+				out = append(out, r)
+				taken = append(taken, r.id)
+			}
+			if !refused || len(out) == limit || len(cands) < limit*4 {
 				break
 			}
-			if admit != nil && !admit(r.endpoint) {
-				continue
-			}
-			out = append(out, r)
 		}
 		for i := range out {
 			out[i].attempts++
@@ -157,6 +172,18 @@ func (q *queue) claim(ctx context.Context, limit int, blocked []string, admit fu
 		return nil, fmt.Errorf("claiming messages: %w", err)
 	}
 	return out, nil
+}
+
+// giveBack returns a claimed message whose attempt was interrupted by shutdown: the attempt is not counted
+// and the message is due at once for the next process.
+func (q *queue) giveBack(ctx context.Context, r record) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	now := ms(q.cfg.Now())
+	if _, err := db.Conn(ctx, q.d).ExecContext(ctx, q.sql.giveBack, now, now, r.id); err != nil {
+		return fmt.Errorf("releasing message %d: %w", r.id, err)
+	}
+	return nil
 }
 
 func candidates(ctx context.Context, conn db.Executor, query string, args ...any) ([]record, error) {
@@ -183,20 +210,31 @@ func (q *queue) finish(ctx context.Context, r record, cause error) (dead bool, e
 	defer cancel()
 	now := q.cfg.Now()
 	conn := db.Conn(ctx, q.d)
+	var res sql.Result
 	switch {
 	case cause == nil:
-		_, err = conn.ExecContext(ctx, q.sql.done, ms(now), r.id)
+		res, err = conn.ExecContext(ctx, q.sql.done, ms(now), r.id)
 	case isPermanent(cause) || r.attempts >= q.cfg.MaxAttempts:
 		dead = true
-		_, err = conn.ExecContext(ctx, q.sql.dead, truncate(cause.Error()), ms(now), r.id)
+		res, err = conn.ExecContext(ctx, q.sql.dead, truncate(cause.Error()), ms(now), r.id)
 	default:
-		_, err = conn.ExecContext(ctx, q.sql.reschedule, ms(now.Add(q.cfg.Backoff(r.attempts))), truncate(cause.Error()), ms(now), r.id)
+		res, err = conn.ExecContext(ctx, q.sql.reschedule, ms(now.Add(q.cfg.Backoff(r.attempts))), truncate(cause.Error()), ms(now), r.id)
+	}
+	if err == nil {
+		var n int64
+		if n, err = res.RowsAffected(); err == nil && n == 0 {
+			err = errStale
+		}
 	}
 	if err != nil {
 		return dead, fmt.Errorf("recording attempt of message %d: %w", r.id, err)
 	}
 	return dead, nil
 }
+
+// errStale means the message changed state while this attempt ran (an operator retry, or the lease expired and
+// another attempt finished it); the inbox rolls the handler's effects back.
+var errStale = errors.New("message is no longer pending")
 
 func (q *queue) listDead(ctx context.Context, limit int) ([]DeadMessage, error) {
 	rows, err := db.Conn(ctx, q.d).QueryContext(ctx, q.sql.listDead, limit)

@@ -39,6 +39,7 @@ type Config struct {
 	Workers         int
 	PollInterval    time.Duration // fallback poll when nothing woke the dispatcher (default 1s)
 	DeliveryTimeout time.Duration // per outbox delivery (default 30s)
+	InboxTimeout    time.Duration // per inbox handler, which holds the write transaction (default 5s)
 	// Lease is how long a claimed message is hidden from other polls; a message whose worker died is retried
 	// after it (default DeliveryTimeout + 30s, so a live delivery is never duplicated).
 	Lease            time.Duration
@@ -75,7 +76,8 @@ func (c Config) WithDefaults() Config {
 	defInt(&c.Workers, 2)
 	def(&c.PollInterval, time.Second)
 	def(&c.DeliveryTimeout, 30*time.Second)
-	def(&c.Lease, c.DeliveryTimeout+30*time.Second)
+	def(&c.InboxTimeout, 5*time.Second)
+	def(&c.Lease, max(c.DeliveryTimeout, c.InboxTimeout)+30*time.Second)
 	defInt(&c.MaxAttempts, 10)
 	def(&c.BaseBackoff, time.Second)
 	def(&c.MaxBackoff, 15*time.Minute)

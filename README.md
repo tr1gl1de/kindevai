@@ -69,6 +69,16 @@ manages memberships. Users see only projects they belong to — any other projec
 missing one. API: `GET/POST /api/projects`, `GET /api/projects/{id}`, `GET /api/projects/{id}/members`,
 `PUT/DELETE /api/projects/{id}/members/{login}`.
 
+### Integrations and external calls
+
+Calls to YouTrack, GitHub, Telegram and runners never happen inside an API request. Outgoing changes are stored
+in a durable outbox in the same SQLite transaction as the change that caused them and delivered in the background
+with retries (exponential backoff with jitter, then `dead` after 10 attempts); incoming webhooks are stored in an
+inbox, deduplicated by delivery id and processed asynchronously. A slow or unavailable service therefore never
+blocks the dashboard. The Owner sees each adapter's state (`ok`, `degraded`, `circuit_open`) and the queue sizes
+at `GET /api/integrations/status`, and dead messages at `GET /api/messaging/{outbox|inbox}/dead`
+(`POST …/dead/{id}/retry` queues one again). Delivered messages are deleted after 7 days, dead ones after 30.
+
 ## Docker Compose
 
 ```bash

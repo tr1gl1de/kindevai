@@ -71,4 +71,9 @@ func TestHealthTruncatesErrors(t *testing.T) {
 	if s := h.Status("github"); len(s.LastError) > messaging.MaxErrorBytes {
 		t.Fatalf("last error is %d bytes", len(s.LastError))
 	}
+	// Invalid UTF-8 at the start must not erase the whole text.
+	h.Failure("github", errors.New("\xff"+string(long)))
+	if s := h.Status("github"); len(s.LastError) < messaging.MaxErrorBytes/2 {
+		t.Fatalf("invalid UTF-8 truncated the error to %d bytes", len(s.LastError))
+	}
 }

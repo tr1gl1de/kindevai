@@ -69,6 +69,16 @@ Owner создаёт проекты и выдаёт участие (`project_adm
 `GET/POST /api/projects`, `GET /api/projects/{id}`, `GET /api/projects/{id}/members`,
 `PUT/DELETE /api/projects/{id}/members/{login}`.
 
+### Интеграции и внешние вызовы
+
+Вызовы YouTrack, GitHub, Telegram и runner никогда не выполняются внутри API-запроса. Исходящие изменения
+записываются в durable outbox в той же транзакции SQLite, что и вызвавшее их изменение, и доставляются в фоне
+с повторами (экспоненциальный backoff с jitter, после 10 попыток — `dead`); входящие webhooks сохраняются в inbox,
+дедуплицируются по delivery id и обрабатываются асинхронно. Поэтому медленный или недоступный сервис не блокирует
+dashboard. Owner видит состояние каждого адаптера (`ok`, `degraded`, `circuit_open`) и размеры очередей в
+`GET /api/integrations/status`, а `dead`-сообщения — в `GET /api/messaging/{outbox|inbox}/dead`
+(`POST …/dead/{id}/retry` ставит сообщение в очередь снова). Доставленные сообщения удаляются через 7 дней, `dead` — через 30.
+
 ## Docker Compose
 
 ```bash

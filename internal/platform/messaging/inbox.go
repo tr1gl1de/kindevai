@@ -20,8 +20,10 @@ type InboundEvent struct {
 	Attempt    int    // 1 for the first processing attempt
 }
 
-// ProcessFunc handles one event. It runs inside the transaction that marks the event done (repositories using
-// db.Conn join it), so its database effects happen exactly once. It must not call external systems — enqueue
+// ProcessFunc handles one event. It runs inside the transaction that marks the event done, so its database
+// effects happen exactly once; it must use repositories that execute via db.Conn(ctx, d) (any other statement
+// waits for the single connection the transaction holds). It must be quick (Config.InboxTimeout): while it
+// runs, every other database user waits. It must not call external systems — enqueue
 // to the Outbox instead, in the same transaction. Errors are retried like outbox deliveries; Permanent(err)
 // makes the event dead at once.
 type ProcessFunc func(ctx context.Context, e InboundEvent) error
@@ -80,7 +82,7 @@ func (in *Inbox) process(ctx context.Context, r record) error {
 	h := in.handler(r.topic)
 	var cause error
 	if h == nil {
-		cause = errNoHandler
+		cause = Permanent(errMissingHandler)
 	} else {
 		err := db.Transactor{DB: in.q.d}.InTx(ctx, func(ctx context.Context) error {
 			if err := in.call(ctx, h, r); err != nil {
@@ -94,6 +96,9 @@ func (in *Inbox) process(ctx context.Context, r record) error {
 			return err // nil, or a storage failure: the lease expires and the event is processed again
 		}
 		cause = he.err
+		if ctx.Err() != nil { // stopping: not the event's fault
+			return in.q.giveBack(ctx, r)
+		}
 	}
 	dead, err := in.q.finish(ctx, r, cause)
 	if dead {
@@ -104,23 +109,22 @@ func (in *Inbox) process(ctx context.Context, r record) error {
 }
 
 func (in *Inbox) call(ctx context.Context, h ProcessFunc, r record) (err error) {
-	ctx, cancel := context.WithTimeout(ctx, in.q.cfg.DeliveryTimeout)
+	ctx, cancel := context.WithTimeout(ctx, in.q.cfg.InboxTimeout)
 	defer cancel()
 	defer func() {
 		if p := recover(); p != nil {
-			err = fmt.Errorf("handler panic: %v", p)
+			in.q.cfg.Logger.Error("inbox handler panic", "id", r.id, "topic", r.topic)
+			err = errPanic
 		}
 	}()
 	return h(ctx, InboundEvent{ID: r.id, Source: r.endpoint, DeliveryID: r.key, Topic: r.topic, Payload: r.payload, Attempt: r.attempts})
 }
 
-// inboxBatch is how many events one poll claims; they are processed one after another.
-const inboxBatch = 8
-
-// Poll claims a batch of due events and processes them one by one. It returns how many were attempted and the
-// first error recording an outcome.
+// Poll claims one due event and processes it (one at a time: the handler holds the only write connection, and
+// a stop never leaves claimed-but-unstarted events hidden behind their lease). It returns how many were
+// attempted (0 or 1) and the error recording the outcome, if any.
 func (in *Inbox) Poll(ctx context.Context) (int, error) {
-	rs, err := in.q.claim(ctx, inboxBatch, nil, nil, nil)
+	rs, err := in.q.claim(ctx, 1, nil, nil, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -142,7 +146,7 @@ func (in *Inbox) Run(ctx context.Context) error {
 			in.q.cfg.Logger.Error("inbox poll", "err", err)
 			return false
 		}
-		return n == inboxBatch
+		return n > 0
 	})
 	return nil
 }

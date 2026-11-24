@@ -277,3 +277,15 @@ func (r *Repository) SaveRunner(ctx context.Context, x domain.Runner) error {
 	}
 	return nil
 }
+
+// MarkSeen records when the gateway last authorized the runner (domain.ErrNotFound for an unknown runner).
+func (r *Repository) MarkSeen(ctx context.Context, id string, at time.Time) error {
+	ok, err := r.update(ctx, "UPDATE runners SET last_seen_at = ? WHERE id = ?", ts(at), id)
+	if err != nil {
+		return fmt.Errorf("updating runner last seen: %w", err)
+	}
+	if !ok {
+		return domain.ErrNotFound
+	}
+	return nil
+}

@@ -41,9 +41,17 @@ type LoginRequest struct {
 
 // UserView is the public shape of the current user.
 type UserView struct {
-	ID    string `json:"id"`
-	Login string `json:"login"`
-	Role  string `json:"role"`
+	ID                 string `json:"id"`
+	Login              string `json:"login"`
+	Role               string `json:"role"`
+	MustChangePassword bool   `json:"mustChangePassword"`
+}
+
+// allowedDuringPasswordChange are the protected paths a user with a temporary password may call.
+var allowedDuringPasswordChange = map[string]bool{
+	"/api/auth/me":       true,
+	"/api/auth/password": true,
+	"/api/auth/logout":   true,
 }
 
 // LoginResult is the response of a successful login.
@@ -52,7 +60,7 @@ type LoginResult struct {
 }
 
 func view(u domain.User) UserView {
-	return UserView{ID: u.ID, Login: string(u.Login), Role: string(u.Role)}
+	return UserView{ID: u.ID, Login: string(u.Login), Role: string(u.Role), MustChangePassword: u.MustChangePassword}
 }
 
 // Register mounts the routes.
@@ -84,6 +92,7 @@ func (h *AuthHandler) Middleware(next http.Handler) http.Handler {
 			case err == nil:
 				r = r.WithContext(auth.WithPrincipal(r.Context(), auth.Principal{
 					UserID: u.ID, Login: string(u.Login), Owner: u.Role == domain.RoleOwner,
+					MustChangePassword: u.MustChangePassword,
 				}))
 			case errors.Is(err, domain.ErrUnauthenticated):
 			case public: // health, setup and login keep working while the database hiccups
@@ -95,8 +104,13 @@ func (h *AuthHandler) Middleware(next http.Handler) http.Handler {
 			}
 		}
 		if !public {
-			if _, ok := auth.FromContext(r.Context()); !ok {
+			p, ok := auth.FromContext(r.Context())
+			if !ok {
 				httpx.WriteError(w, http.StatusUnauthorized, "unauthenticated", "login required")
+				return
+			}
+			if p.MustChangePassword && !allowedDuringPasswordChange[r.URL.Path] {
+				httpx.WriteError(w, http.StatusForbidden, "password_change_required", "set a new password first")
 				return
 			}
 		}
@@ -186,7 +200,7 @@ func (h *AuthHandler) me(w http.ResponseWriter, r *http.Request) {
 	if p.Owner {
 		role = domain.RoleOwner
 	}
-	httpx.WriteJSON(w, http.StatusOK, UserView{ID: p.UserID, Login: p.Login, Role: string(role)})
+	httpx.WriteJSON(w, http.StatusOK, UserView{ID: p.UserID, Login: p.Login, Role: string(role), MustChangePassword: p.MustChangePassword})
 }
 
 // isHTTPS decides the cookie Secure flag. Trusting X-Forwarded-Proto here is safe: a spoofed value can only

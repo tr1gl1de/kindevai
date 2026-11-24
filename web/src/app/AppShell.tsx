@@ -20,6 +20,10 @@ export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
             {t("nav.overview")}
           </NavLink>
           <NavLink to="/projects">{t("nav.projects")}</NavLink>
+          {me.role === "owner" && <NavLink to="/users">{t("nav.users")}</NavLink>}
+          <NavLink to="/account/password" className="nav-account">
+            {t("nav.changePassword")}
+          </NavLink>
         </nav>
         <div className="user-area">
           <span className="user">

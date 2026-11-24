@@ -17,7 +17,17 @@
     "react-hooks/exhaustive-deps": "warn",
     "typescript/no-explicit-any": "error",
     "react/react-in-jsx-scope": "off",
-    "import/no-unassigned-import": "off"
+    "import/no-unassigned-import": "off",
+    "vitest/expect-expect": [
+      "error",
+      {
+        "assertFunctionNames": [
+          "expect",
+          "expectStatus",
+          "expectAccessible"
+        ]
+      }
+    ]
   },
   "ignorePatterns": [
     "dist/**",

@@ -71,10 +71,23 @@ func newIdentity(ctx context.Context, inst *bootstrap.Installation, logger *slog
 		LoginLimiter: perMinute(10),
 		Logger:       logger,
 	}
+	accounts := &httpapi.AccountsHandler{
+		Service: &app.AccountsService{
+			Accounts: sqlite.NewUserRepository(inst.DB),
+			Sessions: sqlite.NewSessionRepository(inst.DB),
+			Hasher:   hasher,
+			Rand:     rand.Reader,
+			Now:      time.Now,
+			NewID:    rand.Text,
+		},
+		Limiter: perMinute(10),
+		Logger:  logger,
+	}
 	return &identityModule{
 		Modules: []server.Module{
 			&httpapi.SetupHandler{Service: setup, Limiter: perMinute(10), StatusLimiter: status, Logger: logger},
 			authn,
+			accounts,
 		},
 		Middleware: authn.Middleware,
 		Users:      sqlite.NewUserRepository(inst.DB),

@@ -9,6 +9,8 @@ type Principal struct {
 	UserID string
 	Login  string
 	Owner  bool // platform Owner
+	// MustChangePassword: signed in with a temporary password; only the password change is allowed.
+	MustChangePassword bool
 }
 
 type ctxKey struct{}

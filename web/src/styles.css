@@ -451,3 +451,38 @@ select[aria-invalid="true"] {
     transition: none !important;
   }
 }
+
+.narrow {
+  max-width: 480px;
+}
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.secret h2:focus {
+  outline: none;
+}
+.secret {
+  border: 2px solid var(--accent);
+  margin: var(--space) 0;
+}
+.secret-value {
+  display: inline-block;
+  font-size: 1.25rem;
+  letter-spacing: 0.05em;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  user-select: all;
+  word-break: break-all;
+}
+.nav {
+  flex-wrap: wrap;
+}
+@media (min-width: 601px) {
+  .nav-account {
+    margin-left: auto;
+  }
+}

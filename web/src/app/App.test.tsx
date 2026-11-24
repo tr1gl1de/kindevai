@@ -172,7 +172,7 @@ describe("session handling", () => {
         return new Response(null, { status: 204 });
       }),
       http.post("/api/auth/login", () => {
-        current = { id: "u2", login: "bob", role: "user" };
+        current = { id: "u2", login: "bob", role: "user", mustChangePassword: false };
         projectsFor = "bob";
         return json({ user: current });
       }),

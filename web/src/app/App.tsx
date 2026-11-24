@@ -6,7 +6,10 @@ import { useMe, useSetupStatus } from "../features/identity/api";
 import { OverviewPage } from "../features/dashboard/OverviewPage";
 import { ProjectPage } from "../features/projects/ProjectPage";
 import { ProjectsPage } from "../features/projects/ProjectsPage";
-import { NotFoundPage } from "../features/projects/NotFoundPage";
+import { AccountPage } from "../features/identity/AccountPage";
+import { ForcedPasswordChange } from "../features/identity/ForcedPasswordChange";
+import { UsersPage } from "../features/identity/UsersPage";
+import { PageNotFound } from "./PageNotFound";
 import { ErrorState, Loading } from "../ui/feedback";
 import { NotifyProvider } from "../ui/notify";
 import { AppShell } from "./AppShell";
@@ -42,6 +45,7 @@ function Gate() {
   }
   if (setup.data?.setupRequired) return <SetupWizard />;
   if (!me.data) return <LoginPage />;
+  if (me.data.mustChangePassword) return <ForcedPasswordChange />;
 
   return (
     <AppShell me={me.data}>
@@ -49,7 +53,9 @@ function Gate() {
           <Route path="/" element={<OverviewPage />} />
           <Route path="/projects" element={<ProjectsPage me={me.data} />} />
           <Route path="/projects/:id" element={<ProjectPage me={me.data} />} />
-          <Route path="*" element={<NotFoundPage />} />
+          <Route path="/account/password" element={<AccountPage />} />
+          {me.data.role === "owner" && <Route path="/users" element={<UsersPage />} />}
+          <Route path="*" element={<PageNotFound />} />
         </Routes>
     </AppShell>
   );

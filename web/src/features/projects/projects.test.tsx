@@ -58,7 +58,7 @@ describe("projects", () => {
   });
 
   it("hides owner-only actions from members", async () => {
-    as({ id: "u2", login: "bob", role: "user" });
+    as({ id: "u2", login: "bob", role: "user", mustChangePassword: false });
     server.use(http.get("/api/projects", () => json([{ ...web, myRole: "member" }])));
     await renderApp("/projects");
     expect(await screen.findByRole("link", { name: "Web" })).toBeInTheDocument();
@@ -122,7 +122,7 @@ describe("projects", () => {
   });
 
   it("treats a missing or foreign project as not found", async () => {
-    as({ id: "u2", login: "bob", role: "user" });
+    as({ id: "u2", login: "bob", role: "user", mustChangePassword: false });
     server.use(http.get("/api/projects/zzz", () => apiError(404, "not_found")));
     await renderApp("/projects/zzz");
     expect(await screen.findByRole("heading", { level: 1, name: "Project not found" })).toBeInTheDocument();

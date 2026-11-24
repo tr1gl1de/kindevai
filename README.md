@@ -50,7 +50,7 @@ a replacement. Only one process can use a data directory at a time.
 
 A new installation starts in setup mode. Creating the first Owner requires a one-time **setup token**, which is
 never shown in logs or over HTTP: it is written to `data/secrets/setup-token` (mode 0600; the log only prints the
-path). Read it on the host (`cat data/secrets/setup-token`, or `docker compose exec … cat /data/secrets/setup-token`),
+path). Read it on the host (`ai-platform setup-token`, or `docker compose exec cp ai-platform setup-token`),
 then enter it in the Dashboard wizard together with the Owner login, password (12+ characters) and platform name.
 The token expires after an hour and is renewed automatically; after setup it is deleted and setup can never be
 run again, including after a restart.
@@ -74,7 +74,7 @@ missing one. API: `GET/POST /api/projects`, `GET /api/projects/{id}`, `GET /api/
 ```bash
 docker compose up -d                                        # one container, http://127.0.0.1:8080
 DOMAIN=ai.example.com docker compose --profile https up -d  # + Caddy with automatic HTTPS on 80/443
-docker compose exec cp cat /data/secrets/setup-token        # first-run setup token
+docker compose exec cp ai-platform setup-token        # first-run setup token
 ```
 
 No `.env` is needed. The plain-HTTP port is published on the host's loopback only; public access goes through

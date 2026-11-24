@@ -280,3 +280,24 @@ func TestHealthCommand(t *testing.T) {
 		})
 	}
 }
+
+func TestSetupTokenCommand(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	var out bytes.Buffer
+	if err := run(t.Context(), []string{"setup-token", "--data-dir", dataDir}, &out, io.Discard, nil); err == nil {
+		t.Fatal("want an error when no setup token exists")
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "secrets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "secrets", "setup-token"), []byte("tok-123\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(t.Context(), []string{"setup-token", "--data-dir", dataDir}, &out, io.Discard, nil); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "tok-123\n" {
+		t.Fatalf("stdout = %q", out.String())
+	}
+}

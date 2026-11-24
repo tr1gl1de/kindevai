@@ -1,7 +1,7 @@
 # Zero-config deployment (KIN-A-27). No .env is required.
 #   Local HTTP:   docker compose up -d                                   → http://127.0.0.1:8080
 #   Public HTTPS: DOMAIN=ai.example.com docker compose --profile https up -d
-# First-run setup token: docker compose exec cp cat /data/secrets/setup-token
+# First-run setup token: docker compose exec cp ai-platform setup-token
 
 name: kindevai
 

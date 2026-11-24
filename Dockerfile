@@ -23,6 +23,7 @@ COPY --from=build /out/ai-platform /usr/local/bin/ai-platform
 # Owned by the nonroot user so a fresh named volume inherits writable, private permissions.
 COPY --from=build --chown=65532:65532 --chmod=0700 /out/data /data
 USER 65532:65532
+ENV KINDEV_DATA_DIR=/data
 VOLUME ["/data"]
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["ai-platform", "health"]

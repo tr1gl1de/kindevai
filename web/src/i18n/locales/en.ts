@@ -44,7 +44,7 @@ export const en = {
     title: "Set up AI Platform",
     intro: "Create the owner account. The one-time setup token is in the file secrets/setup-token in the data directory on the server.",
     token: "Setup token",
-    tokenHint: "Read it on the server, e.g. cat data/secrets/setup-token. It is valid for one hour.",
+    tokenHint: "On the server run: ai-platform setup-token (Docker: docker compose exec cp ai-platform setup-token). Valid for one hour.",
     login: "Owner login",
     loginHint: "3–64 characters: letters a–z, digits, dot, dash, underscore.",
     password: "Password",

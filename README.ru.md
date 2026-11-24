@@ -50,7 +50,7 @@ make build            # собирает web/dist/app, затем bin/ai-platfor
 
 Новая установка стартует в режиме setup. Для создания первого Owner нужен одноразовый **setup token**. Он никогда
 не выводится в логи и не отдаётся по HTTP: он записывается в `data/secrets/setup-token` (права 0600; в логе только
-путь). Прочитайте его на хосте (`cat data/secrets/setup-token` или `docker compose exec … cat /data/secrets/setup-token`)
+путь). Прочитайте его на хосте (`ai-platform setup-token` или `docker compose exec cp ai-platform setup-token`)
 и введите в мастере Dashboard вместе с логином Owner, паролем (от 12 символов) и названием платформы. Токен
 действует час и обновляется автоматически; после настройки он удаляется, и повторить setup нельзя — в том числе
 после рестарта.
@@ -74,7 +74,7 @@ Owner создаёт проекты и выдаёт участие (`project_adm
 ```bash
 docker compose up -d                                        # один контейнер, http://127.0.0.1:8080
 DOMAIN=ai.example.com docker compose --profile https up -d  # + Caddy с автоматическим HTTPS на 80/443
-docker compose exec cp cat /data/secrets/setup-token        # setup token для первой настройки
+docker compose exec cp ai-platform setup-token        # setup token для первой настройки
 ```
 
 `.env` не нужен. HTTP-порт публикуется только на loopback хоста; публичный доступ — через профиль `https`

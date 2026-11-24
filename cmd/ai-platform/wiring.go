@@ -52,7 +52,7 @@ func newIdentity(ctx context.Context, inst *bootstrap.Installation, logger *slog
 	if required {
 		// The token itself is never logged; the operator reads it from the 0600 file on the host/container.
 		logger.Warn("setup required: open the dashboard and enter the one-time setup token",
-			"token_file", tokenPath, "valid_for", "1h, renewed when expired")
+			"token_file", tokenPath, "show_with", "ai-platform setup-token", "valid_for", "1h, renewed when expired")
 	}
 	perMinute := func(burst int) *ratelimit.Limiter {
 		return ratelimit.New(ratelimit.Config{Burst: burst, Every: time.Minute, MaxKeys: 10_000}, time.Now)

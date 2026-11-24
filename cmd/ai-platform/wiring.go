@@ -102,13 +102,17 @@ func (d userDirectory) ByLogin(ctx context.Context, login string) (projectsapp.U
 		return projectsapp.UserRef{}, projects.ErrUserNotFound
 	}
 	u, err := d.users.ByLogin(ctx, l)
-	if errors.Is(err, identity.ErrNotFound) || (err == nil && u.Disabled) {
+	if errors.Is(err, identity.ErrNotFound) {
 		return projectsapp.UserRef{}, projects.ErrUserNotFound
 	}
 	if err != nil {
 		return projectsapp.UserRef{}, err
 	}
-	return projectsapp.UserRef{ID: u.ID, Login: string(u.Login), Owner: u.Role == identity.RoleOwner}, nil
+	return userRef(u), nil
+}
+
+func userRef(u identity.User) projectsapp.UserRef {
+	return projectsapp.UserRef{ID: u.ID, Login: string(u.Login), Owner: u.Role == identity.RoleOwner, Disabled: u.Disabled}
 }
 
 func (d userDirectory) ByIDs(ctx context.Context, ids []string) (map[string]projectsapp.UserRef, error) {
@@ -121,7 +125,7 @@ func (d userDirectory) ByIDs(ctx context.Context, ids []string) (map[string]proj
 		if err != nil {
 			return nil, err
 		}
-		out[id] = projectsapp.UserRef{ID: u.ID, Login: string(u.Login), Owner: u.Role == identity.RoleOwner}
+		out[id] = userRef(u)
 	}
 	return out, nil
 }

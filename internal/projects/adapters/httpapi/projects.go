@@ -82,6 +82,8 @@ func (h *Handler) fail(w http.ResponseWriter, err error) {
 		httpx.WriteError(w, http.StatusForbidden, "forbidden", "not allowed")
 	case errors.Is(err, domain.ErrSlugTaken):
 		httpx.WriteError(w, http.StatusConflict, "slug_taken", "project slug is already taken")
+	case errors.Is(err, domain.ErrNotMember):
+		httpx.WriteError(w, http.StatusNotFound, "membership_not_found", "user is not a member of this project")
 	case errors.Is(err, domain.ErrUserNotFound):
 		httpx.WriteError(w, http.StatusNotFound, "user_not_found", "user not found")
 	case errors.As(err, &ve):

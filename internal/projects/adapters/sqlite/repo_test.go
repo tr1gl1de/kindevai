@@ -80,3 +80,18 @@ func TestRepository(t *testing.T) {
 		t.Fatal("removed twice")
 	}
 }
+
+func TestSetMemberForeignKeys(t *testing.T) {
+	t.Parallel()
+	r := New(testDB(t))
+	now := time.Now()
+	if err := r.Create(t.Context(), domain.Project{ID: "p1", Slug: "web", Name: "Web", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetMember(t.Context(), domain.Membership{ProjectID: "p1", UserID: "ghost", Role: domain.RoleMember, CreatedAt: now}); !errors.Is(err, domain.ErrUserNotFound) {
+		t.Fatalf("unknown user = %v", err)
+	}
+	if err := r.SetMember(t.Context(), domain.Membership{ProjectID: "gone", UserID: "u1", Role: domain.RoleMember, CreatedAt: now}); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("unknown project = %v", err)
+	}
+}

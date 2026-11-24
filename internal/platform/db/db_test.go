@@ -197,3 +197,29 @@ func TestVersionOnFreshDatabaseDoesNotWrite(t *testing.T) {
 		t.Fatalf("Version created %d schema objects", n)
 	}
 }
+
+func TestConstraintErrors(t *testing.T) {
+	t.Parallel()
+	d := openTemp(t)
+	ctx := t.Context()
+	for _, q := range []string{
+		"CREATE TABLE p (id TEXT PRIMARY KEY, slug TEXT UNIQUE)",
+		"CREATE TABLE c (p TEXT REFERENCES p(id))",
+		"INSERT INTO p VALUES ('1', 'a')",
+	} {
+		if _, err := d.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := d.ExecContext(ctx, "INSERT INTO p VALUES ('2', 'a')")
+	if !IsUniqueViolation(err) || IsForeignKeyViolation(err) {
+		t.Fatalf("unique: %v", err)
+	}
+	_, err = d.ExecContext(ctx, "INSERT INTO c VALUES ('missing')")
+	if !IsForeignKeyViolation(err) || IsUniqueViolation(err) {
+		t.Fatalf("fk: %v", err)
+	}
+	if IsUniqueViolation(nil) || IsForeignKeyViolation(errors.New("x")) {
+		t.Fatal("false positive")
+	}
+}

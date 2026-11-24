@@ -6,9 +6,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
+	"github.com/tr1gl1de/kindevai/internal/platform/db"
 	"github.com/tr1gl1de/kindevai/internal/projects/domain"
 )
 
@@ -27,7 +27,7 @@ func ts(t time.Time) string { return t.UTC().Format(tsFormat) }
 func (r *Repository) Create(ctx context.Context, p domain.Project) error {
 	_, err := r.db.ExecContext(ctx, "INSERT INTO projects(id, slug, name, created_at) VALUES (?, ?, ?, ?)",
 		p.ID, string(p.Slug), string(p.Name), ts(p.CreatedAt))
-	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed: projects.slug") {
+	if db.IsUniqueViolation(err) {
 		return domain.ErrSlugTaken
 	}
 	if err != nil {
@@ -105,7 +105,9 @@ func (r *Repository) Membership(ctx context.Context, projectID, userID string) (
 		return domain.Membership{}, false, fmt.Errorf("reading membership: %w", err)
 	}
 	m.Role = domain.Role(role)
-	m.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	if m.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+		return domain.Membership{}, false, fmt.Errorf("reading membership: %w", err)
+	}
 	return m, true, nil
 }
 
@@ -125,7 +127,11 @@ func (r *Repository) Members(ctx context.Context, projectID string) ([]domain.Me
 			return nil, fmt.Errorf("listing members: %w", err)
 		}
 		m.Role = domain.Role(role)
-		m.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		t, err := time.Parse(time.RFC3339Nano, created)
+		if err != nil {
+			return nil, fmt.Errorf("listing members: %w", err)
+		}
+		m.CreatedAt = t
 		out = append(out, m)
 	}
 	return out, rows.Err()
@@ -136,6 +142,13 @@ func (r *Repository) SetMember(ctx context.Context, m domain.Membership) error {
 	_, err := r.db.ExecContext(ctx, `INSERT INTO project_memberships(project_id, user_id, role, created_at) VALUES (?, ?, ?, ?)
 		ON CONFLICT(project_id, user_id) DO UPDATE SET role = excluded.role`,
 		m.ProjectID, m.UserID, string(m.Role), ts(m.CreatedAt))
+	if db.IsForeignKeyViolation(err) {
+		// The project or the user disappeared after the access check.
+		if _, perr := r.ByID(ctx, m.ProjectID); errors.Is(perr, domain.ErrNotFound) {
+			return domain.ErrNotFound
+		}
+		return domain.ErrUserNotFound
+	}
 	if err != nil {
 		return fmt.Errorf("saving membership: %w", err)
 	}

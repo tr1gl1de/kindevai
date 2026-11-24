@@ -21,6 +21,8 @@ var (
 	ErrSlugTaken = errors.New("project slug is already taken")
 	// ErrUserNotFound: no user with the given login.
 	ErrUserNotFound = errors.New("user not found")
+	// ErrNotMember: the user exists but is not a member of the project.
+	ErrNotMember = errors.New("user is not a member of the project")
 )
 
 // ValidationError reports invalid input for one field with a stable code.
@@ -104,7 +106,9 @@ type Access struct {
 }
 
 // NewAccess combines an actor with their membership in a project (isMember false if none).
-func NewAccess(a Actor, r Role, isMember bool) Access { return Access{actor: a, role: r, isMember: isMember} }
+func NewAccess(a Actor, r Role, isMember bool) Access {
+	return Access{actor: a, role: r, isMember: isMember}
+}
 
 // CanView: Owner and members see the project; nobody else learns it exists.
 func (a Access) CanView() bool { return a.actor.Owner || a.isMember }

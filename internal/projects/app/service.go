@@ -24,12 +24,13 @@ type Repository interface {
 
 // UserRef is how the projects context sees an account (owned by the identity context).
 type UserRef struct {
-	ID    string
-	Login string
-	Owner bool
+	ID       string
+	Login    string
+	Owner    bool
+	Disabled bool
 }
 
-// UserDirectory resolves accounts; implemented on top of the identity context.
+// UserDirectory resolves accounts, including disabled ones; implemented on top of the identity context.
 type UserDirectory interface {
 	ByLogin(ctx context.Context, login string) (UserRef, error) // domain.ErrUserNotFound
 	ByIDs(ctx context.Context, ids []string) (map[string]UserRef, error)
@@ -181,14 +182,17 @@ func (s *Service) SetMember(ctx context.Context, a domain.Actor, projectID, logi
 	if u.Owner {
 		return MemberView{}, &domain.ValidationError{Field: "login", Code: "owner_has_full_access"}
 	}
+	if u.Disabled {
+		return MemberView{}, &domain.ValidationError{Field: "login", Code: "user_disabled"}
+	}
 	m := domain.Membership{ProjectID: projectID, UserID: u.ID, Role: r, CreatedAt: s.Now()}
 	if err := s.Repo.SetMember(ctx, m); err != nil {
-		return MemberView{}, fmt.Errorf("saving membership: %w", err)
+		return MemberView{}, err
 	}
 	return MemberView{UserID: u.ID, Login: u.Login, Role: string(r)}, nil
 }
 
-// RemoveMember revokes a membership (Owner only). Removing a non-member is ErrUserNotFound.
+// RemoveMember revokes a membership (Owner only), also for disabled users. Removing a non-member is ErrNotMember.
 func (s *Service) RemoveMember(ctx context.Context, a domain.Actor, projectID, login string) error {
 	_, acc, err := s.access(ctx, a, projectID)
 	if err != nil {
@@ -206,7 +210,7 @@ func (s *Service) RemoveMember(ctx context.Context, a domain.Actor, projectID, l
 		return fmt.Errorf("removing membership: %w", err)
 	}
 	if !removed {
-		return domain.ErrUserNotFound
+		return domain.ErrNotMember
 	}
 	return nil
 }

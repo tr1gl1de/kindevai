@@ -148,7 +148,25 @@ func TestOnlyOwnerManagesMembers(t *testing.T) {
 	if _, err := s.Get(t.Context(), bob, web.ID); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("removed member still sees project: %v", err)
 	}
-	if err := s.RemoveMember(t.Context(), owner, web.ID, "bob"); !errors.Is(err, domain.ErrUserNotFound) {
+	if err := s.RemoveMember(t.Context(), owner, web.ID, "bob"); !errors.Is(err, domain.ErrNotMember) {
 		t.Fatalf("removing a non-member = %v", err)
+	}
+}
+
+func TestDisabledUsers(t *testing.T) {
+	t.Parallel()
+	s, web, _ := seeded(t)
+	users := s.Users.(memUsers)
+	alice := users["alice"]
+	alice.Disabled = true
+	users["alice"] = alice
+	users["carol"] = UserRef{ID: "u-carol", Login: "carol", Disabled: true}
+	var ve *domain.ValidationError
+	if _, err := s.SetMember(t.Context(), owner, web.ID, "carol", "member"); !errors.As(err, &ve) || ve.Code != "user_disabled" {
+		t.Fatalf("granting to a disabled user = %v", err)
+	}
+	// A disabled member must still be removable, or re-enabling them would silently restore access.
+	if err := s.RemoveMember(t.Context(), owner, web.ID, "alice"); err != nil {
+		t.Fatalf("removing a disabled member = %v", err)
 	}
 }

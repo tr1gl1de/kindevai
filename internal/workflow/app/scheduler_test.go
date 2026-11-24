@@ -366,3 +366,71 @@ func TestReleaseRunnerFailsItsAttemptsAndRetriesElsewhere(t *testing.T) {
 		})
 	}
 }
+
+func twoParallelSteps() domain.Plan {
+	return domain.Plan{Risk: domain.RiskL1, MaxParallel: 2, Summary: "s", Steps: []domain.PlanStep{
+		{Key: "backend", Title: "Backend", Repository: "api", Capabilities: []string{"git"}, Scope: []string{"src/"}},
+		{Key: "frontend", Title: "Frontend", Repository: "web", Capabilities: []string{"git"}, Scope: []string{"src/"}}}}
+}
+
+func gitRunner(id string) Candidate {
+	return Candidate{ID: id, Tools: []string{"git"}, DiskHeavyAllowed: true}
+}
+
+// KIN-65: two parallel steps go to two runners, one each — the second assignment counts the first one made in the
+// same pass.
+func TestScheduleSpreadsParallelStepsOverRunners(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	task := e.task(t, twoParallelSteps())
+	e.pool.set("p1", gitRunner("r2"), gitRunner("r1"))
+	e.schedule(t)
+	_, ex := e.state(t, task.ID)
+	if got := []string{ex.StepByKey("backend").RunnerID, ex.StepByKey("frontend").RunnerID}; !slices.Equal(got,
+		[]string{"r1", "r2"}) {
+		t.Fatalf("runners %v", got)
+	}
+	if c := e.disp.take(); !slices.Equal(c, []string{"assign r1 backend/1 p1 api", "assign r2 frontend/1 p1 web"}) {
+		t.Fatalf("commands %v", c)
+	}
+}
+
+// KIN-65: steps of other executions count as load — held in an earlier pass or assigned earlier in this one.
+func TestScheduleCountsStepsHeldByOtherExecutions(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	e.pool.set("p1", gitRunner("r1"), gitRunner("r2"), gitRunner("r3"))
+	first := e.task(t, onlyStep("git"))
+	e.schedule(t) // r1 now holds a step
+	second, third := e.task(t, onlyStep("git")), e.task(t, onlyStep("git"))
+	e.schedule(t) // both in the same pass
+	var got []string
+	for _, id := range []string{first.ID, second.ID, third.ID} {
+		_, ex := e.state(t, id)
+		got = append(got, ex.Steps[0].RunnerID)
+	}
+	slices.Sort(got[1:]) // which of the two new tasks goes first is the task order's business
+	if !slices.Equal(got, []string{"r1", "r2", "r3"}) {
+		t.Fatalf("runners %v", got)
+	}
+}
+
+// KIN-65: a lower id with more held steps loses; an ineligible idle runner is never picked.
+func TestSchedulePrefersTheLeastLoadedEligibleRunner(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	e.pool.set("p1", gitRunner("r1"))
+	busy := e.task(t, twoParallelSteps())
+	e.schedule(t) // r1 holds both steps
+	e.pool.set("p1", gitRunner("r1"), gitRunner("r2"), gitRunner("r3"),
+		Candidate{ID: "r0", Tools: []string{"git"}, DiskHeavyAllowed: false})
+	e.disp.take()
+	task := e.task(t, onlyStep("git"))
+	e.schedule(t)
+	if _, ex := e.state(t, task.ID); ex.Steps[0].RunnerID != "r2" {
+		t.Fatalf("picked %q", ex.Steps[0].RunnerID)
+	}
+	if _, ex := e.state(t, busy.ID); ex.Steps[0].RunnerID != "r1" || ex.Steps[1].RunnerID != "r1" {
+		t.Fatalf("busy %+v", ex.Steps)
+	}
+}

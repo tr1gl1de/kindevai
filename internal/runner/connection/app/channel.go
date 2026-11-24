@@ -108,6 +108,12 @@ func (c *Channel) Emit(e SpooledEvent) (int64, error) {
 	if e.At == 0 {
 		e.At = c.Now().UnixMilli()
 	}
+	// Spool only what the Control Plane accepts: a record failing its validation would close the link on every
+	// reconnect and block all later events behind it.
+	if err := (protocol.Event{Epoch: "e", Seq: 1, Step: e.Step, Fence: e.Fence, AttemptSeq: e.AttemptSeq, Kind: e.Kind,
+		At: e.At, Body: e.Body}).Validate(); err != nil {
+		return 0, err
+	}
 	seq, err := c.Spool.Append(e)
 	if err != nil {
 		return 0, err
@@ -308,6 +314,10 @@ type Attempt struct {
 
 // Emit appends a lifecycle event (body is marshalled to JSON; nil for none).
 func (a *Attempt) Emit(kind string, body any) error {
+	if f, ok := body.(protocol.Failure); ok { // reasons often quote CLI output: keep them bounded
+		f.Reason = truncateUTF8(f.Reason, protocol.MaxReasonLen)
+		body = f
+	}
 	var raw json.RawMessage
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -390,4 +400,15 @@ func (w outputWriter) Write(p []byte) (int, error) {
 		p = p[n:]
 	}
 	return written, nil
+}
+
+// truncateUTF8 cuts s to at most n bytes without splitting a character.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

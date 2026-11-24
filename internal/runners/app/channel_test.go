@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runners/domain"
 )
@@ -95,11 +94,11 @@ func (r *memChannelRepo) SaveEventCursor(_ context.Context, runnerID, epoch stri
 	return nil
 }
 
-func (r *memChannelRepo) EventSeen(_ context.Context, step string, fence, seq int64) (bool, error) {
+func (r *memChannelRepo) EventSeen(_ context.Context, runnerID, step string, fence, seq int64) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	_, ok := r.events[evKey(step, fence, seq)]
-	return ok, nil
+	e, ok := r.events[evKey(step, fence, seq)]
+	return ok && e.RunnerID == runnerID, nil
 }
 
 func (r *memChannelRepo) RecordEvent(_ context.Context, e domain.AttemptEvent) error {
@@ -179,31 +178,6 @@ func (w *fakeWorkflow) history() []string {
 	return slices.Clone(w.calls)
 }
 
-type memOutbox struct {
-	mu   sync.Mutex
-	msgs []messaging.Message
-	keys map[string]bool
-}
-
-func (o *memOutbox) Enqueue(_ context.Context, m messaging.Message) error {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if o.keys == nil {
-		o.keys = map[string]bool{}
-	}
-	if !o.keys[m.Key] {
-		o.keys[m.Key] = true
-		o.msgs = append(o.msgs, m)
-	}
-	return nil
-}
-
-func (o *memOutbox) all() []messaging.Message {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return slices.Clone(o.msgs)
-}
-
 type sent struct {
 	typ     string
 	payload any
@@ -255,29 +229,24 @@ func (f *fakeSession) drain() []sent {
 }
 
 type channelEnv struct {
-	repo   *memChannelRepo
-	wf     *fakeWorkflow
-	outbox *memOutbox
-	ch     *Channel
+	repo *memChannelRepo
+	wf   *fakeWorkflow
+	ch   *Channel
 }
 
 func newChannelEnv() *channelEnv {
-	e := &channelEnv{repo: newMemChannelRepo(), wf: newFakeWorkflow(), outbox: &memOutbox{}}
+	e := &channelEnv{repo: newMemChannelRepo(), wf: newFakeWorkflow()}
 	n := 0
 	var mu sync.Mutex
-	e.ch = &Channel{Repo: e.repo, Executions: e.wf, Outbox: e.outbox, Tx: passTx{}, Now: func() time.Time { return time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC) },
+	e.ch = &Channel{Repo: e.repo, Executions: e.wf, Tx: passTx{}, Now: func() time.Time { return time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC) },
 		NewID: func() string { mu.Lock(); defer mu.Unlock(); n++; return fmt.Sprintf("id%d", n) }, AckTimeout: time.Hour}
 	return e
 }
 
-// deliverAll moves outbox messages into the command log (the dispatcher's job).
-func (e *channelEnv) deliverAll(t *testing.T) {
-	t.Helper()
-	for i, m := range e.outbox.all() {
-		if err := e.ch.Deliver(t.Context(), messaging.Delivery{ID: int64(i), Adapter: m.Adapter, Topic: m.Topic, Key: m.Key, Payload: m.Payload}); err != nil {
-			t.Fatal(err)
-		}
-	}
+func (e *channelEnv) commands(runnerID string) []domain.QueuedCommand {
+	e.repo.mu.Lock()
+	defer e.repo.mu.Unlock()
+	return slices.Clone(e.repo.commands[runnerID])
 }
 
 func handle(t *testing.T, ch *Channel, s Session, typ string, payload any) error {
@@ -315,7 +284,7 @@ func commandsSent(t *testing.T, f *fakeSession, n int) []protocol.Command {
 	return out
 }
 
-// Commands come from the durable outbox, get a message id and a monotonic seq, and are re-sent until ACKed:
+// Commands come from the durable (transactional) command log, get a message id and a monotonic seq, and are re-sent until ACKed:
 // after a reconnect from the last ACK, and after the ACK timeout.
 func TestCommandsSequencedAndResentUntilAcked(t *testing.T) {
 	t.Parallel()
@@ -327,12 +296,9 @@ func TestCommandsSequencedAndResentUntilAcked(t *testing.T) {
 		}
 	}
 	_ = e.ch.Send(ctx, "r1", "c0", protocol.CommandCancel, protocol.Cancel{}) // the same use case again: no new command
-	msgs := e.outbox.all()
-	if len(msgs) != 3 || msgs[0].Adapter != OutboxAdapter || msgs[0].Topic != TopicCommand || msgs[0].Key != "r1/c0" {
-		t.Fatalf("outbox %+v", msgs)
+	if cmds := e.commands("r1"); len(cmds) != 3 || cmds[0].ID != "c0" || cmds[0].Seq != 1 || cmds[2].Seq != 3 {
+		t.Fatalf("command log %+v", cmds)
 	}
-	e.deliverAll(t)
-	e.deliverAll(t) // at-least-once delivery from the outbox: still three commands
 	sess, f := newSession("r1")
 	stop := runServe(t, e.ch, sess)
 	if m := f.next(t); m.typ != protocol.TypeReconcile || m.payload.(protocol.Reconcile).RequestID == "" {
@@ -361,7 +327,6 @@ func TestCommandsSequencedAndResentUntilAcked(t *testing.T) {
 	}
 	// A new command reaches the live session at once.
 	_ = e.ch.Send(ctx, "r1", "c9", protocol.CommandCancel, protocol.Cancel{})
-	e.deliverAll(t)
 	if c := commandsSent(t, f2, 1)[0]; c.Seq != 4 || c.ID != "c9" {
 		t.Fatalf("live command %+v", c)
 	}
@@ -377,9 +342,8 @@ func TestCommandsSequencedAndResentUntilAcked(t *testing.T) {
 func TestCommandsResentAfterAckTimeout(t *testing.T) {
 	t.Parallel()
 	e := newChannelEnv()
-	e.ch.AckTimeout = 20 * time.Millisecond
+	e.ch.AckTimeout, e.ch.PollInterval, e.ch.Now = 20*time.Millisecond, 5*time.Millisecond, time.Now
 	_ = e.ch.Send(t.Context(), "r1", "c1", protocol.CommandCancel, protocol.Cancel{})
-	e.deliverAll(t)
 	sess, f := newSession("r1")
 	runServe(t, e.ch, sess)
 	if a, b := commandsSent(t, f, 1)[0], commandsSent(t, f, 1)[0]; a.Seq != 1 || b.Seq != 1 {
@@ -394,7 +358,6 @@ func TestCommandWindow(t *testing.T) {
 	for i := range 6 {
 		_ = e.ch.Send(t.Context(), "r1", fmt.Sprintf("c%d", i), protocol.CommandCancel, protocol.Cancel{})
 	}
-	e.deliverAll(t)
 	sess, f := newSession("r1")
 	runServe(t, e.ch, sess)
 	cmds := commandsSent(t, f, 3)
@@ -549,14 +512,14 @@ func TestStaleFenceRejectedAndCancelled(t *testing.T) {
 		t.Fatalf("acks %v", a)
 	}
 	rec := e.repo.events[evKey("s1", 7, 6)]
-	if rec.Outcome != domain.OutcomeRejected || rec.Reason != protocol.CancelStaleFence {
+	if rec.Outcome != domain.OutcomeRejected || rec.Reason != protocol.CancelStaleFence || rec.Body != nil {
 		t.Fatalf("record %+v", rec)
 	}
-	msgs := e.outbox.all()
-	var c outboxCommand
-	if len(msgs) != 1 || json.Unmarshal(msgs[0].Payload, &c) != nil || c.Kind != protocol.CommandCancel || c.RunnerID != "r1" {
-		t.Fatalf("outbox %+v", msgs)
+	cmds := e.commands("r1")
+	if len(cmds) != 1 || cmds[0].Kind != protocol.CommandCancel {
+		t.Fatalf("commands %+v", cmds)
 	}
+	c := cmds[0]
 	var body protocol.Cancel
 	if json.Unmarshal(c.Body, &body) != nil || body != (protocol.Cancel{Step: "s1", Fence: 7, Reason: protocol.CancelStaleFence}) {
 		t.Fatalf("cancel %s", c.Body)
@@ -565,7 +528,7 @@ func TestStaleFenceRejectedAndCancelled(t *testing.T) {
 	e.wf.fence["s2"], e.wf.state["s2"] = 1, "claimed"
 	done := protocol.Event{Epoch: "sp", Seq: 2, Base: 1, Step: "s2", Fence: 1, AttemptSeq: 1, Kind: protocol.EventCompleted, At: 1}
 	_ = handle(t, e.ch, sess, protocol.TypeEvent, done)
-	if rec := e.repo.events[evKey("s2", 1, 1)]; rec.Outcome != domain.OutcomeRejected || len(e.outbox.all()) != 1 {
+	if rec := e.repo.events[evKey("s2", 1, 1)]; rec.Outcome != domain.OutcomeRejected || len(e.commands("r1")) != 1 {
 		t.Fatalf("record %+v", rec)
 	}
 }

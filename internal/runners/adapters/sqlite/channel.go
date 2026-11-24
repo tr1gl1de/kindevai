@@ -19,6 +19,9 @@ func (r *Repository) EnsureChannel(ctx context.Context, runnerID, epoch string) 
 	if _, err := db.Conn(ctx, r.db).ExecContext(ctx,
 		`INSERT INTO runner_channels(runner_id, command_epoch) VALUES (?, ?) ON CONFLICT(runner_id) DO NOTHING`,
 		runnerID, epoch); err != nil {
+		if db.IsForeignKeyViolation(err) {
+			return fmt.Errorf("creating runner channel: %w", domain.ErrNotFound)
+		}
 		return fmt.Errorf("creating runner channel: %w", err)
 	}
 	return nil
@@ -122,11 +125,11 @@ func (r *Repository) SaveEventCursor(ctx context.Context, runnerID, epoch string
 	return nil
 }
 
-// EventSeen reports whether the attempt event is recorded.
-func (r *Repository) EventSeen(ctx context.Context, step string, fence, attemptSeq int64) (bool, error) {
+// EventSeen reports whether the runner's attempt event is recorded.
+func (r *Repository) EventSeen(ctx context.Context, runnerID, step string, fence, attemptSeq int64) (bool, error) {
 	var one int
 	err := db.Conn(ctx, r.db).QueryRowContext(ctx, `SELECT 1 FROM runner_attempt_events
-		WHERE step_id = ? AND fence = ? AND attempt_seq = ?`, step, fence, attemptSeq).Scan(&one)
+		WHERE runner_id = ? AND step_id = ? AND fence = ? AND attempt_seq = ?`, runnerID, step, fence, attemptSeq).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

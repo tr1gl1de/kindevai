@@ -249,3 +249,30 @@ func TestNewSpoolsGetDistinctEpochs(t *testing.T) {
 		t.Fatalf("default limit = %d", a.State().LimitBytes)
 	}
 }
+
+// When recovery cuts records off, their seqs may already have been applied by the Control Plane (the ACK was not
+// persisted): the spool starts a new epoch so new records are never mistaken for duplicates.
+func TestRecoveryAfterCorruptionStartsANewEpoch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := open(t, dir, Config{})
+	for i := int64(1); i <= 3; i++ {
+		_, _ = s.Append(ev("execution.output", i, "abc"))
+	}
+	epoch := s.State().Epoch
+	_ = s.Close()
+	m, _ := filepath.Glob(filepath.Join(dir, "seg-*.log"))
+	b, _ := os.ReadFile(m[0])
+	b[len(b)-3] ^= 0xff
+	_ = os.WriteFile(m[0], b, 0o600)
+	s2 := open(t, dir, Config{})
+	if st := s2.State(); st.Epoch == epoch || st.Last != 2 {
+		t.Fatalf("after cut: %+v (old epoch %s)", st, epoch)
+	}
+	// A clean reopen keeps the epoch.
+	e2 := s2.State().Epoch
+	_ = s2.Close()
+	if st := open(t, dir, Config{}).State(); st.Epoch != e2 {
+		t.Fatalf("clean reopen changed the epoch: %s → %s", e2, st.Epoch)
+	}
+}

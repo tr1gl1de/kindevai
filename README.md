@@ -122,6 +122,13 @@ ai-runner fingerprint                                    # compare with the runn
   `--public-url` / `KINDEV_PUBLIC_URL` (e.g. `https://ai.example.com`) pins the origins runners may dial; a connection
   addressed to another host is refused (421), so a relay cannot obtain a signature for itself. A revoked or disabled
   runner that ignores the close frame is cut off after 1 s.
+- Command/event channel: commands from the Control Plane (a per-runner transactional log written with the domain
+  change, monotonic seq) are applied once each, in commit order, and re-sent until the runner acknowledges them. Runner events (accepted, started,
+  output, completed, failed) are written to an on-disk spool first (`events/`, fsync, 256 MiB; when it is full the
+  output is dropped and reported as `execution.output.dropped`, lifecycle events are kept) and deleted only after the
+  Control Plane committed and acknowledged them, so a disconnect or a restart of either side loses nothing. Every
+  event carries its attempt's fencing token: a stale runner's events are rejected and it is told to cancel the
+  process. Each session starts with `runner.reconcile` (running attempts, unacknowledged results, spool offsets).
 
 ### Integrations and external calls
 

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -12,7 +13,6 @@ import (
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
-	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runners/adapters/sqlite"
 	"github.com/tr1gl1de/kindevai/internal/runners/app"
@@ -46,6 +46,9 @@ func TestCommandLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = r.EnsureChannel(ctx, "r1", "ep2") // exists: the epoch stays
+	if err := r.EnsureChannel(ctx, "ghost", "ep"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("channel of an unknown runner = %v", err)
+	}
 	appendCmd := func(id string) int64 {
 		var seq int64
 		if err := tx.InTx(ctx, func(ctx context.Context) error {
@@ -99,11 +102,14 @@ func TestEventCursorAndRecords(t *testing.T) {
 	if err := r.RecordEvent(ctx, ev); err != nil {
 		t.Fatal(err)
 	}
-	if seen, _ := r.EventSeen(ctx, "s", 2, 1); !seen {
+	if seen, _ := r.EventSeen(ctx, "r1", "s", 2, 1); !seen {
 		t.Fatal("not seen")
 	}
-	if seen, _ := r.EventSeen(ctx, "s", 3, 1); seen {
+	if seen, _ := r.EventSeen(ctx, "r1", "s", 3, 1); seen {
 		t.Fatal("another fence seen")
+	}
+	if seen, _ := r.EventSeen(ctx, "r2", "s", 2, 1); seen {
+		t.Fatal("another runner's event seen: a foreign runner could suppress the holder's events")
 	}
 	if r.RecordEvent(ctx, ev) == nil {
 		t.Fatal("an attempt event was recorded twice")
@@ -151,8 +157,7 @@ func TestControlPlaneRestartDuringEventStream(t *testing.T) {
 	d, r := withRunner(t)
 	wf := &okWorkflow{}
 	newChannel := func() *app.Channel {
-		return &app.Channel{Repo: r, Executions: wf, Outbox: messaging.NewOutbox(d, messaging.Config{}),
-			Tx: db.Transactor{DB: d}, Now: time.Now, NewID: rand.Text}
+		return &app.Channel{Repo: r, Executions: wf, Tx: db.Transactor{DB: d}, Now: time.Now, NewID: rand.Text}
 	}
 	kinds := []string{protocol.EventAccepted, protocol.EventStarted, protocol.EventOutput, protocol.EventOutput,
 		protocol.EventOutput, protocol.EventOutput, protocol.EventCompleted}

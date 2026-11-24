@@ -10,16 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runners/domain"
-)
-
-// Outbox adapter and topic of runner commands: Channel.Send enqueues, Channel.Deliver moves them into the
-// runner's command log.
-const (
-	OutboxAdapter = "runner"
-	TopicCommand  = "runner.command"
 )
 
 // ChannelRepo stores the command logs, channel cursors and recorded events.
@@ -34,7 +26,7 @@ type ChannelRepo interface {
 	// domain.AckedCommandRetention ago.
 	AckCommands(ctx context.Context, runnerID string, seq int64, now time.Time) error
 	SaveEventCursor(ctx context.Context, runnerID, epoch string, last int64) error
-	EventSeen(ctx context.Context, step string, fence, attemptSeq int64) (bool, error)
+	EventSeen(ctx context.Context, runnerID, step string, fence, attemptSeq int64) (bool, error)
 	RecordEvent(ctx context.Context, e domain.AttemptEvent) error
 	// AddOutput counts n output bytes for the attempt if they fit under max; false when they do not.
 	AddOutput(ctx context.Context, step string, fence, n, max int64) (bool, error)
@@ -56,25 +48,26 @@ type Reconciler interface {
 	Reconciled(ctx context.Context, runnerID string, r protocol.ReconcileResponse) error
 }
 
-// CommandOutbox is the durable outbox.
-type CommandOutbox interface {
-	Enqueue(ctx context.Context, m messaging.Message) error
-}
-
 // Channel is the Control Plane end of the runner command/event channel (KIN-22).
+//
+// Commands use a per-runner transactional outbox, the command log: Send writes the command in the caller's
+// transaction, so it commits or rolls back with the domain change and the runner sees commands in commit order.
+// (The generic messaging outbox delivers concurrently and cannot keep that order.) The session's sender delivers
+// the log at least once until the runner acknowledges.
 type Channel struct {
 	Repo       ChannelRepo
 	Executions Executions
 	Reconciler Reconciler // optional
-	Outbox     CommandOutbox
 	Tx         TxRunner
 	Now        func() time.Time
 	NewID      func() string
 	Logger     *slog.Logger
 	// Window bounds unacknowledged commands in flight (default 32), AckTimeout re-sends from the last ACK when
-	// nothing was acknowledged for that long (default 30s).
-	Window     int
-	AckTimeout time.Duration
+	// nothing was acknowledged for that long (default 30s). PollInterval is how often a session looks for commands
+	// committed by other transactions (default 1s; a Send also wakes it).
+	Window       int
+	AckTimeout   time.Duration
+	PollInterval time.Duration
 
 	once  sync.Once
 	mu    sync.Mutex
@@ -96,6 +89,9 @@ func (c *Channel) init() {
 		if c.AckTimeout <= 0 {
 			c.AckTimeout = 30 * time.Second
 		}
+		if c.PollInterval <= 0 {
+			c.PollInterval = time.Second
+		}
 	})
 }
 
@@ -111,17 +107,10 @@ func (c *Channel) wake(runnerID string) {
 	}
 }
 
-// outboxCommand is the outbox payload of a runner command.
-type outboxCommand struct {
-	RunnerID string          `json:"runnerId"`
-	ID       string          `json:"id"`
-	Kind     string          `json:"kind"`
-	Body     json.RawMessage `json:"body,omitempty"`
-}
-
-// Send queues a command for the runner through the durable outbox. Call it inside the use case's transaction;
-// id must be unique per runner and deterministic for the domain change (a repeated use case sends once).
+// Send appends a command to the runner's log. Call it inside the use case's transaction; id must be unique per
+// runner and deterministic for the domain change: a repeated use case finds the id and appends nothing.
 func (c *Channel) Send(ctx context.Context, runnerID, id, kind string, body any) error {
+	c.init()
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("encoding %s: %w", kind, err)
@@ -130,33 +119,17 @@ func (c *Channel) Send(ctx context.Context, runnerID, id, kind string, body any)
 	if err := probe.Validate(); err != nil {
 		return err
 	}
-	p, err := json.Marshal(outboxCommand{RunnerID: runnerID, ID: id, Kind: kind, Body: raw})
-	if err != nil {
-		return fmt.Errorf("encoding %s: %w", kind, err)
-	}
-	return c.Outbox.Enqueue(ctx, messaging.Message{Adapter: OutboxAdapter, Topic: TopicCommand,
-		Key: runnerID + "/" + id, Payload: p})
-}
-
-// Deliver is the outbox handler of TopicCommand: it appends the command to the runner's log, assigning its Seq,
-// and wakes the runner's session. A re-delivery finds the command id and appends nothing.
-func (c *Channel) Deliver(ctx context.Context, d messaging.Delivery) error {
-	c.init()
-	var m outboxCommand
-	if err := json.Unmarshal(d.Payload, &m); err != nil || m.RunnerID == "" {
-		return messaging.Permanent(fmt.Errorf("runner command payload: %w", err))
-	}
-	err := c.Tx.InTx(ctx, func(ctx context.Context) error {
-		if err := c.Repo.EnsureChannel(ctx, m.RunnerID, c.NewID()); err != nil {
+	err = c.Tx.InTx(ctx, func(ctx context.Context) error {
+		if err := c.Repo.EnsureChannel(ctx, runnerID, c.NewID()); err != nil {
 			return err
 		}
-		_, err := c.Repo.AppendCommand(ctx, m.RunnerID, domain.QueuedCommand{ID: m.ID, Kind: m.Kind, Body: m.Body}, c.Now())
+		_, err := c.Repo.AppendCommand(ctx, runnerID, domain.QueuedCommand{ID: id, Kind: kind, Body: raw}, c.Now())
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("appending runner command: %w", err)
+		return fmt.Errorf("queueing runner command: %w", err)
 	}
-	c.wake(m.RunnerID)
+	c.wake(runnerID) // may run before the caller commits; the session's poll picks the command up then
 	return nil
 }
 
@@ -186,19 +159,25 @@ func (c *Channel) Serve(ctx context.Context, s Session) {
 
 func (c *Channel) streamCommands(ctx context.Context, s Session, wake chan struct{}) error {
 	var sent, progress int64 = -1, -1
-	timer := time.NewTimer(c.AckTimeout)
-	defer timer.Stop()
+	progressAt := c.Now()
+	tick := time.NewTicker(c.PollInterval)
+	defer tick.Stop()
 	for {
 		st, ok, err := c.Repo.Channel(ctx, s.RunnerID)
 		if err != nil {
 			return err
 		}
 		if ok {
+			if st.CommandAcked != progress {
+				progress, progressAt = st.CommandAcked, c.Now()
+			}
 			if sent < st.CommandAcked {
 				sent = st.CommandAcked
 			}
-			if progress < 0 {
-				progress = st.CommandAcked
+			if sent > st.CommandAcked && c.Now().Sub(progressAt) >= c.AckTimeout {
+				c.Logger.Warn("runner commands not acknowledged in time; re-sending", "runner", s.RunnerID,
+					"from", st.CommandAcked+1)
+				sent, progressAt = st.CommandAcked, c.Now()
 			}
 			if free := c.Window - int(sent-st.CommandAcked); free > 0 && sent < st.CommandSeq {
 				cmds, err := c.Repo.CommandsAfter(ctx, s.RunnerID, sent, min(free, commandBatch))
@@ -221,14 +200,7 @@ func (c *Channel) streamCommands(ctx context.Context, s Session, wake chan struc
 		case <-ctx.Done():
 			return nil
 		case <-wake:
-		case <-timer.C:
-			if ok && sent > st.CommandAcked && st.CommandAcked == progress {
-				c.Logger.Warn("runner commands not acknowledged in time; re-sending", "runner", s.RunnerID,
-					"from", st.CommandAcked+1)
-				sent = st.CommandAcked
-			}
-			progress = st.CommandAcked
-			timer.Reset(c.AckTimeout)
+		case <-tick.C:
 		}
 	}
 }
@@ -348,7 +320,7 @@ func (c *Channel) event(ctx context.Context, s Session, e protocol.Event) error 
 }
 
 func (c *Channel) applyEvent(ctx context.Context, runnerID string, e protocol.Event) error {
-	seen, err := c.Repo.EventSeen(ctx, e.Step, e.Fence, e.AttemptSeq)
+	seen, err := c.Repo.EventSeen(ctx, runnerID, e.Step, e.Fence, e.AttemptSeq)
 	if err != nil || seen {
 		return err // seen: the same attempt event under another spool epoch
 	}
@@ -378,6 +350,9 @@ func (c *Channel) applyEvent(ctx context.Context, runnerID string, e protocol.Ev
 		c.Logger.Warn("runner event rejected", "runner", runnerID, "step", e.Step, "fence", e.Fence, "kind", e.Kind, "err", err)
 	case err != nil:
 		return err
+	}
+	if rec.Outcome == domain.OutcomeRejected {
+		rec.Body = nil // a rejected event keeps no payload: a runner cannot store data under attempts it does not hold
 	}
 	return c.Repo.RecordEvent(ctx, rec)
 }

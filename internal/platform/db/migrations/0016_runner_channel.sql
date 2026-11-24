@@ -1,7 +1,7 @@
 -- runners context (KIN-22): the runner command/event channel. Commands for a runner are numbered in its log
 -- (seq monotonic within command_epoch) and re-sent until acknowledged; acknowledged ones are purged after 7 days.
 -- event_epoch/event_last are the cursor in the runner's spool stream (the last seq applied). Every runner event is
--- recorded once per (step, fence, attempt_seq); output counts towards a per-attempt cap. Times are Unix ms.
+-- recorded once per (runner, step, fence, attempt_seq); output counts towards a per-attempt cap. Times are Unix ms.
 CREATE TABLE runner_channels (
   runner_id     TEXT PRIMARY KEY REFERENCES runners(id) ON DELETE CASCADE,
   command_epoch TEXT NOT NULL CHECK (command_epoch <> ''),
@@ -35,7 +35,7 @@ CREATE TABLE runner_attempt_events (
   reason      TEXT NOT NULL DEFAULT '',
   runner_at   INTEGER NOT NULL,
   received_at INTEGER NOT NULL,
-  PRIMARY KEY (step_id, fence, attempt_seq)
+  PRIMARY KEY (runner_id, step_id, fence, attempt_seq)                -- a runner dedups only its own events
 ) STRICT;
 
 CREATE TABLE runner_attempt_output (

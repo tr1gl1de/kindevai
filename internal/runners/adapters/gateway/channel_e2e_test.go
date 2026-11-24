@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
-	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/controlplane"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/spool"
@@ -50,27 +49,22 @@ func (a *acceptAll) history() []string {
 }
 
 // End to end over the real WebSocket: events spooled while the runner was offline reach the Control Plane after
-// it connects and are deleted from the spool once acknowledged; commands from the durable outbox are applied by
-// the runner in order and acknowledged.
+// it connects and are deleted from the spool once acknowledged; commands are applied by the runner once each, in
+// commit order, and acknowledged.
 func TestChannelEndToEnd(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, opts{})
 	e.approve(t)
 	ctx := t.Context()
 	wf := &acceptAll{}
-	outbox := messaging.NewOutbox(e.d, messaging.Config{PollInterval: 10 * time.Millisecond})
-	cp := &app.Channel{Repo: sqlite.New(e.d), Executions: wf, Outbox: outbox, Tx: db.Transactor{DB: e.d}, Now: time.Now,
-		NewID: func() string { return strings.ReplaceAll(time.Now().Format("150405.000000000"), ".", "") }}
-	outbox.Handle(app.TopicCommand, cp.Deliver)
+	cp := &app.Channel{Repo: sqlite.New(e.d), Executions: wf, Tx: db.Transactor{DB: e.d}, Now: time.Now,
+		NewID:        func() string { return strings.ReplaceAll(time.Now().Format("150405.000000000"), ".", "") },
+		PollInterval: 10 * time.Millisecond}
 	e.h.Messages = map[string]MessageFunc{}
 	for _, typ := range cp.Types() {
 		e.h.Messages[typ] = func(ctx context.Context, s app.Session, env protocol.Envelope) error { return cp.Handle(ctx, s, env) }
 	}
 	e.h.Sessions = []SessionFunc{cp.Serve}
-	octx, stopOutbox := context.WithCancel(ctx)
-	outboxDone := make(chan struct{})
-	go func() { defer close(outboxDone); _ = outbox.Run(octx) }()
-	t.Cleanup(func() { stopOutbox(); <-outboxDone })
 
 	// The runner, offline: its attempt's events go to the spool.
 	dir := filepath.Join(t.TempDir(), "events")
@@ -96,8 +90,8 @@ func TestChannelEndToEnd(t *testing.T) {
 	}
 	_ = at.Emit(protocol.EventCompleted, nil)
 
-	// Commands queued for it on the Control Plane.
-	for _, id := range []string{"c1", "c2"} {
+	// Commands queued for it on the Control Plane, each in its own transaction.
+	for _, id := range []string{"c1", "c2", "c3", "c4"} {
 		if err := (db.Transactor{DB: e.d}).InTx(ctx, func(ctx context.Context) error {
 			return cp.Send(ctx, e.runner, id, protocol.CommandCancel, protocol.Cancel{Step: "s", Fence: 1, Reason: "test"})
 		}); err != nil {
@@ -127,12 +121,12 @@ func TestChannelEndToEnd(t *testing.T) {
 		n := len(applied)
 		mu.Unlock()
 		st, _, _ := sqlite.New(e.d).Channel(ctx, e.runner)
-		return sp.State().Acked == 4 && n == 2 && st.CommandAcked == 2
+		return sp.State().Acked == 4 && n == 4 && st.CommandAcked == 4
 	})
 	if h := wf.history(); !slices.Equal(h, []string{"check", "start", "check", "complete"}) {
 		t.Fatalf("workflow saw %v", h)
 	}
-	if !slices.Equal(applied, []string{"c1", "c2"}) {
+	if !slices.Equal(applied, []string{"c1", "c2", "c3", "c4"}) {
 		t.Fatalf("runner applied %v", applied)
 	}
 	if st := sp.State(); st.Bytes != 0 || len(sp.Pending()) != 0 {

@@ -439,3 +439,38 @@ func TestReconcileResponse(t *testing.T) {
 		t.Fatalf("offsets %+v commands %+v", r.Spool, r.Commands)
 	}
 }
+
+// Everything the runner spools must pass the Control Plane's validation; otherwise one bad record would close the
+// link on every reconnect and block all later events behind it.
+func TestEmittedEventsAlwaysFitTheWire(t *testing.T) {
+	t.Parallel()
+	sp := &memSpool{epoch: "sp"}
+	ch := &Channel{Spool: sp, Cursor: &memCursor{}, Commands: (&applied{}).fn}
+	at := ch.Attempt("step-1", 2)
+	if err := at.Emit(protocol.EventFailed, protocol.Failure{Reason: strings.Repeat("e", 100<<10)}); err != nil {
+		t.Fatalf("a long failure reason must be truncated, got %v", err)
+	}
+	if err := at.Emit(protocol.EventStarted, map[string]string{"x": strings.Repeat("a", protocol.MaxBodyBytes)}); err == nil {
+		t.Fatal("an oversized body reached the spool")
+	}
+	for _, bad := range []*Attempt{ch.Attempt("", 1), ch.Attempt("has space", 1), ch.Attempt(strings.Repeat("s", 200), 1), ch.Attempt("s", 0)} {
+		if err := bad.Emit(protocol.EventStarted, nil); !errors.Is(err, protocol.ErrChannelField) {
+			t.Fatalf("invalid attempt %q/%d spooled: %v", bad.step, bad.fence, err)
+		}
+	}
+	evs, _ := sp.Read(0, 100, 1<<30)
+	if len(evs) != 1 {
+		t.Fatalf("spooled %d events", len(evs))
+	}
+	for _, e := range evs {
+		ev := protocol.Event{Epoch: "sp", Seq: e.Seq, Step: e.Step, Fence: e.Fence, AttemptSeq: e.AttemptSeq, Kind: e.Kind, At: e.At, Body: e.Body}
+		if err := ev.Validate(); err != nil {
+			t.Fatalf("spooled event fails validation: %v", err)
+		}
+		var f protocol.Failure
+		_ = json.Unmarshal(e.Body, &f)
+		if len(f.Reason) != protocol.MaxReasonLen {
+			t.Fatalf("reason %d bytes", len(f.Reason))
+		}
+	}
+}

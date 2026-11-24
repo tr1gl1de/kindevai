@@ -206,6 +206,12 @@ func (s *Spool) recover() error {
 			delete(s.pending, k)
 		}
 	}
+	if cut {
+		// The cut-off seqs may already be applied by the Control Plane (an ACK not yet persisted): a new epoch keeps
+		// the seqs written from now on from being taken for duplicates (the event's Base carries the position over).
+		s.meta.Epoch = rand.Text()
+		return s.writeMeta()
+	}
 	return nil
 }
 

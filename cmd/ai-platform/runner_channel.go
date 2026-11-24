@@ -18,20 +18,17 @@ import (
 	workflow "github.com/tr1gl1de/kindevai/internal/workflow/domain"
 )
 
-// newRunnerChannel wires the runner command/event channel (KIN-22): commands go through the durable outbox into
-// per-runner logs; events are checked against the workflow's fencing tokens.
-func newRunnerChannel(inst *bootstrap.Installation, msg *messagingModule, wf *workflowapp.Service, logger *slog.Logger) *runnersapp.Channel {
-	ch := &runnersapp.Channel{
+// newRunnerChannel wires the runner command/event channel (KIN-22): commands go into per-runner transactional
+// command logs; events are checked against the workflow's fencing tokens.
+func newRunnerChannel(inst *bootstrap.Installation, wf *workflowapp.Service, logger *slog.Logger) *runnersapp.Channel {
+	return &runnersapp.Channel{
 		Repo:       runnersdb.New(inst.DB),
 		Executions: runnerExecutions{wf},
-		Outbox:     msg.Outbox,
 		Tx:         db.Transactor{DB: inst.DB},
 		Now:        time.Now,
 		NewID:      rand.Text,
 		Logger:     logger,
 	}
-	msg.Outbox.Handle(runnersapp.TopicCommand, ch.Deliver)
-	return ch
 }
 
 // attachRunnerChannel runs the channel on every authorized runner session.

@@ -8,6 +8,7 @@ import { errorMessage } from "../../ui/errors";
 import { formatDateTime } from "../../ui/format";
 import { useProjects } from "../projects/api";
 import { useAuditEvents, useAuditKinds } from "./api";
+import { isKnownKind, kindKey } from "./kinds";
 
 /** Filter fields as kept in the URL (dates as YYYY-MM-DD in the viewer's time zone). */
 interface Draft {
@@ -207,29 +208,10 @@ function Filters({
 
 type T = ReturnType<typeof useTranslation>["t"];
 
-const KNOWN_KINDS = new Set([
-  "user.created",
-  "user.disabled",
-  "user.enabled",
-  "user.password_reset",
-  "user.password_changed",
-  "invitation.created",
-  "invitation.revoked",
-  "invitation.accepted",
-  "project.created",
-  "project.member_set",
-  "project.member_removed",
-  "auth.login_succeeded",
-  "auth.login_failed",
-  "auth.logout",
-  "setup.completed",
-]);
-
-/** Translated name of a known kind; kinds added by later contexts show their identifier until translated. */
+/** Translated name of a kind; a kind without a label yet (added by a later task) shows its identifier. */
 function kindLabel(t: T, kind: string): string {
-  if (!KNOWN_KINDS.has(kind)) return kind;
-  // The set above lists exactly the keys of audit.kinds.
-  return t(`audit.kinds.${kind.replace(".", "_")}` as "audit.kinds.user_created");
+  if (!isKnownKind(kind)) return kind;
+  return t(`audit.kinds.${kindKey(kind)}` as "audit.kinds.user_created");
 }
 
 function actorLabel(t: T, e: AuditEvent): string {
@@ -255,7 +237,7 @@ function EventRow({ event: e, projectName }: { event: AuditEvent; projectName?: 
       <td>{actorLabel(t, e)}</td>
       <td>
         {kindLabel(t, e.kind)}
-        {KNOWN_KINDS.has(e.kind) && (
+        {isKnownKind(e.kind) && (
           <>
             {" "}
             <code className="muted">{e.kind}</code>

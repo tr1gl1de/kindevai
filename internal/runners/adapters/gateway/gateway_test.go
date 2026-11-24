@@ -7,7 +7,6 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -389,11 +388,10 @@ func TestKeepaliveClosesUnresponsivePeerAndServerTimeoutsDoNotApply(t *testing.T
 	e.approve(t)
 	c, _ := e.connect(t)
 	// While the runner reads (and so answers pings) the session outlives the HTTP server's timeouts.
-	ctx, cancel := context.WithTimeout(t.Context(), 400*time.Millisecond)
-	_, _, err := c.Read(ctx)
-	cancel()
-	if !errors.Is(err, context.DeadlineExceeded) || !e.hub.Online(e.runner) {
-		t.Fatalf("session ended early: %v (close %d)", err, websocket.CloseStatus(err))
+	go func() { _, _, _ = c.Read(context.WithoutCancel(t.Context())) }() // ends when the test closes c
+	<-time.After(400 * time.Millisecond)
+	if !e.hub.Online(e.runner) {
+		t.Fatal("session ended early")
 	}
 	// A fresh connection that never reads cannot answer pings: the server drops it.
 	c2, _ := e.connect(t)

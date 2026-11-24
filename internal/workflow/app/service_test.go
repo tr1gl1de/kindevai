@@ -366,3 +366,29 @@ func TestTaskForIssueAndRetitleTask(t *testing.T) {
 		t.Fatalf("unchanged: %v %v", changed, err)
 	}
 }
+
+// FinishedSteps tells the runner event retention (KIN-52) which steps' executions finished and when; steps of a
+// running execution are absent and unknown steps report the zero time.
+func TestFinishedSteps(t *testing.T) {
+	t.Parallel()
+	e := newEnv()
+	ctx := t.Context()
+	task := e.readyTask(t)
+	ex, _ := e.svc.StartExecution(ctx, task.ID)
+	backend, frontend := ex.StepByKey("backend").ID, ex.StepByKey("frontend").ID
+	got, err := e.svc.FinishedSteps(ctx, []string{backend, frontend, "ghost"})
+	if err != nil || len(got) != 1 || !got["ghost"].IsZero() {
+		t.Fatalf("while running: %v %v", got, err)
+	}
+	if _, ok := got["ghost"]; !ok {
+		t.Fatal("unknown step not reported")
+	}
+	e.clock.now = t0.Add(time.Hour)
+	if _, err := e.svc.CancelTask(ctx, task.ID, "not needed"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = e.svc.FinishedSteps(ctx, []string{backend, frontend, backend})
+	if err != nil || len(got) != 2 || !got[backend].Equal(t0.Add(time.Hour)) || !got[frontend].Equal(t0.Add(time.Hour)) {
+		t.Fatalf("after cancel: %v %v", got, err)
+	}
+}

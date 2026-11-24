@@ -89,7 +89,12 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 			"connections for any other host are refused")
 	githubAPI := fset.String("github-api-url", envOr("KINDEV_GITHUB_API_URL", github.DefaultBaseURL),
 		"GitHub REST API base URL (GitHub Enterprise Server: https://<host>/api/v3)")
+	retFlags := addRetentionFlags(fset, os.Getenv) // KIN-52
 	if err := fset.Parse(args); err != nil {
+		return err
+	}
+	retention, err := retFlags.policy()
+	if err != nil {
 		return err
 	}
 	audiences, err := parseAudiences(*publicURL)
@@ -139,11 +144,12 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	apv := newApprovals(inst, msg, audit, integ, logger)
 	modules = append(modules, msg.HTTP, audit.HTTP, integ.HTTP, intake.HTTP, apv.HTTP)
 	gateway := newRunnerGateway(inst, hub, tel, localPeers, audiences, logger)
-	attachRunnerChannel(gateway, newRunnerChannel(inst, apv.Workflow, logger))
+	attachRunnerChannel(gateway, newRunnerChannel(inst, apv.Workflow, retention, logger))
 	modules = append(modules, gateway)
 	defer msg.start(ctx)()    // deferred after inst.Close, so the dispatchers stop before the database closes
 	defer intake.start(ctx)() // the YouTrack poller stops first
 	defer startTelemetry(ctx, tel, inst.Dir.Path())()
+	defer startRetention(ctx, inst, apv.Workflow, retention, logger)() // KIN-52
 
 	assets, built := web.Assets()
 	if !built {

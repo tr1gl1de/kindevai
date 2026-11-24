@@ -385,7 +385,7 @@ func (e *Execution) failAttempt(s *Step, msg string, now time.Time, maxAttempts 
 	s.finishAttempt(AttemptFailed, msg, now)
 	s.move(StepFailed)
 	s.RunnerID, s.Reason = "", msg
-	if len(s.Attempts) < maxAttempts {
+	if s.countedAttempts() < maxAttempts {
 		s.move(StepReady)
 		s.Reason = ""
 		return
@@ -461,6 +461,39 @@ func (e *Execution) ExpireLeases(now time.Time) []string {
 		ids = append(ids, s.ID)
 	}
 	return ids
+}
+
+// HoldForApproval stops a CLAIMED or RUNNING step whose runner reported changes beyond the approved scope: the
+// attempt is cancelled (it does not use the retry budget), the claim is released so the old process's later
+// reports are stale, and the step WAITs with reason approval until ResumeStep after a new approval.
+func (e *Execution) HoldForApproval(stepID, runnerID string, fence int64, msg string, now time.Time) error {
+	s, err := e.holder(stepID, runnerID, fence, "hold")
+	if err != nil {
+		return err
+	}
+	if !reportable(s) && s.State != StepClaimed {
+		return invalidStep(s, "hold")
+	}
+	msg = truncate(strings.TrimSpace(msg), MaxReasonLen)
+	if s.State == StepClaimed {
+		s.Attempts = append(s.Attempts, Attempt{Number: len(s.Attempts) + 1, RunnerID: runnerID, Fence: fence,
+			State: AttemptRunning, StartedAt: now})
+	}
+	s.finishAttempt(AttemptCancelled, msg, now)
+	s.move(StepWaiting)
+	s.WaitReason, s.RunnerID = WaitApproval, ""
+	return nil
+}
+
+// countedAttempts are the attempts that use the retry budget: cancelled ones (held for approval) do not.
+func (s *Step) countedAttempts() int {
+	n := 0
+	for _, a := range s.Attempts {
+		if a.State != AttemptCancelled {
+			n++
+		}
+	}
+	return n
 }
 
 // WaitStep parks a READY step that cannot be scheduled (no runner, network, CLI limit, approval).

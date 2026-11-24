@@ -15,6 +15,11 @@ export const handlers = [
   http.get("/api/auth/me", () => apiError(401, "unauthenticated")),
   http.get("/api/projects", () => json([])),
   http.get("/api/invitations", () => json([])),
+  http.get("/api/projects/:id/youtrack", () => json({ connected: false, binding: null, status: "ok", lastPolledAt: null, recent: [] })),
+  http.get("/api/integrations/youtrack/intake", () =>
+    json({ pollIntervalSeconds: 60, webhookSecret: { set: false, updatedAt: null }, webhookPath: "/api/webhooks/youtrack",
+      webhookHeader: "X-Kindevai-Webhook-Secret", links: [], health: { state: "ok", consecutiveFailures: 0, lastFailureAt: null } }),
+  ),
   http.get("/api/telegram/link", () => json({ configured: false, identity: null, request: null })),
 ];
 

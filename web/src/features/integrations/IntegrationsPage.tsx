@@ -12,6 +12,7 @@ import { useFieldErrors } from "../../ui/form";
 import { formatDateTime } from "../../ui/format";
 import { useNotify } from "../../ui/notify";
 import { useProjects } from "../projects/api";
+import { IntakeSettingsSection } from "./IntakeSettingsSection";
 import { useCheckYouTrack, useDisconnectYouTrack, useIntegrations, useSaveYouTrack } from "./api";
 
 /** Message for a field-level validation code from the integrations API. */
@@ -36,6 +37,7 @@ export function IntegrationsPage() {
           <YouTrackSettings key={integrations.data.youtrack?.updatedAt ?? "none"} connection={integrations.data.youtrack} />
         )}
       </section>
+      {integrations.data?.youtrack && <IntakeSettingsSection />}
       <ProjectLinks />
     </>
   );

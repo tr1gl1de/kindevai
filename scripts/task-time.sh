@@ -19,6 +19,16 @@ now=$(date +%s)
 yt_type() { case "$1" in dev) echo "Разработка";; test) echo "Тестирование";; docs) echo "Документирование";;
   research) echo "Исследование";; *) echo "unknown type $1 (dev|test|docs|research)" >&2; exit 1;; esac; }
 
+# YouTrack rejects work item types referenced by name, so resolve the type id from the project settings.
+post_item() { # id minutes type-name text
+  local tid
+  tid=$(python3 "$YT" api GET "admin/projects/${1%%-*}/timeTrackingSettings" -P 'fields=workItemTypes(id,name)' \
+    | python3 -c 'import json,sys; n=sys.argv[1]; print(next(t["id"] for t in json.load(sys.stdin)["workItemTypes"] if t["name"]==n))' "$3") \
+    || { echo "$1: work item type '$3' not found in YouTrack" >&2; return 1; }
+  python3 -c 'import json,sys; print(json.dumps({"duration":{"minutes":int(sys.argv[1])},"type":{"id":sys.argv[2]},"text":sys.argv[3],"date":int(sys.argv[4])*1000}))' \
+    "$2" "$tid" "$4" "$now" | python3 "$YT" api POST "issues/$1/timeTracking/workItems" -D - >/dev/null
+}
+
 close_open() { awk -v t="$now" 'BEGIN{OFS="\t"} $3=="-"{$3=t} {print}' "$f" >"$f.tmp" && mv "$f.tmp" "$f"; }
 
 case "$cmd" in
@@ -36,7 +46,7 @@ case "$cmd" in
     # aggregate unposted closed segments by type, round each type up to whole minutes
     awk '$4==0 && $3!="-"{s[$1]+=$3-$2} END{for(k in s) print k, int((s[k]+59)/60)}' "$f" | while read -r type min; do
       [ "$min" -gt 0 ] || continue
-      python3 "$YT" time add "$id" "${min}m" --type "$(yt_type "$type")" ${text:+-t "$text"} >/dev/null
+      post_item "$id" "$min" "$(yt_type "$type")" "$text"
       echo "$id: posted ${min}m $(yt_type "$type")"
     done
     awk 'BEGIN{OFS="\t"} $3!="-"{$4=1} {print}' "$f" >"$f.tmp" && mv "$f.tmp" "$f" ;;

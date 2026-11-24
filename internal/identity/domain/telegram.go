@@ -32,13 +32,13 @@ var (
 	// ErrInitDataInvalid covers malformed initData and a wrong signature alike.
 	ErrInitDataInvalid = errors.New("invalid Telegram init data")
 	// ErrInitDataExpired means the signature is fine but auth_date is outside the accepted window.
-	ErrInitDataExpired = errors.New("Telegram init data expired")
+	ErrInitDataExpired = errors.New("telegram init data expired")
 	// ErrTelegramNotConfigured means the Owner has not set up the bot yet.
-	ErrTelegramNotConfigured = errors.New("Telegram bot is not configured")
+	ErrTelegramNotConfigured = errors.New("telegram bot is not configured")
 	// ErrTelegramNotLinked means no account is linked to the Telegram user (accounts are never created from it).
-	ErrTelegramNotLinked = errors.New("Telegram account is not linked")
+	ErrTelegramNotLinked = errors.New("telegram account is not linked")
 	// ErrTelegramTaken means the Telegram user is already linked to another account.
-	ErrTelegramTaken = errors.New("Telegram account is linked to another user")
+	ErrTelegramTaken = errors.New("this Telegram account is linked to another user")
 	// ErrUserHasTelegram means the account is already linked to a Telegram user.
 	ErrUserHasTelegram = errors.New("account already has a linked Telegram account")
 )

@@ -27,6 +27,9 @@ const pending: Runner = {
   revokedAt: null,
   lastSeenAt: null,
   projects: [],
+  availability: "never_connected",
+  lastHeartbeatAt: null,
+  capabilities: null,
 };
 
 describe("runners list (owner)", () => {

@@ -666,3 +666,63 @@ textarea {
   margin: 0;
   font-size: 0.9rem;
 }
+} /* closes .policy-rules (its nested rules above were left unclosed) */
+
+/* Storage Overview (KIN-20) */
+.details-row {
+  display: contents;
+}
+.storage-card {
+  grid-column: 1 / -1;
+}
+.machine-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: var(--space);
+}
+.machine + .machine {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space);
+}
+.machine-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.machine-head h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+.volume {
+  margin-top: 8px;
+}
+.volume p {
+  margin: 4px 0;
+}
+.volume-role {
+  font-weight: 600;
+}
+.volume meter {
+  width: 100%;
+  height: 12px;
+}
+.volume.stale meter {
+  opacity: 0.5;
+}
+.level-badge.level-warning,
+.level-badge.level-high {
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+}
+.level-badge.level-critical {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--danger-text);
+}
+.availability-unreachable {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+}

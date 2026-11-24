@@ -23,6 +23,7 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/configfile"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/controlplane"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/keyfile"
+	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/probe"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/spool"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/app"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/domain"
@@ -274,7 +275,8 @@ func daemon(ctx context.Context, args []string, e *env) error {
 		return err
 	}
 	defer closeSpool()
-	conn := &app.Connector{Dialer: controlplane.New(), Logger: logger, Handlers: []app.LinkHandler{ch}}
+	conn := &app.Connector{Dialer: controlplane.New(), Logger: logger, Handlers: []app.LinkHandler{ch,
+		&app.Reporter{Probe: probe.New(d.Path())}}} // KIN-20 heartbeat, capabilities, storage
 	return conn.Run(ctx, en, id)
 }
 

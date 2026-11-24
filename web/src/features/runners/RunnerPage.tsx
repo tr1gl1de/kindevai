@@ -10,6 +10,7 @@ import { errorMessage, validationMessage } from "../../ui/errors";
 import { formatDateTime } from "../../ui/format";
 import { useNotify } from "../../ui/notify";
 import { useRunner, useRunnerAction, type RunnerAction } from "./api";
+import { AvailabilityBadge } from "./AvailabilityBadge";
 import { StatusBadge } from "./StatusBadge";
 
 /** Owner-only runner card: identity to verify, project permissions and lifecycle actions. */
@@ -60,7 +61,9 @@ function RunnerCard({ runner: r }: { runner: Runner }) {
       <div className="page-head">
         <PageHeading>{r.hostname}</PageHeading>
         <StatusBadge status={r.status} />
+        {r.status !== "pending" && r.status !== "revoked" && <AvailabilityBadge availability={r.availability} />}
       </div>
+      {r.status === "approved" && r.availability === "unreachable" && <p className="warning">{t("runners.unreachableNotice")}</p>}
       {r.status === "revoked" && <p className="warning">{t("runners.revokedNotice")}</p>}
       {r.status === "disabled" && <p className="warning">{t("runners.disabledNotice")}</p>}
       <FormAlert message={error} />
@@ -99,8 +102,12 @@ function RunnerCard({ runner: r }: { runner: Runner }) {
           <dd>{date(r.approvedAt, "—")}</dd>
           <dt>{t("runners.lastSeen")}</dt>
           <dd>{date(r.lastSeenAt, t("runners.never"))}</dd>
+          <dt>{t("runners.lastHeartbeat")}</dt>
+          <dd>{date(r.lastHeartbeatAt, t("runners.never"))}</dd>
         </dl>
       </section>
+
+      {r.status !== "pending" && <CapabilitiesSection runner={r} />}
 
       {r.status !== "revoked" && (
         <ProjectsForm
@@ -217,3 +224,42 @@ function ProjectsForm({ runner, busy, onSubmit }: { runner: Runner; busy: boolea
     </form>
   );
 }
+
+/** What the runner reported about itself (KIN-20): self-reported and informational, it grants nothing. */
+function CapabilitiesSection({ runner }: { runner: Runner }) {
+  const { t, i18n } = useTranslation();
+  const c = runner.capabilities;
+  return (
+    <section aria-labelledby="caps-title" className="page-section">
+      <h2 id="caps-title">{t("runners.capabilities")}</h2>
+      {!c ? (
+        <p className="muted">{t("runners.capabilitiesNone")}</p>
+      ) : (
+        <>
+          <p className="muted">{t("runners.capabilitiesHint", { date: formatDateTime(c.reportedAt, i18n.language) })}</p>
+          <dl className="details">
+            <dt>{t("runners.platform")}</dt>
+            <dd>{`${c.os}/${c.arch}`}</dd>
+            <dt>{t("runners.wsl")}</dt>
+            <dd>{t(c.wsl ? "runners.yes" : "runners.no")}</dd>
+            <dt>{t("runners.strictEgress")}</dt>
+            <dd>{t(c.strictEgress ? "runners.supported" : "runners.notSupported")}</dd>
+            {KNOWN_TOOLS.map((name) => {
+              const tool = c.tools.find((x) => x.name === name);
+              return (
+                <div key={name} className="details-row">
+                  <dt>
+                    <code>{name}</code>
+                  </dt>
+                  <dd>{tool ? tool.version || t("runners.versionUnknown") : <span className="muted">{t("runners.toolMissing")}</span>}</dd>
+                </div>
+              );
+            })}
+          </dl>
+        </>
+      )}
+    </section>
+  );
+}
+
+const KNOWN_TOOLS = ["claude", "codex", "git", "docker"];

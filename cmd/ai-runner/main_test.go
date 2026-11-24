@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,6 +23,7 @@ import (
 	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
+	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
 	"github.com/tr1gl1de/kindevai/internal/platform/ratelimit"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/domain"
@@ -30,6 +32,7 @@ import (
 	runnershttp "github.com/tr1gl1de/kindevai/internal/runners/adapters/httpapi"
 	runnersdb "github.com/tr1gl1de/kindevai/internal/runners/adapters/sqlite"
 	runnersapp "github.com/tr1gl1de/kindevai/internal/runners/app"
+	runnersdomain "github.com/tr1gl1de/kindevai/internal/runners/domain"
 )
 
 // controlPlane serves the real runners API of the Control Plane over httptest and issues enrollment tokens.
@@ -37,6 +40,7 @@ type controlPlane struct {
 	url string
 	svc *runnersapp.Service
 	hub *runnersapp.Hub
+	tel *runnersapp.Telemetry
 }
 
 func newControlPlane(t *testing.T) *controlPlane {
@@ -64,11 +68,13 @@ func newControlPlane(t *testing.T) *controlPlane {
 	mux := http.NewServeMux()
 	(&runnershttp.Handler{Service: svc,
 		Limiter: ratelimit.New(ratelimit.Config{Burst: 100, Every: time.Minute, MaxKeys: 10}, time.Now)}).Register(mux)
+	tel := &runnersapp.Telemetry{Repo: runnersdb.New(d), Runners: runnersdb.New(d), Tx: db.Transactor{DB: d},
+		Outbox: messaging.NewOutbox(d, messaging.Config{}), Now: time.Now}
 	(&runnersgw.Handler{Gateway: &runnersapp.Gateway{Runners: runnersdb.New(d), Hub: hub, Rand: rand.Reader, Now: time.Now,
-		NewID: rand.Text}}).Register(mux)
+		NewID: rand.Text}, Messages: runnersgw.TelemetryMessages(tel, time.Now, nil)}).Register(mux)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(func() { hub.Shutdown(); ts.Close() })
-	return &controlPlane{url: ts.URL, svc: svc, hub: hub}
+	return &controlPlane{url: ts.URL, svc: svc, hub: hub, tel: tel}
 }
 
 type projectsStub struct{}
@@ -368,6 +374,19 @@ func TestRunConnectsAfterApprovalAndStopsWhenRevoked(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitUntil("the runner to connect", func() bool { return cp.hub.Online(id) })
+	// KIN-20: the connected runner reports heartbeat, capabilities and storage.
+	waitUntil("the runner's telemetry", func() bool {
+		p, err := cp.tel.Presence(t.Context())
+		if err != nil || p[id].Availability != runnersdomain.AvailabilityOnline || p[id].Capabilities == nil {
+			return false
+		}
+		ov, err := cp.tel.Overview(t.Context(), owner)
+		return err == nil && slices.ContainsFunc(ov.Machines, func(m runnersapp.MachineOverview) bool {
+			return m.ID == id && slices.ContainsFunc(m.Volumes, func(v runnersapp.VolumeOverview) bool {
+				return v.Role == runnersdomain.RoleWorkspaces
+			})
+		})
+	})
 	if _, err := cp.svc.Revoke(t.Context(), owner, id); err != nil {
 		t.Fatal(err)
 	}

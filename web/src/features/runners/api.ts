@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
-import type { CreateEnrollmentTokenResult, EnrollmentToken, Runner } from "../../api/types";
+import type { CreateEnrollmentTokenResult, EnrollmentToken, Runner, StorageOverview } from "../../api/types";
 
 const keys = {
   runners: ["runners"] as const,
@@ -75,4 +75,14 @@ export function enrollCommand(origin = window.location.origin): string {
 export function needsHttpsForRemote(origin = window.location.origin): boolean {
   const u = new URL(origin);
   return u.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+}
+
+/** Storage Overview of the Control Plane and the runners (Owner only); refreshed while the dashboard is open. */
+export function useStorageOverview(enabled: boolean) {
+  return useQuery({
+    queryKey: ["storage-overview"] as const,
+    enabled,
+    refetchInterval: 60_000,
+    queryFn: ({ signal }) => api<StorageOverview>("GET", "/api/storage/overview", undefined, signal),
+  });
 }

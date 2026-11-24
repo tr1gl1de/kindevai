@@ -4,7 +4,7 @@
 !.env.example
 *.pem
 *.key
-secrets/
+/secrets/
 
 # --- Platform runtime data (SQLite WAL, encryption key, artifacts) --------
 data/
@@ -27,6 +27,9 @@ go.work.sum
 # --- Frontend (React / TypeScript) ---------------------------------------
 node_modules/
 dist/
+# web/dist holds a committed placeholder; the Vite build goes to web/dist/app
+!/web/dist/
+/web/dist/app/
 build/
 .vite/
 *.tsbuildinfo

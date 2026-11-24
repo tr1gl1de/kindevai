@@ -1,0 +1,41 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - bodyclose
+    - copyloopvar
+    - errorlint
+    - gosec
+    - misspell
+    - noctx
+    - rowserrcheck
+    - sqlclosecheck
+    - unconvert
+    - unparam
+  settings:
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Tx).Rollback
+        - (*database/sql.DB).Close
+    gosec:
+      excludes:
+        - G304 # file paths come from operator flags/config (data dir), not from request input
+  exclusions:
+    presets: [std-error-handling]
+    rules:
+      - path: _test\.go
+        linters: [gosec, errcheck, unparam, noctx, bodyclose]
+      # G407 false positive: the GCM nonce is filled from crypto/rand into the output buffer before Seal.
+      - path: internal/platform/secrets/secrets\.go
+        linters: [gosec]
+        text: G407
+
+formatters:
+  enable: [gofmt, goimports]

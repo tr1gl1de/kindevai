@@ -32,6 +32,14 @@ Everything goes through `make` (targets are no-ops until that part is scaffolded
 - One task = one branch = one worktree. Parallel tasks run in separate worktrees (see `/task`); each worktree
   gets its own port/compose name in `.worktree.env` — never hardcode ports or shared paths.
 
+## Engineering approach
+- **TDD**: failing test first for every acceptance criterion, then code, then refactor (`.claude/rules/process.md`).
+- **DDD**: bounded contexts under `internal/<context>/{domain,app,adapters}`; domain has no I/O (`.claude/rules/ddd.md`).
+- **Subagents** when they save context or give an independent view (spec-reader, test-runner, reviewer, Explore);
+  inline for small steps.
+- Prefer existing skills, plugins and proven libraries over hand-rolled code.
+- **Bilingual**: README in EN + RU (`README.md`, `README.ru.md`); web UI in EN + RU via i18next.
+
 ## Working rules
 - Keep context small: search with Grep/Glob, read file ranges, delegate broad exploration to the Explore agent.
 - Do not read `data/`, `node_modules/`, `dist/`, generated files or lockfiles unless the task needs it.

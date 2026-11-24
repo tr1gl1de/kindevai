@@ -114,13 +114,27 @@ export function seedLocale(launch: TelegramLaunch | null, storageKey: string) {
   }
 }
 
-export type StartKind = "link" | "invite" | "approval" | "alert";
+export type StartKind = "link" | "invite" | "approval" | "alert" | "task";
 
 /**
- * Splits a start parameter into its kind and token: link/invite flows before sign-in, approval/alert deep links
- * from Telegram notifications (KIN-40) after it.
+ * Splits a start parameter into its kind and token: link/invite flows before sign-in, approval/alert/task deep
+ * links from Telegram notifications (KIN-40, KIN-62) after it.
  */
 export function startTarget(startParam: string): { kind: StartKind; token: string } | null {
-  const m = /^(link|invite|approval|alert)_([A-Za-z0-9_-]{1,57})$/.exec(startParam);
+  const m = /^(link|invite|approval|alert|task)_([A-Za-z0-9_-]{1,57})$/.exec(startParam);
   return m ? { kind: m[1] as StartKind, token: m[2]! } : null;
+}
+
+/** The page a notification's deep link opens after sign-in; null for the pre-sign-in flows. */
+export function startPath(target: { kind: StartKind; token: string }): string | null {
+  switch (target.kind) {
+    case "approval":
+      return `/approvals/${target.token}`;
+    case "alert":
+      return "/alerts";
+    case "task":
+      return `/tasks/${target.token}`; // task page: KIN-25
+    default:
+      return null;
+  }
 }

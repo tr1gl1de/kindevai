@@ -69,6 +69,7 @@ type Projects interface {
 	Visible(ctx context.Context, p auth.Principal) ([]ProjectRef, error)
 	Name(ctx context.Context, projectID string) (string, error)
 	Members(ctx context.Context, projectID string) ([]string, error) // user ids
+	Admins(ctx context.Context, projectID string) ([]string, error)  // user ids of the project's admins
 }
 
 // People is the identity context as the notifier needs it.
@@ -371,6 +372,61 @@ func (s *Service) NotifyApproval(ctx context.Context, r ApprovalRequest) error {
 		n := domain.ApprovalNotice{ApprovalID: r.ApprovalID, TaskID: r.TaskID, Project: project, Risk: r.Risk, Reason: r.Reason}
 		return s.send(ctx, owners, domain.NotifyApprovalRequested, "approval/"+r.ApprovalID, "approval_"+r.ApprovalID,
 			func(l domain.Language) string { return domain.RenderApproval(l, n) })
+	})
+}
+
+// Final task states announced by the workflow (KIN-62).
+const (
+	TaskCompleted = "COMPLETED"
+	TaskFailed    = "FAILED"
+)
+
+// TaskFinished is a task that entered COMPLETED or FAILED, as the workflow announces it.
+type TaskFinished struct {
+	TaskID, ProjectID, State, Title, CreatedBy string
+}
+
+// NotifyTask tells a finished task's audience: the Owners, the project's admins and the task's author while they
+// are still a member of the project (RBAC is re-checked here, at delivery). Each message is keyed by task, state
+// and user, so a redelivered event never sends twice.
+func (s *Service) NotifyTask(ctx context.Context, e TaskFinished) error {
+	switch {
+	case e.TaskID == "":
+		return &domain.ValidationError{Field: "taskId", Code: "required"}
+	case e.ProjectID == "":
+		return &domain.ValidationError{Field: "projectId", Code: "required"}
+	case e.State != TaskCompleted && e.State != TaskFailed:
+		return &domain.ValidationError{Field: "state", Code: "invalid"}
+	}
+	project, err := s.Projects.Name(ctx, e.ProjectID)
+	if errors.Is(err, domain.ErrNotFound) {
+		return nil // the project is gone: nobody may see the task any more
+	}
+	if err != nil {
+		return fmt.Errorf("loading project: %w", err)
+	}
+	return s.Tx.InTx(ctx, func(ctx context.Context) error {
+		users, err := s.People.Owners(ctx)
+		if err != nil {
+			return fmt.Errorf("listing owners: %w", err)
+		}
+		admins, err := s.Projects.Admins(ctx, e.ProjectID)
+		if err != nil {
+			return fmt.Errorf("listing admins: %w", err)
+		}
+		users = append(users, admins...)
+		if e.CreatedBy != "" {
+			members, err := s.Projects.Members(ctx, e.ProjectID)
+			if err != nil {
+				return fmt.Errorf("listing members: %w", err)
+			}
+			if slices.Contains(members, e.CreatedBy) {
+				users = append(users, e.CreatedBy)
+			}
+		}
+		n := domain.TaskNotice{TaskID: e.TaskID, Title: e.Title, Project: project, Failed: e.State == TaskFailed}
+		return s.send(ctx, users, domain.NotifyTaskFinished, "task/"+e.TaskID+"/"+e.State, "task_"+e.TaskID,
+			func(l domain.Language) string { return domain.RenderTask(l, n) })
 	})
 }
 

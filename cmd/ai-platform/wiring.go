@@ -19,6 +19,8 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/identity/adapters/tokenfile"
 	"github.com/tr1gl1de/kindevai/internal/identity/app"
 	identity "github.com/tr1gl1de/kindevai/internal/identity/domain"
+	integrationsdb "github.com/tr1gl1de/kindevai/internal/integrations/adapters/sqlite"
+	integrationsapp "github.com/tr1gl1de/kindevai/internal/integrations/app"
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
 	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
@@ -78,6 +80,7 @@ type identityModule struct {
 	Middleware func(http.Handler) http.Handler
 	Users      app.AccountRepository // for other contexts, via the adapters below
 	Hasher     *password.Hasher      // shared so the Argon2id concurrency cap is global
+	Telegram   *app.TelegramService  // Mini App sign-in; also links Telegram on invitation acceptance
 }
 
 // newIdentity wires the identity bounded context and prepares setup mode.
@@ -136,12 +139,26 @@ func newIdentity(ctx context.Context, inst *bootstrap.Installation, audit *audit
 		Limiter: perMinute(10),
 		Logger:  logger,
 	}
+	telegram := &app.TelegramService{
+		Repo:     sqlite.NewTelegramRepository(inst.DB),
+		Vault:    botTokenVault{&integrationsapp.Vault{Store: integrationsdb.New(inst.DB), Cipher: inst.Box, Now: time.Now}},
+		Users:    sqlite.NewUserRepository(inst.DB),
+		Sessions: sqlite.NewSessionRepository(inst.DB),
+		Tx:       db.Transactor{DB: inst.DB},
+		Audit:    audit.Service,
+		Now:      time.Now,
+		Rand:     rand.Reader,
+		NewID:    rand.Text,
+		Logger:   logger,
+	}
 	return &identityModule{
 		Modules: []server.Module{
 			&httpapi.SetupHandler{Service: setup, Limiter: perMinute(10), StatusLimiter: status, Logger: logger},
 			authn,
 			accounts,
+			&httpapi.TelegramHandler{Service: telegram, Limiter: perMinute(20), Logger: logger},
 		},
+		Telegram:   telegram,
 		Middleware: authn.Middleware,
 		Users:      sqlite.NewUserRepository(inst.DB),
 		Hasher:     hasher,
@@ -172,9 +189,11 @@ func newProjects(inst *bootstrap.Installation, id *identityModule, audit *auditM
 			Now:         time.Now,
 			NewID:       rand.Text,
 			Logger:      logger,
+			Telegram:    id.Telegram,
 		},
-		Limiter: ratelimit.New(ratelimit.Config{Burst: 10, Every: time.Minute, MaxKeys: 10_000}, time.Now),
-		Logger:  logger,
+		Limiter:  ratelimit.New(ratelimit.Config{Burst: 10, Every: time.Minute, MaxKeys: 10_000}, time.Now),
+		Logger:   logger,
+		Telegram: id.Telegram,
 	}
 	runnerMgmt := &runnershttp.Handler{
 		Service: &runnersapp.Service{

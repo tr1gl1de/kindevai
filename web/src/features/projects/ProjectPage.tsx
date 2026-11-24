@@ -10,6 +10,7 @@ import { errorMessage, validationMessage } from "../../ui/errors";
 import { useFieldErrors } from "../../ui/form";
 import { useNotify } from "../../ui/notify";
 import { useMembers, useProject, useRemoveMember, useSetMember } from "./api";
+import { ProjectIntegrationsPanel } from "../integrations/ProjectIntegrationsPanel";
 import { NotFoundPage } from "./NotFoundPage";
 import { RoleLabel } from "./RoleLabel";
 
@@ -33,6 +34,7 @@ export function ProjectPage({ me }: { me: Me }) {
       </div>
       <p className="muted">{p.slug}</p>
       <Members project={p} canManage={me.role === "owner"} />
+      {me.role === "owner" && <ProjectIntegrationsPanel project={p} />}
     </>
   );
 }

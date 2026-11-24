@@ -1,0 +1,190 @@
+package app
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/tr1gl1de/kindevai/internal/workflow/domain"
+)
+
+// memRepo is an in-memory Repository with the same optimistic-concurrency contract as the SQLite one.
+type memRepo struct {
+	mu        sync.Mutex
+	tasks     map[string]domain.Task
+	revisions map[string]domain.PlanRevision // taskID/number
+	execs     map[string]domain.Execution
+}
+
+func newMemRepo() *memRepo {
+	return &memRepo{tasks: map[string]domain.Task{}, revisions: map[string]domain.PlanRevision{},
+		execs: map[string]domain.Execution{}}
+}
+
+func revKey(taskID string, n int) string { return fmt.Sprintf("%s/%d", taskID, n) }
+
+func (r *memRepo) CreateTask(_ context.Context, t *domain.Task) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, o := range r.tasks {
+		if t.YouTrackIssue != "" && o.ProjectID == t.ProjectID && o.YouTrackIssue == t.YouTrackIssue {
+			return ErrDuplicateIssue
+		}
+	}
+	t.Version = 1
+	r.tasks[t.ID] = *t
+	return nil
+}
+
+func (r *memRepo) Task(_ context.Context, id string) (domain.Task, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, ok := r.tasks[id]
+	if !ok {
+		return t, domain.ErrNotFound
+	}
+	return t, nil
+}
+
+func (r *memRepo) SaveTask(_ context.Context, t *domain.Task) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	old, ok := r.tasks[t.ID]
+	if !ok || old.Version != t.Version {
+		return domain.ErrConflict
+	}
+	t.Version++
+	r.tasks[t.ID] = *t
+	return nil
+}
+
+func (r *memRepo) CreateRevision(_ context.Context, rev domain.PlanRevision) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := revKey(rev.TaskID(), rev.Number())
+	if _, ok := r.revisions[k]; ok {
+		return domain.ErrConflict
+	}
+	r.revisions[k] = rev
+	return nil
+}
+
+func (r *memRepo) Revision(_ context.Context, taskID string, n int) (domain.PlanRevision, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rev, ok := r.revisions[revKey(taskID, n)]
+	if !ok {
+		return rev, domain.ErrNotFound
+	}
+	return rev, nil
+}
+
+func (r *memRepo) CreateExecution(_ context.Context, e *domain.Execution) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, o := range r.execs {
+		if o.TaskID == e.TaskID && o.State == domain.ExecutionRunning {
+			return domain.ErrConflict
+		}
+	}
+	e.Version = 1
+	r.execs[e.ID] = e.Clone()
+	return nil
+}
+
+func (r *memRepo) Execution(_ context.Context, id string) (domain.Execution, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.execs[id]
+	if !ok {
+		return e, domain.ErrNotFound
+	}
+	return e.Clone(), nil
+}
+
+func (r *memRepo) ExecutionByStep(_ context.Context, stepID string) (domain.Execution, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.execs {
+		if e.Step(stepID) != nil {
+			return e.Clone(), nil
+		}
+	}
+	return domain.Execution{}, domain.ErrNotFound
+}
+
+func (r *memRepo) RunningExecution(_ context.Context, taskID string) (domain.Execution, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.execs {
+		if e.TaskID == taskID && e.State == domain.ExecutionRunning {
+			return e.Clone(), nil
+		}
+	}
+	return domain.Execution{}, domain.ErrNotFound
+}
+
+func (r *memRepo) SaveExecution(_ context.Context, e *domain.Execution) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	old, ok := r.execs[e.ID]
+	if !ok || old.Version != e.Version {
+		return domain.ErrConflict
+	}
+	e.Version++
+	r.execs[e.ID] = e.Clone()
+	return nil
+}
+
+func (r *memRepo) ExpiredLeaseExecutions(_ context.Context, now time.Time) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var ids []string
+	for _, e := range r.execs {
+		for _, s := range e.Steps {
+			if e.State == domain.ExecutionRunning && s.LeaseExpiresAt != nil && !now.Before(*s.LeaseExpiresAt) {
+				ids = append(ids, e.ID)
+				break
+			}
+		}
+	}
+	return ids, nil
+}
+
+// memTx serializes use cases like the single SQLite writer does. It does not roll back: tests that need atomicity
+// run against SQLite (adapters/sqlite).
+type memTx struct{ mu sync.Mutex }
+
+func (t *memTx) InTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return fn(ctx)
+}
+
+type fakeProjects map[string][]string
+
+func (f fakeProjects) Repositories(_ context.Context, projectID string) ([]string, error) {
+	r, ok := f[projectID]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	return r, nil
+}
+
+type clock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *clock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *clock) Add(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}

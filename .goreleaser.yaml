@@ -1,4 +1,4 @@
-# GoReleaser v2: cross-platform Control Plane binaries with the web UI embedded.
+# GoReleaser v2: cross-platform Control Plane binaries with the web UI embedded, and the Runner daemon.
 # Dev pre-releases run it with --snapshot; prod releases run it on an owner-created v* tag of main.
 version: 2
 project_name: kindevai
@@ -18,11 +18,27 @@ builds:
     flags: [-trimpath]
     ldflags: ["-s -w -X main.version={{ .Version }}"]
     mod_timestamp: "{{ .CommitTimestamp }}"
+  - id: ai-runner
+    main: ./cmd/ai-runner
+    binary: ai-runner
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{ .Version }}"]
+    mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
-  - formats: [tar.gz]
+  - id: ai-platform
+    ids: [ai-platform]
+    formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files: [LICENSE, README.md, README.ru.md, compose.yml, deploy/Caddyfile]
+  - id: ai-runner
+    ids: [ai-runner]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}-runner_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [LICENSE, README.md, README.ru.md, deploy/runner/*]
 
 checksum:
   name_template: SHA256SUMS

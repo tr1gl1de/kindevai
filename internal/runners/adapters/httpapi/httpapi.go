@@ -12,12 +12,13 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
 	"github.com/tr1gl1de/kindevai/internal/platform/httpx"
 	"github.com/tr1gl1de/kindevai/internal/platform/ratelimit"
+	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runners/app"
 	"github.com/tr1gl1de/kindevai/internal/runners/domain"
 )
 
 // EnrollPath is the public enrollment endpoint; the identity middleware lets it through without a session.
-const EnrollPath = "/api/runners/enroll"
+const EnrollPath = protocol.EnrollPath
 
 // Handler serves the runners API.
 type Handler struct {
@@ -70,22 +71,11 @@ type ProjectsRequest struct {
 	ProjectIDs []string `json:"projectIds"`
 }
 
-// EnrollRequest is the body of POST /api/runners/enroll.
-type EnrollRequest struct {
-	Token     string `json:"token"`
-	PublicKey string `json:"publicKey"` // standard base64 of the raw 32-byte Ed25519 public key
-	Hostname  string `json:"hostname"`
-	OS        string `json:"os"`
-	Arch      string `json:"arch"`
-	Version   string `json:"version"`
-}
+// EnrollRequest is the body of POST /api/runners/enroll (shared wire message, see internal/protocol).
+type EnrollRequest = protocol.EnrollRequest
 
 // EnrollResult is the runner's registration: 201 when created, 200 for a retry of the same enrollment.
-type EnrollResult struct {
-	RunnerID    string `json:"runnerId"`
-	Status      string `json:"status"`
-	Fingerprint string `json:"fingerprint"`
-}
+type EnrollResult = protocol.EnrollResult
 
 // Register mounts the routes.
 func (h *Handler) Register(mux *http.ServeMux) {

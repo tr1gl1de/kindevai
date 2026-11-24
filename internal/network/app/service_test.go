@@ -301,8 +301,6 @@ func newEnv(t *testing.T) *env {
 	return e
 }
 
-func ptr(s string) *string { return &s }
-
 func (e *env) create(t *testing.T, r app.ProfileRequest) app.ProfileView {
 	t.Helper()
 	v, err := e.svc.CreateProfile(t.Context(), ownerP, r)

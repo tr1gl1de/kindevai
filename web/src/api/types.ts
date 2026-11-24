@@ -515,3 +515,85 @@ export interface RiskPolicy {
   custom: boolean;
   rules: RiskRule[];
 }
+
+// Network profiles (KIN-30). Proxy passwords are write-only: requests may carry one, responses only passwordSet.
+export type Enforcement = "off" | "monitor" | "strict";
+export type DnsPolicy = "system" | "proxy";
+export type NetworkLevel = "system" | "runner" | "project" | "role";
+
+export interface NetworkRule {
+  host?: string;
+  cidr?: string;
+  ports: number[];
+}
+
+export interface NetworkProxy {
+  scheme: "http" | "https" | "socks5";
+  host: string;
+  port: number;
+  username: string;
+  url?: string;
+}
+
+export interface NetworkProfile {
+  id: string;
+  name: string;
+  proxy: NetworkProxy | null;
+  passwordSet: boolean;
+  enforcement: Enforcement;
+  dns: DnsPolicy;
+  failClosed: boolean;
+  expectedIpv4: string;
+  expectedIpv6: string;
+  allow: NetworkRule[];
+  diagnosticUrl: string;
+  assigned: { level: NetworkLevel; target: string }[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** POST/PUT /api/network/profiles: password omitted keeps the stored one. */
+export interface NetworkProfileRequest {
+  name: string;
+  proxyUrl: string;
+  password?: string;
+  clearPassword?: boolean;
+  enforcement: Enforcement;
+  dns: DnsPolicy;
+  failClosed: boolean;
+  expectedIpv4: string;
+  expectedIpv6: string;
+  allow: NetworkRule[];
+  diagnosticUrl: string;
+}
+
+export interface NetworkAssignment {
+  level: NetworkLevel;
+  target: string;
+  profileId: string;
+}
+
+export interface NetworkCheck {
+  name: string;
+  host: string;
+  ok: boolean;
+  code: string;
+  latencyMs: number;
+}
+
+export interface NetworkTest {
+  id: string;
+  runnerId: string;
+  profileId: string;
+  status: "pending" | "ok" | "failed" | "timed_out";
+  code: string;
+  detail: string;
+  expectedIpv4: string;
+  expectedIpv6: string;
+  observedIpv4: string;
+  observedIpv6: string;
+  checks: NetworkCheck[];
+  durationMs: number;
+  requestedAt: string;
+  completedAt: string | null;
+}

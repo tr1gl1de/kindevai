@@ -35,6 +35,14 @@ func newRunnerChannel(inst *bootstrap.Installation, wf *workflowapp.Service, ret
 	}
 }
 
+// reportOutputStorage shows the stored runner output against its limit in the Storage Overview and raises the
+// Alert Center's "runner output storage full" alert through the outbox (KIN-59).
+func reportOutputStorage(inst *bootstrap.Installation, msg *messagingModule, tel *runnersapp.Telemetry, ch *runnersapp.Channel,
+	ret runners.RetentionPolicy) {
+	tel.Output, tel.OutputPolicy = runnersdb.New(inst.DB), ret
+	ch.Outbox = msg.Outbox
+}
+
 // retentionFlags are the retention settings of recorded runner events (KIN-52): flags defaulting to KINDEV_*
 // environment variables, then to domain.DefaultRetention.
 type retentionFlags struct{ output, events, limitMB *string }

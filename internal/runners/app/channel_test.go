@@ -671,3 +671,52 @@ func TestCommandsPreparedBeforeSending(t *testing.T) {
 		t.Fatal("the command log was changed")
 	}
 }
+
+// KIN-59: dropping output for the total limit raises a Control Plane alert through the outbox (at most once a
+// minute, grouped by the Alert Center); the first output stored afterwards resolves it.
+func TestOutputStorageFullAlertsAndRecovers(t *testing.T) {
+	t.Parallel()
+	e := newChannelEnv()
+	ob := &memOutbox{}
+	e.ch.Outbox = ob
+	e.ch.MaxStoredOutput = domain.MaxAttemptOutput
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	e.ch.Now = func() time.Time { return now }
+	e.wf.fence["s1"], e.wf.state["s1"] = 1, "running"
+	sess, _ := newSession("r1")
+	seq := int64(0)
+	output := func(data string) {
+		t.Helper()
+		seq++
+		body, _ := json.Marshal(protocol.Output{Stream: "stdout", Data: data})
+		ev := protocol.Event{Epoch: "sp", Seq: seq, Step: "s1", Fence: 1, AttemptSeq: seq, Kind: protocol.EventOutput, At: 1, Body: body}
+		if err := handle(t, e.ch, sess, protocol.TypeEvent, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.repo.output["old/1"] = domain.MaxAttemptOutput - 5
+	output("more than five bytes")
+	output("more than five bytes") // same minute: grouped, not enqueued again
+	now = now.Add(time.Minute)
+	output("more than five bytes")
+	if got := ob.topics(); !slices.Equal(got, []string{TopicRunnerOutputFull, TopicRunnerOutputFull}) {
+		t.Fatalf("topics while full = %v", got)
+	}
+	var p struct {
+		LimitBytes int64  `json:"limitBytes"`
+		RunnerID   string `json:"runnerId"`
+		StepID     string `json:"stepId"`
+	}
+	if err := json.Unmarshal(ob.msgs[0].Payload, &p); err != nil || p.LimitBytes != domain.MaxAttemptOutput || p.RunnerID != "r1" ||
+		p.StepID != "s1" || ob.msgs[0].Adapter != AdapterAlerts {
+		t.Fatalf("payload %s %+v %v", ob.msgs[0].Payload, p, err)
+	}
+	e.repo.mu.Lock()
+	delete(e.repo.output, "old/1") // the retention evicted the oldest finished output
+	e.repo.mu.Unlock()
+	output("fits")
+	output("fits again")
+	if got := ob.topics(); !slices.Equal(got, []string{TopicRunnerOutputFull, TopicRunnerOutputFull, TopicRunnerOutputRecovered}) {
+		t.Fatalf("topics after space was freed = %v", got)
+	}
+}

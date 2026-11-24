@@ -62,3 +62,31 @@ func TestExpired(t *testing.T) {
 		t.Fatal("expired")
 	}
 }
+
+// KIN-59: the Storage Overview's state of stored runner output.
+func TestOutputStorageState(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) *time.Time { x := now.Add(-d); return &x }
+	for _, c := range []struct {
+		name string
+		s    OutputStorage
+		want OutputStorageState
+	}{
+		{"empty", OutputStorage{LimitBytes: 1000}, OutputStorageOK},
+		{"below 90%", OutputStorage{UsedBytes: 899, LimitBytes: 1000}, OutputStorageOK},
+		{"near the limit", OutputStorage{UsedBytes: 900, LimitBytes: 1000}, OutputStorageHigh},
+		{"dropping now", OutputStorage{UsedBytes: 500, LimitBytes: 1000, LastDropAt: at(OutputDroppingWindow - time.Second)}, OutputStorageFull},
+		{"dropped a while ago", OutputStorage{UsedBytes: 500, LimitBytes: 1000, LastDropAt: at(OutputDroppingWindow)}, OutputStorageOK},
+	} {
+		if got := c.s.State(now); got != c.want {
+			t.Errorf("%s: state %q, want %q", c.name, got, c.want)
+		}
+	}
+	if p := (OutputStorage{UsedBytes: 250, LimitBytes: 1000}).UsedPercent(); p != 25 {
+		t.Errorf("used percent %v", p)
+	}
+	if p := (OutputStorage{UsedBytes: 250}).UsedPercent(); p != 0 {
+		t.Errorf("used percent without a limit %v", p)
+	}
+}

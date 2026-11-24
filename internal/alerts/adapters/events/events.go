@@ -101,6 +101,34 @@ func (h Handlers) StorageLevel(ctx context.Context, d messaging.Delivery) error 
 			"availableBytes": strconv.FormatInt(p.AvailableBytes, 10)}}))
 }
 
+// runnerOutputKey groups the Control Plane's "runner output storage full" alerts until output is stored again.
+const runnerOutputKey = "runner-output/full"
+
+// RunnerOutputFull handles alerts.runner_output_full {limitBytes, runnerId, stepId} (KIN-59): output of running
+// executions is dropped because the Control Plane's runner output storage is full.
+func (h Handlers) RunnerOutputFull(ctx context.Context, d messaging.Delivery) error {
+	var p struct {
+		LimitBytes int64  `json:"limitBytes"`
+		RunnerID   string `json:"runnerId"`
+		StepID     string `json:"stepId"`
+	}
+	if err := decode(d, &p); err != nil {
+		return err
+	}
+	if p.LimitBytes <= 0 {
+		return messaging.Permanent(errors.New("runner_output_full: no limitBytes"))
+	}
+	return permanent(h.Svc.Raise(ctx, d.Key, domain.Occurrence{Kind: domain.KindRunnerOutputFull,
+		Severity: domain.SeverityWarning, DedupKey: runnerOutputKey, Subject: "control-plane", Details: map[string]string{
+			"limitBytes": strconv.FormatInt(p.LimitBytes, 10), "limitMiB": strconv.FormatInt(p.LimitBytes>>20, 10),
+			"runnerId": p.RunnerID, "stepId": p.StepID}}))
+}
+
+// RunnerOutputRecovered handles alerts.runner_output_recovered {}: output is stored again, the alert resolves.
+func (h Handlers) RunnerOutputRecovered(ctx context.Context, _ messaging.Delivery) error {
+	return h.Svc.ResolveKey(ctx, runnerOutputKey)
+}
+
 // ApprovalRequested handles telegram.approval_requested {approvalId, projectId, taskId, planRevision, scope,
 // reason, risk}: the Owners are told in Telegram.
 func (h Handlers) ApprovalRequested(ctx context.Context, d messaging.Delivery) error {

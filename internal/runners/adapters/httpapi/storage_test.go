@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tr1gl1de/kindevai/internal/runners/adapters/sqlite"
 	"github.com/tr1gl1de/kindevai/internal/runners/domain"
 )
 
@@ -134,5 +135,42 @@ func TestStorageMachineDetailOwnerOnlyWithHistoryAndConsumers(t *testing.T) {
 	cp := e.do(t, "owner", "GET", "/api/storage/machines/control-plane", nil)
 	if cp.Code != http.StatusOK || decode[StorageMachineDetail](t, cp).Days != 7 || !strings.Contains(cp.Body.String(), `"consumers":null`) {
 		t.Fatalf("control plane = %d %s", cp.Code, cp.Body)
+	}
+}
+
+// KIN-59: the Storage Overview carries the Control Plane's stored runner output against its limit, the retention
+// settings and the output recently dropped because the storage was full.
+func TestStorageOverviewShowsRunnerOutputStorage(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, 100)
+	id := e.approvedRunner(t)
+	now := *e.now.Load()
+	repo := sqlite.New(e.db)
+	ov := decode[StorageOverview](t, e.do(t, "owner", "GET", "/api/storage/overview", nil))
+	if o := ov.RunnerOutput; o == nil || o.UsedBytes != 0 || o.LimitBytes != 100<<20 || o.State != "ok" || o.OutputRetentionDays != 3 ||
+		o.EventRetentionDays != 7 || o.DroppedEvents != 0 || o.LastDroppedAt != nil || o.Drops == nil || len(o.Drops) != 0 {
+		t.Fatalf("empty output storage = %+v", o)
+	}
+	limits := domain.OutputLimits{Attempt: domain.MaxAttemptOutput, Total: 100 << 20}
+	if v, err := repo.AddOutput(t.Context(), "s1", 1, 95<<20-domain.MaxAttemptOutput*5, limits, now); err != nil || v != domain.OutputStored {
+		t.Fatal(v, err)
+	}
+	for i, at := range []time.Time{now.Add(-2 * time.Hour), now.Add(-time.Minute)} {
+		if err := repo.RecordEvent(t.Context(), domain.AttemptEvent{RunnerID: id, Step: "s2", Fence: 4, AttemptSeq: int64(i + 1),
+			Kind: "execution.output", Outcome: domain.OutcomeApplied, Reason: "output_storage_limit", RunnerAt: at, ReceivedAt: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ov = decode[StorageOverview](t, e.do(t, "owner", "GET", "/api/storage/overview", nil))
+	o := ov.RunnerOutput
+	if o == nil || o.UsedBytes != 95<<20-domain.MaxAttemptOutput*5 || o.State != "full" || o.DroppedEvents != 2 ||
+		o.LastDroppedAt == nil || !o.LastDroppedAt.Equal(now.Add(-time.Minute)) || o.DropsWindowHours != 24 {
+		t.Fatalf("full output storage = %+v", o)
+	}
+	if len(o.Drops) != 1 || o.Drops[0] != (OutputDropView{RunnerID: id, StepID: "s2", Fence: 4, Events: 2, LastAt: now.Add(-time.Minute)}) {
+		t.Fatalf("drops = %+v", o.Drops)
+	}
+	if w := e.do(t, "bob", "GET", "/api/storage/overview", nil); w.Code != http.StatusForbidden {
+		t.Fatalf("member = %d", w.Code)
 	}
 }

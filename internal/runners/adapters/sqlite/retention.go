@@ -164,3 +164,39 @@ func (r *Repository) OutputUsage(ctx context.Context) (int64, error) {
 	}
 	return n, nil
 }
+
+// OutputDrops lists the attempts whose output was dropped because the output storage was full (reason
+// output_storage_limit) since then, newest first, at most limit of them, with the number of such events in all.
+// The reason is a literal in the SQL so that the partial index runner_attempt_events_output_dropped applies.
+func (r *Repository) OutputDrops(ctx context.Context, since time.Time, limit int) ([]domain.OutputDrop, int64, error) {
+	conn := db.Conn(ctx, r.db)
+	var total int64
+	if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM runner_attempt_events
+		WHERE reason = 'output_storage_limit' AND received_at >= ?`, since.UnixMilli()).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("counting dropped output: %w", err)
+	}
+	if total == 0 {
+		return nil, 0, nil
+	}
+	rows, err := conn.QueryContext(ctx, `SELECT runner_id, step_id, fence, count(*), max(received_at) AS last
+		FROM runner_attempt_events WHERE reason = 'output_storage_limit' AND received_at >= ?
+		GROUP BY runner_id, step_id, fence ORDER BY last DESC, step_id LIMIT ?`, since.UnixMilli(), limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("listing dropped output: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.OutputDrop
+	for rows.Next() {
+		var d domain.OutputDrop
+		var last int64
+		if err := rows.Scan(&d.RunnerID, &d.Step, &d.Fence, &d.Events, &last); err != nil {
+			return nil, 0, fmt.Errorf("listing dropped output: %w", err)
+		}
+		d.LastAt = time.UnixMilli(last).UTC()
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("listing dropped output: %w", err)
+	}
+	return out, total, nil
+}

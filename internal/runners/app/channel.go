@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runners/domain"
 )
@@ -76,11 +78,18 @@ type Channel struct {
 	// MaxStoredOutput bounds all stored output (default domain.DefaultRetention().MaxOutputBytes); output beyond
 	// it is acknowledged and recorded without its body until the retention frees space (KIN-52).
 	MaxStoredOutput int64
+	// Outbox, if set, raises the Control Plane alert alerts.runner_output_full while output is dropped for that
+	// limit (at most once a minute) and alerts.runner_output_recovered when output is stored again (KIN-59).
+	Outbox Enqueuer
 
 	once     sync.Once
-	fullWarn time.Time // last "output storage full" warning (at most one per minute)
-	mu       sync.Mutex
-	wakes    map[string]chan struct{} // runnerID → the live session's sender
+	fullWarn time.Time // last "output storage full" warning/alert (at most one per minute)
+	// spaceKnown: output was stored since the start or since the last "full" alert, so no recovery is pending. A
+	// fresh Control Plane does not know whether an earlier run left the alert open; its first stored output
+	// resolves it (a no-op when there is none).
+	spaceKnown bool
+	mu         sync.Mutex
+	wakes      map[string]chan struct{} // runnerID → the live session's sender
 }
 
 // commandBatch: commands loaded per read; with ≤64 KiB per command it bounds a sender's memory to ~256 KiB.
@@ -357,8 +366,15 @@ func (c *Channel) applyEvent(ctx context.Context, runnerID string, e protocol.Ev
 		if v != domain.OutputStored {
 			rec.Body, rec.Reason = nil, v.Reason()
 		}
-		if v == domain.OutputOverTotal {
-			c.warnFull(runnerID, e.Step, rec.ReceivedAt)
+		switch v {
+		case domain.OutputOverTotal:
+			if err := c.storageFull(ctx, runnerID, e.Step, rec.ReceivedAt); err != nil {
+				return err
+			}
+		case domain.OutputStored:
+			if err := c.storageFreed(ctx, rec.ReceivedAt); err != nil {
+				return err
+			}
 		}
 	}
 	switch {
@@ -382,18 +398,59 @@ func (c *Channel) applyEvent(ctx context.Context, runnerID string, e protocol.Ev
 	return c.Repo.RecordEvent(ctx, rec)
 }
 
-// warnFull logs that output is being dropped because the output storage is full, at most once a minute.
-func (c *Channel) warnFull(runnerID, step string, now time.Time) {
+// storageFull logs and alerts that output is being dropped because the output storage is full, at most once a
+// minute. The alert joins the event's transaction; if that rolls back, the next drop a minute later raises it.
+func (c *Channel) storageFull(ctx context.Context, runnerID, step string, now time.Time) error {
 	c.mu.Lock()
 	quiet := !c.fullWarn.IsZero() && now.Sub(c.fullWarn) < time.Minute
-	if !quiet {
-		c.fullWarn = now
-	}
 	c.mu.Unlock()
-	if !quiet {
-		c.Logger.Warn("runner output storage full: output of running attempts is dropped until retention frees space",
-			"runner", runnerID, "step", step, "limit_bytes", c.MaxStoredOutput)
+	if quiet {
+		return nil
 	}
+	if c.Outbox != nil {
+		if err := c.alert(ctx, TopicRunnerOutputFull, "runner-output/full/"+strconv.FormatInt(now.UnixMilli(), 10),
+			map[string]any{"limitBytes": c.MaxStoredOutput, "runnerId": runnerID, "stepId": step}); err != nil {
+			return err
+		}
+	}
+	c.mu.Lock()
+	c.fullWarn, c.spaceKnown = now, false
+	c.mu.Unlock()
+	c.Logger.Warn("runner output storage full: output of running attempts is dropped until retention frees space",
+		"runner", runnerID, "step", step, "limit_bytes", c.MaxStoredOutput)
+	return nil
+}
+
+// storageFreed resolves the "output storage full" alert once output is stored again.
+func (c *Channel) storageFreed(ctx context.Context, now time.Time) error {
+	if c.Outbox == nil {
+		return nil
+	}
+	c.mu.Lock()
+	known := c.spaceKnown
+	c.mu.Unlock()
+	if known {
+		return nil
+	}
+	if err := c.alert(ctx, TopicRunnerOutputRecovered, "runner-output/recovered/"+strconv.FormatInt(now.UnixMilli(), 10),
+		map[string]any{}); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.spaceKnown = true
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Channel) alert(ctx context.Context, topic, key string, payload map[string]any) error {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if err := c.Outbox.Enqueue(ctx, messaging.Message{Adapter: AdapterAlerts, Topic: topic, Key: key, Payload: b}); err != nil {
+		return fmt.Errorf("enqueueing %s: %w", topic, err)
+	}
+	return nil
 }
 
 func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Event) error {

@@ -134,7 +134,7 @@ ai-runner fingerprint                                    # compare with the runn
 - Retention of recorded runner events: nothing of a running execution is deleted. Output goes 14 days after its
   execution finished (`--runner-output-retention-days` / `KINDEV_RUNNER_OUTPUT_RETENTION_DAYS`), other events after
   30 days (`--runner-event-retention-days` / `KINDEV_RUNNER_EVENT_RETENTION_DAYS`); acknowledged commands after 7
-  days. Output is capped at 16 MiB per attempt and 1 GiB in total (`--runner-output-limit-mb` /
+  days; the whole command log of a revoked runner (it never connects again) within an hour. Output is capped at 16 MiB per attempt and 1 GiB in total (`--runner-output-limit-mb` /
   `KINDEV_RUNNER_OUTPUT_LIMIT_MB`): over the limit the oldest output of finished executions is evicted first, and if
   only running executions hold output, new output is stored without its body (`output_storage_limit`) and a
   warning is logged. The cleanup runs at start and hourly in small batches.

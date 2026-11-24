@@ -19,6 +19,7 @@ import (
 	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
+	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
 	"github.com/tr1gl1de/kindevai/internal/platform/ratelimit"
 	"github.com/tr1gl1de/kindevai/internal/runners/adapters/sqlite"
 	"github.com/tr1gl1de/kindevai/internal/runners/app"
@@ -43,6 +44,7 @@ type env struct {
 	h   http.Handler
 	db  *sql.DB
 	now atomic.Pointer[time.Time]
+	tel *app.Telemetry
 }
 
 // newEnv serves the runners API; X-Test-User stands in for the identity middleware.
@@ -76,7 +78,10 @@ func newEnv(t *testing.T, burst int) *env {
 			NewID: func() string { return "id" + string(rune('a'+n.Add(1))) },
 		},
 		Limiter: ratelimit.New(ratelimit.Config{Burst: burst, Every: time.Hour, MaxKeys: 100}, time.Now),
+		Telemetry: &app.Telemetry{Repo: sqlite.New(d), Runners: sqlite.New(d), Tx: db.Transactor{DB: d},
+			Outbox: messaging.NewOutbox(d, messaging.Config{}), Now: clock},
 	}
+	e.tel = h.Telemetry
 	mux := http.NewServeMux()
 	h.Register(mux)
 	e.h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

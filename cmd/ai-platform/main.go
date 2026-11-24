@@ -132,14 +132,16 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	}
 	msg := newMessaging(inst, logger)
 	hub := runnersapp.NewHub()
-	modules := append(identity.Modules, newProjects(inst, identity, audit, hub, logger)...)
+	tel := newTelemetry(inst, msg, logger)
+	modules := append(identity.Modules, newProjects(inst, identity, audit, hub, tel, logger)...)
 	integ := newIntegrations(inst, msg, audit, ghURL, logger)
 	intake := newYouTrackIntake(inst, msg, integ, identity, logger)
 	modules = append(modules, msg.HTTP, audit.HTTP, integ.HTTP, intake.HTTP, newApprovals(inst, msg, audit, integ, logger).HTTP)
-	gateway := newRunnerGateway(inst, hub, localPeers, audiences, logger)
+	gateway := newRunnerGateway(inst, hub, tel, localPeers, audiences, logger)
 	modules = append(modules, gateway)
 	defer msg.start(ctx)()    // deferred after inst.Close, so the dispatchers stop before the database closes
 	defer intake.start(ctx)() // the YouTrack poller stops first
+	defer startTelemetry(ctx, tel, inst.Dir.Path())()
 
 	assets, built := web.Assets()
 	if !built {

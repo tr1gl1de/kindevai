@@ -53,6 +53,8 @@ type Connector struct {
 	// MinBackoff, MaxBackoff bound the reconnect delay (defaults 1s and 60s); a session that stayed up for
 	// StableAfter (default 1m) resets it.
 	MinBackoff, MaxBackoff, StableAfter time.Duration
+	// Reporter sends telemetry while a link that can send (Sender) is up (KIN-20); nil sends nothing.
+	Reporter *Reporter
 }
 
 func (c *Connector) defaults() {
@@ -98,7 +100,9 @@ func (c *Connector) Run(ctx context.Context, e domain.Enrollment, id domain.Iden
 		if err == nil {
 			start := c.Now()
 			c.Logger.Info("connected to the Control Plane", "server", e.Server.String(), "runner", e.RunnerID)
+			stopReport := c.report(ctx, link)
 			err = link.Wait(ctx)
+			stopReport()
 			if c.Now().Sub(start) >= c.StableAfter {
 				b.Reset()
 			}
@@ -118,6 +122,23 @@ func (c *Connector) Run(ctx context.Context, e domain.Enrollment, id domain.Iden
 			return nil
 		}
 	}
+}
+
+// report runs the Reporter for the link's lifetime; the returned stop cancels it and waits for it.
+func (c *Connector) report(ctx context.Context, link Link) (stop func()) {
+	s, ok := link.(Sender)
+	if !ok || c.Reporter == nil {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := c.Reporter.Report(ctx, s); err != nil {
+			c.Logger.Warn("sending telemetry to the Control Plane", "err", err)
+		}
+	}()
+	return func() { cancel(); <-done }
 }
 
 // sign answers a challenge after checking it was issued by the configured Control Plane for this protocol.

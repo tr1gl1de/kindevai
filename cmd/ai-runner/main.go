@@ -21,6 +21,7 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/configfile"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/controlplane"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/keyfile"
+	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/probe"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/app"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/domain"
 	"github.com/tr1gl1de/kindevai/internal/runner/platform/datadir"
@@ -265,6 +266,7 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	}
 	fmt.Fprintf(e.stderr, "ai-runner %s: runner %s enrolled with %s (fingerprint %s); data dir %s\n", version, en.RunnerID,
 		en.Server, en.Fingerprint, d.Path())
-	conn := &app.Connector{Dialer: controlplane.New(), Logger: slog.New(slog.NewTextHandler(e.stderr, nil))}
+	conn := &app.Connector{Dialer: controlplane.New(), Logger: slog.New(slog.NewTextHandler(e.stderr, nil)),
+		Reporter: &app.Reporter{Probe: probe.New(d.Path())}}
 	return conn.Run(ctx, en, id)
 }

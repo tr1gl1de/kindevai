@@ -2,26 +2,42 @@
 """PreToolUse(Bash) guard: main/master are owner-only (KIN-A-20); the agent may merge PRs into dev (KIN-12).
 
 Reads the hook JSON on stdin. Exit 0 = allow, exit 2 = block (stderr goes back to Claude).
-The command is tokenized with shlex (quotes removed) and checked segment by segment, so quoting, attached
-flags and global options cannot hide a protected action. Anything that cannot be analysed reliably and
-touches merges/pushes is blocked (fail closed).
+
+This is defence in depth, not the security boundary: a text check cannot see every indirection, so the owner's
+GitHub rulesets on main/master and v* tags remain the real protection. The guard tokenizes each command with
+shlex (quotes removed, heredoc bodies dropped, substitutions analysed recursively) and fails closed:
+  * a PR merge must be the only command: `gh pr merge <number> [method/subject/body flags]`, and the PR's base,
+    looked up from the session's working directory without GH_*/GIT_* redirection, must be dev;
+  * raw `gh api` writes and GraphQL mutations, unknown gh commands (aliases) and alias creation are blocked;
+  * pushes and PRs that target main/master, `--all`/`--mirror`, variable refspecs and push-related config
+    overrides are blocked.
 """
 import json
+import os
 import re
 import shlex
 import subprocess
 import sys
 
 PROTECTED = {"main", "master"}
-SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", "\n"}
+PUNCT = ";&|()"
 # Top-level gh commands; anything else may be a user alias (e.g. `gh pm` → `pr merge`).
 GH_COMMANDS = {
     "pr", "api", "issue", "run", "repo", "auth", "workflow", "release", "search", "browse", "label",
     "status", "cache", "gist", "project", "ruleset", "secret", "variable", "codespace", "org", "config",
     "help", "version", "completion", "attestation", "ssh-key", "gpg-key", "extension",
 }
+GH_PR_READ_ONLY = {"view", "list", "checks", "diff", "status", "comment", "close", "reopen", "ready", "checkout",
+                   "review", "create", "edit"}
 MERGE_FLAGS = {"--merge", "-m", "--squash", "-s", "--rebase", "-r", "--delete-branch", "-d", "--auto"}
-RISKY_WORDS = re.compile(r"\b(merge|push|mergePullRequest)\b|pr\s+(create|edit)|git/refs", re.I)
+MERGE_VALUE_FLAGS = {"--subject", "-t", "--body", "-b"}
+REDIRECTING_ENV = ("GH_", "GIT_")
+GIT_GLOBAL_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
+GIT_RISKY_CONFIG = re.compile(r"^(alias|remote|url|push|branch|include|includeif)\.", re.I)
+
+HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1([^\n]*)\n.*?\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
+FD_DUP = re.compile(r"\d*[<>]&\d*-?|&>>?")
+REDIRECT = re.compile(r"^\d*(<<?|>>?)(.*)$")
 
 
 class Blocked(Exception):
@@ -32,34 +48,52 @@ def block(reason: str):
     raise Blocked(reason)
 
 
+def substitutions(cmd: str):
+    """Contents of $(...) (balanced parentheses) and `...` anywhere in the text, including inside quotes."""
+    out = re.findall(r"`([^`]*)`", cmd)
+    i = cmd.find("$(")
+    while i != -1:
+        depth, j = 0, i + 1
+        while j < len(cmd):
+            depth += {"(": 1, ")": -1}.get(cmd[j], 0)
+            if depth == 0:
+                break
+            j += 1
+        out.append(cmd[i + 2:j])
+        i = cmd.find("$(", i + 2)
+    return out
+
+
 def segments(cmd: str):
-    lex = shlex.shlex(cmd.replace("\n", " ; "), posix=True, punctuation_chars=";&|()")
+    lex = shlex.shlex(FD_DUP.sub(" ", cmd).replace("\n", " ; "), posix=True, punctuation_chars=PUNCT)
     lex.whitespace_split = True
-    seg = []
+    seg, skip = [], False
     for tok in lex:
-        if tok in SEPARATORS or set(tok) <= set(";&|()"):
+        if skip:
+            skip = False
+            continue
+        if set(tok) <= set(PUNCT):
             if seg:
                 yield seg
             seg = []
-        else:
-            seg.append(tok)
+            continue
+        m = REDIRECT.match(tok)
+        if m:  # redirections are not arguments; `> file` also consumes the next token
+            skip = m.group(2) == ""
+            continue
+        seg.append(tok)
     if seg:
         yield seg
 
 
 def strip_env(seg):
-    """Drops `env` and VAR=value prefixes; refuses GH_*/GIT_* overrides for gh/git (they redirect repos)."""
-    i = 0
-    if seg and seg[0] == "env":
-        i = 1
-    assigned = []
+    """Drops `env` and VAR=value prefixes; refuses GH_*/GIT_* overrides (they redirect gh/git to other repos)."""
+    i = 1 if seg and seg[0] == "env" else 0
     while i < len(seg) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", seg[i]):
-        assigned.append(seg[i].split("=", 1)[0])
+        if seg[i].startswith(REDIRECTING_ENV):
+            block(f"{seg[i].split('=', 1)[0]} override")
         i += 1
-    rest = seg[i:]
-    if rest and rest[0] in ("gh", "git") and any(v.startswith(("GH_", "GIT_")) for v in assigned):
-        block(f"{rest[0]} with {', '.join(assigned)} override")
-    return rest
+    return seg[i:]
 
 
 def flag_value(args, short, long):
@@ -75,16 +109,19 @@ def flag_value(args, short, long):
     return out
 
 
-def pr_base(number: str) -> str:
+def clean_env():
+    return {k: v for k, v in os.environ.items() if not k.startswith(REDIRECTING_ENV)}
+
+
+def run(args, cwd, timeout):
     try:
-        r = subprocess.run(["gh", "pr", "view", number, "--json", "baseRefName", "--jq", ".baseRefName"],
-                           capture_output=True, text=True, timeout=20)
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, cwd=cwd or None, env=clean_env())
     except (OSError, subprocess.TimeoutExpired):
         return ""
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
-def check_gh(args, state):
+def check_gh(args, ctx):
     if not args:
         return
     if args[0] not in GH_COMMANDS:
@@ -94,25 +131,16 @@ def check_gh(args, state):
         method = (flag_value(args[1:], "-X", "--method") or [""])[-1].upper()
         writes = any(a in ("-f", "-F", "--field", "--raw-field", "--input") or
                      re.match(r"^(-f|-F).|^--(raw-)?field=|^--input=", a) for a in args[1:])
-        if not method:
-            method = "POST" if writes else "GET"
-        if method != "GET" or any("mutation" in a for a in args):
+        method = method or ("POST" if writes else "GET")
+        if method != "GET" or any("mutation" in a.lower() for a in args):
             block(f"gh api {method} (raw API writes are owner-only)")
         return
+    if cmd == "alias" or (cmd == "config" and "alias" in args):
+        block("gh aliases")
     if cmd != "pr":
         return
     if sub == "merge":
-        if state.get("merged"):
-            block("one merge per command")
-        state["merged"] = True
-        if not rest or not rest[0].isdigit():
-            block("gh pr merge needs a bare PR number first")
-        unknown = [a for a in rest[1:] if a not in MERGE_FLAGS]
-        if unknown:
-            block(f"gh pr merge flags not allowed: {' '.join(unknown)}")
-        base = pr_base(rest[0])
-        if base != "dev":
-            block(f"merge of PR #{rest[0]} whose base is '{base or 'unknown'}' (only dev is allowed)")
+        check_merge(rest, ctx)
     elif sub == "create":
         bases = flag_value(rest, "-B", "--base")
         if not bases:
@@ -122,83 +150,107 @@ def check_gh(args, state):
     elif sub == "edit":
         if set(flag_value(rest, "-B", "--base")) & PROTECTED:
             block("retarget PR to main/master")
-    elif sub not in ("view", "list", "checks", "diff", "status", "comment", "close", "reopen", "ready", "checkout", "review"):
-        if any("merge" in a for a in args):
-            block(f"gh pr {sub} with merge arguments")
+    elif sub not in GH_PR_READ_ONLY:
+        block(f"gh pr {sub or '(none)'} is not on the allowlist")
 
 
-GIT_GLOBAL_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
+def check_merge(rest, ctx):
+    if ctx["segments"] != 1 or ctx["substituted"]:
+        block("a PR merge must be the only command (no cd, export or chaining around it)")
+    if any(os.environ.get(k) for k in ("GH_REPO", "GH_HOST", "GIT_DIR", "GIT_WORK_TREE")):
+        block("GH_REPO/GH_HOST/GIT_DIR is set in the environment")
+    if not rest or not rest[0].isdigit():
+        block("gh pr merge needs a bare PR number first")
+    i = 1
+    while i < len(rest):
+        a = rest[i]
+        if a in MERGE_VALUE_FLAGS:
+            i += 2
+            continue
+        if a not in MERGE_FLAGS and not a.startswith(("--subject=", "--body=")):
+            block(f"gh pr merge flag not allowed: {a}")
+        i += 1
+    base = run(["gh", "pr", "view", rest[0], "--json", "baseRefName", "--jq", ".baseRefName"], ctx["cwd"], 20)
+    if base != "dev":
+        block(f"merge of PR #{rest[0]} whose base is '{base or 'unknown'}' (only dev is allowed)")
 
 
-def check_git(args, state):
-    i = 0
+def check_git(args, ctx):
+    i, globals_ = 0, []
     while i < len(args) and args[i].startswith("-"):
-        i += 2 if args[i] in GIT_GLOBAL_WITH_VALUE else 1
+        n = 2 if args[i] in GIT_GLOBAL_WITH_VALUE else 1
+        globals_ += args[i:i + n]
+        i += n
+    for v in flag_value(globals_, "-c", ""):
+        if GIT_RISKY_CONFIG.match(v):
+            block(f"git -c {v.split('=', 1)[0]}")
     if i >= len(args):
         return
     sub, rest = args[i], args[i + 1:]
     if sub == "push":
-        if any(a in ("--all", "--mirror") for a in rest):
-            block("git push --all/--mirror")
-        for a in (a for a in rest if not a.startswith("-")):
+        if any(a in ("--all", "--mirror") or a.startswith("--repo") for a in rest):
+            block("git push --all/--mirror/--repo")
+        for a in rest:
+            if any(c in a for c in "${}`"):
+                block("git push with a variable argument")
+            if a.startswith("-"):
+                continue
             dst = a.lstrip("+").split(":")[-1].removeprefix("refs/heads/")
             if dst in PROTECTED:
                 block("push to main/master")
-        if current_branch() in PROTECTED:
+        if run(["git", *globals_, "branch", "--show-current"], ctx["cwd"], 5) in PROTECTED:
             block("push from a checked-out main/master")
+    elif sub == "config":
+        reading = any(a in ("--get", "--get-all", "--get-regexp", "--list", "-l") for a in rest)
+        if not reading and any(GIT_RISKY_CONFIG.match(a) for a in rest):
+            block("git config of alias/remote/url/push settings")
     elif sub in ("checkout", "switch"):
-        state["on_protected"] = any(a in PROTECTED for a in rest)
-    elif sub == "merge" and state.get("on_protected"):
+        ctx["on_protected"] = any(a in PROTECTED for a in rest)
+    elif sub == "merge" and ctx.get("on_protected"):
         block("merge into main/master")
 
 
-def current_branch() -> str:
-    try:
-        r = subprocess.run(["git", "branch", "--show-current"], capture_output=True, text=True, timeout=5)
-        return r.stdout.strip()
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-
-
-def check(cmd: str, depth: int = 0):
+def check(cmd: str, cwd: str, depth: int = 0, substituted: bool = False):
     if depth > 3:
         block("nested shells too deep to analyse")
-    if ("$(" in cmd or "`" in cmd or "<(" in cmd) and RISKY_WORDS.search(cmd):
-        block("command substitution around merge/push/PR commands cannot be checked")
+    cmd = HEREDOC.sub(lambda m: "<<HEREDOC" + m.group(3), cmd)
+    for inner in substitutions(cmd):
+        check(inner, cwd, depth + 1, substituted=True)
     try:
-        segs = list(segments(cmd))
+        segs = [s for s in (strip_env(s) for s in segments(cmd)) if s]
     except ValueError:  # unbalanced quotes
-        if RISKY_WORDS.search(cmd):
-            block("unparsable command mentioning merge/push")
+        if re.search(r"\b(gh|git)\b", cmd):
+            block("unparsable gh/git command")
         return
-    state = {}
-    for seg in segs:
-        args = strip_env(seg)
-        if not args:
-            continue
+    ctx = {"cwd": cwd, "segments": len(segs), "substituted": substituted}
+    for args in segs:
         prog = args[0].rsplit("/", 1)[-1]
         if prog in ("bash", "sh", "zsh", "dash") and "-c" in args:
             idx = args.index("-c")
             if idx + 1 < len(args):
-                check(args[idx + 1], depth + 1)
+                check(args[idx + 1], cwd, depth + 1, substituted)
         elif prog == "eval":
-            check(" ".join(args[1:]), depth + 1)
-        elif prog in ("xargs", "nohup", "time", "timeout", "nice", "sudo", "command", "exec"):
-            if RISKY_WORDS.search(" ".join(args)) or any(a in ("gh", "git") for a in args[1:]):
+            check(" ".join(args[1:]), cwd, depth + 1, substituted)
+        elif prog in ("xargs", "nohup", "time", "timeout", "nice", "sudo", "command", "exec", "watch"):
+            if any(a in ("gh", "git") or a.endswith(("/gh", "/git")) for a in args[1:]):
                 block(f"gh/git wrapped in {prog} cannot be checked")
+        elif prog == "export" and any(a.startswith(REDIRECTING_ENV) for a in args[1:]):
+            block("export of GH_*/GIT_* variables")
         elif prog == "gh":
-            check_gh(args[1:], state)
+            check_gh(args[1:], ctx)
         elif prog == "git":
-            check_git(args[1:], state)
+            check_git(args[1:], ctx)
 
 
 def main() -> int:
     try:
-        cmd = (json.load(sys.stdin).get("tool_input") or {}).get("command") or ""
+        data = json.load(sys.stdin)
+        cmd = (data.get("tool_input") or {}).get("command") or ""
+        cwd = data.get("cwd") or ""
     except (ValueError, AttributeError):
         return 0
     try:
-        check(cmd)
+        check(cmd, cwd)
     except Blocked as e:
         print(f"BLOCKED by .claude/hooks/guard-git.sh: {e}. main/master are owner-only; target dev instead.",
               file=sys.stderr)

@@ -30,8 +30,6 @@ run() { # run <expect allow|block> <base> <command>
 # --- gh pr merge: allowed only as `gh pr merge <number> [method flags]` with a dev base ---
 run allow dev    'gh pr merge 12 --merge'
 run allow dev    'gh pr merge 12 --squash --delete-branch'
-run allow dev    'gh pr merge 12 --merge && git pull'
-run allow dev    'cd x; gh pr merge 12 --merge'
 run block main   'gh pr merge 12 --merge'
 run block master 'gh pr merge 12'
 run block ''     'gh pr merge 12 --merge'                      # base unknown → fail closed
@@ -43,7 +41,6 @@ run block dev    'gh pr merge 12 --repo other/repo'
 run block dev    'gh pr merge 12 -R other/repo'
 run block dev    'gh pr merge 12 -Rother/repo'
 run block dev    'gh pr merge 12 --admin'
-run block dev    'gh pr merge 12 --subject x'
 run block dev    'gh -R other/repo pr merge 12'
 run allow dev    'gh pr "merge" 12'                              # quoting is normalised, then the base check applies
 run block main   'gh pr "merge" 12'
@@ -59,7 +56,16 @@ run block dev    'gh pr merge 12 && gh pr merge 13'              # one merge per
 run block dev    'gh alias set pm "pr merge"'
 run block dev    'gh pm 12'                                      # unknown top-level gh commands may be aliases
 
+run allow dev    'gh pr merge 12 --squash --subject "KIN-12: x (y)" --body "z"'
+run allow dev    'gh pr merge 12 --merge 2>&1'
+run block dev    'export GH_REPO=o/r && gh pr merge 12'            # a merge must be the only command
+run block dev    'cd /other && gh pr merge 12'
+run block dev    'gh pr merge 12 --merge && git pull'
+run block dev    'gh pr merge 12 --body-file /etc/passwd'
+GH_REPO=o/r run block dev 'gh pr merge 12'                         # inherited GH_REPO redirects the merge
+
 # --- raw API writes are never allowed; reads are ---
+run block dev "gh api -X GET graphql -f query='MUTATION{mergePullRequest(input:{}){clientMutationId}}'"
 run block dev 'gh api -X PUT repos/o/r/pulls/12/merge'
 run block dev 'gh api "repos/o/r/pulls/12/merge" -X PUT'
 run block dev 'gh api -XPUT repos/o/r/pulls/12/merge'
@@ -78,6 +84,21 @@ run block dev 'git -C . push origin main'
 run block dev 'git push --all'
 run block dev 'git push --mirror origin'
 run block dev 'git status && git push origin master'
+run block dev 'b=main; git push origin $b'
+run block dev 'git push origin ${B}'
+run block dev 'git -c remote.origin.push=HEAD:main push origin'
+run block dev 'git push --repo=o/r origin dev'
+run block dev "git config alias.x 'push origin main'"
+run block dev 'git config --global alias.p push'
+run allow dev 'git config user.name x'
+run allow dev 'git push -q -u origin HEAD 2>&1 | tail -2'
+run allow dev "git commit -q -F - <<'EOF'
+KIN-12: scope the push check, don't merge yet
+EOF"
+run allow dev 'git commit -m "$(cat <<'"'"'EOF'"'"'
+KIN-12: it'"'"'s the push and merge fix
+EOF
+)"'
 run allow dev 'git push -u origin feature/x && gh pr create --base dev --title "keep main owner-only"'
 run allow dev 'git push -q origin feature/KIN-12-dev-merge-policy'
 run allow dev 'git push origin --delete feature/x'

@@ -35,6 +35,17 @@ func (r *memRepo) Active(_ context.Context, key string) (domain.Alert, error) {
 	return domain.Alert{}, domain.ErrNotFound
 }
 
+func (r *memRepo) Applied(_ context.Context, key, event string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, a := range r.alerts {
+		if a.DedupKey == key && a.LastEvent == event {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (r *memRepo) Create(_ context.Context, a domain.Alert) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -129,6 +140,10 @@ func (f fakePeople) TelegramChat(_ context.Context, u string) (int64, bool, erro
 	return c, ok, nil
 }
 
+type fakeApprovals map[string]bool
+
+func (f fakeApprovals) Pending(_ context.Context, id string) (bool, error) { return f[id], nil }
+
 type noTx struct{}
 
 func (noTx) InTx(ctx context.Context, fn func(context.Context) error) error { return fn(ctx) }
@@ -205,8 +220,9 @@ func newFixture() fixture {
 			},
 			members: map[string][]string{"p1": {"admin", "member"}},
 		},
-		People: fakePeople{owners: []string{"owner"}, chats: map[string]int64{"owner": 100, "member": 300}},
-		Tx:     noTx{}, Audit: au, Outbox: out,
+		People:    fakePeople{owners: []string{"owner"}, chats: map[string]int64{"owner": 100, "member": 300}},
+		Approvals: fakeApprovals{"AP1": true, "AP2": true},
+		Tx:        noTx{}, Audit: au, Outbox: out,
 		Now: func() time.Time { return time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC) },
 		NewID: func() string {
 			mu.Lock()
@@ -249,6 +265,13 @@ func TestRaiseGroupsAndNotifies(t *testing.T) {
 	// A system resolve closes it; the next occurrence is a new alert.
 	if err := f.svc.ResolveKey(ctx, "runner/r1/unreachable"); err != nil {
 		t.Fatal(err)
+	}
+	// Review: a redelivery of the last event after the alert closed does not open a duplicate.
+	if err := f.svc.Raise(ctx, "e3", runnerDown(domain.SeverityCritical)); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.repo.alerts) != 1 {
+		t.Fatalf("redelivery after close opened a duplicate: %+v", f.repo.alerts)
 	}
 	if err := f.svc.Raise(ctx, "e4", runnerDown(domain.SeverityWarning)); err != nil {
 		t.Fatal(err)
@@ -348,6 +371,16 @@ func TestNotifyApprovalHonoursPreferences(t *testing.T) {
 	}
 	if got := len(f.out.sent(t)); got != 1 {
 		t.Fatalf("opted-out owner still notified (%d messages)", got)
+	}
+	// Review: an approval decided meanwhile is not announced.
+	if _, err := f.svc.SavePreferences(ctx, owner, "en", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.NotifyApproval(ctx, app.ApprovalRequest{ApprovalID: "DECIDED"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(f.out.sent(t)); got != 1 {
+		t.Fatalf("decided approval announced (%d messages)", got)
 	}
 	var ve *domain.ValidationError
 	if _, err := f.svc.SavePreferences(ctx, owner, "xx", nil); !errors.As(err, &ve) {

@@ -49,6 +49,8 @@ type ListQuery struct {
 // Repository stores alerts and preferences; every method runs on the caller's transaction (db.Conn).
 type Repository interface {
 	Active(ctx context.Context, dedupKey string) (domain.Alert, error) // domain.ErrNotFound
+	// Applied reports whether event was the last one applied to an alert with dedupKey (active or closed).
+	Applied(ctx context.Context, dedupKey, event string) (bool, error)
 	Create(ctx context.Context, a domain.Alert) error
 	Save(ctx context.Context, a domain.Alert) error
 	Get(ctx context.Context, id string) (domain.Alert, error)                   // domain.ErrNotFound
@@ -76,6 +78,11 @@ type People interface {
 	TelegramChat(ctx context.Context, userID string) (int64, bool, error)
 }
 
+// Approvals is the approvals context as the notifier needs it.
+type Approvals interface {
+	Pending(ctx context.Context, approvalID string) (bool, error) // false for unknown or decided approvals
+}
+
 // AuditLog records audit events in the caller's transaction.
 type AuditLog interface {
 	Record(ctx context.Context, e auditapp.Entry) error
@@ -93,14 +100,15 @@ type TxRunner interface {
 
 // Service implements the Alert Center.
 type Service struct {
-	Repo     Repository
-	Projects Projects
-	People   People
-	Tx       TxRunner
-	Audit    AuditLog
-	Outbox   Outbox
-	Now      func() time.Time
-	NewID    func() string
+	Repo      Repository
+	Projects  Projects
+	People    People
+	Approvals Approvals
+	Tx        TxRunner
+	Audit     AuditLog
+	Outbox    Outbox
+	Now       func() time.Time
+	NewID     func() string
 }
 
 // SendPayload is the outbox payload of TopicTelegramSend. It holds no secrets: the adapter reads the bot token
@@ -120,6 +128,10 @@ func (s *Service) Raise(ctx context.Context, event string, o domain.Occurrence) 
 		a, err := s.Repo.Active(ctx, o.DedupKey)
 		switch {
 		case errors.Is(err, domain.ErrNotFound):
+			// A redelivery may arrive after its alert was closed: it must not open a duplicate.
+			if done, err := s.Repo.Applied(ctx, o.DedupKey, event); err != nil || done {
+				return err
+			}
 			if a, err = domain.NewAlert(s.NewID(), o, now); err != nil {
 				return err
 			}
@@ -133,7 +145,10 @@ func (s *Service) Raise(ctx context.Context, event string, o domain.Occurrence) 
 		case a.LastEvent == event:
 			return nil // redelivery of the event already applied
 		}
-		escalated := a.Recur(o, now)
+		escalated, err := a.Recur(o, now)
+		if err != nil {
+			return err
+		}
 		a.LastEvent = event
 		if err := s.Repo.Save(ctx, a); err != nil {
 			return fmt.Errorf("saving alert: %w", err)
@@ -333,6 +348,12 @@ type ApprovalRequest struct {
 func (s *Service) NotifyApproval(ctx context.Context, r ApprovalRequest) error {
 	if r.ApprovalID == "" {
 		return &domain.ValidationError{Field: "approvalId", Code: "required"}
+	}
+	// A late delivery (retry, or a dead message requeued at startup) must not ask for an approval already decided.
+	if pending, err := s.Approvals.Pending(ctx, r.ApprovalID); err != nil {
+		return fmt.Errorf("checking approval: %w", err)
+	} else if !pending {
+		return nil
 	}
 	project := ""
 	if r.ProjectID != "" {

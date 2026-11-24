@@ -32,6 +32,16 @@ func TestRenderAlertInUserLanguage(t *testing.T) {
 	}
 }
 
+// Review: free-form values are clipped and stripped of control characters, so a long reason cannot exceed
+// Telegram's message limit and turn the notification into a permanent 400.
+func TestRenderApprovalClipsValues(t *testing.T) {
+	t.Parallel()
+	got := domain.RenderApproval(domain.LangEN, domain.ApprovalNotice{TaskID: "t1", Reason: strings.Repeat("x", 10_000) + "\n\x00"})
+	if len([]rune(got)) > 600 || strings.ContainsRune(got, 0) {
+		t.Fatalf("len %d", len([]rune(got)))
+	}
+}
+
 func TestRenderApproval(t *testing.T) {
 	t.Parallel()
 	n := domain.ApprovalNotice{ApprovalID: "ap1", TaskID: "t1", Project: "Shop", Risk: "L2", Reason: "execute"}

@@ -13,7 +13,9 @@ import (
 	alertstg "github.com/tr1gl1de/kindevai/internal/alerts/adapters/telegram"
 	alertsapp "github.com/tr1gl1de/kindevai/internal/alerts/app"
 	alerts "github.com/tr1gl1de/kindevai/internal/alerts/domain"
+	approvalsdb "github.com/tr1gl1de/kindevai/internal/approvals/adapters/sqlite"
 	approvalsapp "github.com/tr1gl1de/kindevai/internal/approvals/app"
+	approvals "github.com/tr1gl1de/kindevai/internal/approvals/domain"
 	identitydb "github.com/tr1gl1de/kindevai/internal/identity/adapters/sqlite"
 	identityapp "github.com/tr1gl1de/kindevai/internal/identity/app"
 	identity "github.com/tr1gl1de/kindevai/internal/identity/domain"
@@ -37,14 +39,15 @@ func newAlerts(inst *bootstrap.Installation, msg *messagingModule, audit *auditM
 	projectsSvc := &projectsapp.Service{Repo: projectsdb.New(inst.DB), Users: userDirectory{users}}
 	tgRepo := identitydb.NewTelegramRepository(inst.DB)
 	svc := &alertsapp.Service{
-		Repo:     alertsdb.New(inst.DB),
-		Projects: alertProjects{projectsSvc},
-		People:   alertPeople{users: users, telegram: tgRepo},
-		Tx:       db.Transactor{DB: inst.DB},
-		Audit:    audit.Service,
-		Outbox:   msg.Outbox,
-		Now:      time.Now,
-		NewID:    rand.Text,
+		Repo:      alertsdb.New(inst.DB),
+		Projects:  alertProjects{projectsSvc},
+		People:    alertPeople{users: users, telegram: tgRepo},
+		Approvals: pendingApprovals{approvalsdb.New(inst.DB)},
+		Tx:        db.Transactor{DB: inst.DB},
+		Audit:     audit.Service,
+		Outbox:    msg.Outbox,
+		Now:       time.Now,
+		NewID:     rand.Text,
 	}
 	ev := alertsevents.Handlers{Svc: svc}
 	msg.Outbox.Handle(runnersapp.TopicRunnerUnreachable, ev.RunnerUnreachable)
@@ -55,7 +58,7 @@ func newAlerts(inst *bootstrap.Installation, msg *messagingModule, audit *auditM
 		vault:    botTokenVault{&integrationsapp.Vault{Store: integrationsdb.New(inst.DB), Cipher: inst.Box, Now: time.Now}},
 		settings: tgRepo,
 	}
-	msg.Outbox.Handle(alertsapp.TopicTelegramSend, (&alertstg.Sender{Bot: bot, APIBase: telegramAPI}).Deliver)
+	msg.Outbox.Handle(alertsapp.TopicTelegramSend, (&alertstg.Sender{Bot: bot, APIBase: telegramAPI, Logger: logger}).Deliver)
 	return &alertshttp.Handler{Service: svc, Logger: logger}
 }
 
@@ -167,4 +170,18 @@ func (b alertBot) MiniAppLink(ctx context.Context, startParam string) (string, b
 		return "", false, err
 	}
 	return s.LinkURL(startParam), true, nil
+}
+
+// pendingApprovals tells the notifier whether an approval still waits for a decision.
+type pendingApprovals struct{ repo *approvalsdb.Repository }
+
+func (p pendingApprovals) Pending(ctx context.Context, id string) (bool, error) {
+	a, err := p.repo.Get(ctx, id)
+	if errors.Is(err, approvals.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return a.State == approvals.StatePending, nil
 }

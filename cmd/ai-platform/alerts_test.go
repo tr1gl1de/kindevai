@@ -51,6 +51,12 @@ func TestAlertCenterDrainsDeadEventsIntoAlertsAndTelegram(t *testing.T) {
 	t.Cleanup(func() { _ = inst.Close() })
 	for _, q := range []string{
 		"INSERT INTO users(id, login, password_hash, platform_role, created_at) VALUES ('u1', 'owner', 'h', 'owner', '2026-11-25T10:00:00Z')",
+		"INSERT INTO projects(id, slug, name, created_at) VALUES ('p1', 'alpha', 'Alpha', '2026-11-25T10:00:00Z')",
+		`INSERT INTO tasks(id, project_id, title, state, plan_revision, created_at, updated_at, version)
+		 VALUES ('T1', 'p1', 'Billing', 'AWAITING_APPROVAL', 1, 'x', 'x', 1)`,
+		"INSERT INTO task_plan_revisions(task_id, revision, plan_json, plan_hash, risk, created_at) VALUES ('T1', 1, '{}', '1111111111111111111111111111111111111111111111111111111111111111', 'L2', 'x')",
+		`INSERT INTO approvals(id, project_id, task_id, task_title, plan_revision, plan_hash, scope, reason, risk, state, requested_at)
+		 VALUES ('AP1', 'p1', 'T1', 'Billing', 1, '1111111111111111111111111111111111111111111111111111111111111111', 'execute', 'plan', 'L2', 'pending', '2026-11-25T10:00:00Z')`,
 	} {
 		if _, err := inst.DB.ExecContext(ctx, q); err != nil {
 			t.Fatal(err)
@@ -74,7 +80,7 @@ func TestAlertCenterDrainsDeadEventsIntoAlertsAndTelegram(t *testing.T) {
 		{Adapter: runnersapp.AdapterAlerts, Topic: runnersapp.TopicRunnerUnreachable, Key: "runner/r1/unreachable/1",
 			Payload: []byte(`{"runnerId":"r1","since":"2026-11-25T10:00:00Z","missedHeartbeats":3}`)},
 		{Adapter: approvalsapp.AdapterTelegram, Topic: approvalsapp.TopicApprovalRequested, Key: "approval/AP1/requested",
-			Payload: []byte(`{"approvalId":"AP1","projectId":"","taskId":"T1","planRevision":1,"scope":"execute","reason":"plan","risk":"L2"}`)},
+			Payload: []byte(`{"approvalId":"AP1","projectId":"p1","taskId":"T1","planRevision":1,"scope":"execute","reason":"plan","risk":"L2"}`)},
 	} {
 		if err := msg.Outbox.Enqueue(ctx, m); err != nil {
 			t.Fatal(err)

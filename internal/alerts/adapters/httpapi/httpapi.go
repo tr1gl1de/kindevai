@@ -38,12 +38,18 @@ type AlertView struct {
 	CanManage   bool              `json:"canManage"`
 }
 
-// PreferencesView is the body of GET/PUT /api/notifications/preferences.
+// PreferencesRequest is the body of PUT /api/notifications/preferences.
+type PreferencesRequest struct {
+	Language string   `json:"language"`
+	Disabled []string `json:"disabled"`
+}
+
+// PreferencesView is the response of GET/PUT /api/notifications/preferences.
 type PreferencesView struct {
 	Language       string   `json:"language"`
 	Disabled       []string `json:"disabled"`
-	Types          []string `json:"types,omitempty"`          // every notification type (response only)
-	TelegramLinked bool     `json:"telegramLinked,omitempty"` // response only
+	Types          []string `json:"types"` // every notification type
+	TelegramLinked bool     `json:"telegramLinked"`
 }
 
 // Register mounts the routes.
@@ -175,7 +181,7 @@ func (h *Handler) savePreferences(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req PreferencesView
+	var req PreferencesRequest
 	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}

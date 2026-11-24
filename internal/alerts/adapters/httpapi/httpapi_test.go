@@ -35,6 +35,10 @@ func (projects) Visible(_ context.Context, p auth.Principal) ([]app.ProjectRef, 
 func (projects) Name(context.Context, string) (string, error)      { return "Alpha", nil }
 func (projects) Members(context.Context, string) ([]string, error) { return nil, nil }
 
+type approvals struct{}
+
+func (approvals) Pending(context.Context, string) (bool, error) { return true, nil }
+
 type people struct{}
 
 func (people) Owners(context.Context) ([]string, error) { return []string{"owner"}, nil }
@@ -66,7 +70,7 @@ func setup(t *testing.T) (http.Handler, *app.Service) {
 		}
 	}
 	n := 0
-	svc := &app.Service{Repo: alertsdb.New(d), Projects: projects{}, People: people{}, Tx: db.Transactor{DB: d},
+	svc := &app.Service{Repo: alertsdb.New(d), Projects: projects{}, People: people{}, Approvals: approvals{}, Tx: db.Transactor{DB: d},
 		Audit:  &auditapp.Service{Repo: auditdb.New(d), Now: time.Now},
 		Outbox: messaging.NewOutbox(d, messaging.Config{}), Now: time.Now,
 		NewID: func() string { n++; return "A" + string(rune('0'+n)) }}

@@ -90,23 +90,28 @@ func TestAlertTransitions(t *testing.T) {
 func TestAlertRecur(t *testing.T) {
 	t.Parallel()
 	a, _ := domain.NewAlert("a1", occ(domain.SeverityWarning), t0)
-	if esc := a.Recur(occ(domain.SeverityWarning), t0.Add(time.Minute)); esc {
-		t.Fatal("same severity escalated")
+	later := occ(domain.SeverityWarning)
+	later.Details = map[string]string{"runnerId": "r1", "since": "later"}
+	if esc, err := a.Recur(later, t0.Add(time.Minute)); esc || err != nil {
+		t.Fatal("same severity escalated", err)
 	}
-	if a.Occurrences != 2 || !a.LastSeenAt.Equal(t0.Add(time.Minute)) {
+	if a.Occurrences != 2 || !a.LastSeenAt.Equal(t0.Add(time.Minute)) || a.Details["since"] != "later" {
 		t.Fatalf("after recur = %+v", a)
 	}
 	if err := a.Acknowledge("u1", t0.Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if esc := a.Recur(occ(domain.SeverityCritical), t0.Add(3*time.Minute)); !esc {
+	if esc, _ := a.Recur(occ(domain.SeverityCritical), t0.Add(3*time.Minute)); !esc {
 		t.Fatal("higher severity did not escalate")
 	}
 	if a.Severity != domain.SeverityCritical || a.State != domain.StateOpen || a.AckedBy != "" {
 		t.Fatalf("escalated = %+v", a)
 	}
-	if esc := a.Recur(occ(domain.SeverityWarning), t0.Add(4*time.Minute)); esc || a.Severity != domain.SeverityCritical {
+	if esc, _ := a.Recur(occ(domain.SeverityWarning), t0.Add(4*time.Minute)); esc || a.Severity != domain.SeverityCritical {
 		t.Fatalf("lower severity changed the alert: %+v", a)
+	}
+	if _, err := a.Recur(domain.Occurrence{Kind: domain.KindRunnerUnreachable, Severity: "loud", DedupKey: "k"}, t0); err == nil {
+		t.Fatal("invalid occurrence accepted")
 	}
 }
 

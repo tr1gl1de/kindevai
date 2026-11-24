@@ -116,7 +116,6 @@ func TestDeliverErrorClassification(t *testing.T) {
 		{"server error", http.StatusBadGateway, bot{token: token}, false},
 		{"blocked", http.StatusForbidden, bot{token: token}, true},
 		{"token rejected", http.StatusUnauthorized, bot{token: token}, true},
-		{"not configured", http.StatusOK, bot{err: telegram.ErrNotConfigured}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -134,6 +133,19 @@ func TestDeliverErrorClassification(t *testing.T) {
 				t.Fatalf("token leaked in %q", err)
 			}
 		})
+	}
+}
+
+// Review: before the bot is configured, notifications are dropped rather than dead-lettered.
+func TestDeliverSkipsWhenNotConfigured(t *testing.T) {
+	t.Parallel()
+	api := &fakeAPI{}
+	s, _ := newSender(t, api, bot{err: telegram.ErrNotConfigured})
+	if err := s.Deliver(t.Context(), delivery(t, app.SendPayload{ChatID: 1, Text: "x"})); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.paths) != 0 {
+		t.Fatalf("called the API without a token: %q", api.paths)
 	}
 }
 

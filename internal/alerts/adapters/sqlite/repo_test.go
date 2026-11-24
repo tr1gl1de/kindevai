@@ -75,6 +75,12 @@ func TestAlertRoundTripAndOneActivePerKey(t *testing.T) {
 	if _, err := r.Active(ctx, "storage/m1/data"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("resolved alert still active: %v", err)
 	}
+	if ok, err := r.Applied(ctx, "storage/m1/data", "ev1"); !ok || err != nil {
+		t.Fatalf("applied ev1 = %v, %v", ok, err)
+	}
+	if ok, _ := r.Applied(ctx, "storage/m1/data", "ev2"); ok {
+		t.Fatal("ev2 reported applied")
+	}
 	back, _ := r.Get(ctx, "a1")
 	if back.State != domain.StateResolved || back.AckedBy != "u1" || back.ClosedBy != "" || back.ClosedAt == nil {
 		t.Fatalf("back = %+v", back)

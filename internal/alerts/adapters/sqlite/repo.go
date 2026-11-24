@@ -102,6 +102,16 @@ func (r *Repository) Active(ctx context.Context, key string) (domain.Alert, erro
 		WHERE dedup_key = ? AND state IN ('OPEN', 'ACKNOWLEDGED')`, key))
 }
 
+// Applied reports whether event was the last one applied to an alert with the dedup key.
+func (r *Repository) Applied(ctx context.Context, key, event string) (bool, error) {
+	var n int
+	if err := r.conn(ctx).QueryRowContext(ctx, `SELECT count(*) FROM alerts WHERE dedup_key = ? AND last_event = ?`,
+		key, event).Scan(&n); err != nil {
+		return false, fmt.Errorf("checking alert event: %w", err)
+	}
+	return n > 0, nil
+}
+
 // Get returns an alert by id.
 func (r *Repository) Get(ctx context.Context, id string) (domain.Alert, error) {
 	return one(r.conn(ctx).QueryRowContext(ctx, `SELECT `+columns+` FROM alerts WHERE id = ?`, id))

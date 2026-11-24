@@ -23,6 +23,7 @@ CREATE TABLE alerts (
   CHECK ((state IN ('DISMISSED', 'RESOLVED')) = (closed_at IS NOT NULL))
 ) STRICT;
 CREATE UNIQUE INDEX alerts_one_active ON alerts(dedup_key) WHERE state IN ('OPEN', 'ACKNOWLEDGED');
+CREATE INDEX alerts_dedup ON alerts(dedup_key, last_event);
 CREATE INDEX alerts_list ON alerts(last_seen_at);
 CREATE INDEX alerts_project ON alerts(project_id, last_seen_at);
 CREATE TRIGGER alerts_closed_immutable BEFORE UPDATE ON alerts

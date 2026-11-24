@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -44,6 +45,7 @@ type Bot interface {
 // Sender is the outbox handler of app.TopicTelegramSend.
 type Sender struct {
 	Bot     Bot
+	Logger  *slog.Logger // optional
 	APIBase string       // default DefaultAPIBase; tests point it to an httptest server
 	Client  *http.Client // default a client with a 15s timeout
 	PerChat time.Duration
@@ -135,8 +137,9 @@ type apiResponse struct {
 	} `json:"parameters"`
 }
 
-// Deliver sends one notification. A missing token, a chat that blocked the bot or any other 4xx rejection is
-// permanent; 429 and 5xx are retried by the outbox with backoff.
+// Deliver sends one notification. Without a bot token Telegram is off: the message is dropped (the alert or
+// approval stays visible in the app) instead of piling up as dead letters. A chat that blocked the bot or any other
+// 4xx rejection is permanent; 429 and 5xx are retried by the outbox with backoff.
 func (s *Sender) Deliver(ctx context.Context, d messaging.Delivery) error {
 	var p app.SendPayload
 	if err := json.Unmarshal(d.Payload, &p); err != nil || p.ChatID == 0 || p.Text == "" {
@@ -144,7 +147,10 @@ func (s *Sender) Deliver(ctx context.Context, d messaging.Delivery) error {
 	}
 	token, err := s.Bot.Token(ctx)
 	if errors.Is(err, ErrNotConfigured) {
-		return messaging.Permanent(err)
+		if s.Logger != nil {
+			s.Logger.Info("telegram notification skipped: the bot is not configured", "key", d.Key)
+		}
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("reading bot token: %w", err)

@@ -3,10 +3,29 @@ package domain
 import (
 	"fmt"
 	"strings"
+	"unicode"
 )
 
-// Telegram notification texts. They are built only from the fields named here (ids, levels, numbers), never
-// from free-form payload values, so nothing secret can reach a chat.
+// Telegram notification texts. They are built only from the fields named here (ids, levels, numbers, short
+// codes), each clipped and stripped of control characters, so a message stays far below Telegram's 4096-character
+// limit and no other payload value can reach a chat.
+
+// maxField is the most runes a single interpolated value contributes to a message.
+const maxField = 120
+
+// clip makes an interpolated value safe for a chat message: no control characters, at most maxField runes.
+func clip(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
+	if r := []rune(s); len(r) > maxField {
+		s = string(r[:maxField-1]) + "…"
+	}
+	return s
+}
 
 // ApprovalNotice is what a pending-approval notification says.
 type ApprovalNotice struct {
@@ -29,23 +48,24 @@ func lang(l Language) Language {
 func RenderAlert(l Language, a Alert) string {
 	l = lang(l)
 	head := severityLabel[l][a.Severity]
+	subject := clip(a.Subject)
 	var body string
 	switch a.Kind {
 	case KindRunnerUnreachable:
 		body = map[Language]string{
-			LangEN: fmt.Sprintf("Runner %s is unreachable (no heartbeats).", a.Subject),
-			LangRU: fmt.Sprintf("Раннер %s недоступен (нет heartbeat).", a.Subject),
+			LangEN: fmt.Sprintf("Runner %s is unreachable (no heartbeats).", subject),
+			LangRU: fmt.Sprintf("Раннер %s недоступен (нет heartbeat).", subject),
 		}[l]
 	case KindStorageLevel:
-		pct := a.Details["usedPercent"]
+		pct := clip(a.Details["usedPercent"])
 		body = map[Language]string{
 			LangEN: fmt.Sprintf("Disk %s is %s%% full.", a.Subject, pct),
 			LangRU: fmt.Sprintf("Диск %s заполнен на %s%%.", a.Subject, pct),
 		}[l]
 	default:
 		body = map[Language]string{
-			LangEN: fmt.Sprintf("New alert: %s (%s).", a.Kind, a.Subject),
-			LangRU: fmt.Sprintf("Новый алерт: %s (%s).", a.Kind, a.Subject),
+			LangEN: fmt.Sprintf("New alert: %s (%s).", a.Kind, subject),
+			LangRU: fmt.Sprintf("Новый алерт: %s (%s).", a.Kind, subject),
 		}[l]
 	}
 	return strings.TrimSpace(head + ": " + body)
@@ -54,10 +74,11 @@ func RenderAlert(l Language, a Alert) string {
 // RenderApproval is the text of a pending-approval notification. Deciding is possible only in the Mini App or on
 // the web, after signing in there; the chat message carries no action.
 func RenderApproval(l Language, n ApprovalNotice) string {
-	project := n.Project
+	project := clip(n.Project)
 	if project == "" {
 		project = "—"
 	}
+	n.TaskID, n.Risk, n.Reason = clip(n.TaskID), clip(n.Risk), clip(n.Reason)
 	if lang(l) == LangRU {
 		return fmt.Sprintf("Требуется одобрение плана.\nПроект: %s\nЗадача: %s\nРиск: %s, причина: %s\nОткройте его в приложении, чтобы проверить и решить.",
 			project, n.TaskID, n.Risk, n.Reason)

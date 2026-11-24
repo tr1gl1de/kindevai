@@ -140,17 +140,22 @@ func NewAlert(id string, o Occurrence, now time.Time) (Alert, error) {
 // Active reports whether the alert still groups repeats (OPEN or ACKNOWLEDGED).
 func (a Alert) Active() bool { return a.State == StateOpen || a.State == StateAcknowledged }
 
-// Recur records a repeat of an active alert. A higher severity escalates it: the alert takes the new severity and
-// details and an acknowledged alert opens again. It reports whether it escalated (people are notified again).
-func (a *Alert) Recur(o Occurrence, now time.Time) bool {
+// Recur records a repeat of an active alert: the latest subject and details replace the old ones. A higher
+// severity escalates it: the alert takes the new severity and an acknowledged alert opens again. It reports whether
+// it escalated (people are notified again).
+func (a *Alert) Recur(o Occurrence, now time.Time) (bool, error) {
+	if err := o.validate(); err != nil {
+		return false, err
+	}
 	a.Occurrences++
 	a.LastSeenAt = now
+	a.Subject, a.Details = o.Subject, o.Details
 	if o.Severity.rank() <= a.Severity.rank() {
-		return false
+		return false, nil
 	}
-	a.Severity, a.Subject, a.Details = o.Severity, o.Subject, o.Details
+	a.Severity = o.Severity
 	a.State, a.AckedBy, a.AckedAt = StateOpen, "", nil
-	return true
+	return true, nil
 }
 
 // Acknowledge marks an open alert as seen by userID; it stays active.

@@ -4,7 +4,7 @@ import { http } from "msw";
 import { describe, expect, it } from "vitest";
 import type { Member, Me, Project } from "../../api/types";
 import { apiError, json, owner, server } from "../../test/msw";
-import { expectAccessible, renderApp } from "../../test/render";
+import { expectAccessible, expectStatus, renderApp } from "../../test/render";
 
 const web: Project = { id: "p1", slug: "web", name: "Web", myRole: "owner", createdAt: "2026-11-24T10:00:00Z" };
 
@@ -43,7 +43,7 @@ describe("projects", () => {
     await user.click(within(form).getByRole("button", { name: "Create project" }));
     expect(await screen.findByRole("link", { name: "Web App 2" })).toBeInTheDocument();
     expect(posted).toEqual({ name: "Web App 2", slug: "web-app-2" });
-    expect(screen.getByRole("status")).toHaveTextContent("Project “Web App 2” created.");
+    await expectStatus("Project “Web App 2” created.");
   });
 
   it("shows a taken slug next to the field", async () => {
@@ -103,9 +103,22 @@ describe("projects", () => {
 
     await user.click(screen.getByRole("button", { name: "Remove alice" }));
     const dialog = screen.getByRole("alertdialog", { name: "Remove alice from Web?" });
-    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
-    expect(await screen.findByRole("status")).toHaveTextContent("alice removed from Web.");
+    const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+    const confirm = within(dialog).getByRole("button", { name: "Remove" });
+    expect(cancel).toHaveFocus();
+    await user.tab();
+    expect(confirm).toHaveFocus();
+    await user.tab(); // focus is trapped inside the dialog
+    expect(cancel).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove alice" })).toHaveFocus();
+
+    await user.click(screen.getByRole("button", { name: "Remove alice" }));
+    await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Remove" }));
+    await expectStatus("alice removed from Web.");
     expect(screen.queryByRole("cell", { name: "alice" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name: "Members" })).toHaveFocus();
   });
 
   it("treats a missing or foreign project as not found", async () => {
@@ -115,4 +128,32 @@ describe("projects", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Project not found" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Back to projects" })).toBeInTheDocument();
   });
+});
+
+it("treats an already removed member as removed", async () => {
+  as(owner);
+  let members: Member[] = [{ userId: "u2", login: "alice", role: "member" }];
+  server.use(
+    http.get("/api/projects/p1", () => json(web)),
+    http.get("/api/projects/p1/members", () => json(members)),
+    http.delete("/api/projects/p1/members/:login", () => {
+      members = [];
+      return apiError(404, "membership_not_found");
+    }),
+  );
+  await renderApp("/projects/p1");
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Remove alice" }));
+  await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Remove" }));
+  await expectStatus("alice removed from Web.");
+  expect(await screen.findByText("No members yet.")).toBeInTheDocument();
+});
+
+it("returns focus to the New project button after cancelling", async () => {
+  as(owner);
+  await renderApp("/projects");
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "New project" }));
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(screen.getByRole("button", { name: "New project" })).toHaveFocus();
 });

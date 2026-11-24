@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { http } from "msw";
 import { describe, expect, it } from "vitest";
 import { apiError, json, owner, server } from "../test/msw";
-import { expectAccessible, renderApp } from "../test/render";
+import { expectAccessible, expectStatus, renderApp } from "../test/render";
 
 function signedIn() {
   server.use(http.get("/api/auth/me", () => json(owner)));
@@ -65,8 +65,11 @@ describe("first-run setup", () => {
     await user.type(screen.getByLabelText("Repeat password"), "correct horse battery");
     await user.type(screen.getByLabelText("Platform name"), "Acme");
     await user.click(screen.getByRole("button", { name: "Create owner and finish setup" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(/setup token is invalid or expired/i);
-    expect(screen.getByLabelText("Setup token")).toHaveAttribute("aria-invalid", "true");
+    const token = await screen.findByLabelText("Setup token");
+    await waitFor(() => expect(token).toHaveAccessibleDescription(/setup token is invalid or expired/i));
+    expect(token).toHaveAttribute("aria-invalid", "true");
+    expect(token).toHaveFocus();
+    expect(screen.getByRole("alert")).toHaveTextContent(/fix 1 field/i);
     expect(screen.getByLabelText("Owner login")).toHaveValue("owner");
   });
 });
@@ -148,5 +151,80 @@ describe("app shell", () => {
     fail = false;
     await userEvent.setup().click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(screen.getByRole("heading", { level: 1, name: "Sign in" })).toBeInTheDocument());
+  });
+});
+
+describe("session handling", () => {
+  it("returns to sign-in when the session expires", async () => {
+    signedIn();
+    server.use(http.get("/api/projects", () => apiError(401, "unauthenticated")));
+    await renderApp("/projects");
+    expect(await screen.findByRole("heading", { level: 1, name: "Sign in" })).toBeInTheDocument();
+  });
+
+  it("does not show the previous user's data after switching accounts", async () => {
+    let current: typeof owner | null = owner;
+    let projectsFor = "owner";
+    server.use(
+      http.get("/api/auth/me", () => (current ? json(current) : apiError(401, "unauthenticated"))),
+      http.post("/api/auth/logout", () => {
+        current = null;
+        return new Response(null, { status: 204 });
+      }),
+      http.post("/api/auth/login", () => {
+        current = { id: "u2", login: "bob", role: "user" };
+        projectsFor = "bob";
+        return json({ user: current });
+      }),
+      http.get("/api/projects", async () => {
+        if (projectsFor === "bob") {
+          await new Promise((r) => setTimeout(r, 50));
+          return json([]);
+        }
+        return json([{ id: "p1", slug: "web", name: "Secret Web", myRole: "owner", createdAt: "2026-11-24T00:00:00Z" }]);
+      }),
+    );
+    await renderApp("/projects");
+    const user = userEvent.setup();
+    expect(await screen.findByRole("link", { name: "Secret Web" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.type(await screen.findByLabelText("Login"), "bob");
+    await user.type(screen.getByLabelText("Password"), "bob-password-1");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "Projects" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Secret Web" })).not.toBeInTheDocument();
+    expect(await screen.findByText("No projects yet")).toBeInTheDocument();
+  });
+
+  it("explains when the owner was created but signing in failed", async () => {
+    let created = false;
+    server.use(
+      http.get("/api/setup/status", () => json({ setupRequired: !created })),
+      http.post("/api/setup", () => {
+        created = true;
+        return json({ login: "owner" }, 201);
+      }),
+      http.post("/api/auth/login", () => apiError(429, "rate_limited")),
+    );
+    await renderApp("/");
+    const user = userEvent.setup();
+    await user.type(await screen.findByLabelText("Setup token"), "tok");
+    await user.type(screen.getByLabelText("Owner login"), "owner");
+    await user.type(screen.getByLabelText("Password"), "correct horse battery");
+    await user.type(screen.getByLabelText("Repeat password"), "correct horse battery");
+    await user.type(screen.getByLabelText("Platform name"), "Acme");
+    await user.click(screen.getByRole("button", { name: "Create owner and finish setup" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "Sign in" })).toBeInTheDocument();
+    await expectStatus(/owner account was created/i);
+  });
+});
+
+describe("overview", () => {
+  it("shows an error with retry when projects cannot be loaded", async () => {
+    signedIn();
+    server.use(http.get("/api/projects", () => apiError(500, "internal")));
+    await renderApp("/");
+    expect(await screen.findByRole("alert")).toHaveTextContent(/went wrong on the server/i);
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
   });
 });

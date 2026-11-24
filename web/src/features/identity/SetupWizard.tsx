@@ -7,6 +7,7 @@ import { TextField } from "../../ui/Field";
 import { FormAlert, PageHeading } from "../../ui/feedback";
 import { errorMessage, validationMessage } from "../../ui/errors";
 import { useFieldErrors, type FieldErrors } from "../../ui/form";
+import { useNotify } from "../../ui/notify";
 import { keys, useCompleteSetup, useLogin } from "./api";
 import { AuthLayout } from "./AuthLayout";
 
@@ -21,9 +22,15 @@ export function SetupWizard() {
   const navigate = useNavigate();
   const setup = useCompleteSetup();
   const login = useLogin();
-  const { errors, show, clear, register, count } = useFieldErrors(fields);
+  const notify = useNotify();
+  const { errors, show, clear, register } = useFieldErrors(fields);
   const [values, setValues] = useState<Record<F, string>>({ token: "", login: "", password: "", passwordRepeat: "", platformName: "" });
+  // Announced once per submit (role="alert"); field details live in each field's description.
   const [formError, setFormError] = useState<string>();
+  const fieldErrors = (e: FieldErrors<F>) => {
+    show(e);
+    setFormError(t("form.summary", { count: Object.keys(e).length }));
+  };
   const busy = setup.isPending || login.isPending;
 
   const set = (f: F) => (e: { target: { value: string } }) => {
@@ -51,7 +58,7 @@ export function SetupWizard() {
     setFormError(undefined);
     const e = validate();
     if (Object.keys(e).length) {
-      show(e);
+      fieldErrors(e);
       return;
     }
     const creds = { login: values.login.trim(), password: values.password };
@@ -59,38 +66,41 @@ export function SetupWizard() {
       await setup.mutateAsync({ token: values.token.trim(), ...creds, platformName: values.platformName.trim() });
     } catch (err) {
       if (isApiError(err, "invalid_setup_token")) {
-        show({ token: t("setup.invalidToken") });
-        setFormError(t("setup.invalidToken"));
+        fieldErrors({ token: t("setup.invalidToken") });
       } else if (isApiError(err, "setup_completed")) {
-        setFormError(t("setup.completed"));
+        notify(t("setup.completed"));
         await qc.invalidateQueries({ queryKey: keys.setup });
       } else if (isApiError(err, "validation") && err.field && fields.includes(err.field as F)) {
-        show({ [err.field]: validationMessage(t, err.detail) ?? t("errors.unknown") });
+        fieldErrors({ [err.field]: validationMessage(t, err.detail) ?? t("errors.unknown") });
       } else {
         setFormError(errorMessage(t, err));
       }
       return;
     }
-    // Owner created: sign in with the same credentials so the operator lands in the dashboard.
+    // Owner created: sign in with the same credentials so the operator lands in the dashboard. If that fails,
+    // the account still exists — say so on the sign-in page instead of showing a setup error.
     try {
       await login.mutateAsync(creds);
-    } finally {
+    } catch {
+      notify(t("setup.createdSignIn"));
       await qc.invalidateQueries({ queryKey: keys.setup });
+      return;
     }
+    await qc.invalidateQueries({ queryKey: keys.setup });
     navigate("/projects");
   }
 
-  const summary = formError ?? (count ? t("form.summary", { count }) : undefined);
   return (
     <AuthLayout>
       <PageHeading>{t("setup.title")}</PageHeading>
       <p>{t("setup.intro")}</p>
-      <FormAlert message={summary} />
+      <FormAlert message={formError} />
       <form noValidate onSubmit={onSubmit} aria-label={t("setup.title")}>
         <TextField
           ref={register("token")}
           label={t("setup.token")}
           hint={t("setup.tokenHint")}
+          keepHint
           error={errors.token}
           type="password"
           autoComplete="off"

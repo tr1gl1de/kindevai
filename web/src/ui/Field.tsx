@@ -4,6 +4,13 @@ interface Common {
   label: string;
   hint?: string;
   error?: string;
+  /** Keep the hint visible next to an error (e.g. where to find a token). */
+  keepHint?: boolean;
+}
+
+/** While an error is shown it carries the guidance, so the hint is hidden unless it helps fix the error. */
+function visibleHint(hint?: string, error?: string, keepHint?: boolean) {
+  return error && !keepHint ? undefined : hint;
 }
 
 function describedBy(hintId: string, errorId: string, hint?: string, error?: string) {
@@ -13,12 +20,14 @@ function describedBy(hintId: string, errorId: string, hint?: string, error?: str
 /** Labelled input with hint and inline error wired to aria-describedby / aria-invalid. */
 export function TextField({
   label,
-  hint,
+  hint: rawHint,
   error,
+  keepHint,
   id,
   ref,
   ...input
 }: Common & InputHTMLAttributes<HTMLInputElement> & { ref?: Ref<HTMLInputElement> }) {
+  const hint = visibleHint(rawHint, error, keepHint);
   const auto = useId();
   const fid = id ?? auto;
   return (

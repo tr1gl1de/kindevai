@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router";
-import { PageHeading } from "../../ui/feedback";
+import { ErrorState, PageHeading } from "../../ui/feedback";
+import { errorMessage } from "../../ui/errors";
 import { useProjects } from "../projects/api";
 
 /** Landing page: what is set up and what is still missing (the platform never pretends to be ready). */
@@ -13,9 +14,13 @@ export function OverviewPage() {
       <div className="cards">
         <section className="card" aria-labelledby="ov-projects">
           <h2 id="ov-projects">{t("overview.projectsTitle")}</h2>
-          <p aria-busy={projects.isPending}>
-            {projects.data ? t("overview.projectsCount", { count: projects.data.length }) : t("app.loading")}
-          </p>
+          {projects.isError ? (
+            <ErrorState message={errorMessage(t, projects.error)} onRetry={() => void projects.refetch()} />
+          ) : (
+            <p aria-busy={projects.isPending}>
+              {projects.data ? t("overview.projectsCount", { count: projects.data.length }) : t("app.loading")}
+            </p>
+          )}
           <Link to="/projects">{t("overview.openProjects")}</Link>
         </section>
         <section className="card warn" aria-labelledby="ov-runners">

@@ -31,7 +31,11 @@ export function useLogin() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (req: LoginRequest) => api<LoginResult>("POST", "/api/auth/login", req),
-    onSuccess: (res) => qc.setQueryData(keys.me, res.user),
+    onSuccess: (res) => {
+      // Never show a previous session's data to the user who just signed in.
+      qc.removeQueries({ predicate: (q) => q.queryKey[0] !== keys.me[0] && q.queryKey[0] !== keys.setup[0] });
+      qc.setQueryData(keys.me, res.user);
+    },
   });
 }
 

@@ -419,10 +419,26 @@ select[aria-invalid="true"] {
 @media (max-width: 600px) {
   .topbar {
     padding: 8px 12px;
+    justify-content: space-between;
   }
   .nav {
     order: 3;
     flex-basis: 100%;
+  }
+  .user-area {
+    gap: 4px;
+  }
+  .user-area .user {
+    display: none; /* the login is shown on wider screens; sign-out stays reachable */
+  }
+  /* Keep the label for screen readers, save the width on phones. */
+  .language-switcher label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
   .page-heading {
     font-size: 1.35rem;

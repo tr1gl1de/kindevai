@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useParams } from "react-router";
 import { isApiError } from "../../api/client";
@@ -44,6 +44,7 @@ function Members({ project, canManage }: { project: Project; canManage: boolean 
   const remove = useRemoveMember(project.id);
   const [confirm, setConfirm] = useState<string | null>(null);
   const [removeError, setRemoveError] = useState<string>();
+  const heading = useRef<HTMLHeadingElement>(null);
 
   async function doRemove(login: string) {
     setRemoveError(undefined);
@@ -51,15 +52,25 @@ function Members({ project, canManage }: { project: Project; canManage: boolean 
       await remove.mutateAsync(login);
       notify(t("members.removed", { login, project: project.name }));
     } catch (err) {
-      setRemoveError(errorMessage(t, err));
+      if (isApiError(err, "membership_not_found")) {
+        // Someone else removed them already: the outcome the user wanted.
+        await members.refetch();
+        notify(t("members.removed", { login, project: project.name }));
+      } else {
+        setRemoveError(errorMessage(t, err));
+      }
     } finally {
       setConfirm(null);
+      // The row (and its button) is gone; keep keyboard focus in the section.
+      queueMicrotask(() => heading.current?.focus());
     }
   }
 
   return (
     <section aria-labelledby="members-title" className="section">
-      <h2 id="members-title">{t("members.title")}</h2>
+      <h2 id="members-title" ref={heading} tabIndex={-1}>
+        {t("members.title")}
+      </h2>
       <FormAlert message={removeError} />
       {members.isPending && <Loading />}
       {members.isError && <ErrorState message={errorMessage(t, members.error)} onRetry={() => void members.refetch()} />}

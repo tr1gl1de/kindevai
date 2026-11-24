@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router";
 import { isApiError } from "../../api/client";
@@ -16,13 +16,20 @@ export function ProjectsPage({ me }: { me: Me }) {
   const projects = useProjects();
   const [creating, setCreating] = useState(false);
   const isOwner = me.role === "owner";
+  const newButton = useRef<HTMLButtonElement>(null);
+  const wasCreating = useRef(false);
+  useEffect(() => {
+    // When the form closes (created or cancelled), focus returns to the button that opened it.
+    if (wasCreating.current && !creating) newButton.current?.focus();
+    wasCreating.current = creating;
+  }, [creating]);
 
   return (
     <>
       <div className="page-head">
         <PageHeading>{t("projects.title")}</PageHeading>
         {isOwner && !creating && (
-          <button type="button" className="button primary" onClick={() => setCreating(true)}>
+          <button ref={newButton} type="button" className="button primary" onClick={() => setCreating(true)}>
             {t("projects.new")}
           </button>
         )}
@@ -59,7 +66,7 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
   const { t } = useTranslation();
   const notify = useNotify();
   const create = useCreateProject();
-  const { errors, show, clear, register, count } = useFieldErrors(fields);
+  const { errors, show, clear, register } = useFieldErrors(fields);
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [slugEdited, setSlugEdited] = useState(false);
@@ -73,6 +80,7 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
     if (!/^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])$/.test(slug)) e.slug = t("validation.slug_format");
     if (Object.keys(e).length) {
       show(e);
+      setFormError(t("form.summary", { count: Object.keys(e).length }));
       return;
     }
     try {
@@ -89,7 +97,7 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
 
   return (
     <form noValidate onSubmit={onSubmit} aria-label={t("projects.new")} className="card form-card">
-      <FormAlert message={formError ?? (count ? t("form.summary", { count }) : undefined)} />
+      <FormAlert message={formError} />
       <TextField
         ref={register("name")}
         label={t("projects.name")}

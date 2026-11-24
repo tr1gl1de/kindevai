@@ -36,6 +36,9 @@ export const en = {
     internal: "Something went wrong on the server. Try again; if it keeps happening, check the server log.",
     unknown: "Unexpected error. Try again.",
     forbidden: "You do not have permission to do this.",
+    unauthenticated: "Your session has ended. Sign in again.",
+    cross_origin: "The request was blocked because it came from another site. Reload the page and try again.",
+    not_found: "It no longer exists. Reload the page.",
   },
   setup: {
     title: "Set up AI Platform",
@@ -52,6 +55,7 @@ export const en = {
     submit: "Create owner and finish setup",
     invalidToken: "The setup token is invalid or expired. Read the current token from the server and try again.",
     completed: "Setup is already completed. Sign in instead.",
+    createdSignIn: "The owner account was created. Sign in to continue.",
   },
   validation: {
     login_format: "Use 3–64 characters: letters a–z, digits, dot, dash, underscore.",

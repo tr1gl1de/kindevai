@@ -13,6 +13,12 @@ export function errorMessage(t: TFunction, e: unknown): string {
       return t("errors.forbidden");
     case "internal":
       return t("errors.internal");
+    case "unauthenticated":
+      return t("errors.unauthenticated");
+    case "cross_origin":
+      return t("errors.cross_origin");
+    case "not_found":
+      return t("errors.not_found");
     default:
       return t("errors.unknown");
   }

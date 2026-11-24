@@ -62,6 +62,13 @@ SameSite=Strict cookie (Secure over HTTPS), and the session ends after 12 hours 
 or on sign-out. Every API endpoint except health, setup and login requires a session; cross-origin state-changing
 requests are rejected, and login attempts are rate-limited per address and per account.
 
+### Projects and access
+
+The Owner creates projects and grants memberships (`project_admin` or `member`); in the MVP only the Owner
+manages memberships. Users see only projects they belong to — any other project answers `404`, exactly like a
+missing one. API: `GET/POST /api/projects`, `GET /api/projects/{id}`, `GET /api/projects/{id}/members`,
+`PUT/DELETE /api/projects/{id}/members/{login}`.
+
 ## Development
 
 ```bash

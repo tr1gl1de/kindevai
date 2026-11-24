@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -13,9 +14,14 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/identity/adapters/sqlite"
 	"github.com/tr1gl1de/kindevai/internal/identity/adapters/tokenfile"
 	"github.com/tr1gl1de/kindevai/internal/identity/app"
+	identity "github.com/tr1gl1de/kindevai/internal/identity/domain"
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
 	"github.com/tr1gl1de/kindevai/internal/platform/password"
 	"github.com/tr1gl1de/kindevai/internal/platform/ratelimit"
+	projectshttp "github.com/tr1gl1de/kindevai/internal/projects/adapters/httpapi"
+	projectsdb "github.com/tr1gl1de/kindevai/internal/projects/adapters/sqlite"
+	projectsapp "github.com/tr1gl1de/kindevai/internal/projects/app"
+	projects "github.com/tr1gl1de/kindevai/internal/projects/domain"
 	"github.com/tr1gl1de/kindevai/internal/server"
 )
 
@@ -23,6 +29,7 @@ import (
 type identityModule struct {
 	Modules    []server.Module
 	Middleware func(http.Handler) http.Handler
+	Users      app.UserRepository // read access for other contexts, via directory adapters below
 }
 
 // newIdentity wires the identity bounded context and prepares setup mode.
@@ -70,5 +77,51 @@ func newIdentity(ctx context.Context, inst *bootstrap.Installation, logger *slog
 			authn,
 		},
 		Middleware: authn.Middleware,
+		Users:      sqlite.NewUserRepository(inst.DB),
 	}, nil
+}
+
+// newProjects wires the projects bounded context.
+func newProjects(inst *bootstrap.Installation, users app.UserRepository, logger *slog.Logger) server.Module {
+	svc := &projectsapp.Service{
+		Repo:  projectsdb.New(inst.DB),
+		Users: userDirectory{users},
+		Now:   time.Now,
+		NewID: rand.Text,
+	}
+	return &projectshttp.Handler{Service: svc, Logger: logger}
+}
+
+// userDirectory lets the projects context resolve accounts through the identity context's port, so it never
+// reads identity's tables itself.
+type userDirectory struct{ users app.UserRepository }
+
+func (d userDirectory) ByLogin(ctx context.Context, login string) (projectsapp.UserRef, error) {
+	l, err := identity.NewLogin(login)
+	if err != nil {
+		return projectsapp.UserRef{}, projects.ErrUserNotFound
+	}
+	u, err := d.users.ByLogin(ctx, l)
+	if errors.Is(err, identity.ErrNotFound) || (err == nil && u.Disabled) {
+		return projectsapp.UserRef{}, projects.ErrUserNotFound
+	}
+	if err != nil {
+		return projectsapp.UserRef{}, err
+	}
+	return projectsapp.UserRef{ID: u.ID, Login: string(u.Login), Owner: u.Role == identity.RoleOwner}, nil
+}
+
+func (d userDirectory) ByIDs(ctx context.Context, ids []string) (map[string]projectsapp.UserRef, error) {
+	out := make(map[string]projectsapp.UserRef, len(ids))
+	for _, id := range ids {
+		u, err := d.users.ByID(ctx, id)
+		if errors.Is(err, identity.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		out[id] = projectsapp.UserRef{ID: u.ID, Login: string(u.Login), Owner: u.Role == identity.RoleOwner}
+	}
+	return out, nil
 }

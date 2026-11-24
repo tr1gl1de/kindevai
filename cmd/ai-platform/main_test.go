@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"os"
 	"path/filepath"
 	"strings"
@@ -188,5 +189,53 @@ func TestFirstRunSetupEndToEnd(t *testing.T) {
 	}
 	if _, err := os.Stat(tokenFile); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("setup token file still present after setup")
+	}
+}
+
+func TestLoginAfterSetupEndToEnd(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	base, stop := startServe(t, dataDir)
+	defer stop()
+	tok, _ := os.ReadFile(filepath.Join(dataDir, "secrets", "setup-token"))
+	setup := `{"token":"` + strings.TrimSpace(string(tok)) + `","login":"owner","password":"correct horse battery","platformName":"Acme"}`
+	if code, body := call(t, "POST", base+"/api/setup", setup); code != 201 {
+		t.Fatalf("setup = %d %s", code, body)
+	}
+	if code, _ := call(t, "GET", base+"/api/auth/me", ""); code != 401 {
+		t.Fatalf("me without session = %d", code)
+	}
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	post := func(path, body string) int {
+		req, _ := http.NewRequestWithContext(t.Context(), "POST", base+path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	get := func(path string) int {
+		req, _ := http.NewRequestWithContext(t.Context(), "GET", base+path, nil)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := post("/api/auth/login", `{"login":"owner","password":"correct horse battery"}`); code != 200 {
+		t.Fatalf("login = %d", code)
+	}
+	if code := get("/api/auth/me"); code != 200 {
+		t.Fatalf("me = %d", code)
+	}
+	if code := post("/api/auth/logout", ""); code != 204 {
+		t.Fatalf("logout = %d", code)
+	}
+	if code := get("/api/auth/me"); code != 401 {
+		t.Fatalf("me after logout = %d", code)
 	}
 }

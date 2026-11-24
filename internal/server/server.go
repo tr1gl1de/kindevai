@@ -18,6 +18,8 @@ type Options struct {
 	Assets  fs.FS // site root with index.html; see web.Assets
 	Logger  *slog.Logger
 	Modules []Module // bounded-context HTTP adapters
+	// Middleware wraps all routes (authentication, CSRF); security headers are applied outside it.
+	Middleware func(http.Handler) http.Handler
 }
 
 // Module registers a bounded context's API routes (under /api/).
@@ -41,7 +43,11 @@ func New(opts Options) http.Handler {
 		httpx.WriteError(w, http.StatusNotFound, "not_found", "unknown API endpoint")
 	})
 	mux.Handle("/", spa(opts.Assets))
-	return securityHeaders(mux)
+	var h http.Handler = mux
+	if opts.Middleware != nil {
+		h = opts.Middleware(h)
+	}
+	return securityHeaders(h)
 }
 
 // spa serves static files from assets and falls back to index.html for client-side routes.

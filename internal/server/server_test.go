@@ -107,3 +107,23 @@ func TestHealthMethodNotAllowedHasAllow(t *testing.T) {
 		t.Fatalf("status = %d, Allow = %q", rec.Code, rec.Header().Get("Allow"))
 	}
 }
+
+func TestMiddlewareWrapsRoutes(t *testing.T) {
+	t.Parallel()
+	mw := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/health" {
+				http.Error(w, "blocked", http.StatusTeapot)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	h := New(Options{Assets: testAssets(), Middleware: mw})
+	if rec := do(t, h, http.MethodGet, "/api/health"); rec.Code != http.StatusTeapot {
+		t.Fatalf("middleware not applied: %d", rec.Code)
+	}
+	if rec := do(t, h, http.MethodGet, "/api/health"); rec.Header().Get("Content-Security-Policy") == "" {
+		t.Fatal("security headers must wrap the middleware too")
+	}
+}

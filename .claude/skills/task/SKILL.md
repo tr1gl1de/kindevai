@@ -30,8 +30,11 @@ production/infra secrets, deleting YouTrack data, or a genuine spec contradictio
 ## 3. Plan
 - Write the plan as a short YouTrack comment (3–8 bullets) and proceed immediately.
 
-## 4. Implement — `TT start <ID> dev`
-- Follow `CLAUDE.md` and `.claude/rules/*`. Smallest change that satisfies the acceptance criteria.
+## 4. Implement — `TT start <ID> dev` (TDD, DDD)
+- Follow `CLAUDE.md` and `.claude/rules/*` (`process.md`, `ddd.md`). Smallest change that satisfies the acceptance criteria.
+- For each acceptance criterion: write the failing test, run it (red), implement (green), refactor. Never write
+  production code without a failing test that needs it.
+- Place code in the right bounded context and layer; UI strings in EN + RU; README EN + RU if it changes.
 - Commit in logical steps: `<ID>: <imperative summary>`.
 
 ## 5. Verify — `TT start <ID> test`
@@ -39,6 +42,7 @@ production/infra secrets, deleting YouTrack data, or a genuine spec contradictio
 - Run `reviewer` on `git diff origin/dev...HEAD`; fix real findings, re-verify.
 
 ## 6. Hand off — `TT start <ID> docs`
+- PR description lists acceptance criterion → test name.
 - `make clean`; `git status` clean. Stop anything you started (servers, compose stacks, background jobs).
 - `git push -u origin HEAD`; `gh pr create --base dev` — summary, `Closes <ID>`, verification, time spent.
 - KB sync: if behaviour described in a KB article changed, `YT article get` it, edit only the affected section,

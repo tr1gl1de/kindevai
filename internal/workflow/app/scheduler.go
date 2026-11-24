@@ -44,6 +44,9 @@ const (
 	CancelReasonStale     = "stale_fence"
 	// CancelReasonRunnerDisabled: the Owner disabled the runner (KIN-63).
 	CancelReasonRunnerDisabled = "runner_" + ReleaseDisabled
+	// CancelReasonScopeExceeded: the attempt changed files beyond the approved scope; the step waits for a new
+	// approval (KIN-51).
+	CancelReasonScopeExceeded = "scope_exceeded"
 )
 
 // Wait details shown with a task BLOCKED for a runner.

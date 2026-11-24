@@ -507,3 +507,45 @@ func TestActiveStepsCountsClaimedAndRunning(t *testing.T) {
 		t.Fatalf("running+claimed: %d", n)
 	}
 }
+
+// KIN-65: the scheduler's load counts the steps a runner holds in running executions — CLAIMED, RUNNING and unknown
+// attempts — and nothing else.
+func TestHeldSteps(t *testing.T) {
+	t.Parallel()
+	d, _ := testDB(t)
+	ctx := t.Context()
+	var now atomic.Int64
+	now.Store(t0.UnixNano())
+	svc := service(d, func() time.Time { return time.Unix(0, now.Load()).UTC() })
+	repo := sqlite.New(d)
+	task, e := running(t, svc)
+	if held, err := repo.HeldSteps(ctx); err != nil || len(held) != 0 {
+		t.Fatalf("held before claims %v %v", held, err)
+	}
+	l, err := svc.Claim(ctx, e.StepByKey("backend").ID, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Claim(ctx, e.StepByKey("lint").ID, "r2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.StartStep(ctx, e.StepByKey("backend").ID, "r1", l.Fence); err != nil {
+		t.Fatal(err)
+	}
+	if held, err := repo.HeldSteps(ctx); err != nil || len(held) != 2 || held["r1"] != 1 || held["r2"] != 1 {
+		t.Fatalf("held running+claimed %v %v", held, err)
+	}
+	now.Add(int64(2 * app.DefaultLeaseTTL)) // backend's attempt becomes unknown, lint's claim returns to READY
+	if _, err := svc.ExpireLeases(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if held, err := repo.HeldSteps(ctx); err != nil || len(held) != 1 || held["r1"] != 1 {
+		t.Fatalf("held after expiry %v %v", held, err)
+	}
+	if _, err := svc.CancelTask(ctx, task.ID, "stop"); err != nil {
+		t.Fatal(err)
+	}
+	if held, err := repo.HeldSteps(ctx); err != nil || len(held) != 0 {
+		t.Fatalf("held after the execution ended %v %v", held, err)
+	}
+}

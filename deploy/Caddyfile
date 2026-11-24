@@ -2,7 +2,19 @@
 # DNS must point to this host and ports 80/443 must be reachable for the ACME certificate.
 # Without DOMAIN Caddy serves https://localhost with its internal CA (local testing only).
 {$DOMAIN:localhost} {
-	encode zstd gzip
 	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
-	reverse_proxy cp:8080
+
+	# Runner WebSocket (wss://<domain>/runner/connect, KIN-19). reverse_proxy passes the Upgrade through and sets
+	# X-Forwarded-Proto https, which the Control Plane trusts from this network only. No response compression on
+	# the upgraded stream; runner sessions survive a Caddy config reload for up to 5 minutes.
+	handle /runner/connect {
+		reverse_proxy cp:8080 {
+			stream_close_delay 5m
+		}
+	}
+
+	handle {
+		encode zstd gzip
+		reverse_proxy cp:8080
+	}
 }

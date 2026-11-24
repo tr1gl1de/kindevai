@@ -66,6 +66,7 @@ type Request struct {
 	Scope        Scope
 	Reason       Reason
 	StepKey      string   // the step that exceeded its scope (ReasonScopeExceeded)
+	StepID       string   // its execution step, resumed on approval
 	Paths        []string // the files beyond the scope; approving adds them to the step's scope
 	Risk         Risk     // effective risk of the revision
 	ProposedRisk Risk     // what the planner proposed
@@ -83,6 +84,7 @@ type Approval struct {
 	Scope        Scope
 	Reason       Reason
 	StepKey      string
+	StepID       string
 	Paths        []string
 	Risk         Risk
 	ProposedRisk Risk
@@ -110,7 +112,7 @@ func NewRequest(r Request, now time.Time) (Approval, error) {
 		return Approval{}, invalid("risk", "risk_level")
 	case r.Reason != ReasonPlan && r.Reason != ReasonScopeExceeded:
 		return Approval{}, invalid("reason", "reason_unknown")
-	case r.Reason == ReasonScopeExceeded && (r.StepKey == "" || r.Scope != ScopeExecute):
+	case r.Reason == ReasonScopeExceeded && (r.StepKey == "" || r.StepID == "" || r.Scope != ScopeExecute):
 		return Approval{}, invalid("stepKey", "step_required")
 	}
 	paths := slices.Clone(r.Paths)
@@ -127,7 +129,7 @@ func NewRequest(r Request, now time.Time) (Approval, error) {
 		findings = []Finding{}
 	}
 	return Approval{ID: r.ID, ProjectID: r.ProjectID, TaskID: r.TaskID, TaskTitle: r.TaskTitle, Revision: r.Revision,
-		PlanHash: r.PlanHash, Scope: r.Scope, Reason: r.Reason, StepKey: r.StepKey, Paths: paths, Risk: r.Risk,
+		PlanHash: r.PlanHash, Scope: r.Scope, Reason: r.Reason, StepKey: r.StepKey, StepID: r.StepID, Paths: paths, Risk: r.Risk,
 		ProposedRisk: r.ProposedRisk, Findings: findings, State: StatePending, RequestedAt: now}, nil
 }
 

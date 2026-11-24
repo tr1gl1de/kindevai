@@ -405,4 +405,6 @@ func TestCancelTaskIsAtomic(t *testing.T) {
 // asProposed is a policy that keeps the planner's risk.
 type asProposed struct{}
 
-func (asProposed) EffectiveRisk(_ context.Context, _ string, p domain.Plan) (domain.Risk, error) { return p.Risk, nil }
+func (asProposed) EffectiveRisk(_ context.Context, _ string, p domain.Plan) (domain.Risk, error) {
+	return p.Risk, nil
+}

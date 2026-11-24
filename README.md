@@ -133,6 +133,24 @@ API: `GET /api/integrations`, `PUT|DELETE /api/integrations/youtrack`, `POST /ap
 `GET /api/projects/{id}/integrations`, `PUT /api/projects/{id}/integrations/youtrack`,
 `POST /api/projects/{id}/repositories`, `PUT|DELETE /api/projects/{id}/repositories/{repoId}`.
 
+#### YouTrack intake
+
+Issues of a linked YouTrack project become platform tasks when they carry the project's trigger tag (`kindevai` by
+default, changeable per project). **Polling is the primary channel**: every 60 s (15–3600 s, set on the Integrations
+page) the Control Plane asks YouTrack for the tagged issues updated since the project's cursor, hands each one to the
+durable inbox (deduplicated by issue and `updated`) and then moves the cursor; duplicate or out-of-order deliveries
+are harmless, and failures back off up to 15 minutes (honouring `Retry-After`) and show up as the integration status.
+The **webhook is optional**: once the Owner sets a secret, a YouTrack workflow may `POST /api/webhooks/youtrack` with
+the header `X-Kindevai-Webhook-Secret` and `{"issueId":"KIN-12","updated":<ms>}`; the platform keeps only the issue
+ID and re-reads the issue through the REST API, so a webhook body never decides anything. An issue runs for the
+platform account the Owner linked to its reporter's YouTrack login, and only if that account may start AI in the
+project (the Owner or a project member) — creating an issue in YouTrack grants nothing; otherwise no task is created
+and members see the reason on the project page. Members can also **run by issue ID** (no tag needed; the member is
+the initiator). API: `GET|PUT /api/integrations/youtrack/intake`, `PUT|DELETE /api/integrations/youtrack/webhook`,
+`POST /api/integrations/youtrack/users`, `DELETE /api/integrations/youtrack/users/{userId}`,
+`PUT /api/projects/{id}/integrations/youtrack/trigger` (Owner); `GET /api/projects/{id}/youtrack`,
+`POST /api/projects/{id}/youtrack/runs` (members).
+
 ### Audit log
 
 Security-relevant actions are recorded in an append-only audit log in the same transaction as the action itself:

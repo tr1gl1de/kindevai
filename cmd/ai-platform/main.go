@@ -109,8 +109,11 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	}
 	msg := newMessaging(inst, logger)
 	modules := append(identity.Modules, newProjects(inst, identity, audit, logger)...)
-	modules = append(modules, msg.HTTP, audit.HTTP, newIntegrations(inst, msg, audit, logger).HTTP)
-	defer msg.start(ctx)() // deferred after inst.Close, so the dispatchers stop before the database closes
+	integ := newIntegrations(inst, msg, audit, logger)
+	intake := newYouTrackIntake(inst, msg, integ, identity, logger)
+	modules = append(modules, msg.HTTP, audit.HTTP, integ.HTTP, intake.HTTP)
+	defer msg.start(ctx)()    // deferred after inst.Close, so the dispatchers stop before the database closes
+	defer intake.start(ctx)() // the YouTrack poller stops first
 
 	assets, built := web.Assets()
 	if !built {

@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { Me, TelegramLinkStatus, TelegramSettings } from "../../api/types";
 import { apiError, json, owner, server } from "../../test/msw";
 import { expectAccessible, expectStatus, renderApp } from "../../test/render";
-import { applyThemeParams, parseLaunch, startTarget, type TelegramLaunch } from "./webapp";
+import { applyThemeParams, parseLaunch, startPath, startTarget, type TelegramLaunch } from "./webapp";
 
 const INIT = "query_id=AAQ&user=%7B%22id%22%3A42%2C%22first_name%22%3A%22Ann%22%2C%22language_code%22%3A%22ru%22%7D&auth_date=1800000000&hash=abc";
 const launch = (startParam = ""): TelegramLaunch => ({ initData: INIT, startParam, languageCode: "ru" });
@@ -20,6 +20,14 @@ describe("Telegram launch data", () => {
     expect(startTarget("link_abc")).toEqual({ kind: "link", token: "abc" });
     expect(startTarget("invite_x-y_z")).toEqual({ kind: "invite", token: "x-y_z" });
     expect(startTarget("other_1")).toBeNull();
+  });
+
+  it("maps notification deep links to their pages, a finished task to its task page (KIN-62)", () => {
+    expect(startPath({ kind: "task", token: "T1" })).toBe("/tasks/T1");
+    expect(startPath({ kind: "approval", token: "AP1" })).toBe("/approvals/AP1");
+    expect(startPath({ kind: "alert", token: "A1" })).toBe("/alerts");
+    expect(startPath({ kind: "link", token: "x" })).toBeNull();
+    expect(startTarget("task_T1")).toEqual({ kind: "task", token: "T1" });
   });
 
   it("applies only colour theme params as --tg-theme-* variables", () => {

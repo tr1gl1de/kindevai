@@ -18,6 +18,7 @@ import (
 	projects "github.com/tr1gl1de/kindevai/internal/projects/domain"
 	"github.com/tr1gl1de/kindevai/internal/server"
 	workflowhttp "github.com/tr1gl1de/kindevai/internal/workflow/adapters/httpapi"
+	workflownotify "github.com/tr1gl1de/kindevai/internal/workflow/adapters/notify"
 	workflowdb "github.com/tr1gl1de/kindevai/internal/workflow/adapters/sqlite"
 	workflowapp "github.com/tr1gl1de/kindevai/internal/workflow/app"
 )
@@ -52,7 +53,8 @@ func newApprovals(inst *bootstrap.Installation, msg *messagingModule, audit *aud
 		Access:   taskAccess{projectsSvc},
 		Policy:   hooks,
 		Events:   hooks,
-		Outbox:   msg.Outbox, // KIN-60 BLOCKED alerts
+		Outbox:   msg.Outbox,                                  // KIN-60 BLOCKED alerts
+		Notifier: workflownotify.Notifier{Outbox: msg.Outbox}, // finished tasks → Telegram (KIN-62)
 		Tx:       tx,
 		Now:      time.Now,
 		NewID:    rand.Text,

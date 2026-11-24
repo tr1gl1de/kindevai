@@ -25,6 +25,7 @@ type nobody struct{}
 func (nobody) Visible(context.Context, auth.Principal) ([]app.ProjectRef, error) { return nil, nil }
 func (nobody) Name(context.Context, string) (string, error)                      { return "", nil }
 func (nobody) Members(context.Context, string) ([]string, error)                 { return nil, nil }
+func (nobody) Admins(context.Context, string) ([]string, error)                  { return nil, nil }
 func (nobody) Owners(context.Context) ([]string, error)                          { return nil, nil }
 func (nobody) TelegramChat(context.Context, string) (int64, bool, error)         { return 0, false, nil }
 func (nobody) Pending(context.Context, string) (bool, error)                     { return false, nil }
@@ -222,5 +223,18 @@ func TestRunnerOutputFullGroupsAndResolves(t *testing.T) {
 	}
 	if active, _ := repo.List(t.Context(), app.ListQuery{ActiveOnly: true, Platform: true, Limit: 10}); len(active) != 0 {
 		t.Fatalf("still active %+v", active)
+	}
+}
+
+// KIN-62: a task_finished event that can never succeed (malformed or for a state that is not announced) is a
+// permanent failure, not a retry loop.
+func TestTaskFinishedRejectsBadEventsPermanently(t *testing.T) {
+	t.Parallel()
+	h := events.Handlers{Svc: &app.Service{}}
+	for _, payload := range []string{`{`, `{"taskId":"t1","projectId":"p1","state":"CANCELLED"}`, `{"projectId":"p1","state":"FAILED"}`} {
+		err := h.TaskFinished(t.Context(), messaging.Delivery{Topic: "telegram.task_finished", Payload: []byte(payload)})
+		if !messaging.IsPermanent(err) {
+			t.Fatalf("%s: err = %v, want permanent", payload, err)
+		}
 	}
 }

@@ -165,6 +165,23 @@ func (h Handlers) ApprovalRequested(ctx context.Context, d messaging.Delivery) e
 		TaskID: p.TaskID, Risk: p.Risk, Reason: p.Reason}))
 }
 
+// TaskFinished handles telegram.task_finished {taskId, projectId, state, title, createdBy} (KIN-62): the
+// task's audience is told in Telegram.
+func (h Handlers) TaskFinished(ctx context.Context, d messaging.Delivery) error {
+	var p struct {
+		TaskID    string `json:"taskId"`
+		ProjectID string `json:"projectId"`
+		State     string `json:"state"`
+		Title     string `json:"title"`
+		CreatedBy string `json:"createdBy"`
+	}
+	if err := decode(d, &p); err != nil {
+		return err
+	}
+	return permanent(h.Svc.NotifyTask(ctx, app.TaskFinished{TaskID: p.TaskID, ProjectID: p.ProjectID, State: p.State,
+		Title: p.Title, CreatedBy: p.CreatedBy}))
+}
+
 // StorageDedupKey groups a volume's level alerts until the volume recovers.
 func StorageDedupKey(machineID, role string) string { return "storage/" + machineID + "/" + role }
 

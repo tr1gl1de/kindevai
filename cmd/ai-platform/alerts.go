@@ -31,6 +31,7 @@ import (
 	projects "github.com/tr1gl1de/kindevai/internal/projects/domain"
 	runnersapp "github.com/tr1gl1de/kindevai/internal/runners/app"
 	"github.com/tr1gl1de/kindevai/internal/server"
+	workflownotify "github.com/tr1gl1de/kindevai/internal/workflow/adapters/notify"
 	workflowapp "github.com/tr1gl1de/kindevai/internal/workflow/app"
 )
 
@@ -69,6 +70,7 @@ func newAlerts(inst *bootstrap.Installation, msg *messagingModule, audit *auditM
 	msg.Outbox.Handle(runnersapp.TopicRunnerOutputFull, ev.RunnerOutputFull)           // KIN-59
 	msg.Outbox.Handle(runnersapp.TopicRunnerOutputRecovered, ev.RunnerOutputRecovered) // KIN-59
 	msg.Outbox.Handle(approvalsapp.TopicApprovalRequested, ev.ApprovalRequested)
+	msg.Outbox.Handle(workflownotify.TopicTaskFinished, ev.TaskFinished) // KIN-62
 	bot := alertBot{
 		vault:    botTokenVault{&integrationsapp.Vault{Store: integrationsdb.New(inst.DB), Cipher: inst.Box, Now: time.Now}},
 		settings: tgRepo,
@@ -132,6 +134,24 @@ func (c alertProjects) Members(ctx context.Context, id string) ([]string, error)
 	out := make([]string, 0, len(ms))
 	for _, m := range ms {
 		out = append(out, m.UserID)
+	}
+	return out, nil
+}
+
+// Admins lists the user ids of the project's admins.
+func (c alertProjects) Admins(ctx context.Context, id string) ([]string, error) {
+	ms, err := c.svc.Members(ctx, system, id)
+	if errors.Is(err, projects.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, m := range ms {
+		if m.Role == alertsapp.RoleProjectAdmin {
+			out = append(out, m.UserID)
+		}
 	}
 	return out, nil
 }

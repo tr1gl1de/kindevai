@@ -84,6 +84,34 @@ func TestRenderAlertNewSources(t *testing.T) {
 	}
 }
 
+// KIN-62: a finished task's message names the outcome, the task and the project, in the user's language.
+func TestRenderTaskFinished(t *testing.T) {
+	t.Parallel()
+	done := domain.TaskNotice{TaskID: "t1", Title: "Fix login", Project: "Shop", Failed: false}
+	failed := domain.TaskNotice{TaskID: "t1", Title: "Fix login", Project: "Shop", Failed: true}
+	en, ru := domain.RenderTask(domain.LangEN, done), domain.RenderTask(domain.LangRU, done)
+	if !strings.Contains(en, "completed") || !strings.Contains(en, "Fix login") || !strings.Contains(en, "Shop") {
+		t.Fatalf("en = %q", en)
+	}
+	if !strings.Contains(ru, "выполнена") || !strings.Contains(ru, "Fix login") {
+		t.Fatalf("ru = %q", ru)
+	}
+	if got := domain.RenderTask(domain.LangEN, failed); !strings.Contains(got, "failed") {
+		t.Fatalf("failed en = %q", got)
+	}
+	if got := domain.RenderTask(domain.LangRU, failed); !strings.Contains(got, "ошибкой") {
+		t.Fatalf("failed ru = %q", got)
+	}
+	long := domain.RenderTask(domain.LangEN, domain.TaskNotice{TaskID: "t1", Title: strings.Repeat("x", 10_000) + "\n\x00"})
+	if len([]rune(long)) > 400 || strings.ContainsRune(long, 0) {
+		t.Fatalf("title not clipped: %d runes", len([]rune(long)))
+	}
+	en, ru = domain.ButtonLabel(domain.LangEN, domain.NotifyTaskFinished), domain.ButtonLabel(domain.LangRU, domain.NotifyTaskFinished)
+	if en != "Open task" || ru != "Открыть задачу" {
+		t.Fatalf("buttons = %q / %q", en, ru)
+	}
+}
+
 // KIN-59: the runner output storage alert in both languages.
 func TestRenderRunnerOutputFull(t *testing.T) {
 	t.Parallel()

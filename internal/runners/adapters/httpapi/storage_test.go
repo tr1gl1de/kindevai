@@ -27,11 +27,11 @@ func TestRunnerViewShowsAvailabilityLastHeartbeatAndCapabilities(t *testing.T) {
 		t.Fatalf("before telemetry = %+v", v)
 	}
 	now := *e.now.Load()
-	if err := e.tel.Heartbeat(t.Context(), id); err != nil {
+	if err := e.tel.Heartbeat(t.Context(), id, "s1"); err != nil {
 		t.Fatal(err)
 	}
 	c, _ := domain.NewCapabilities("linux", "amd64", true, false, []domain.Tool{{Name: "claude", Version: "1.0.3"}}, now)
-	if err := e.tel.Capabilities(t.Context(), id, c); err != nil {
+	if err := e.tel.Capabilities(t.Context(), id, "s1", c); err != nil {
 		t.Fatal(err)
 	}
 	v := decode[RunnerView](t, e.do(t, "owner", "GET", "/api/runners/"+id, nil))
@@ -54,9 +54,9 @@ func TestStorageOverviewOwnerOnly(t *testing.T) {
 	e := newEnv(t, 100)
 	id := e.approvedRunner(t)
 	now := *e.now.Load()
-	_ = e.tel.Heartbeat(t.Context(), id)
+	_ = e.tel.Heartbeat(t.Context(), id, "s1")
 	v, _ := domain.NewVolume("/", domain.RoleWorkspaces, "/srv/runner", 100<<30, 4<<30, 5<<30, now)
-	if err := e.tel.Storage(t.Context(), id, []domain.Volume{v}); err != nil {
+	if err := e.tel.Storage(t.Context(), id, "s1", []domain.Volume{v}); err != nil {
 		t.Fatal(err)
 	}
 	if w := e.do(t, "bob", "GET", "/api/storage/overview", nil); w.Code != http.StatusForbidden {

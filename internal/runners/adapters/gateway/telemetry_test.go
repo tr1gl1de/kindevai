@@ -18,21 +18,21 @@ type sink struct {
 	vols  [][]domain.Volume
 }
 
-func (s *sink) Heartbeat(_ context.Context, id string) error {
+func (s *sink) Heartbeat(_ context.Context, id, _ string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.beats = append(s.beats, id)
 	return nil
 }
 
-func (s *sink) Capabilities(_ context.Context, _ string, c domain.Capabilities) error {
+func (s *sink) Capabilities(_ context.Context, _, _ string, c domain.Capabilities) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.caps = append(s.caps, c)
 	return nil
 }
 
-func (s *sink) Storage(_ context.Context, machine string, vs []domain.Volume) error {
+func (s *sink) Storage(_ context.Context, _, _ string, vs []domain.Volume) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.vols = append(s.vols, vs)

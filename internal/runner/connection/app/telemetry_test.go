@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"errors"
-	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -70,13 +69,47 @@ func TestReporterSendsCapabilitiesStorageThenPeriodicHeartbeats(t *testing.T) {
 		t.Fatalf("Report after cancel = %v", err)
 	}
 	s.mu.Lock()
-	first := slices.Clone(s.types[:3])
+	first := s.types[0]
 	s.mu.Unlock()
-	if !slices.Equal(first, []string{protocol.TypeCapabilities, protocol.TypeStorage, protocol.TypeHeartbeat}) {
-		t.Fatalf("first messages = %v", first)
+	if first != protocol.TypeHeartbeat {
+		t.Fatalf("first message = %v, want a heartbeat before any probe", first)
 	}
 	if s.count(protocol.TypeStorage) != 1 || s.count(protocol.TypeCapabilities) != 1 {
 		t.Fatalf("messages = %v", s.types)
+	}
+}
+
+// A hung probe (e.g. a stale /mnt/c) neither delays heartbeats nor blocks stopping.
+type hungProbe struct{ release chan struct{} }
+
+func (p hungProbe) Capabilities(context.Context) protocol.Capabilities {
+	<-p.release
+	return protocol.Capabilities{}
+}
+
+func (p hungProbe) Storage(context.Context) protocol.Storage { return protocol.Storage{} }
+
+func TestHungProbeDoesNotStopHeartbeatsOrShutdown(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	defer close(release)
+	s := &recSender{}
+	r := &Reporter{Probe: hungProbe{release: release}, HeartbeatEvery: time.Millisecond}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- r.Report(ctx, s) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for s.count(protocol.TypeHeartbeat) < 3 {
+		if time.Now().After(deadline) {
+			t.Fatal("heartbeats stopped behind a hung probe")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Report did not return while a probe hung")
 	}
 }
 
@@ -127,7 +160,7 @@ func TestConnectorRunsTheReporterWhileTheLinkIsUp(t *testing.T) {
 	f.c.Reporter = &Reporter{Probe: &fakeProbe{}, HeartbeatEvery: time.Hour, StorageEvery: time.Hour}
 	go func() {
 		deadline := time.Now().Add(5 * time.Second)
-		for link.count(protocol.TypeHeartbeat) < 1 && time.Now().Before(deadline) {
+		for (link.count(protocol.TypeHeartbeat) < 1 || link.count(protocol.TypeCapabilities) < 1) && time.Now().Before(deadline) {
 			time.Sleep(time.Millisecond)
 		}
 		close(link.wait)

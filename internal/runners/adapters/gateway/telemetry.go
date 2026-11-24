@@ -16,9 +16,9 @@ import (
 
 // TelemetrySink receives a runner's telemetry (app.Telemetry).
 type TelemetrySink interface {
-	Heartbeat(ctx context.Context, runnerID string) error
-	Capabilities(ctx context.Context, runnerID string, c domain.Capabilities) error
-	Storage(ctx context.Context, machineID string, vs []domain.Volume) error
+	Heartbeat(ctx context.Context, runnerID, session string) error
+	Capabilities(ctx context.Context, runnerID, session string, c domain.Capabilities) error
+	Storage(ctx context.Context, machineID, session string, vs []domain.Volume) error
 }
 
 // TelemetryMessages handles runner.heartbeat, runner.capabilities and runner.storage (KIN-20). Payloads are
@@ -45,7 +45,7 @@ func TelemetryMessages(sink TelemetrySink, now func() time.Time, logger *slog.Lo
 			if err := decode(env.Payload, &hb); err != nil {
 				return err
 			}
-			return stored(s, env.Type, sink.Heartbeat(ctx, s.RunnerID))
+			return stored(s, env.Type, sink.Heartbeat(ctx, s.RunnerID, s.ID))
 		},
 		protocol.TypeCapabilities: func(ctx context.Context, s app.Session, env protocol.Envelope) error {
 			var p protocol.Capabilities
@@ -63,7 +63,7 @@ func TelemetryMessages(sink TelemetrySink, now func() time.Time, logger *slog.Lo
 			if err != nil {
 				return err
 			}
-			return stored(s, env.Type, sink.Capabilities(ctx, s.RunnerID, c))
+			return stored(s, env.Type, sink.Capabilities(ctx, s.RunnerID, s.ID, c))
 		},
 		protocol.TypeStorage: func(ctx context.Context, s app.Session, env protocol.Envelope) error {
 			var p protocol.Storage
@@ -85,7 +85,7 @@ func TelemetryMessages(sink TelemetrySink, now func() time.Time, logger *slog.Lo
 				}
 				vs = append(vs, dv)
 			}
-			return stored(s, env.Type, sink.Storage(ctx, s.RunnerID, vs))
+			return stored(s, env.Type, sink.Storage(ctx, s.RunnerID, s.ID, vs))
 		},
 	}
 }

@@ -80,9 +80,14 @@ type Telemetry struct {
 	Now     func() time.Time
 	Logger  *slog.Logger
 
-	mu   sync.Mutex
-	last map[string]time.Time // "<kind>/<runner>" → last accepted message
+	mu      sync.Mutex
+	last    map[string]time.Time // "<kind>/<machine>/<session>" → last stored message
+	started time.Time            // set by Run: the unreachable sweep waits StartupGrace after it
 }
+
+// StartupGrace: after the Control Plane starts, runners need up to the longest reconnect backoff (1 min) plus a
+// heartbeat to come back; until then the sweep marks nobody unreachable, so a restart does not raise an alert storm.
+const StartupGrace = domain.UnreachableAfter + time.Minute
 
 func (t *Telemetry) logger() *slog.Logger {
 	if t.Logger == nil {
@@ -91,19 +96,42 @@ func (t *Telemetry) logger() *slog.Logger {
 	return t.Logger
 }
 
-// accept rate-limits one kind of message of one machine.
-func (t *Telemetry) accept(kind, machine string, gap time.Duration, now time.Time) bool {
+// throttled reports whether a message of this kind from this connection arrives within gap of the last stored
+// one. Keyed by session, so a fresh connection's first reports are never dropped.
+func (t *Telemetry) throttled(kind, machine, session string, gap time.Duration, now time.Time) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	prev, ok := t.last[kind+"/"+machine+"/"+session]
+	return ok && now.Sub(prev) < gap
+}
+
+// stored records a successfully stored message; old entries (ended sessions) are pruned as the map grows.
+func (t *Telemetry) stored(kind, machine, session string, now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.last == nil {
 		t.last = map[string]time.Time{}
 	}
-	k := kind + "/" + machine
-	if prev, ok := t.last[k]; ok && now.Sub(prev) < gap {
-		return false
+	if len(t.last) >= 4096 {
+		for k, at := range t.last {
+			if now.Sub(at) > 10*time.Minute {
+				delete(t.last, k)
+			}
+		}
 	}
-	t.last[k] = now
-	return true
+	t.last[kind+"/"+machine+"/"+session] = now
+}
+
+// guarded runs store unless throttled and records it only when it succeeded.
+func (t *Telemetry) guarded(kind, machine, session string, gap time.Duration, now time.Time, store func() error) error {
+	if t.throttled(kind, machine, session, gap, now) {
+		return nil
+	}
+	if err := store(); err != nil {
+		return err
+	}
+	t.stored(kind, machine, session, now)
+	return nil
 }
 
 func (t *Telemetry) alert(ctx context.Context, topic, key string, payload map[string]any) error {
@@ -119,12 +147,13 @@ func (t *Telemetry) alert(ctx context.Context, topic, key string, payload map[st
 
 func unixNano(t time.Time) string { return strconv.FormatInt(t.UnixNano(), 10) }
 
-// Heartbeat records a runner.heartbeat of an authorized runner, stamped with the Control Plane's clock.
-func (t *Telemetry) Heartbeat(ctx context.Context, runnerID string) error {
+// Heartbeat records a runner.heartbeat of an authorized runner session, stamped with the Control Plane's clock.
+func (t *Telemetry) Heartbeat(ctx context.Context, runnerID, session string) error {
 	now := t.Now()
-	if !t.accept("heartbeat", runnerID, minHeartbeatGap, now) {
-		return nil
-	}
+	return t.guarded("heartbeat", runnerID, session, minHeartbeatGap, now, func() error { return t.heartbeat(ctx, runnerID, now) })
+}
+
+func (t *Telemetry) heartbeat(ctx context.Context, runnerID string, now time.Time) error {
 	return t.Tx.InTx(ctx, func(ctx context.Context) error {
 		since, err := t.Repo.RecordHeartbeat(ctx, runnerID, now)
 		if err != nil || since == nil {
@@ -135,9 +164,16 @@ func (t *Telemetry) Heartbeat(ctx context.Context, runnerID string) error {
 	})
 }
 
-// Sweep marks runners that missed domain.MissedHeartbeats heartbeats UNREACHABLE and raises one alert each.
+// Sweep marks runners that missed domain.MissedHeartbeats heartbeats UNREACHABLE and raises one alert each
+// (not during StartupGrace after Run started).
 func (t *Telemetry) Sweep(ctx context.Context) error {
 	now := t.Now()
+	t.mu.Lock()
+	started := t.started
+	t.mu.Unlock()
+	if !started.IsZero() && now.Sub(started) < StartupGrace {
+		return nil
+	}
 	return t.Tx.InTx(ctx, func(ctx context.Context) error {
 		ids, err := t.Repo.MarkUnreachable(ctx, now.Add(-domain.UnreachableAfter), now)
 		if err != nil {
@@ -153,17 +189,17 @@ func (t *Telemetry) Sweep(ctx context.Context) error {
 	})
 }
 
-// Capabilities stores a runner's capability report.
-func (t *Telemetry) Capabilities(ctx context.Context, runnerID string, c domain.Capabilities) error {
-	if !t.accept("capabilities", runnerID, minReportGap, t.Now()) {
-		return nil
-	}
-	return t.Repo.SaveCapabilities(ctx, runnerID, c)
+// Capabilities stores the capability report of a runner session.
+func (t *Telemetry) Capabilities(ctx context.Context, runnerID, session string, c domain.Capabilities) error {
+	return t.guarded("capabilities", runnerID, session, minReportGap, t.Now(), func() error {
+		return t.Repo.SaveCapabilities(ctx, runnerID, c)
+	})
 }
 
 // Storage stores a machine's volume metrics (a runner's report or the Control Plane's own) and raises an alert
-// when a volume's level rises to warning or above.
-func (t *Telemetry) Storage(ctx context.Context, machineID string, vs []domain.Volume) error {
+// when a volume's level rises to warning or above. session identifies the reporting connection (LocalSession for
+// the Control Plane's own metrics).
+func (t *Telemetry) Storage(ctx context.Context, machineID, session string, vs []domain.Volume) error {
 	if len(vs) > domain.MaxVolumes {
 		return &domain.ValidationError{Field: "volumes", Code: "too_many"}
 	}
@@ -174,10 +210,13 @@ func (t *Telemetry) Storage(ctx context.Context, machineID string, vs []domain.V
 		}
 		roles[v.Role] = true
 	}
-	now := t.Now()
-	if !t.accept("storage", machineID, minReportGap, now) {
-		return nil
-	}
+	return t.guarded("storage", machineID, session, minReportGap, t.Now(), func() error { return t.storage(ctx, machineID, vs) })
+}
+
+// LocalSession is the session of the Control Plane's own storage metrics.
+const LocalSession = "local"
+
+func (t *Telemetry) storage(ctx context.Context, machineID string, vs []domain.Volume) error {
 	return t.Tx.InTx(ctx, func(ctx context.Context) error {
 		prev, err := t.Repo.ReplaceVolumes(ctx, machineID, vs)
 		if err != nil {
@@ -192,7 +231,8 @@ func (t *Telemetry) Storage(ctx context.Context, machineID string, vs []domain.V
 			if lvl == domain.LevelOK || !lvl.Above(was) {
 				continue
 			}
-			key := "storage/" + machineID + "/" + v.Role + "/" + string(lvl) + "/" + v.ReportedAt.UTC().Format(time.DateOnly)
+			// One alert per rise: falling back and rising again later is a new event.
+			key := "storage/" + machineID + "/" + v.Role + "/" + string(lvl) + "/" + unixNano(v.ReportedAt)
 			if err := t.alert(ctx, TopicStorageLevel, key, map[string]any{"machineId": machineID, "role": v.Role,
 				"volumeId": v.ID, "level": lvl, "usedPercent": v.UsedPercent(), "availableBytes": v.AvailableBytes,
 				"totalBytes": v.TotalBytes, "diskHeavyAllowed": v.DiskHeavyAllowed()}); err != nil {
@@ -204,7 +244,8 @@ func (t *Telemetry) Storage(ctx context.Context, machineID string, vs []domain.V
 }
 
 // DiskHeavyAllowed is the scheduler's flag (KIN-23): false while a volume of the runner is critical (≥95% or
-// under 2 GiB available). Without any metrics yet the runner is not blocked.
+// under 2 GiB available) by its last report. Without any metrics yet the runner is not blocked. It does not look at
+// liveness: the scheduler combines it with Presence (an unreachable runner gets no work anyway).
 func (t *Telemetry) DiskHeavyAllowed(ctx context.Context, runnerID string) (bool, error) {
 	all, err := t.Repo.Volumes(ctx)
 	if err != nil {
@@ -356,12 +397,15 @@ func (t *Telemetry) Run(ctx context.Context, probe LocalProbe) {
 	collect := func() {
 		vs, err := probe()
 		if err == nil {
-			err = t.Storage(ctx, domain.ControlPlaneMachine, vs)
+			err = t.Storage(ctx, domain.ControlPlaneMachine, LocalSession, vs)
 		}
 		if err != nil && ctx.Err() == nil {
 			t.logger().Warn("collecting control plane storage metrics", "err", err)
 		}
 	}
+	t.mu.Lock()
+	t.started = t.Now()
+	t.mu.Unlock()
 	if probe != nil {
 		collect()
 	}

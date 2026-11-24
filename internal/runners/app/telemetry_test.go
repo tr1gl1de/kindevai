@@ -195,7 +195,7 @@ func TestHeartbeatsKeepRunnerOnlineAndThreeMissedMakeItUnreachable(t *testing.T)
 	t.Parallel()
 	f := newTelFixture(t)
 	r := f.approved(t, keyA)
-	if err := f.tel.Heartbeat(t.Context(), r.ID); err != nil {
+	if err := f.tel.Heartbeat(t.Context(), r.ID, "s1"); err != nil {
 		t.Fatal(err)
 	}
 	p, err := f.tel.Presence(t.Context())
@@ -232,7 +232,7 @@ func TestHeartbeatsKeepRunnerOnlineAndThreeMissedMakeItUnreachable(t *testing.T)
 	}
 
 	f.clock.add(time.Minute)
-	if err := f.tel.Heartbeat(t.Context(), r.ID); err != nil {
+	if err := f.tel.Heartbeat(t.Context(), r.ID, "s1"); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.outbox.topics(); !slices.Equal(got, []string{TopicRunnerUnreachable, TopicRunnerRecovered}) {
@@ -248,15 +248,15 @@ func TestHeartbeatFloodIsThrottled(t *testing.T) {
 	t.Parallel()
 	f := newTelFixture(t)
 	r := f.approved(t, keyA)
-	_ = f.tel.Heartbeat(t.Context(), r.ID)
+	_ = f.tel.Heartbeat(t.Context(), r.ID, "s1")
 	first := f.trepo.hb[r.ID]
 	f.clock.add(time.Second)
-	_ = f.tel.Heartbeat(t.Context(), r.ID)
+	_ = f.tel.Heartbeat(t.Context(), r.ID, "s1")
 	if !f.trepo.hb[r.ID].Equal(first) {
 		t.Fatal("a heartbeat 1s after the previous one was written")
 	}
 	f.clock.add(5 * time.Second)
-	_ = f.tel.Heartbeat(t.Context(), r.ID)
+	_ = f.tel.Heartbeat(t.Context(), r.ID, "s1")
 	if f.trepo.hb[r.ID].Equal(first) {
 		t.Fatal("a heartbeat 6s after the previous one was dropped")
 	}
@@ -267,7 +267,7 @@ func TestCapabilitiesAreStoredAndShown(t *testing.T) {
 	f := newTelFixture(t)
 	r := f.approved(t, keyA)
 	c, _ := domain.NewCapabilities("linux", "amd64", false, false, []domain.Tool{{Name: "claude", Version: "1.0.3"}}, f.clock.Now())
-	if err := f.tel.Capabilities(t.Context(), r.ID, c); err != nil {
+	if err := f.tel.Capabilities(t.Context(), r.ID, "s1", c); err != nil {
 		t.Fatal(err)
 	}
 	p, _ := f.tel.Presence(t.Context())
@@ -298,7 +298,7 @@ func TestStorageLevelRiseAlertsOncePerLevelAndCriticalBlocksDiskHeavy(t *testing
 	report := func(avail int64) {
 		t.Helper()
 		f.clock.add(time.Minute)
-		if err := f.tel.Storage(ctx, r.ID, []domain.Volume{volume(t, domain.RoleWorkspaces, 100*gib, avail, f.clock.Now())}); err != nil {
+		if err := f.tel.Storage(ctx, r.ID, "s1", []domain.Volume{volume(t, domain.RoleWorkspaces, 100*gib, avail, f.clock.Now())}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -323,14 +323,14 @@ func TestStorageReportsAreThrottledAndBounded(t *testing.T) {
 	f := newTelFixture(t)
 	r := f.approved(t, keyA)
 	v := volume(t, domain.RoleWorkspaces, 100*gib, 50*gib, f.clock.Now())
-	if err := f.tel.Storage(t.Context(), r.ID, []domain.Volume{v, v}); err == nil {
+	if err := f.tel.Storage(t.Context(), r.ID, "s1", []domain.Volume{v, v}); err == nil {
 		t.Fatal("duplicate volume roles accepted")
 	}
-	if err := f.tel.Storage(t.Context(), r.ID, []domain.Volume{v}); err != nil {
+	if err := f.tel.Storage(t.Context(), r.ID, "s1", []domain.Volume{v}); err != nil {
 		t.Fatal(err)
 	}
 	v.AvailableBytes = gib
-	if err := f.tel.Storage(t.Context(), r.ID, []domain.Volume{v}); err != nil {
+	if err := f.tel.Storage(t.Context(), r.ID, "s1", []domain.Volume{v}); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.trepo.vols[r.ID][0].AvailableBytes; got != 50*gib {
@@ -354,16 +354,16 @@ func TestStorageOverviewOwnerOnlyWithControlPlaneStaleAndForecast(t *testing.T) 
 		at := f.clock.Now().AddDate(0, 0, -d)
 		_, _ = f.trepo.ReplaceVolumes(ctx, online.ID, []domain.Volume{volume(t, domain.RoleWorkspaces, 100*gib, (50-int64(3-d))*gib, at)})
 	}
-	_ = f.tel.Heartbeat(ctx, offline.ID)
+	_ = f.tel.Heartbeat(ctx, offline.ID, "s1")
 	_, _ = f.trepo.ReplaceVolumes(ctx, offline.ID, []domain.Volume{volume(t, domain.RoleWorkspaces, 100*gib, 10*gib, f.clock.Now())})
-	if err := f.tel.Storage(ctx, domain.ControlPlaneMachine, []domain.Volume{volume(t, domain.RoleData, 20*gib, 15*gib, f.clock.Now())}); err != nil {
+	if err := f.tel.Storage(ctx, domain.ControlPlaneMachine, "s1", []domain.Volume{volume(t, domain.RoleData, 20*gib, 15*gib, f.clock.Now())}); err != nil {
 		t.Fatal(err)
 	}
 	f.clock.add(time.Minute)
 	f.trepo.mu.Lock()
 	f.trepo.hb[offline.ID] = f.clock.Now().Add(-time.Hour)
 	f.trepo.mu.Unlock()
-	_ = f.tel.Heartbeat(ctx, online.ID)
+	_ = f.tel.Heartbeat(ctx, online.ID, "s1")
 
 	ov, err := f.tel.Overview(ctx, owner)
 	if err != nil {
@@ -397,3 +397,71 @@ func TestStorageOverviewOwnerOnlyWithControlPlaneStaleAndForecast(t *testing.T) 
 }
 
 const keyC = "KCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4/QEFCQ0RFRkc="
+
+// Review finding: a Control Plane restart must not mark every runner unreachable before it could reconnect.
+func TestNoUnreachableAlertsDuringStartupGrace(t *testing.T) {
+	t.Parallel()
+	f := newTelFixture(t)
+	r := f.approved(t, keyA)
+	_ = f.tel.Heartbeat(t.Context(), r.ID, "s1")
+	f.clock.add(10 * time.Minute) // the Control Plane was down
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	f.tel.Run(ctx, nil) // records the start and returns at once
+	f.clock.add(StartupGrace - time.Second)
+	if err := f.tel.Sweep(t.Context()); err != nil || len(f.outbox.topics()) != 0 {
+		t.Fatalf("alerts during grace: %v, %v", f.outbox.topics(), err)
+	}
+	f.clock.add(time.Second)
+	_ = f.tel.Sweep(t.Context())
+	if got := f.outbox.topics(); !slices.Equal(got, []string{TopicRunnerUnreachable}) {
+		t.Fatalf("alerts after grace = %v", got)
+	}
+}
+
+// Review finding: a reconnect within the throttle gap must not drop the new session's capabilities.
+func TestNewSessionReportsAreNotThrottledAndFailedStoresRetry(t *testing.T) {
+	t.Parallel()
+	f := newTelFixture(t)
+	r := f.approved(t, keyA)
+	c1, _ := domain.NewCapabilities("linux", "amd64", false, false, nil, f.clock.Now())
+	c2, _ := domain.NewCapabilities("linux", "amd64", false, false, []domain.Tool{{Name: "codex"}}, f.clock.Now())
+	_ = f.tel.Capabilities(t.Context(), r.ID, "s1", c1)
+	f.clock.add(time.Second)
+	_ = f.tel.Capabilities(t.Context(), r.ID, "s2", c2)
+	if _, ok := f.trepo.caps[r.ID].Tool("codex"); !ok {
+		t.Fatal("capabilities of the new session were dropped")
+	}
+	if err := f.tel.Capabilities(t.Context(), "unknown", "s3", c1); err != nil {
+		t.Fatal(err) // the fake stores anything; the throttle state must stay untouched on failure below
+	}
+	failing := &Telemetry{Repo: failRepo{f.trepo}, Runners: f.repo, Tx: fakeTx{}, Outbox: f.outbox, Now: f.clock.Now}
+	if err := failing.Capabilities(t.Context(), r.ID, "s4", c1); err == nil {
+		t.Fatal("store failure swallowed")
+	}
+	if failing.throttled("capabilities", r.ID, "s4", minReportGap, f.clock.Now()) {
+		t.Fatal("a failed store throttles the retry")
+	}
+}
+
+type failRepo struct{ *memTelemetry }
+
+func (failRepo) SaveCapabilities(context.Context, string, domain.Capabilities) error {
+	return errors.New("disk I/O error")
+}
+
+// Review finding: a volume that falls back and rises again the same day alerts again.
+func TestStorageRiseAfterRecoveryAlertsAgain(t *testing.T) {
+	t.Parallel()
+	f := newTelFixture(t)
+	r := f.approved(t, keyA)
+	for _, avail := range []int64{4, 20, 4} { // critical, high, critical
+		f.clock.add(time.Minute)
+		if err := f.tel.Storage(t.Context(), r.ID, "s1", []domain.Volume{volume(t, domain.RoleWorkspaces, 100*gib, avail*gib, f.clock.Now())}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := f.outbox.topics(); len(got) != 2 {
+		t.Fatalf("alerts = %v, want two critical rises", got)
+	}
+}

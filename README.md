@@ -38,6 +38,14 @@ make build            # builds web/dist/app, then bin/ai-platform with the UI em
 `ai-platform serve --addr 127.0.0.1:9000` changes the listen address. A binary built without the web UI
 still starts and serves a placeholder page.
 
+### Data directory and encryption key
+
+On first start `serve` creates `./data` (`--data-dir` to change it) with the SQLite database in WAL mode
+(`data/db/platform.db`), applies schema migrations and generates the encryption key `data/secrets/master.key`
+(mode 0600; `--key-file` keeps it elsewhere). Later starts reuse them. **Back up the key together with the database:**
+if the database exists but the key is missing or different, the Control Plane refuses to start and never generates
+a replacement. Only one process can use a data directory at a time.
+
 ## Development
 
 ```bash

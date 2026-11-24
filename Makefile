@@ -58,7 +58,7 @@ cover: ## coverage report to coverage.out
 	go test -race -count=1 -coverprofile=coverage.out $(GO_PKGS) && go tool cover -func=coverage.out | tail -1
 
 dev: ## run control plane on this worktree's port (web: npm --prefix web run dev in another shell)
-	go run ./cmd/ai-platform serve --addr 127.0.0.1:$${KINDEV_PORT:-8080}
+	go run ./cmd/ai-platform serve --addr 127.0.0.1:$${KINDEV_PORT:-8080} --data-dir $${KINDEV_DATA_DIR:-./data}
 
 clean: ## remove build/test leftovers of this worktree (keeps data/ and .env)
 	rm -rf bin/ coverage.* *.test *.out web/dist/app web/coverage

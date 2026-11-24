@@ -1,11 +1,4 @@
-import {
-  useId,
-  type InputHTMLAttributes,
-  type ReactNode,
-  type Ref,
-  type SelectHTMLAttributes,
-  type TextareaHTMLAttributes,
-} from "react";
+import { useId, type InputHTMLAttributes, type ReactNode, type Ref, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
 
 interface Common {
   label: string;
@@ -99,7 +92,7 @@ export function SelectField({
   );
 }
 
-/** Labelled multi-line input with the same error/hint wiring as TextField. */
+/** Labelled multi-line input (e.g. a PEM key) with the same error/hint wiring as TextField. */
 export function TextAreaField({
   label,
   hint: rawHint,

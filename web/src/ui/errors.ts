@@ -94,6 +94,11 @@ const validationKeys = new Set([
   "too_many_patterns",
   "comment_required",
   "comment_format",
+  "app_id_format",
+  "private_key_format",
+  "webhook_secret_short",
+  "webhook_secret_format",
+  "key_required_for_app",
 ]);
 
 /** Message for a server validation code, or undefined if unknown. */

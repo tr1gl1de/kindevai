@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
-import type { Integrations, Me, Project, ProjectIntegrations, YouTrackConnection } from "../../api/types";
+import type { GitHubApp, Integrations, Me, Project, ProjectIntegrations, YouTrackConnection } from "../../api/types";
 import { json, owner, server } from "../../test/msw";
 import { expectAccessible, expectStatus, renderApp } from "../../test/render";
 
@@ -24,7 +24,7 @@ function connection(over: Partial<YouTrackConnection> = {}): YouTrackConnection 
 
 describe("integrations page (owner)", () => {
   it("connects YouTrack write-only and tests the connection in the background", async () => {
-    let state: Integrations = { youtrack: null };
+    let state: Integrations = { github: null, youtrack: null };
     const bodies: unknown[] = [];
     let polls = 0;
     server.use(
@@ -32,17 +32,17 @@ describe("integrations page (owner)", () => {
       http.get("/api/projects", () => json([alpha])),
       http.get("/api/integrations", () => {
         if (state.youtrack?.check.status === "pending" && ++polls >= 1) {
-          state = { youtrack: connection({ check: { status: "ok", detail: "robot", requestedAt: "2026-11-24T10:00:00Z", checkedAt: "2026-11-24T10:00:01Z" } }) };
+          state = { github: null, youtrack: connection({ check: { status: "ok", detail: "robot", requestedAt: "2026-11-24T10:00:00Z", checkedAt: "2026-11-24T10:00:01Z" } }) };
         }
         return json(state);
       }),
       http.put("/api/integrations/youtrack", async ({ request }) => {
         bodies.push(await request.json());
-        state = { youtrack: connection() };
+        state = { github: null, youtrack: connection() };
         return json(state.youtrack);
       }),
       http.post("/api/integrations/youtrack/check", () => {
-        state = { youtrack: connection({ check: { status: "pending", requestedAt: "2026-11-24T10:00:00Z", checkedAt: null } }) };
+        state = { github: null, youtrack: connection({ check: { status: "pending", requestedAt: "2026-11-24T10:00:00Z", checkedAt: null } }) };
         return json(state.youtrack, 202);
       }),
     );
@@ -79,7 +79,7 @@ describe("integrations page (owner)", () => {
     server.use(
       http.get("/api/auth/me", () => json(owner)),
       http.get("/api/integrations", () =>
-        json({ youtrack: connection({ check: { status: "failed", code: "unauthorized", detail: "HTTP 401", requestedAt: null, checkedAt: "2026-11-24T10:00:01Z" } }) }),
+        json({ github: null, youtrack: connection({ check: { status: "failed", code: "unauthorized", detail: "HTTP 401", requestedAt: null, checkedAt: "2026-11-24T10:00:01Z" } }) }),
       ),
       http.put("/api/integrations/youtrack", async ({ request }) => {
         bodies.push(await request.json());
@@ -100,12 +100,12 @@ describe("integrations page (owner)", () => {
   });
 
   it("disconnects after confirmation", async () => {
-    let state: Integrations = { youtrack: connection() };
+    let state: Integrations = { github: null, youtrack: connection() };
     server.use(
       http.get("/api/auth/me", () => json(owner)),
       http.get("/api/integrations", () => json(state)),
       http.delete("/api/integrations/youtrack", () => {
-        state = { youtrack: null };
+        state = { github: null, youtrack: null };
         return new Response(null, { status: 204 });
       }),
     );
@@ -121,7 +121,7 @@ describe("integrations page (owner)", () => {
   it("is in Russian", async () => {
     server.use(
       http.get("/api/auth/me", () => json(owner)),
-      http.get("/api/integrations", () => json({ youtrack: null })),
+      http.get("/api/integrations", () => json({ github: null, youtrack: null })),
     );
     const { container } = await renderApp("/integrations", "ru");
     expect(await screen.findByRole("heading", { level: 1, name: "Интеграции" })).toBeInTheDocument();
@@ -153,6 +153,7 @@ describe("project integrations (owner)", () => {
       protectedBranches: ["main", "master"],
       createdAt: "2026-11-24T10:00:00Z",
       updatedAt: "2026-11-24T10:00:00Z",
+      github: { installed: false, defaultBranch: "", protection: "unknown" as const, unprotected: [], sync: { status: "none" as const, requestedAt: null, checkedAt: null } },
     };
     server.use(
       http.get("/api/auth/me", () => json(owner)),
@@ -219,5 +220,175 @@ describe("project integrations (owner)", () => {
     await user.click(within(dialog).getByRole("button", { name: "Remove" }));
     await expectStatus("acme/web removed.");
     expect(await within(section).findByText("No repositories yet.")).toBeInTheDocument();
+  });
+});
+
+const PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIEsecretkeymaterial\n-----END RSA PRIVATE KEY-----";
+const HOOK = "whsec-0123456789abcdef";
+
+function githubApp(over: Partial<GitHubApp> = {}): GitHubApp {
+  return {
+    appId: 42,
+    privateKey: { set: true, updatedAt: "2026-11-24T10:00:00Z" },
+    webhookSecret: { set: true, updatedAt: "2026-11-24T10:00:00Z" },
+    updatedAt: "2026-11-24T10:00:00Z",
+    check: { status: "none", requestedAt: null, checkedAt: null },
+    lastDeliveryAt: null,
+    ...over,
+  };
+}
+
+describe("GitHub App (owner)", () => {
+  it("configures the App write-only, explains minimal permissions and tests it in the background", async () => {
+    let state: Integrations = { youtrack: null, github: null };
+    const bodies: unknown[] = [];
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/integrations", () => {
+        if (state.github?.check.status === "pending") {
+          state = { ...state, github: githubApp({ check: { status: "ok", detail: "kindev-bot", requestedAt: null, checkedAt: "2026-11-24T10:00:01Z" } }) };
+        }
+        return json(state);
+      }),
+      http.put("/api/integrations/github", async ({ request }) => {
+        const body = (await request.json()) as { appId: string };
+        bodies.push(body);
+        if (body.appId === "x") return invalid("app_id_format", "appId");
+        state = { ...state, github: githubApp() };
+        return json(state.github);
+      }),
+      http.post("/api/integrations/github/check", () => {
+        state = { ...state, github: githubApp({ check: { status: "pending", requestedAt: "2026-11-24T10:00:00Z", checkedAt: null } }) };
+        return json(state.github, 202);
+      }),
+    );
+    const { container, client } = await renderApp("/integrations");
+    const user = userEvent.setup();
+    const section = await screen.findByRole("region", { name: "GitHub" });
+    expect(await within(section).findByText("No GitHub App configured")).toBeInTheDocument();
+    await user.click(within(section).getByText("How to set up the GitHub App"));
+    expect(within(section).getByText("Contents: read and write")).toBeInTheDocument();
+    expect(within(section).getByText(/Do not grant Administration or Workflows/)).toBeInTheDocument();
+    expect(within(section).getByText(`${window.location.origin}/api/webhooks/github`)).toBeInTheDocument();
+    await expectAccessible(container);
+
+    await user.click(within(section).getByRole("button", { name: "Save GitHub App" }));
+    expect(within(section).getByLabelText("App ID")).toHaveFocus();
+    expect(within(section).getByLabelText("Private key")).toHaveAttribute("aria-invalid", "true");
+
+    await user.type(within(section).getByLabelText("App ID"), "x");
+    await user.type(within(section).getByLabelText("Private key"), PEM);
+    const secret = within(section).getByLabelText("Webhook secret");
+    expect(secret).toHaveAttribute("type", "password");
+    await user.type(secret, HOOK);
+    await user.click(within(section).getByRole("button", { name: "Save GitHub App" }));
+    expect(await within(section).findByText("Enter the numeric App ID from the App's settings page.")).toBeInTheDocument();
+    expect(within(section).getByLabelText("Private key")).toHaveValue(PEM); // never clear what the user typed
+
+    await user.clear(within(section).getByLabelText("App ID"));
+    await user.type(within(section).getByLabelText("App ID"), "42");
+    await user.click(within(section).getByRole("button", { name: "Save GitHub App" }));
+    await expectStatus("GitHub App saved. Registered repositories are being read from GitHub.");
+    expect(bodies.at(-1)).toEqual({ appId: "42", privateKey: PEM, webhookSecret: HOOK });
+    expect(await within(section).findByLabelText("Private key")).toHaveValue("");
+    expect(container.innerHTML).not.toContain("secretkeymaterial");
+    expect(container.innerHTML).not.toContain(HOOK);
+    expect(JSON.stringify(client.getMutationCache().getAll().map((m) => m.state))).not.toContain(HOOK);
+    expect(within(section).getByText("No webhook received yet.")).toBeInTheDocument();
+
+    await user.click(within(section).getByRole("button", { name: "Test App" }));
+    expect(await within(section).findByText("Authenticated as kindev-bot.", undefined, { timeout: 4000 })).toBeInTheDocument();
+    await expectAccessible(container);
+  });
+
+  it("is in Russian", async () => {
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/integrations", () => json({ youtrack: null, github: githubApp({ lastDeliveryAt: "2026-11-24T10:00:00Z", lastEvent: "push" }) })),
+    );
+    const { container } = await renderApp("/integrations", "ru");
+    const section = await screen.findByRole("region", { name: "GitHub" });
+    expect(await within(section).findByLabelText("Закрытый ключ")).toBeInTheDocument();
+    expect(within(section).getByText(/Последний вебхук: push/)).toBeInTheDocument();
+    await expectAccessible(container);
+  });
+
+  it("warns about unprotected main/master and refreshes a repository from GitHub", async () => {
+    const base = {
+      id: "r1",
+      owner: "acme",
+      name: "web",
+      fullName: "acme/web",
+      integrationBranch: "dev",
+      protectedBranches: ["main", "master"],
+      createdAt: "2026-11-24T10:00:00Z",
+      updatedAt: "2026-11-24T10:00:00Z",
+    };
+    const done = { status: "ok" as const, detail: "unprotected", requestedAt: null, checkedAt: "2026-11-24T10:00:01Z" };
+    let state: ProjectIntegrations = {
+      projectId: "p1",
+      youtrackProject: "",
+      repositories: [{ ...base, github: { installed: true, defaultBranch: "main", protection: "unprotected", unprotected: ["main"], sync: done } }],
+    };
+    let syncs = 0;
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects/p1", () => json(alpha)),
+      http.get("/api/projects/p1/members", () => json([])),
+      http.get("/api/projects/p1/integrations", () => json(state)),
+      http.post("/api/projects/p1/repositories/r1/sync", () => {
+        syncs++;
+        state = {
+          ...state,
+          repositories: [{ ...base, github: { installed: true, defaultBranch: "main", protection: "protected", unprotected: [], sync: done } }],
+        };
+        return json(state.repositories[0], 202);
+      }),
+    );
+    const { container } = await renderApp("/projects/p1");
+    const user = userEvent.setup();
+    const row = (await screen.findByRole("cell", { name: "acme/web" })).closest("tr")!;
+    expect(within(row).getByText("App installed; default branch main.")).toBeInTheDocument();
+    expect(within(row).getByText("Not protected on GitHub: main. Add a ruleset or branch protection.")).toBeInTheDocument();
+    await expectAccessible(container);
+    await user.click(within(row).getByRole("button", { name: "Refresh acme/web from GitHub" }));
+    expect(await screen.findByText("main/master protected on GitHub.")).toBeInTheDocument();
+    expect(syncs).toBe(1);
+  });
+
+  it("explains a repository the App is not installed on", async () => {
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects/p1", () => json(alpha)),
+      http.get("/api/projects/p1/members", () => json([])),
+      http.get("/api/projects/p1/integrations", () =>
+        json({
+          projectId: "p1",
+          youtrackProject: "",
+          repositories: [
+            {
+              id: "r1",
+              owner: "acme",
+              name: "web",
+              fullName: "acme/web",
+              integrationBranch: "dev",
+              protectedBranches: ["main", "master"],
+              createdAt: "2026-11-24T10:00:00Z",
+              updatedAt: "2026-11-24T10:00:00Z",
+              github: {
+                installed: false,
+                defaultBranch: "",
+                protection: "unknown",
+                unprotected: [],
+                sync: { status: "failed", code: "not_installed", detail: "x", requestedAt: null, checkedAt: "2026-11-24T10:00:01Z" },
+              },
+            },
+          ],
+        }),
+      ),
+    );
+    await renderApp("/projects/p1", "ru");
+    expect(await screen.findByText("Приложение не установлено на этот репозиторий. Установите его в GitHub и обновите.")).toBeInTheDocument();
   });
 });

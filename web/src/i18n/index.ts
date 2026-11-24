@@ -1,4 +1,4 @@
-import i18next, { type i18n as I18n } from "i18next";
+import { createInstance, type i18n as I18n } from "i18next";
 import LanguageDetector from "i18next-browser-languagedetector";
 import { initReactI18next } from "react-i18next";
 import { en } from "./locales/en";
@@ -18,7 +18,7 @@ export const LOCALE_STORAGE_KEY = "kindevai.locale";
  * then the browser language; anything unsupported falls back to English.
  */
 export async function createI18n(opts: { lng?: string } = {}): Promise<I18n> {
-  const instance = i18next.createInstance();
+  const instance = createInstance();
   instance.on("languageChanged", (lng) => {
     document.documentElement.lang = instance.resolvedLanguage ?? lng;
   });

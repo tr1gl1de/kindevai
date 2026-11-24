@@ -71,6 +71,9 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
   const [slug, setSlug] = useState("");
   const [slugEdited, setSlugEdited] = useState(false);
   const [formError, setFormError] = useState<string>();
+  const nameRef = useRef<HTMLInputElement | null>(null);
+  // The form opens on the user's request, so moving focus into it is expected (no autofocus on page load).
+  useEffect(() => nameRef.current?.focus(), []);
 
   async function onSubmit(ev: FormEvent) {
     ev.preventDefault();
@@ -99,10 +102,12 @@ function NewProjectForm({ onDone }: { onDone: () => void }) {
     <form noValidate onSubmit={onSubmit} aria-label={t("projects.new")} className="card form-card">
       <FormAlert message={formError} />
       <TextField
-        ref={register("name")}
+        ref={(el) => {
+          register("name")(el);
+          nameRef.current = el;
+        }}
         label={t("projects.name")}
         error={errors.name}
-        autoFocus
         value={name}
         onChange={(e) => {
           setName(e.target.value);

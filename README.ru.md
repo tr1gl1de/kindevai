@@ -98,6 +98,24 @@ make clean            # удалить артефакты сборки и тес
 
 Ветки создаются от `dev` как `feature/KIN-<n>-<slug>`; pull request — только в `dev`. `main` — только для владельца.
 
+## CI и релизы
+
+| Событие | Что выполняется |
+|---|---|
+| PR или push в `dev` / `main` | `make lint` (go vet, golangci-lint, oxlint, tsc), тесты с покрытием, `make vuln` (govulncheck, npm audit), `make build`, проверка конфига GoReleaser, actionlint, сборка Docker-образа и смоук-тест |
+| Зелёный push в `dev` | **Dev pre-release** `dev`: бинарники linux/darwin × amd64/arm64 + `SHA256SUMS`; образ `ghcr.io/tr1gl1de/kindevai-dev:latest` (отдельный dev-пакет) |
+| Тег `v*` на коммите `main` (только владелец) | **Prod-релиз**: проверка, что тег на `main`, тесты, GitHub Release (changelog, checksums, provenance) и образ `:X.Y.Z`, `:X.Y`, `:latest` через защищённый environment `production` |
+
+Автоматизация никогда не пушит в `main` и не создаёт PR в `main`. Dependabot еженедельно предлагает обновления в `dev`.
+Все сторонние actions и образы закреплены по SHA/digest.
+
+**Обязательные настройки репозитория (владелец, один раз)** — workflow сами их обеспечить не могут:
+1. Rulesets: защитить `main` (push/merge только владелец) и теги `v*` (создавать, менять, удалять — только владелец).
+2. Environment `production`: обязательный ревьюер — владелец, без обхода администраторами, deployment tags `v*`.
+3. Пакет `ghcr.io/tr1gl1de/kindevai`: права записи из Actions только для этого репозитория (dev-образы — в
+   `kindevai-dev`).
+Локально: `make lint vuln build`, `make release-snapshot` (нужен GoReleaser).
+
 ## Лицензия
 
 См. [LICENSE](LICENSE).

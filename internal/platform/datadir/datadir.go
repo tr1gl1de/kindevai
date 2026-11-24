@@ -38,7 +38,7 @@ func Open(dir string) (*Dir, error) {
 		return nil, fmt.Errorf("data dir %s is not a directory", abs)
 	}
 	if st.Mode().Perm()&0o077 != 0 { // pre-existing dirs (docker volumes, ./data) may be world-readable
-		if err := os.Chmod(abs, 0o700); err != nil {
+		if err := os.Chmod(abs, 0o700); err != nil { //nolint:gosec // G302: directories need the x bit; 0700 is owner-only
 			return nil, fmt.Errorf("restricting data dir %s to mode 0700: %w", abs, err)
 		}
 	}

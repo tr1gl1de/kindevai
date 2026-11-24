@@ -15,7 +15,7 @@ import (
 const (
 	metaSetupCompleted   = "setup_completed_at"
 	metaSetupTokenHash   = "setup_token_hash"
-	metaSetupTokenExpiry = "setup_token_expires_at"
+	metaSetupTokenExpiry = "setup_token_expires_at" //nolint:gosec // G101: a meta key name, not a credential
 	settingPlatformName  = "platform.name"
 )
 

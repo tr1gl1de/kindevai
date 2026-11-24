@@ -98,6 +98,24 @@ make clean            # remove build and test leftovers
 
 Branches start from `dev` as `feature/KIN-<n>-<slug>`; pull requests target `dev`. `main` is owner-only.
 
+## CI and releases
+
+| Trigger | What runs |
+|---|---|
+| PR or push to `dev` / `main` | `make lint` (go vet, golangci-lint, oxlint, tsc), tests with coverage, `make vuln` (govulncheck, npm audit), `make build`, GoReleaser config check, actionlint, Docker image build + smoke test |
+| Green push to `dev` | **Dev pre-release** `dev`: binaries for linux/darwin × amd64/arm64 + `SHA256SUMS`; image `ghcr.io/tr1gl1de/kindevai-dev:latest` (separate dev package) |
+| Tag `v*` on a commit of `main` (owner only) | **Production release**: verifies the tag is on `main`, runs tests, publishes the GitHub Release (changelog, checksums, provenance) and image `:X.Y.Z`, `:X.Y`, `:latest` through the protected `production` environment |
+
+Automation never pushes to `main` or opens PRs against it. Dependabot proposes weekly updates to `dev`.
+All third-party actions and images are pinned by commit SHA / digest.
+
+**Required repository settings (owner, one-time)** — workflows cannot enforce these themselves:
+1. Rulesets: protect `main` (owner-only push/merge) and tags `v*` (only the owner may create, update or delete).
+2. Environment `production`: required reviewer = owner, prevent self-review bypass by admins off, deployment tags `v*`.
+3. Package `ghcr.io/tr1gl1de/kindevai`: grant Actions write access only to this repository (dev images go to
+   `kindevai-dev`).
+Locally: `make lint vuln build`, `make release-snapshot` (needs GoReleaser).
+
 ## License
 
 See [LICENSE](LICENSE).

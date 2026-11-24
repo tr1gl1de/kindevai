@@ -16,6 +16,7 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/network/app"
 	"github.com/tr1gl1de/kindevai/internal/network/domain"
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
+	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
 	"github.com/tr1gl1de/kindevai/internal/platform/secrets"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 )
@@ -277,6 +278,29 @@ type env struct {
 	vault *vault
 	cmds  *commands
 	audit *auditLog
+	alert *alertOutbox
+}
+
+type alertOutbox struct {
+	mu   sync.Mutex
+	msgs []messaging.Message
+}
+
+func (o *alertOutbox) Enqueue(_ context.Context, m messaging.Message) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.msgs = append(o.msgs, m)
+	return nil
+}
+
+func (o *alertOutbox) topics() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	var out []string
+	for _, m := range o.msgs {
+		out = append(out, m.Topic)
+	}
+	return out
 }
 
 func newEnv(t *testing.T) *env {
@@ -290,10 +314,10 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	e := &env{repo: &repo{profiles: map[string]domain.Profile{}, assigned: map[domain.Scope]domain.Assignment{}, tests: map[string]domain.Test{}},
-		vault: &vault{m: map[string]string{}}, cmds: &commands{}, audit: &auditLog{}}
+		vault: &vault{m: map[string]string{}}, cmds: &commands{}, audit: &auditLog{}, alert: &alertOutbox{}}
 	var n int
 	var mu sync.Mutex
-	e.svc = &app.Service{Repo: e.repo, Secrets: e.vault, Cipher: box, Commands: e.cmds, Tx: tx{}, Audit: e.audit,
+	e.svc = &app.Service{Repo: e.repo, Secrets: e.vault, Cipher: box, Commands: e.cmds, Tx: tx{}, Audit: e.audit, Outbox: e.alert,
 		Runners: runners{
 			"r1": {ID: "r1", Name: "box-1", Projects: []string{"p1", "p2"}, Active: true},
 			"r2": {ID: "r2", Name: "box-2", Active: true},
@@ -543,5 +567,39 @@ func TestTestNetworkRunsOnTheRunner(t *testing.T) {
 	}
 	if _, err := e.svc.RequestTest(t.Context(), ownerP, "r3", ""); err == nil {
 		t.Fatal("test on an inactive runner accepted")
+	}
+}
+
+// KIN-60 AC: a failed egress check of a runner's effective profile raises an alert, a passing one resolves it; a
+// test of another profile says nothing about the runner's egress and raises nothing.
+func TestEgressCheckRaisesAndResolvesAlert(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	run := func(profileID string, ok bool) {
+		t.Helper()
+		tt, err := e.svc.RequestTest(t.Context(), ownerP, "r1", profileID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := protocol.NetworkTestResult{TestID: tt.ID, OK: ok, DurationMs: 10}
+		if !ok {
+			res.Code = "proxy_unreachable"
+		}
+		if err := e.svc.RecordResult(t.Context(), "r1", res); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := e.create(t, app.ProfileRequest{Name: "P", ProxyURL: "http://proxy.example:3128"})
+	run(p.Profile.ID, false)
+	run("", false)
+	run("", true)
+	want := []string{app.TopicEgressCheckFailed, app.TopicEgressCheckPassed}
+	if got := e.alert.topics(); !slices.Equal(got, want) {
+		t.Fatalf("alert events = %v, want %v", got, want)
+	}
+	var body struct{ RunnerID, Code string }
+	_ = json.Unmarshal(e.alert.msgs[0].Payload, &body)
+	if body.RunnerID != "r1" || body.Code != "proxy_unreachable" || e.alert.msgs[0].Adapter != "alerts" {
+		t.Fatalf("failed event = %s", e.alert.msgs[0].Payload)
 	}
 }

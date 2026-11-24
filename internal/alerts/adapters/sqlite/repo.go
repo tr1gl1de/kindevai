@@ -245,3 +245,16 @@ func (r *Repository) SavePreferences(ctx context.Context, p domain.Preferences, 
 	}
 	return nil
 }
+
+// DeleteClosed deletes up to limit alerts closed before `before`, oldest first. A closed alert was last seen no
+// later than it closed, so the last_seen_at bound lets the alerts_list index narrow the scan.
+func (r *Repository) DeleteClosed(ctx context.Context, before time.Time, limit int) (int64, error) {
+	cut := ts(before)
+	res, err := r.conn(ctx).ExecContext(ctx, `DELETE FROM alerts WHERE id IN (SELECT id FROM alerts
+		WHERE last_seen_at < ? AND state IN ('DISMISSED', 'RESOLVED') AND closed_at < ?
+		ORDER BY last_seen_at LIMIT ?)`, cut, cut, limit)
+	if err != nil {
+		return 0, fmt.Errorf("deleting closed alerts: %w", err)
+	}
+	return res.RowsAffected()
+}

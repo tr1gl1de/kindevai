@@ -23,6 +23,7 @@ const (
 	TopicRunnerUnreachable = "alerts.runner_unreachable"
 	TopicRunnerRecovered   = "alerts.runner_recovered"
 	TopicStorageLevel      = "alerts.storage_level"
+	TopicStorageRecovered  = "alerts.storage_recovered" // KIN-60: the volume is back under the recovery threshold
 	// KIN-59: the Control Plane's runner output storage is full (output is dropped) / stores output again.
 	TopicRunnerOutputFull      = "alerts.runner_output_full"
 	TopicRunnerOutputRecovered = "alerts.runner_output_recovered"
@@ -210,7 +211,8 @@ func (t *Telemetry) Capabilities(ctx context.Context, runnerID, session string, 
 }
 
 // Storage stores a machine's volume metrics (a runner's report or the Control Plane's own) and raises an alert
-// when a volume's level rises to warning or above. session identifies the reporting connection (LocalSession for
+// when a volume's level rises to warning or above, and a recovery event when it falls back under
+// domain.RecoveredPercent. session identifies the reporting connection (LocalSession for
 // the Control Plane's own metrics).
 func (t *Telemetry) Storage(ctx context.Context, machineID, session string, vs []domain.Volume) error {
 	if len(vs) > domain.MaxVolumes {
@@ -236,9 +238,17 @@ func (t *Telemetry) storage(ctx context.Context, machineID string, vs []domain.V
 			return err
 		}
 		for _, v := range vs {
-			was := domain.Level("")
+			was, wasRecovered := domain.Level(""), true
 			if i := slices.IndexFunc(prev, func(p domain.Volume) bool { return p.Role == v.Role }); i >= 0 {
-				was = prev[i].Level()
+				was, wasRecovered = prev[i].Level(), prev[i].Recovered()
+			}
+			if v.Recovered() && !wasRecovered {
+				key := "storage/" + machineID + "/" + v.Role + "/recovered/" + unixNano(v.ReportedAt)
+				if err := t.alert(ctx, TopicStorageRecovered, key, map[string]any{"machineId": machineID, "role": v.Role,
+					"volumeId": v.ID, "usedPercent": v.UsedPercent()}); err != nil {
+					return err
+				}
+				continue
 			}
 			lvl := v.Level()
 			if lvl == domain.LevelOK || !lvl.Above(was) {

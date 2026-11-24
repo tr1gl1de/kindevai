@@ -200,6 +200,10 @@ func ValidatePlan(p Plan, projectRepos []string) error {
 	if hasCycle(n.Steps) {
 		return invalid("steps", "cycle")
 	}
+	// The stored canonical form must parse again (ParsePlan's size cap), or the revision could never be loaded.
+	if c, err := n.CanonicalJSON(); err != nil || len(c) > MaxPlanBytes {
+		return invalid("plan", "plan_too_large")
+	}
 	return nil
 }
 

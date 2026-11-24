@@ -103,6 +103,11 @@ type Step struct {
 // WaitingForNetwork is what the UI shows as WAITING_FOR_NETWORK.
 func (s *Step) WaitingForNetwork() bool { return s.State == StepWaiting && s.WaitReason == WaitNetwork }
 
+func (s *Step) unknownAttempt() bool {
+	a := s.lastAttempt()
+	return s.State == StepWaiting && a != nil && a.State == AttemptUnknown
+}
+
 func (s *Step) lastAttempt() *Attempt {
 	if len(s.Attempts) == 0 {
 		return nil
@@ -239,8 +244,8 @@ func (e *Execution) promote() {
 func (e *Execution) active() int {
 	n := 0
 	for _, s := range e.Steps {
-		if s.State == StepClaimed || s.State == StepRunning {
-			n++
+		if s.State == StepClaimed || s.State == StepRunning || s.unknownAttempt() {
+			n++ // an unknown attempt may still have a live process
 		}
 	}
 	return n
@@ -269,7 +274,12 @@ func (e *Execution) Claim(stepID, runnerID string, now time.Time, ttl time.Durat
 }
 
 // holder returns the step if runnerID with fence holds its current claim.
+// A finished or cancelled execution has no current claims, so every runner report to it is stale: the runner
+// must stop its process.
 func (e *Execution) holder(stepID, runnerID string, fence int64, op string) (*Step, error) {
+	if e.State != ExecutionRunning && e.Step(stepID) != nil {
+		return nil, fmt.Errorf("execution %s is %s: %s: %w", e.ID, e.State, op, ErrStaleFence)
+	}
 	s, err := e.step(stepID, op)
 	if err != nil {
 		return nil, err
@@ -323,13 +333,11 @@ func (e *Execution) Renew(stepID, runnerID string, fence int64, now time.Time, t
 
 // reportable: a result comes from a RUNNING step, or from a step WAITING on its unknown attempt (the runner came
 // back after its lease ran out; its token is still the current one, so the result is genuine).
-func reportable(s *Step) bool {
-	if s.State == StepRunning {
-		return true
-	}
-	a := s.lastAttempt()
-	return s.State == StepWaiting && a != nil && a.State == AttemptUnknown
-}
+func reportable(s *Step) bool { return s.State == StepRunning || s.unknownAttempt() }
+
+// Lease vs fencing: the token is the safety rule, the lease only liveness. Start and Renew need a live lease, but a
+// result (Succeed/Fail) is accepted while the token is current even if the lease ran out and the sweep has not run
+// yet: nobody else can hold the step until ExpireLeases releases it, and then the old token is rejected.
 
 // Succeed records the step's success, promotes its dependents and finishes the execution when all steps succeeded.
 func (e *Execution) Succeed(stepID, runnerID string, fence int64, now time.Time) error {
@@ -368,15 +376,52 @@ func (e *Execution) Fail(stepID, runnerID string, fence int64, msg string, now t
 		s.Attempts = append(s.Attempts, Attempt{Number: len(s.Attempts) + 1, RunnerID: runnerID, Fence: fence,
 			State: AttemptRunning, StartedAt: now})
 	}
+	e.failAttempt(s, msg, now, maxAttempts)
+	return nil
+}
+
+// failAttempt ends the step's attempt as failed and retries the step within maxAttempts, else fails the execution.
+func (e *Execution) failAttempt(s *Step, msg string, now time.Time, maxAttempts int) {
 	s.finishAttempt(AttemptFailed, msg, now)
 	s.move(StepFailed)
 	s.RunnerID, s.Reason = "", msg
 	if len(s.Attempts) < maxAttempts {
 		s.move(StepReady)
 		s.Reason = ""
-		return nil
+		return
 	}
 	e.finish(ExecutionFailed, fmt.Sprintf("step %s failed: %s", s.Key, msg), now)
+}
+
+// ProcessState is what reconciliation with the runner found for an UNKNOWN attempt (KIN-22/23). A terminal result
+// the runner kept arrives as Succeed/Fail with the still-current token instead.
+type ProcessState string
+
+const (
+	ProcessAlive ProcessState = "alive" // the process still runs: back to RUNNING under the same token
+	ProcessGone  ProcessState = "gone"  // no process and no result: the attempt failed (retry within the budget)
+)
+
+// Reconcile resolves the UNKNOWN attempt of a WAITING step. Until it is resolved no second process may start.
+func (e *Execution) Reconcile(stepID string, p ProcessState, now time.Time, ttl time.Duration, maxAttempts int) error {
+	if p != ProcessAlive && p != ProcessGone {
+		return invalid("process", "process_state")
+	}
+	s, err := e.step(stepID, "reconcile")
+	if err != nil {
+		return err
+	}
+	if !s.unknownAttempt() {
+		return invalidStep(s, "reconcile")
+	}
+	if p == ProcessGone {
+		e.failAttempt(s, "process lost", now, maxAttempts)
+		return nil
+	}
+	exp := now.Add(ttl)
+	s.move(StepRunning)
+	s.LeaseExpiresAt = &exp
+	s.lastAttempt().State = AttemptRunning
 	return nil
 }
 

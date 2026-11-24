@@ -132,6 +132,15 @@ func TestValidatePlanDAG(t *testing.T) {
 		{"escaping scope", func(p *Plan) { p.Steps[0].Scope = []string{"src/../../x"} }, "steps[0].scope", "scope_path"},
 		{"bad capability", func(p *Plan) { p.Steps[0].Capabilities = []string{"rm -rf"} }, "steps[0].capabilities", "capability_format"},
 		{"long summary", func(p *Plan) { p.Summary = strings.Repeat("x", 4001) }, "summary", "summary_format"},
+		{"canonical JSON over the size limit", func(p *Plan) {
+			for i := range 90 {
+				s := PlanStep{Key: fmt.Sprintf("big%d", i), Title: "x", Repository: "api"}
+				for j := range 10 {
+					s.Scope = append(s.Scope, fmt.Sprintf("%s/%d", strings.Repeat("d", 400), j))
+				}
+				p.Steps = append(p.Steps, s)
+			}
+		}, "plan", "plan_too_large"},
 	}
 	for _, tt := range tests {
 		p := samplePlan()

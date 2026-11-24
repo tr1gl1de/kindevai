@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
@@ -92,7 +93,7 @@ func (r *Repository) CreateTask(ctx context.Context, t *domain.Task) error {
 		t.ID, t.ProjectID, t.Title, nullStr(t.YouTrackIssue), t.State, nullStr(t.BlockReason), nullStr(t.BlockedFrom),
 		t.Reason.Detail, t.PlanRevision, nullStr(t.CreatedBy), ts(t.CreatedAt), ts(t.UpdatedAt))
 	switch {
-	case db.IsUniqueViolation(err) && t.YouTrackIssue != "":
+	case db.IsUniqueViolation(err) && strings.Contains(err.Error(), "youtrack_issue"):
 		return app.ErrDuplicateIssue
 	case db.IsUniqueViolation(err):
 		return domain.ErrConflict

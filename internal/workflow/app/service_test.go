@@ -270,10 +270,12 @@ func TestExecutionFinishingWhileTheTaskIsBlocked(t *testing.T) {
 	id := ex.StepByKey("backend").ID
 	lease, _ := e.svc.Claim(ctx, id, "r1")
 	_ = e.svc.StartStep(ctx, id, "r1", lease.Fence)
-	_, _ = e.svc.BlockTask(ctx, task.ID, domain.WaitCLILimit, "")
 	_ = e.svc.FailStep(ctx, id, "r1", lease.Fence, "x")
 	lease, _ = e.svc.Claim(ctx, id, "r1")
 	_ = e.svc.StartStep(ctx, id, "r1", lease.Fence)
+	if _, err := e.svc.BlockTask(ctx, task.ID, domain.WaitCLILimit, ""); err != nil {
+		t.Fatal(err)
+	}
 	if err := e.svc.FailStep(ctx, id, "r1", lease.Fence, "x"); err != nil {
 		t.Fatal(err)
 	}
@@ -294,5 +296,40 @@ func TestUnknownIDs(t *testing.T) {
 	}
 	if _, err := e.svc.CreateTask(ctx, "p-unknown", "x", "", "u1"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("unknown project = %v", err)
+	}
+}
+
+func TestClaimRequiresARunningTask(t *testing.T) {
+	t.Parallel()
+	e := newEnv()
+	ctx := t.Context()
+	task := e.readyTask(t)
+	ex, _ := e.svc.StartExecution(ctx, task.ID)
+	_, _ = e.svc.BlockTask(ctx, task.ID, domain.WaitApproval, "scope grew")
+	if _, err := e.svc.Claim(ctx, ex.StepByKey("backend").ID, "r1"); !errors.Is(err, domain.ErrInvalidTransition) {
+		t.Fatalf("claim of a blocked task's step = %v", err)
+	}
+	_, _ = e.svc.ResumeTask(ctx, task.ID)
+	if _, err := e.svc.Claim(ctx, ex.StepByKey("backend").ID, "r1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReconcileStep(t *testing.T) {
+	t.Parallel()
+	e := newEnv()
+	ctx := t.Context()
+	task := e.readyTask(t)
+	ex, _ := e.svc.StartExecution(ctx, task.ID)
+	id := ex.StepByKey("backend").ID
+	l, _ := e.svc.Claim(ctx, id, "r1")
+	_ = e.svc.StartStep(ctx, id, "r1", l.Fence)
+	e.clock.Add(DefaultLeaseTTL)
+	_, _ = e.svc.ExpireLeases(ctx)
+	if err := e.svc.ReconcileStep(ctx, id, domain.ProcessGone); err != nil {
+		t.Fatal(err)
+	}
+	if cur, _ := e.repo.Execution(ctx, ex.ID); cur.StepByKey("backend").State != domain.StepReady {
+		t.Fatalf("step = %s", cur.StepByKey("backend").State)
 	}
 }

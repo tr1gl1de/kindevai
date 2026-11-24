@@ -322,7 +322,7 @@ func TestCancelStopsEverything(t *testing.T) {
 	if e.StepByKey("backend").Attempts[0].State != AttemptCancelled {
 		t.Fatal("running attempt not cancelled")
 	}
-	if err := e.Succeed(id, "r1", l.Fence, t0); !errors.Is(err, ErrInvalidTransition) {
+	if err := e.Succeed(id, "r1", l.Fence, t0); !errors.Is(err, ErrStaleFence) {
 		t.Fatalf("result after cancel = %v", err)
 	}
 	if err := e.Cancel("again", t0); !errors.Is(err, ErrInvalidTransition) {
@@ -417,5 +417,75 @@ func TestExecutionInvariantsUnderRandomOperations(t *testing.T) {
 				t.Fatalf("walk %d: %d active steps, limit %d", walk, active, e.MaxParallel)
 			}
 		}
+	}
+}
+
+// unknownStep leaves the backend step WAITING(runner) on an UNKNOWN attempt.
+func unknownStep(t *testing.T, maxParallel int) (Execution, string, Lease) {
+	t.Helper()
+	e := newExecution(t, maxParallel)
+	id := e.StepByKey("backend").ID
+	l, _ := e.Claim(id, "r1", t0, ttl)
+	if err := e.Start(id, "r1", l.Fence, t0, ttl); err != nil {
+		t.Fatal(err)
+	}
+	e.ExpireLeases(t0.Add(ttl))
+	return e, id, l
+}
+
+func TestAStepWithAnUnknownAttemptKeepsItsParallelismSlot(t *testing.T) {
+	t.Parallel()
+	e, _, _ := unknownStep(t, 1)
+	if _, err := e.Claim(e.StepByKey("lint").ID, "r2", t0.Add(ttl), ttl); !errors.Is(err, ErrParallelismLimit) {
+		t.Fatalf("claim next to a possibly live process = %v", err)
+	}
+}
+
+func TestReconcileAnUnknownAttempt(t *testing.T) {
+	t.Parallel()
+	now := t0.Add(2 * ttl)
+	// The process is alive: back to RUNNING under the same token with a fresh lease.
+	e, id, l := unknownStep(t, 2)
+	if err := e.Reconcile(id, ProcessAlive, now, ttl, 2); err != nil {
+		t.Fatal(err)
+	}
+	s := e.StepByKey("backend")
+	if s.State != StepRunning || s.Attempts[0].State != AttemptRunning || !s.LeaseExpiresAt.Equal(now.Add(ttl)) || s.Fence != l.Fence {
+		t.Fatalf("alive = %+v", s)
+	}
+	if err := e.Reconcile(id, ProcessAlive, now, ttl, 2); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("reconcile without an unknown attempt = %v", err)
+	}
+	// The process is gone: the attempt failed and the step is retried with a new token.
+	e, id, l = unknownStep(t, 2)
+	if err := e.Reconcile(id, ProcessGone, now, ttl, 2); err != nil {
+		t.Fatal(err)
+	}
+	s = e.StepByKey("backend")
+	if s.State != StepReady || s.Attempts[0].State != AttemptFailed || s.RunnerID != "" {
+		t.Fatalf("gone = %+v", s)
+	}
+	if l2, err := e.Claim(id, "r2", now, ttl); err != nil || l2.Fence != l.Fence+1 {
+		t.Fatalf("re-claim = %+v, %v", l2, err)
+	}
+	// Gone without retry budget fails the execution.
+	e, id, _ = unknownStep(t, 2)
+	if err := e.Reconcile(id, ProcessGone, now, ttl, 1); err != nil || e.State != ExecutionFailed {
+		t.Fatalf("gone, no budget = %v, %s", err, e.State)
+	}
+	if err := e.Reconcile(id, "maybe", now, ttl, 1); err == nil {
+		t.Fatal("unknown outcome accepted")
+	}
+}
+
+func TestReportsToAClosedExecutionAreStale(t *testing.T) {
+	t.Parallel()
+	e := newExecution(t, 2)
+	id := e.StepByKey("backend").ID
+	l, _ := e.Claim(id, "r1", t0, ttl)
+	_ = e.Start(id, "r1", l.Fence, t0, ttl)
+	_ = e.Cancel("stop", t0)
+	if _, err := e.Renew(id, "r1", l.Fence, t0, ttl); !errors.Is(err, ErrStaleFence) {
+		t.Fatalf("renew after cancel = %v (the runner must stop its process)", err)
 	}
 }

@@ -177,14 +177,14 @@ func (s *Service) StartExecution(ctx context.Context, taskID string) (domain.Exe
 
 // updateExecution loads the execution owning stepID, applies fn, saves it and carries a finished execution over
 // to its task, all in one transaction. Nothing is saved when fn fails.
-func (s *Service) updateExecution(ctx context.Context, stepID string, fn func(e *domain.Execution, now time.Time) error) error {
+func (s *Service) updateExecution(ctx context.Context, stepID string, fn func(ctx context.Context, e *domain.Execution, now time.Time) error) error {
 	return s.Tx.InTx(ctx, func(ctx context.Context) error {
 		e, err := s.Repo.ExecutionByStep(ctx, stepID)
 		if err != nil {
 			return err
 		}
 		now := s.now()
-		if err := fn(&e, now); err != nil {
+		if err := fn(ctx, &e, now); err != nil {
 			return err
 		}
 		if err := s.Repo.SaveExecution(ctx, &e); err != nil {
@@ -222,21 +222,36 @@ func (s *Service) syncTask(ctx context.Context, e *domain.Execution, now time.Ti
 	return s.Repo.SaveTask(ctx, &t)
 }
 
-// Claim gives runnerID the READY step with a new fencing token and a lease. Concurrent claims of one step are
-// serialized by the transaction and the aggregate version: exactly one wins.
+// Claim gives runnerID the READY step with a new fencing token and a lease, only while the task is RUNNING (not
+// BLOCKED). Concurrent claims of one step are serialized by the transaction and the aggregate version: exactly one
+// wins. runnerID must come from the authenticated runner channel, and the caller (the scheduler, KIN-23) checks the
+// runner is approved for the project and has the step's capabilities.
 func (s *Service) Claim(ctx context.Context, stepID, runnerID string) (domain.Lease, error) {
 	var l domain.Lease
-	err := s.updateExecution(ctx, stepID, func(e *domain.Execution, now time.Time) error {
-		var err error
+	err := s.updateExecution(ctx, stepID, func(ctx context.Context, e *domain.Execution, now time.Time) error {
+		t, err := s.Repo.Task(ctx, e.TaskID)
+		if err != nil {
+			return err
+		}
+		if t.State != domain.TaskRunning {
+			return fmt.Errorf("task %s is %s: claim: %w", t.ID, t.State, domain.ErrInvalidTransition)
+		}
 		l, err = e.Claim(stepID, runnerID, now, s.leaseTTL())
 		return err
 	})
 	return l, err
 }
 
+// ReconcileStep resolves a step whose attempt became UNKNOWN when its lease ran out (KIN-23 reconciliation).
+func (s *Service) ReconcileStep(ctx context.Context, stepID string, p domain.ProcessState) error {
+	return s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
+		return e.Reconcile(stepID, p, now, s.leaseTTL(), s.maxAttempts())
+	})
+}
+
 // StartStep records that the runner launched the claimed step.
 func (s *Service) StartStep(ctx context.Context, stepID, runnerID string, fence int64) error {
-	return s.updateExecution(ctx, stepID, func(e *domain.Execution, now time.Time) error {
+	return s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
 		return e.Start(stepID, runnerID, fence, now, s.leaseTTL())
 	})
 }
@@ -244,7 +259,7 @@ func (s *Service) StartStep(ctx context.Context, stepID, runnerID string, fence 
 // RenewLease extends the step's lease (runner heartbeat) and returns the new expiry.
 func (s *Service) RenewLease(ctx context.Context, stepID, runnerID string, fence int64) (time.Time, error) {
 	var exp time.Time
-	err := s.updateExecution(ctx, stepID, func(e *domain.Execution, now time.Time) error {
+	err := s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
 		var err error
 		exp, err = e.Renew(stepID, runnerID, fence, now, s.leaseTTL())
 		return err
@@ -254,14 +269,14 @@ func (s *Service) RenewLease(ctx context.Context, stepID, runnerID string, fence
 
 // CompleteStep records the step's success and promotes its dependents.
 func (s *Service) CompleteStep(ctx context.Context, stepID, runnerID string, fence int64) error {
-	return s.updateExecution(ctx, stepID, func(e *domain.Execution, now time.Time) error {
+	return s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
 		return e.Succeed(stepID, runnerID, fence, now)
 	})
 }
 
 // FailStep records a failed attempt; the step is retried within the attempt budget, else the task fails.
 func (s *Service) FailStep(ctx context.Context, stepID, runnerID string, fence int64, msg string) error {
-	return s.updateExecution(ctx, stepID, func(e *domain.Execution, now time.Time) error {
+	return s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
 		return e.Fail(stepID, runnerID, fence, msg, now, s.maxAttempts())
 	})
 }

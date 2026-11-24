@@ -178,3 +178,16 @@ func TestSetupIsRateLimitedByPeerAddress(t *testing.T) {
 		t.Fatalf("other peer limited: %d", rec.Code)
 	}
 }
+
+func TestSetupStatusIsRateLimited(t *testing.T) {
+	t.Parallel()
+	h, _ := setupStack(t, 2)
+	codes := []int{}
+	for range 3 {
+		rec, _ := send(t, h, req{method: "GET", target: "/api/setup/status", remote: "203.0.113.9:1"})
+		codes = append(codes, rec.Code)
+	}
+	if codes[0] != 200 || codes[2] != 429 {
+		t.Fatalf("codes = %v, want 200 … 429", codes)
+	}
+}

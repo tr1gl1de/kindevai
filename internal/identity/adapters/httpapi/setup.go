@@ -14,9 +14,10 @@ import (
 
 // SetupHandler serves the First-run Wizard API.
 type SetupHandler struct {
-	Service *app.SetupService
-	Limiter *ratelimit.Limiter // attempts per client address
-	Logger  *slog.Logger
+	Service       *app.SetupService
+	Limiter       *ratelimit.Limiter // setup attempts per client address
+	StatusLimiter *ratelimit.Limiter // status checks per client address; defaults to Limiter
+	Logger        *slog.Logger
 }
 
 // SetupStatus is the response of GET /api/setup/status.
@@ -51,6 +52,14 @@ func (h *SetupHandler) logger() *slog.Logger {
 }
 
 func (h *SetupHandler) status(w http.ResponseWriter, r *http.Request) {
+	lim := h.StatusLimiter
+	if lim == nil {
+		lim = h.Limiter
+	}
+	if !lim.Allow(httpx.ClientIP(r)) {
+		rateLimited(w)
+		return
+	}
 	required, err := h.Service.Status(r.Context())
 	if err != nil {
 		h.logger().Error("setup status", "err", err)
@@ -62,8 +71,7 @@ func (h *SetupHandler) status(w http.ResponseWriter, r *http.Request) {
 
 func (h *SetupHandler) complete(w http.ResponseWriter, r *http.Request) {
 	if !h.Limiter.Allow(httpx.ClientIP(r)) {
-		w.Header().Set("Retry-After", "60")
-		httpx.WriteError(w, http.StatusTooManyRequests, "rate_limited", "too many attempts, try again later")
+		rateLimited(w)
 		return
 	}
 	var in SetupRequest
@@ -89,4 +97,9 @@ func (h *SetupHandler) complete(w http.ResponseWriter, r *http.Request) {
 		h.logger().Error("setup failed", "err", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal", "internal error")
 	}
+}
+
+func rateLimited(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "60")
+	httpx.WriteError(w, http.StatusTooManyRequests, "rate_limited", "too many requests, try again later")
 }

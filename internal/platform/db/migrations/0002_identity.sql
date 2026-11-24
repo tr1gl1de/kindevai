@@ -7,3 +7,6 @@ CREATE TABLE users (
   created_at    TEXT NOT NULL,
   disabled_at   TEXT
 ) STRICT;
+
+-- MVP has exactly one Owner; enforce it in the schema, not only in the setup flow.
+CREATE UNIQUE INDEX users_single_owner ON users(platform_role) WHERE platform_role = 'owner';

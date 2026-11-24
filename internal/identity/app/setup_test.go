@@ -13,21 +13,29 @@ import (
 
 // fakeRepo is an in-memory SetupRepository; InTx serialises like a write transaction and rolls back on error.
 type fakeRepo struct {
-	mu    sync.Mutex
-	state domain.SetupState
-	users []domain.User
-	name  domain.PlatformName
+	mu       sync.Mutex
+	writeTxs int
+	state    domain.SetupState
+	users    []domain.User
+	name     domain.PlatformName
 }
 
 func (r *fakeRepo) InTx(ctx context.Context, fn func(SetupTx) error) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.writeTxs++
 	state, users, name := r.state, r.users, r.name
 	if err := fn(&fakeTx{r}); err != nil {
 		r.state, r.users, r.name = state, users, name
 		return err
 	}
 	return nil
+}
+
+func (r *fakeRepo) State(context.Context) (domain.SetupState, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.state, nil
 }
 
 type fakeTx struct{ r *fakeRepo }
@@ -54,13 +62,21 @@ func (h *fakeHasher) Hash(_ context.Context, pw string) (string, error) {
 type fakeChannel struct {
 	published []string
 	cleared   int
+	fail      error
 }
 
 func (c *fakeChannel) Publish(plain string) error {
+	if c.fail != nil {
+		return c.fail
+	}
 	c.published = append(c.published, plain)
 	return nil
 }
-func (c *fakeChannel) Clear() error { c.cleared++; return nil }
+
+func (c *fakeChannel) Clear() error {
+	c.cleared++
+	return c.fail
+}
 func (c *fakeChannel) last() string { return c.published[len(c.published)-1] }
 
 type clock struct{ t time.Time }
@@ -216,5 +232,60 @@ func TestPrepareAfterCompletionClearsChannel(t *testing.T) {
 	}
 	if len(f.ch.published) != 0 || f.ch.cleared != 1 {
 		t.Fatalf("published=%d cleared=%d", len(f.ch.published), f.ch.cleared)
+	}
+}
+
+func TestFailedPublishDoesNotKeepAnUndeliveredToken(t *testing.T) {
+	t.Parallel()
+	f := newFixture()
+	f.ch.fail = errors.New("disk full")
+	if _, err := f.svc.Prepare(t.Context()); err == nil {
+		t.Fatal("want error when the token cannot be delivered")
+	}
+	if f.repo.state.Token != nil {
+		t.Fatal("token stored although it was never delivered")
+	}
+	f.ch.fail = nil
+	if _, err := f.svc.Status(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.ch.published) != 1 || f.repo.state.Token == nil {
+		t.Fatal("status did not issue a token after the failed delivery")
+	}
+}
+
+func TestStatusWithValidTokenDoesNotWrite(t *testing.T) {
+	t.Parallel()
+	f := newFixture()
+	_, _ = f.svc.Prepare(t.Context())
+	before := f.repo.writeTxs
+	for range 5 {
+		if _, err := f.svc.Status(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.repo.state.Completed = true
+	_, _ = f.svc.Status(t.Context())
+	if f.repo.writeTxs != before {
+		t.Fatalf("status opened %d write transactions", f.repo.writeTxs-before)
+	}
+}
+
+func TestCompleteAcceptsTokenWithSurroundingWhitespace(t *testing.T) {
+	t.Parallel()
+	f := newFixture()
+	_, _ = f.svc.Prepare(t.Context())
+	if _, err := f.svc.Complete(t.Context(), validInput("  "+f.ch.last()+"\n")); err != nil {
+		t.Fatalf("Complete with copied newline: %v", err)
+	}
+}
+
+func TestPrepareAfterCompletionToleratesClearFailure(t *testing.T) {
+	t.Parallel()
+	f := newFixture()
+	f.repo.state.Completed = true
+	f.ch.fail = errors.New("read-only file system")
+	if required, err := f.svc.Prepare(t.Context()); err != nil || required {
+		t.Fatalf("Prepare = %v, %v; a leftover token file must not block start-up", required, err)
 	}
 }

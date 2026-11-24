@@ -4,7 +4,6 @@ package httpx
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"mime"
 	"net"
@@ -65,7 +64,8 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 			WriteError(w, http.StatusRequestEntityTooLarge, "body_too_large", "request body is too large")
 			return false
 		}
-		WriteError(w, http.StatusBadRequest, "invalid_json", fmt.Sprintf("invalid JSON body: %v", err))
+		// Decoder errors name Go types and fields; keep them out of responses.
+		WriteError(w, http.StatusBadRequest, "invalid_json", "malformed JSON body or unknown field")
 		return false
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {

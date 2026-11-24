@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"time"
 
@@ -42,38 +41,52 @@ func (r *SetupRepository) InTx(ctx context.Context, fn func(app.SetupTx) error) 
 	return nil
 }
 
-type setupTx struct{ tx *sql.Tx }
-
-func (t *setupTx) meta(ctx context.Context, key string) (string, bool, error) {
-	var v string
-	err := t.tx.QueryRowContext(ctx, "SELECT value FROM meta WHERE key = ?", key).Scan(&v)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("reading %s: %w", key, err)
-	}
-	return v, true, nil
+// State reads the setup state without a write transaction.
+func (r *SetupRepository) State(ctx context.Context) (domain.SetupState, error) {
+	return readState(ctx, r.db)
 }
 
+type querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+type setupTx struct{ tx *sql.Tx }
+
 func (t *setupTx) SetupState(ctx context.Context) (domain.SetupState, error) {
-	_, completed, err := t.meta(ctx, metaSetupCompleted)
-	if err != nil || completed {
-		return domain.SetupState{Completed: completed}, err
-	}
-	h, hasHash, err := t.meta(ctx, metaSetupTokenHash)
-	if err != nil || !hasHash {
-		return domain.SetupState{}, err
-	}
-	exp, _, err := t.meta(ctx, metaSetupTokenExpiry)
+	return readState(ctx, t.tx)
+}
+
+// readState loads all setup keys with one statement, so a concurrent completion cannot be seen half-applied.
+func readState(ctx context.Context, q querier) (domain.SetupState, error) {
+	rows, err := q.QueryContext(ctx, "SELECT key, value FROM meta WHERE key IN (?, ?, ?)",
+		metaSetupCompleted, metaSetupTokenHash, metaSetupTokenExpiry)
 	if err != nil {
-		return domain.SetupState{}, err
+		return domain.SetupState{}, fmt.Errorf("reading setup state: %w", err)
+	}
+	defer rows.Close()
+	m := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return domain.SetupState{}, fmt.Errorf("reading setup state: %w", err)
+		}
+		m[k] = v
+	}
+	if err := rows.Err(); err != nil {
+		return domain.SetupState{}, fmt.Errorf("reading setup state: %w", err)
+	}
+	if _, done := m[metaSetupCompleted]; done {
+		return domain.SetupState{Completed: true}, nil
+	}
+	h, ok := m[metaSetupTokenHash]
+	if !ok {
+		return domain.SetupState{}, nil
 	}
 	hash, err := hex.DecodeString(h)
 	if err != nil {
 		return domain.SetupState{}, fmt.Errorf("decoding setup token hash: %w", err)
 	}
-	at, err := time.Parse(time.RFC3339Nano, exp)
+	at, err := time.Parse(time.RFC3339Nano, m[metaSetupTokenExpiry])
 	if err != nil {
 		return domain.SetupState{}, fmt.Errorf("decoding setup token expiry: %w", err)
 	}

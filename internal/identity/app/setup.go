@@ -5,14 +5,18 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/identity/domain"
 )
 
-// SetupRepository runs fn inside one serialised write transaction; an error rolls everything back.
+// SetupRepository runs fn inside one serialised write transaction (an error rolls everything back) and
+// reads the state without taking the write lock.
 type SetupRepository interface {
 	InTx(ctx context.Context, fn func(SetupTx) error) error
+	State(ctx context.Context) (domain.SetupState, error)
 }
 
 // SetupTx is the transactional view of the setup state.
@@ -42,6 +46,7 @@ type SetupService struct {
 	Now     func() time.Time
 	Rand    io.Reader
 	NewID   func() string
+	Logger  *slog.Logger // optional
 }
 
 // CompleteSetupInput is the First-run Wizard form.
@@ -54,7 +59,6 @@ type CompleteSetupInput struct {
 
 // Prepare runs at start-up: in setup mode it issues a fresh token; otherwise it removes any leftover token.
 func (s *SetupService) Prepare(ctx context.Context) (setupRequired bool, err error) {
-	var plain string
 	err = s.Repo.InTx(ctx, func(tx SetupTx) error {
 		st, err := tx.SetupState(ctx)
 		if err != nil {
@@ -64,23 +68,35 @@ func (s *SetupService) Prepare(ctx context.Context) (setupRequired bool, err err
 			return nil
 		}
 		setupRequired = true
-		plain, err = s.issue(ctx, tx)
-		return err
+		return s.issue(ctx, tx)
 	})
 	if err != nil {
 		return false, fmt.Errorf("preparing setup: %w", err)
 	}
 	if !setupRequired {
-		return false, s.clear()
+		// Only a stale, already-invalid token can be left; failing to delete it must not block start-up.
+		if err := s.clear(); err != nil {
+			s.logger().Warn("could not remove leftover setup token file", "err", err)
+		}
 	}
-	return true, s.publish(plain)
+	return setupRequired, nil
 }
 
-// Status reports whether setup is required, reissuing the token if the current one has expired.
+// Status reports whether setup is required, reissuing the token if the current one has expired. The common
+// path only reads, so polling it cannot hold the database's single writer.
 func (s *SetupService) Status(ctx context.Context) (setupRequired bool, err error) {
-	var plain string
+	st, err := s.Repo.State(ctx)
+	if err != nil {
+		return false, fmt.Errorf("reading setup status: %w", err)
+	}
+	if st.Completed {
+		return false, nil
+	}
+	if st.Token != nil && !st.Token.Expired(s.Now()) {
+		return true, nil
+	}
 	err = s.Repo.InTx(ctx, func(tx SetupTx) error {
-		st, err := tx.SetupState(ctx)
+		st, err := tx.SetupState(ctx) // re-check under the write lock
 		if err != nil {
 			return err
 		}
@@ -91,31 +107,35 @@ func (s *SetupService) Status(ctx context.Context) (setupRequired bool, err erro
 		if st.Token != nil && !st.Token.Expired(s.Now()) {
 			return nil
 		}
-		plain, err = s.issue(ctx, tx)
-		return err
+		return s.issue(ctx, tx)
 	})
 	if err != nil {
 		return false, fmt.Errorf("reading setup status: %w", err)
 	}
-	if plain != "" {
-		return true, s.publish(plain)
-	}
 	return setupRequired, nil
 }
 
-func (s *SetupService) issue(ctx context.Context, tx SetupTx) (string, error) {
+// issue stores a new token and delivers it inside the same transaction: if delivery fails the new token is
+// rolled back, so the next call issues another instead of trusting one the operator never received.
+func (s *SetupService) issue(ctx context.Context, tx SetupTx) error {
 	plain, tok, err := domain.NewSetupToken(s.Rand, s.Now(), domain.SetupTokenTTL)
 	if err != nil {
-		return "", err
+		return err
 	}
-	return plain, tx.SaveSetupToken(ctx, tok)
-}
-
-func (s *SetupService) publish(plain string) error {
+	if err := tx.SaveSetupToken(ctx, tok); err != nil {
+		return err
+	}
 	if err := s.Channel.Publish(plain); err != nil {
 		return fmt.Errorf("publishing setup token: %w", err)
 	}
 	return nil
+}
+
+func (s *SetupService) logger() *slog.Logger {
+	if s.Logger == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return s.Logger
 }
 
 func (s *SetupService) clear() error {
@@ -128,6 +148,7 @@ func (s *SetupService) clear() error {
 // Complete creates the first Owner. The token is checked before the (expensive) password hash and again,
 // together with the write, inside one transaction, so concurrent or repeated requests cannot both succeed.
 func (s *SetupService) Complete(ctx context.Context, in CompleteSetupInput) (domain.User, error) {
+	in.Token = strings.TrimSpace(in.Token) // operators copy it from a file that ends with a newline
 	if err := s.verify(ctx, in.Token); err != nil {
 		return domain.User{}, err
 	}
@@ -163,16 +184,16 @@ func (s *SetupService) Complete(ctx context.Context, in CompleteSetupInput) (dom
 	}
 	// Setup is done; a leftover token file holds a token the database no longer accepts, and Prepare
 	// removes it on the next start, so a failure here must not turn a completed setup into an error.
-	_ = s.clear()
+	if err := s.clear(); err != nil {
+		s.logger().Warn("could not remove used setup token file", "err", err)
+	}
 	return owner, nil
 }
 
 func (s *SetupService) verify(ctx context.Context, token string) error {
-	return s.Repo.InTx(ctx, func(tx SetupTx) error {
-		st, err := tx.SetupState(ctx)
-		if err != nil {
-			return err
-		}
-		return st.Verify(token, s.Now())
-	})
+	st, err := s.Repo.State(ctx)
+	if err != nil {
+		return err
+	}
+	return st.Verify(token, s.Now())
 }

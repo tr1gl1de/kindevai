@@ -28,6 +28,7 @@ func newIdentity(ctx context.Context, inst *bootstrap.Installation, logger *slog
 		Now:     time.Now,
 		Rand:    rand.Reader,
 		NewID:   rand.Text,
+		Logger:  logger,
 	}
 	required, err := setup.Prepare(ctx)
 	if err != nil {
@@ -38,6 +39,9 @@ func newIdentity(ctx context.Context, inst *bootstrap.Installation, logger *slog
 		logger.Warn("setup required: open the dashboard and enter the one-time setup token",
 			"token_file", tokenPath, "valid_for", "1h, renewed when expired")
 	}
-	limiter := ratelimit.New(ratelimit.Config{Burst: 10, Every: time.Minute, MaxKeys: 10_000}, time.Now)
-	return []server.Module{&httpapi.SetupHandler{Service: setup, Limiter: limiter, Logger: logger}}, nil
+	attempts := ratelimit.New(ratelimit.Config{Burst: 10, Every: time.Minute, MaxKeys: 10_000}, time.Now)
+	status := ratelimit.New(ratelimit.Config{Burst: 30, Every: time.Second, MaxKeys: 10_000}, time.Now)
+	return []server.Module{&httpapi.SetupHandler{
+		Service: setup, Limiter: attempts, StatusLimiter: status, Logger: logger,
+	}}, nil
 }

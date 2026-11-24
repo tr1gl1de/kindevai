@@ -131,3 +131,18 @@ func TestConcurrentCompleteCreatesExactlyOneOwner(t *testing.T) {
 		t.Fatalf("successes = %d, users = %d; want exactly 1", ok.Load(), users)
 	}
 }
+
+func TestSchemaAllowsOnlyOneOwner(t *testing.T) {
+	t.Parallel()
+	d := testDB(t)
+	ins := "INSERT INTO users(id, login, password_hash, platform_role, created_at) VALUES (?, ?, 'h', ?, 'now')"
+	if _, err := d.ExecContext(t.Context(), ins, "1", "a", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(t.Context(), ins, "2", "b", "owner"); err == nil {
+		t.Fatal("second owner inserted")
+	}
+	if _, err := d.ExecContext(t.Context(), ins, "3", "c", "user"); err != nil {
+		t.Fatalf("regular user rejected: %v", err)
+	}
+}

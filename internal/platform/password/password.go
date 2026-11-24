@@ -75,17 +75,25 @@ func (h *Hasher) release() {
 	<-h.sem
 }
 
+// derive runs Argon2id while holding a concurrency slot; the slot is released even if hashing panics.
+func (h *Hasher) derive(ctx context.Context, pw, salt []byte, t, m uint32, p uint8, n uint32) ([]byte, error) {
+	if err := h.acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer h.release()
+	return argon2.IDKey(pw, salt, t, m, p, n), nil
+}
+
 // Hash returns the PHC-encoded Argon2id hash of pw with a random salt.
 func (h *Hasher) Hash(ctx context.Context, pw string) (string, error) {
 	salt := make([]byte, saltLen)
 	if _, err := rand.Read(salt); err != nil {
 		return "", fmt.Errorf("generating salt: %w", err)
 	}
-	if err := h.acquire(ctx); err != nil {
+	key, err := h.derive(ctx, []byte(pw), salt, h.p.Iterations, h.p.MemoryKiB, h.p.Parallelism, keyLen)
+	if err != nil {
 		return "", err
 	}
-	key := argon2.IDKey([]byte(pw), salt, h.p.Iterations, h.p.MemoryKiB, h.p.Parallelism, keyLen)
-	h.release()
 	b64 := base64.RawStdEncoding
 	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s", argon2.Version, h.p.MemoryKiB, h.p.Iterations,
 		h.p.Parallelism, b64.EncodeToString(salt), b64.EncodeToString(key)), nil
@@ -113,21 +121,15 @@ func (h *Hasher) Verify(ctx context.Context, encoded, pw string) (bool, error) {
 	if err != nil || len(want) == 0 {
 		return false, ErrMalformedHash
 	}
-	if err := h.acquire(ctx); err != nil {
+	got, err := h.derive(ctx, []byte(pw), salt, t, m, p, uint32(len(want)))
+	if err != nil {
 		return false, err
 	}
-	got := argon2.IDKey([]byte(pw), salt, t, m, p, uint32(len(want)))
-	h.release()
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 
 // DummyVerify burns the same work as a real verification; use it when the user does not exist so response
 // time does not reveal which logins are valid.
 func (h *Hasher) DummyVerify(ctx context.Context, pw string) {
-	salt := make([]byte, saltLen)
-	if h.acquire(ctx) != nil {
-		return
-	}
-	_ = argon2.IDKey([]byte(pw), salt, h.p.Iterations, h.p.MemoryKiB, h.p.Parallelism, keyLen)
-	h.release()
+	_, _ = h.derive(ctx, []byte(pw), make([]byte, saltLen), h.p.Iterations, h.p.MemoryKiB, h.p.Parallelism, keyLen)
 }

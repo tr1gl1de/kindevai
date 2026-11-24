@@ -68,7 +68,7 @@ a {
   width: 1px;
   height: 1px;
   overflow: hidden;
-  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
   white-space: nowrap;
 }
 
@@ -101,6 +101,7 @@ a {
 }
 .nav {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   flex: 1;
 }
@@ -441,7 +442,7 @@ textarea[aria-invalid="true"] {
     width: 1px;
     height: 1px;
     overflow: hidden;
-    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
     white-space: nowrap;
   }
   .page-heading {
@@ -489,9 +490,6 @@ textarea[aria-invalid="true"] {
   border-radius: var(--radius);
   user-select: all;
   word-break: break-all;
-}
-.nav {
-  flex-wrap: wrap;
 }
 @media (min-width: 601px) {
   .nav-account {

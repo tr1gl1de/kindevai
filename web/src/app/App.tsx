@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import { Route, Routes, useLocation } from "react-router";
+import { Route, Routes, useLocation, useNavigate } from "react-router";
 import { AcceptInvitePage } from "../features/identity/AcceptInvitePage";
 import { LoginPage } from "../features/identity/LoginPage";
 import { SetupWizard } from "../features/identity/SetupWizard";
@@ -14,6 +14,7 @@ import { AuditPage } from "../features/audit/AuditPage";
 import { RunnerPage } from "../features/runners/RunnerPage";
 import { ApprovalPage } from "../features/approvals/ApprovalPage";
 import { ApprovalsPage } from "../features/approvals/ApprovalsPage";
+import { AlertsPage } from "../features/alerts/AlertsPage";
 import { RunnersPage } from "../features/runners/RunnersPage";
 import { NetworkPage } from "../features/network/NetworkPage";
 import { StoragePage } from "../features/runners/StoragePage";
@@ -27,7 +28,7 @@ import { LinkConfirmPage } from "../features/telegram/LinkConfirmPage";
 import { MiniAppSignIn } from "../features/telegram/MiniAppSignIn";
 import { TelegramSettingsPage } from "../features/telegram/TelegramSettingsPage";
 import { startTarget, type TelegramLaunch } from "../features/telegram/webapp";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 /**
  * Gate: setup wizard → sign-in → application, with loading and error states for each step. Inside the Telegram
@@ -77,6 +78,8 @@ function Gate() {
   if (setup.data?.setupRequired) return <SetupWizard />;
   if (!me.data) return tg ? <MiniAppSignIn initData={tg.initData} /> : <LoginPage />;
   if (me.data.mustChangePassword) return <ForcedPasswordChange />;
+  if (target && (target.kind === "approval" || target.kind === "alert"))
+    return <StartRedirect to={target.kind === "approval" ? `/approvals/${target.token}` : "/alerts"} onDone={() => setStartDone(true)} />;
 
   return (
     <AppShell me={me.data}>
@@ -86,6 +89,7 @@ function Gate() {
           <Route path="/projects/:id" element={<ProjectPage me={me.data} />} />
           <Route path="/approvals" element={<ApprovalsPage />} />
           <Route path="/approvals/:id" element={<ApprovalPage />} />
+          <Route path="/alerts" element={<AlertsPage />} />
           <Route path="/account/password" element={<AccountPage />} />
           {me.data.role === "owner" && <Route path="/users" element={<UsersPage />} />}
           {me.data.role === "owner" && <Route path="/runners" element={<RunnersPage />} />}
@@ -99,4 +103,17 @@ function Gate() {
         </Routes>
     </AppShell>
   );
+}
+
+/**
+ * A notification's Mini App link (startapp=approval_<id> / alert_<id>) opens its page once, after the Mini App
+ * sign-in: deciding an approval always happens there, with the signed-in session, never from the chat.
+ */
+function StartRedirect({ to, onDone }: { to: string; onDone: () => void }) {
+  const navigate = useNavigate();
+  useEffect(() => {
+    navigate(to, { replace: true });
+    onDone();
+  }, [to, navigate, onDone]);
+  return null;
 }

@@ -143,6 +143,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	intake := newYouTrackIntake(inst, msg, integ, identity, logger)
 	apv := newApprovals(inst, msg, audit, integ, logger)
 	modules = append(modules, msg.HTTP, audit.HTTP, integ.HTTP, intake.HTTP, apv.HTTP)
+	modules = append(modules, newAlerts(inst, msg, audit, identity.Users, "", logger)) // KIN-40
 	gateway := newRunnerGateway(inst, hub, tel, localPeers, audiences, logger)
 	channel := newRunnerChannel(inst, apv.Workflow, retention, logger)
 	attachRunnerChannel(gateway, channel)

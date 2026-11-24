@@ -44,11 +44,12 @@ type messagingModule struct {
 	Outbox *messaging.Outbox
 	Inbox  *messaging.Inbox
 	HTTP   server.Module
+	logger *slog.Logger
 }
 
 func newMessaging(inst *bootstrap.Installation, logger *slog.Logger) *messagingModule {
 	cfg := messaging.Config{Logger: logger}
-	m := &messagingModule{Outbox: messaging.NewOutbox(inst.DB, cfg), Inbox: messaging.NewInbox(inst.DB, cfg)}
+	m := &messagingModule{Outbox: messaging.NewOutbox(inst.DB, cfg), Inbox: messaging.NewInbox(inst.DB, cfg), logger: logger}
 	m.HTTP = &messaginghttp.Handler{Outbox: m.Outbox, Inbox: m.Inbox, Logger: logger}
 	return m
 }
@@ -56,6 +57,13 @@ func newMessaging(inst *bootstrap.Installation, logger *slog.Logger) *messagingM
 // start runs the dispatchers until ctx ends; the returned stop cancels them and waits, so call it before the
 // database closes.
 func (m *messagingModule) start(ctx context.Context) (stop func()) {
+	// Messages that went dead only because their handler did not exist yet (e.g. alerts emitted before KIN-40)
+	// are delivered now that every handler is registered.
+	if n, err := m.Outbox.RetryUnhandled(ctx); err != nil {
+		m.logger.Error("requeueing unhandled outbox messages", "err", err)
+	} else if n > 0 {
+		m.logger.Info("requeued outbox messages whose handler now exists", "count", n)
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	wg.Go(func() { _ = m.Outbox.Run(ctx) })

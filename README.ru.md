@@ -103,7 +103,7 @@ make clean            # удалить артефакты сборки и тес
 | Событие | Что выполняется |
 |---|---|
 | PR или push в `dev` / `main` | `make lint` (go vet, golangci-lint, oxlint, tsc), тесты с покрытием, `make vuln` (govulncheck, npm audit), `make build`, проверка конфига GoReleaser, actionlint, сборка Docker-образа и смоук-тест |
-| Зелёный push в `dev` | **Dev pre-release** `dev`: бинарники linux/darwin × amd64/arm64 + `SHA256SUMS`; образ `ghcr.io/tr1gl1de/kindevai-dev:latest` (отдельный dev-пакет) |
+| Зелёный push в `dev` | **Dev-сборка**: бинарники linux/darwin × amd64/arm64 + `SHA256SUMS` как артефакт прогона CI `ai-platform-dev-<sha>` (хранится 14 дней); образ `ghcr.io/tr1gl1de/kindevai-dev:latest` (отдельный dev-пакет) |
 | Тег `v*` на коммите `main` (только владелец) | **Prod-релиз**: проверка, что тег на `main`, тесты, GitHub Release (changelog, checksums, provenance) и образ `:X.Y.Z`, `:X.Y`, `:latest` через защищённый environment `production` |
 
 Автоматизация никогда не пушит в `main` и не создаёт PR в `main`. Dependabot еженедельно предлагает обновления в `dev`.

@@ -103,7 +103,7 @@ Branches start from `dev` as `feature/KIN-<n>-<slug>`; pull requests target `dev
 | Trigger | What runs |
 |---|---|
 | PR or push to `dev` / `main` | `make lint` (go vet, golangci-lint, oxlint, tsc), tests with coverage, `make vuln` (govulncheck, npm audit), `make build`, GoReleaser config check, actionlint, Docker image build + smoke test |
-| Green push to `dev` | **Dev pre-release** `dev`: binaries for linux/darwin × amd64/arm64 + `SHA256SUMS`; image `ghcr.io/tr1gl1de/kindevai-dev:latest` (separate dev package) |
+| Green push to `dev` | **Dev build**: binaries for linux/darwin × amd64/arm64 + `SHA256SUMS` as the CI run's artifact `ai-platform-dev-<sha>` (kept 14 days); image `ghcr.io/tr1gl1de/kindevai-dev:latest` (separate dev package) |
 | Tag `v*` on a commit of `main` (owner only) | **Production release**: verifies the tag is on `main`, runs tests, publishes the GitHub Release (changelog, checksums, provenance) and image `:X.Y.Z`, `:X.Y`, `:latest` through the protected `production` environment |
 
 Automation never pushes to `main` or opens PRs against it. Dependabot proposes weekly updates to `dev`.

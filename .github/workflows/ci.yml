@@ -1,6 +1,6 @@
 name: CI
-# Checks on every PR and push to dev and main; a green push to dev also publishes the dev pre-release
-# (separate package ghcr.io/<repo>-dev and the "dev" pre-release tag only).
+# Checks on every PR and push to dev and main; a green push to dev also publishes dev builds
+# (binaries as run artifacts, image in the separate package ghcr.io/<repo>-dev).
 # Production releases live in release.yml and run only for owner-created v* tags on main (KIN-A-20).
 on:
   pull_request:
@@ -146,7 +146,7 @@ jobs:
         if: always()
         run: docker rm -f cp || true
 
-  # ---- Dev pre-release: only for pushes to dev, only after every check above is green ----
+  # ---- Dev builds: only for pushes to dev, only after every check above is green ----
 
   dev-binaries:
     if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
@@ -154,10 +154,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write # moves the "dev" tag and updates the "dev" pre-release; never touches main
-    concurrency:
-      group: release-dev
-      cancel-in-progress: false # never stop half-way through updating the pre-release; runs queue instead
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -175,24 +172,17 @@ jobs:
         with:
           version: "~> v2"
           args: release --snapshot --clean
-      - name: Publish the dev pre-release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          title="dev (${GITHUB_SHA::7})"
-          notes="Automatic build of the dev branch at ${GITHUB_SHA}. Not a release; may break at any time."
-          git tag -f dev "$GITHUB_SHA"
-          git push -f origin refs/tags/dev
-          if gh release view dev >/dev/null 2>&1; then
-            gh release view dev --json assets --jq '.assets[].name' | while read -r asset; do
-              gh release delete-asset dev "$asset" --yes
-            done
-            gh release edit dev --prerelease --title "$title" --notes "$notes"
-          else
-            gh release create dev --prerelease --verify-tag --title "$title" --notes "$notes"
-          fi
-          gh release upload dev dist/*.tar.gz dist/SHA256SUMS --clobber
+      # Run artifacts, not a release: a moving tag would need the `workflows` permission (GITHUB_TOKEN never has
+      # it) whenever dev changes a workflow file, and a tag named like the dev branch makes `dev` ambiguous.
+      - name: Upload the dev binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ai-platform-dev-${{ github.sha }}
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
 
   dev-image:
     if: github.event_name == 'push' && github.ref == 'refs/heads/dev'

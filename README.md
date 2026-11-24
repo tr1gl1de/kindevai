@@ -92,6 +92,19 @@ blocks the dashboard. The Owner sees each adapter's state (`ok`, `degraded`, `ci
 at `GET /api/integrations/status`, and dead messages at `GET /api/messaging/{outbox|inbox}/dead`
 (`POST …/dead/{id}/retry` queues one again). Delivered messages are deleted after 7 days, dead ones after 30.
 
+#### Credentials and integration settings
+
+The Owner manages integrations on the **Integrations** page. The YouTrack connection (one per installation) is a
+base URL and a permanent token; each project is linked to a YouTrack project by short name and has a registry of
+GitHub repositories (`owner/name`, integration branch `dev` by default; `main` and `master` are protected and can
+never be an integration branch). Credentials are encrypted one by one with the installation key (AES-256-GCM, the
+credential's name bound as associated data) and are write-only: the API only says whether a token is set and when it
+changed, and leaving the token field empty keeps the stored one. **Test connection** queues the check in the outbox;
+the page shows the result when the background delivery finishes. Every change is audited without the secret. Owner
+API: `GET /api/integrations`, `PUT|DELETE /api/integrations/youtrack`, `POST /api/integrations/youtrack/check`,
+`GET /api/projects/{id}/integrations`, `PUT /api/projects/{id}/integrations/youtrack`,
+`POST /api/projects/{id}/repositories`, `PUT|DELETE /api/projects/{id}/repositories/{repoId}`.
+
 ### Audit log
 
 Security-relevant actions are recorded in an append-only audit log in the same transaction as the action itself:

@@ -159,3 +159,29 @@ func TestLaunchFailsForAMissingProgram(t *testing.T) {
 		t.Fatal("launched a missing program")
 	}
 }
+
+// In a worktree the process works there, while its result stays in the attempt's state directory (it never
+// becomes a changed file of the repository).
+func TestProcessRunsInTheWorkdirAndLeavesItsResultInTheStateDir(t *testing.T) {
+	t.Parallel()
+	l := launcher(t)
+	state, work := t.TempDir(), t.TempDir()
+	out := &syncBuf{}
+	p, err := l.Launch(t.Context(), app.LaunchSpec{Dir: state, Workdir: work, Scenario: domain.ScenarioGate, Attempt: 1,
+		Stdout: out, Stderr: out})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, mockagent.ReleaseFile), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if e := p.Wait(); e.Code != 0 {
+		t.Fatalf("%+v %s", e, out)
+	}
+	if code, ok := mockagent.ReadResult(state); !ok || code != 0 {
+		t.Fatal("no result in the state dir")
+	}
+	if ents, _ := os.ReadDir(work); len(ents) != 0 {
+		t.Fatalf("files left in the worktree: %v", ents)
+	}
+}

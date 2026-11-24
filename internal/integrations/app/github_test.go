@@ -386,3 +386,26 @@ func TestRepositoryTokenIsProjectScoped(t *testing.T) {
 		t.Fatal("token marshals in clear")
 	}
 }
+
+// KIN-29: the runner's checkout source is the registered repository's integration branch plus a token for it
+// alone; an uninstalled App still gives the branch (public repositories), other projects get nothing.
+func TestCheckoutSource(t *testing.T) {
+	t.Parallel()
+	e := newGitHubEnv(t)
+	e.configure(t)
+	e.addRepo(t, "p1", "acme", "api")
+	ctx := t.Context()
+	src, err := e.gh.CheckoutSource(ctx, "p1", "acme/api")
+	if err != nil || src.Branch != "dev" || !src.Token.IsZero() {
+		t.Fatalf("not installed: %+v %v", src, err)
+	}
+	if _, err := e.gh.CheckoutSource(ctx, "p2", "acme/api"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("other project: %v", err)
+	}
+	e.api.read = domain.SyncResult{CheckResult: domain.CheckResult{OK: true}, State: domain.RepoState{InstallationID: 7, DefaultBranch: "dev"}}
+	e.deliver(t, app.TopicRepositorySync)
+	src, err = e.gh.CheckoutSource(ctx, "p1", "acme/api")
+	if err != nil || src.Branch != "dev" || src.Token.Reveal() != "ghs_token-for-api" {
+		t.Fatalf("installed: %+v %v", src, err)
+	}
+}

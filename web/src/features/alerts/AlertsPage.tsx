@@ -59,6 +59,8 @@ export function useAlertText() {
         return t("alerts.kind_integration_circuit_open", { subject: a.subject });
       case "task_blocked":
         return t("alerts.kind_task_blocked", { subject: a.subject, reason: a.details.reason ?? "?" });
+      case "runner_output_full":
+        return t("alerts.kind_runner_output_full");
       default:
         return t("alerts.kind_other", { kind: a.kind, subject: a.subject });
     }

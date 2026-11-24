@@ -85,6 +85,12 @@ func RenderAlert(l Language, a Alert) string {
 			LangEN: fmt.Sprintf("Task %s is blocked (%s).", subject, r),
 			LangRU: fmt.Sprintf("Задача %s заблокирована (%s).", subject, r),
 		}[l]
+	case KindRunnerOutputFull:
+		mib := clip(a.Details["limitMiB"])
+		body = map[Language]string{
+			LangEN: fmt.Sprintf("Runner output storage is full (%s MiB): new output of running executions is dropped until the retention frees space.", mib),
+			LangRU: fmt.Sprintf("Хранилище вывода раннеров заполнено (%s МиБ): новый вывод идущих исполнений отбрасывается, пока очистка не освободит место.", mib),
+		}[l]
 	default:
 		body = map[Language]string{
 			LangEN: fmt.Sprintf("New alert: %s (%s).", a.Kind, subject),

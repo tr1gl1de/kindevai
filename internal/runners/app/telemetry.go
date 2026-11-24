@@ -24,6 +24,9 @@ const (
 	TopicRunnerRecovered   = "alerts.runner_recovered"
 	TopicStorageLevel      = "alerts.storage_level"
 	TopicStorageRecovered  = "alerts.storage_recovered" // KIN-60: the volume is back under the recovery threshold
+	// KIN-59: the Control Plane's runner output storage is full (output is dropped) / stores output again.
+	TopicRunnerOutputFull      = "alerts.runner_output_full"
+	TopicRunnerOutputRecovered = "alerts.runner_output_recovered"
 )
 
 // Storage history: hourly aggregates kept HistoryTTL, at most HistoryMaxRows rows in total (enough for 8 volumes
@@ -86,6 +89,10 @@ type Telemetry struct {
 	Outbox  Enqueuer
 	Now     func() time.Time
 	Logger  *slog.Logger
+	// Output, if set, adds the Control Plane's stored runner output (KIN-52 limit, KIN-59) to the Storage Overview;
+	// OutputPolicy is the retention policy in force.
+	Output       OutputStore
+	OutputPolicy domain.RetentionPolicy
 
 	mu      sync.Mutex
 	last    map[string]time.Time // "<kind>/<machine>/<session>" → last stored message
@@ -331,7 +338,19 @@ type MachineOverview struct {
 type Overview struct {
 	GeneratedAt time.Time
 	Machines    []MachineOverview
+	Output      *domain.OutputStorage // nil when Telemetry.Output is not set
 }
+
+// OutputStore reads the stored runner output for the Storage Overview (KIN-59).
+type OutputStore interface {
+	OutputUsage(ctx context.Context) (int64, error)
+	// OutputDrops lists the attempts whose output was dropped for the total limit since then, newest first (at most
+	// limit), and counts such events in all.
+	OutputDrops(ctx context.Context, since time.Time, limit int) ([]domain.OutputDrop, int64, error)
+}
+
+// maxOutputDrops bounds the attempts with dropped output listed in the overview.
+const maxOutputDrops = 10
 
 // Overview builds the Storage Overview (Owner only).
 func (t *Telemetry) Overview(ctx context.Context, actor auth.Principal) (Overview, error) {
@@ -339,7 +358,33 @@ func (t *Telemetry) Overview(ctx context.Context, actor auth.Principal) (Overvie
 		return Overview{}, err
 	}
 	ov, _, err := t.overview(ctx, "")
-	return ov, err
+	if err != nil || t.Output == nil {
+		return ov, err
+	}
+	o, err := t.outputStorage(ctx, ov.GeneratedAt)
+	if err != nil {
+		return Overview{}, err
+	}
+	ov.Output = &o
+	return ov, nil
+}
+
+func (t *Telemetry) outputStorage(ctx context.Context, now time.Time) (domain.OutputStorage, error) {
+	used, err := t.Output.OutputUsage(ctx)
+	if err != nil {
+		return domain.OutputStorage{}, err
+	}
+	drops, n, err := t.Output.OutputDrops(ctx, now.Add(-domain.OutputDropsWindow), maxOutputDrops)
+	if err != nil {
+		return domain.OutputStorage{}, err
+	}
+	o := domain.OutputStorage{UsedBytes: used, LimitBytes: t.OutputPolicy.MaxOutputBytes, Policy: t.OutputPolicy,
+		DroppedEvents: n, Drops: drops}
+	if len(drops) > 0 {
+		last := drops[0].LastAt
+		o.LastDropAt = &last
+	}
+	return o, nil
 }
 
 // overview builds the overview of every machine, or of machine only (then it also returns only's 30-day history,

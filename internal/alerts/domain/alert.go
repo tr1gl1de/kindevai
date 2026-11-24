@@ -66,6 +66,7 @@ const (
 	KindCIFailed               Kind = "ci_failed"                // CI failed on a project's integration branch or a PR
 	KindIntegrationCircuitOpen Kind = "integration_circuit_open" // an external adapter's circuit breaker opened
 	KindTaskBlocked            Kind = "task_blocked"             // a task is BLOCKED
+	KindRunnerOutputFull       Kind = "runner_output_full"       // KIN-59: runner output is dropped, the Control Plane's output storage is full
 )
 
 // Limits of stored alert fields.

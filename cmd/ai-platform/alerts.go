@@ -66,6 +66,8 @@ func newAlerts(inst *bootstrap.Installation, msg *messagingModule, audit *auditM
 	msg.Outbox.Handle(alertsapp.TopicCircuitClosed, ev.CircuitClosed)
 	msg.Outbox.Handle(workflowapp.TopicTaskBlocked, ev.TaskBlocked)
 	msg.Outbox.Handle(workflowapp.TopicTaskUnblocked, ev.TaskUnblocked)
+	msg.Outbox.Handle(runnersapp.TopicRunnerOutputFull, ev.RunnerOutputFull)           // KIN-59
+	msg.Outbox.Handle(runnersapp.TopicRunnerOutputRecovered, ev.RunnerOutputRecovered) // KIN-59
 	msg.Outbox.Handle(approvalsapp.TopicApprovalRequested, ev.ApprovalRequested)
 	bot := alertBot{
 		vault:    botTokenVault{&integrationsapp.Vault{Store: integrationsdb.New(inst.DB), Cipher: inst.Box, Now: time.Now}},

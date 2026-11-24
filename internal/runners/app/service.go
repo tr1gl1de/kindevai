@@ -250,6 +250,9 @@ func (s *Service) Enroll(ctx context.Context, req EnrollRequest) (EnrollResult, 
 		}
 		r := domain.Enroll(s.NewID(), tok, key, meta, now)
 		if err := s.Repo.CreateRunner(ctx, r); err != nil {
+			if errors.Is(err, domain.ErrKeyEnrolled) {
+				rejected = &tok
+			}
 			return err
 		}
 		if ok, err := s.Repo.ConsumeToken(ctx, tok.ID, r.ID, now); err != nil {
@@ -276,10 +279,12 @@ func (s *Service) Enroll(ctx context.Context, req EnrollRequest) (EnrollResult, 
 	return res, nil
 }
 
-// auditRejected records an attempt with a known but unusable token (a leaked or replayed token is worth seeing).
+// auditRejected records an attempt with a known token that was refused: the token was unusable, or the key is
+// already enrolled (a leaked or replayed token or key is worth seeing).
 // Unknown tokens are only logged: they are guesses, and the rate limit bounds them.
 func (s *Service) auditRejected(ctx context.Context, tok domain.EnrollmentToken, cause error, m domain.Metadata) {
-	reason := map[error]string{domain.ErrTokenUsed: "used", domain.ErrTokenExpired: "expired", domain.ErrTokenRevoked: "revoked"}[cause]
+	reason := map[error]string{domain.ErrTokenUsed: "used", domain.ErrTokenExpired: "expired", domain.ErrTokenRevoked: "revoked",
+		domain.ErrKeyEnrolled: "key_enrolled"}[cause]
 	err := s.inTx(ctx, func(ctx context.Context) error {
 		return s.Audit.Record(ctx, auditapp.Entry{Actor: auditapp.Anonymous(), Kind: KindEnrollRejected,
 			Subject: tokenSubject(tok.ID), Details: map[string]string{"reason": reason, "hostname": m.Hostname}})

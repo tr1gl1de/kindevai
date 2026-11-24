@@ -19,6 +19,8 @@ export function errorMessage(t: TFunction, e: unknown): string {
       return t("errors.cross_origin");
     case "not_found":
       return t("errors.not_found");
+    case "validation": // a validation error not tied to a form field (e.g. from a row action)
+      return validationMessage(t, e.detail) ?? t("errors.unknown");
     case "invitation_invalid":
       return t("invite.invitation_invalid");
     case "invitation_used":

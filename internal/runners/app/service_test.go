@@ -156,6 +156,9 @@ func TestEnrollValidatesInputAndKeyUniqueness(t *testing.T) {
 	if _, err := f.svc.Enroll(t.Context(), enrollReq(plain, keyA)); !errors.Is(err, domain.ErrKeyEnrolled) {
 		t.Fatalf("same key with another token = %v", err)
 	}
+	if e := f.audit.last(); e.Kind != KindEnrollRejected || e.Details["reason"] != "key_enrolled" {
+		t.Fatalf("a replayed key is audited: %+v", e)
+	}
 	if tok, _ := f.repo.TokenByHash(t.Context(), domain.HashEnrollmentToken(plain)); tok.ConsumedAt != nil {
 		t.Fatal("a failed enrollment leaves the token usable")
 	}

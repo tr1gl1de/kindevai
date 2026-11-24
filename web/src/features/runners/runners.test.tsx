@@ -78,6 +78,20 @@ describe("runners list (owner)", () => {
     await expectStatus("The enrollment token is revoked.");
   });
 
+  it("explains why a token can no longer be revoked", async () => {
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/runners", () => json([])),
+      http.get("/api/runners/enrollment-tokens", () => json([{ id: "t1", state: "pending", createdAt: "2026-11-24T10:00:00Z", expiresAt: "2026-11-24T10:10:00Z" }])),
+      http.post("/api/runners/enrollment-tokens/t1/revoke", () => json({ error: "validation", message: "token_not_pending", field: "token" }, 422)),
+    );
+    await renderApp("/runners");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Revoke" }));
+    await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Revoke" }));
+    expect(await screen.findByText(/no longer waiting: it was used, revoked or has expired/)).toBeInTheDocument();
+  });
+
   it("explains the empty state and works in Russian", async () => {
     server.use(
       http.get("/api/auth/me", () => json(owner)),

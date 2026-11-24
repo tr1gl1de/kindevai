@@ -100,7 +100,7 @@ ai-runner fingerprint                                    # сверьте с к�
   Повтор с тем же токеном после обрыва использует тот же ключ. Fingerprint, который вернул Control Plane, обязан
   совпасть с локальным ключом, иначе регистрация не сохраняется.
 - Сертификаты TLS проверяются всегда; флага insecure нет. `http://` работает только для Control Plane на
-  `localhost`/loopback. Переменные прокси (`HTTPS_PROXY`) для канала управления игнорируются, редиректы не выполняются.
+  `localhost`/loopback, и соединение по http возможно только с loopback-адресом. Переменные прокси (`HTTPS_PROXY`) для канала управления игнорируются, редиректы не выполняются.
 - Каталог данных (`--data-dir`): `/var/lib/kindevai-runner` под root, иначе `$XDG_DATA_HOME/kindevai-runner` или
   `~/.local/share/kindevai-runner`. В нём `config.json` (сервер, id раннера, fingerprint; 0600), `keys/` и
   `repos/ workspaces/ sessions/ events/ proxy/`, все с правами 0700; одновременно — только один процесс (lock-файл).

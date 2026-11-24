@@ -142,3 +142,23 @@ func TestEnsureDir(t *testing.T) {
 		t.Fatal("file accepted as directory")
 	}
 }
+
+// A symlinked directory would move the key out of the data dir and get its target chmod-ed.
+func TestEnsureDirRefusesSymlink(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	target := filepath.Join(root, "elsewhere")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "keys")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureDir(link); !errors.Is(err, ErrInsecure) {
+		t.Fatalf("err = %v", err)
+	}
+	if st, _ := os.Stat(target); st.Mode().Perm() != 0o755 {
+		t.Fatal("symlink target changed")
+	}
+}

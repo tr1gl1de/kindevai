@@ -22,6 +22,8 @@ StateDirectoryMode=0700
 UMask=0077
 Restart=on-failure
 RestartSec=5s
+# 78 (EX_CONFIG): not enrolled or an insecure/mismatched key; restarting cannot fix it.
+RestartPreventExitStatus=78
 # A stopped runner lets its CLI processes finish their own shutdown.
 KillMode=mixed
 TimeoutStopSec=60s

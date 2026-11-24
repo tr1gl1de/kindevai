@@ -120,6 +120,9 @@ func (s ServerURL) Endpoint(path string) string {
 	return u.String()
 }
 
+// TLS reports whether the URL uses https.
+func (s ServerURL) TLS() bool { return s.u.Scheme == "https" }
+
 // IsZero reports an unset URL.
 func (s ServerURL) IsZero() bool { return s.u.Host == "" }
 

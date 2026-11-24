@@ -245,6 +245,9 @@ func TestRunNeedsEnrollment(t *testing.T) {
 	if !errors.Is(r.err, domain.ErrNotEnrolled) {
 		t.Fatalf("err = %v", r.err)
 	}
+	if exitCode(r.err) != exitConfig || exitCode(errors.New("network down")) != 1 {
+		t.Fatal("not-enrolled must exit with EX_CONFIG so services stop restarting")
+	}
 	if r := cli(t.Context(), t.TempDir(), "", nil, "fingerprint"); r.err == nil {
 		t.Fatal("fingerprint without a key succeeded")
 	}
@@ -307,7 +310,8 @@ func TestServiceTemplates(t *testing.T) {
 					t.Fatalf("%s: %v", name, err)
 				}
 			}
-		} else if !strings.Contains(s, "UMask=0077") || !strings.Contains(s, "NoNewPrivileges=yes") {
+		} else if !strings.Contains(s, "UMask=0077") || !strings.Contains(s, "NoNewPrivileges=yes") ||
+			!strings.Contains(s, "RestartPreventExitStatus=78") {
 			t.Errorf("%s lacks hardening", name)
 		}
 	}

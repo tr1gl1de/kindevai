@@ -109,3 +109,30 @@ func TestInspectNeitherLocksNorCreates(t *testing.T) {
 		t.Fatal("Inspect created the directory")
 	}
 }
+
+// Temp files from a crash during key or config writes are removed on the next Open.
+func TestOpenRemovesStaleTempFiles(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	d, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = d.Close()
+	stale := []string{filepath.Join(root, "keys", "ed25519.pem.tmp123"), filepath.Join(root, "config.json.tmp9")}
+	for _, p := range stale {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d, err = Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	for _, p := range stale {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s left behind", p)
+		}
+	}
+}

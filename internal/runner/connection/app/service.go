@@ -91,7 +91,9 @@ func (s *Service) Enroll(ctx context.Context, server string, token domain.Token)
 	}
 	e := domain.Enrollment{Server: srv, RunnerID: res.RunnerID, Fingerprint: res.Fingerprint, Status: res.Status}
 	if err := s.Enrollments.Save(ctx, e); err != nil {
-		return Enrolled{KeyCreated: created}, err
+		return Enrolled{KeyCreated: created}, fmt.Errorf("the Control Plane registered runner %s (fingerprint %s), but "+
+			"saving the registration failed; fix the cause and run enroll again with the same token while it is valid: %w",
+			e.RunnerID, e.Fingerprint, err)
 	}
 	return Enrolled{Enrollment: e, KeyCreated: created}, nil
 }

@@ -78,6 +78,9 @@ func TestEnrollMapsErrors(t *testing.T) {
 		{502, `<html>bad gateway</html>`, ErrUnexpected},
 		{200, `not json`, ErrUnexpected},
 		{200, `{"runnerId":"","status":"pending","fingerprint":"x"}`, ErrUnexpected},
+		{201, `{"runnerId":"r1\u001b[2J","status":"pending","fingerprint":"SHA256:x"}`, ErrUnexpected},
+		{201, `{"runnerId":"r1","status":"\u001b[31mpending","fingerprint":"SHA256:x"}`, ErrUnexpected},
+		{201, `{"runnerId":"r1","status":"pending","fingerprint":"SHA256:x\u001b"}`, ErrUnexpected},
 	}
 	for _, tc := range cases {
 		t.Run(tc.body, func(t *testing.T) {
@@ -161,5 +164,16 @@ func TestEnrollBoundsResponse(t *testing.T) {
 	})
 	if _, err := New().Enroll(t.Context(), srv, request(t)); !errors.Is(err, ErrUnexpected) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// Plain http goes only to a loopback address, even when "localhost" resolves elsewhere.
+func TestPlainHTTPDialsOnlyLoopback(t *testing.T) {
+	t.Parallel()
+	if err := loopbackOnly("tcp4", "10.0.0.1:80", nil); err == nil {
+		t.Fatal("non-loopback dial allowed")
+	}
+	if err := loopbackOnly("tcp6", "[::1]:80", nil); err != nil {
+		t.Fatal(err)
 	}
 }

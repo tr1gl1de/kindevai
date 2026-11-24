@@ -59,8 +59,22 @@ func main() {
 	stop()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ai-runner:", err)
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
+}
+
+// exitConfig (EX_CONFIG) marks failures a restart cannot fix (not enrolled, insecure or mismatched key); the
+// service units do not restart on it.
+const exitConfig = 78
+
+func exitCode(err error) int {
+	for _, target := range []error{domain.ErrNotEnrolled, domain.ErrFingerprintMismatch, domain.ErrInvalidKey,
+		domain.ErrServerURL, domain.ErrPlainHTTP, app.ErrNoKey, secfile.ErrInsecure} {
+		if errors.Is(err, target) {
+			return exitConfig
+		}
+	}
+	return 1
 }
 
 const usage = `usage: ai-runner <command> [flags]

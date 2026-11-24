@@ -100,7 +100,7 @@ ai-runner fingerprint                                    # compare with the runn
   A retry with the same token after a dropped connection reuses the key. The fingerprint the Control Plane returns must
   match the local key, otherwise the enrollment is not saved.
 - TLS certificates are always verified; there is no insecure flag. `http://` works only for a Control Plane on
-  `localhost`/loopback. Proxy variables (`HTTPS_PROXY`) are ignored for the management connection and redirects are
+  `localhost`/loopback, and plain-http connections may only reach a loopback address. Proxy variables (`HTTPS_PROXY`) are ignored for the management connection and redirects are
   not followed.
 - Data directory (`--data-dir`): `/var/lib/kindevai-runner` as root, otherwise `$XDG_DATA_HOME/kindevai-runner` or
   `~/.local/share/kindevai-runner`. It holds `config.json` (server, runner id, fingerprint; 0600), `keys/` and

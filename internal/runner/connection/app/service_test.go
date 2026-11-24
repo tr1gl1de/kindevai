@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/domain"
@@ -41,12 +42,16 @@ func (f *fakeKeys) Load(context.Context) (domain.Identity, error) {
 }
 
 type fakeStore struct {
-	e     domain.Enrollment
-	saves int
+	e       domain.Enrollment
+	saves   int
+	saveErr error
 }
 
 func (f *fakeStore) Load(context.Context) (domain.Enrollment, error) { return f.e, nil }
 func (f *fakeStore) Save(_ context.Context, e domain.Enrollment) error {
+	if f.saveErr != nil {
+		return f.saveErr
+	}
 	f.e = e
 	f.saves++
 	return nil
@@ -219,5 +224,16 @@ func TestReady(t *testing.T) {
 	e, id, err := svc.Ready(t.Context())
 	if err != nil || e.RunnerID != "r1" || id.Fingerprint() != e.Fingerprint {
 		t.Fatalf("ready = %+v, %v", e, err)
+	}
+}
+
+// The server consumed the token; if saving fails the operator still learns the runner id to recover.
+func TestEnrollSaveFailureNamesRegisteredRunner(t *testing.T) {
+	t.Parallel()
+	svc, _, store, _ := newSvc()
+	store.saveErr = errors.New("disk full")
+	_, err := svc.Enroll(t.Context(), "https://cp.example.com", token(t))
+	if err == nil || !strings.Contains(err.Error(), "r1") || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("err = %v", err)
 	}
 }

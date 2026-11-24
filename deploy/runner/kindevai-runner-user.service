@@ -15,6 +15,8 @@ ExecStart=%h/.local/bin/ai-runner run --data-dir %h/.local/share/kindevai-runner
 UMask=0077
 Restart=on-failure
 RestartSec=5s
+# 78 (EX_CONFIG): not enrolled or an insecure/mismatched key; restarting cannot fix it.
+RestartPreventExitStatus=78
 KillMode=mixed
 TimeoutStopSec=60s
 NoNewPrivileges=yes

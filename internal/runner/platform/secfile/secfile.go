@@ -61,6 +61,22 @@ func CheckPrivate(path string, st fs.FileInfo) error {
 	return nil
 }
 
+// RemoveStaleTemps deletes temp files that WriteNew/WriteReplace left in dir after a crash (they may hold key bytes).
+func RemoveStaleTemps(dir string) error {
+	matches, err := filepath.Glob(filepath.Join(dir, "*.tmp*"))
+	if err != nil {
+		return fmt.Errorf("listing temp files in %s: %w", dir, err)
+	}
+	for _, m := range matches {
+		if st, err := os.Lstat(m); err == nil && st.Mode().IsRegular() {
+			if err := os.Remove(m); err != nil {
+				return fmt.Errorf("removing stale %s: %w", m, err)
+			}
+		}
+	}
+	return nil
+}
+
 // WriteNew atomically creates path with mode 0600 and data. It fails with fs.ErrExist when path exists, so an
 // existing file (a key) is never replaced, even by a concurrent writer.
 func WriteNew(path string, data []byte) error {
@@ -116,14 +132,18 @@ func syncDir(dir string) error {
 	return nil
 }
 
-// EnsureDir creates dir and its missing parents with mode 0700 and restricts an existing dir to 0700.
+// EnsureDir creates dir and its missing parents with mode 0700 and restricts an existing dir to 0700. dir itself
+// must not be a symlink (its parents may be).
 func EnsureDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating %s: %w", dir, err)
 	}
-	st, err := os.Stat(dir)
+	st, err := os.Lstat(dir)
 	if err != nil {
 		return fmt.Errorf("checking %s: %w", dir, err)
+	}
+	if st.Mode()&fs.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symlink: %w", dir, ErrInsecure)
 	}
 	if !st.IsDir() {
 		return fmt.Errorf("%s is not a directory", dir)

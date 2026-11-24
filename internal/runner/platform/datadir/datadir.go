@@ -67,6 +67,12 @@ func Open(dir string) (*Dir, error) {
 			return nil, fmt.Errorf("data dir: %w", err)
 		}
 	}
+	for _, dir := range []string{abs, filepath.Join(abs, "keys")} { // only safe while we hold the lock
+		if err := secfile.RemoveStaleTemps(dir); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+	}
 	return &Dir{path: abs, lock: f}, nil
 }
 

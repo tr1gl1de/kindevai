@@ -51,8 +51,14 @@ func SecretValue(v string) bool {
 		return false
 	}
 	lower := strings.ToLower(v)
-	if strings.HasPrefix(lower, "bearer ") || strings.HasPrefix(lower, "basic ") || strings.HasPrefix(lower, "token ") {
+	if strings.HasPrefix(lower, "bearer ") {
 		return true
+	}
+	// "Basic <base64>" / "token <value>" headers; prose such as "token expired" or "Token Service" passes.
+	for _, scheme := range []string{"basic ", "token "} {
+		if len(v) > len(scheme) && strings.EqualFold(v[:len(scheme)], scheme) && credentialWord(strings.TrimSpace(v[len(scheme):])) {
+			return true
+		}
 	}
 	if strings.Contains(v, "PRIVATE KEY-----") || jwtRe.MatchString(v) {
 		return true
@@ -95,7 +101,7 @@ func randomLooking(v string) bool {
 		}
 		counts[r]++
 	}
-	if !lower || !upper || !digit {
+	if !lower || !upper || !digit || wordSeparated(v) {
 		return false
 	}
 	var h float64
@@ -105,6 +111,40 @@ func randomLooking(v string) bool {
 		h -= p * math.Log2(p)
 	}
 	return h >= 4.0
+}
+
+// credentialWord reports a single word long enough to be a credential after an auth scheme.
+func credentialWord(w string) bool {
+	if w == "" || strings.ContainsAny(w, " \t\n") {
+		return false
+	}
+	if len(w) >= minCredentialLen || SecretValue(w) {
+		return true
+	}
+	// Short base64 ("dXNlcjpwYXNz") has upper case inside the word or digits/padding; words do not.
+	return len(w) >= 8 && strings.ContainsFunc(w[1:], func(r rune) bool {
+		return (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '=' || r == '+'
+	})
+}
+
+// minCredentialLen is the shortest value after "Basic"/"token" that is treated as a credential.
+const minCredentialLen = 16
+
+// wordSeparated reports a slug or path made of plain words and numbers ("Feature-Add-Login-2024",
+// "feature/KIN-16-audit"): every part between separators is all letters or all digits.
+func wordSeparated(v string) bool {
+	parts := strings.FieldsFunc(v, func(r rune) bool { return strings.ContainsRune("-_/.", r) })
+	if len(parts) < 3 {
+		return false
+	}
+	for _, p := range parts {
+		letters := strings.IndexFunc(p, func(r rune) bool { return r < 'A' || (r > 'Z' && r < 'a') || r > 'z' }) < 0
+		digits := strings.IndexFunc(p, func(r rune) bool { return r < '0' || r > '9' }) < 0
+		if !letters && !digits {
+			return false
+		}
+	}
+	return true
 }
 
 // Text redacts credentials inside free text word by word: secret-shaped words, values of key=value or key: value
@@ -119,7 +159,7 @@ func Text(s string) string {
 		w := words[i]
 		switch lw := strings.ToLower(w); {
 		case lw == "bearer" || lw == "basic" || lw == "token":
-			if i+1 < len(words) {
+			if i+1 < len(words) && (lw == "bearer" || credentialWord(words[i+1])) {
 				words[i+1] = Placeholder
 				i++
 				changed = true

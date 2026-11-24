@@ -79,6 +79,15 @@ blocks the dashboard. The Owner sees each adapter's state (`ok`, `degraded`, `ci
 at `GET /api/integrations/status`, and dead messages at `GET /api/messaging/{outbox|inbox}/dead`
 (`POST …/dead/{id}/retry` queues one again). Delivered messages are deleted after 7 days, dead ones after 30.
 
+### Audit log
+
+Security-relevant actions are recorded in an append-only audit log in the same transaction as the action itself:
+account created, disabled, enabled, password reset or changed, and invitations created, revoked or accepted (later
+contexts — runners, approvals, integrations — add theirs). Records cannot be changed or deleted (database triggers
+refuse it, and there is no API for it); values that look like passwords or tokens are stored as `[redacted]`. The
+Owner reads the log on the **Audit log** page or at `GET /api/audit?actor=&project=&kind=&from=&to=&before=&limit=`
+(newest first, `next` is the cursor for the following page); other users get `403`. No automatic retention in the MVP.
+
 ## Docker Compose
 
 ```bash

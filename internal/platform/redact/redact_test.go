@@ -40,6 +40,12 @@ func TestSecretValue(t *testing.T) {
 		{"pem", "-----BEGIN PRIVATE KEY-----\nMIIB", true},
 		{"url with credentials", "https://user:hunter2@example.com/repo.git", true},
 		{"high-entropy mixed", "q8Zr2LmX9vB4nT7wY1kP6sD3fG5hJ0aQ", true},
+		{"prose after token", "token expired", false},
+		{"prose after basic", "basic setup done", false},
+		{"name starting with token", "Token Service", false},
+		{"word-separated slug", "Feature-Add-Login-Page-2024-Fix", false},
+		{"branch path", "feature/KIN-16-Append-Only-Audit-Log", false},
+		{"token header", "token Zm9vYmFyYmF6cXV4MTIzNDU2", true},
 		{"login", "alice", false},
 		{"id base32", "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", false},
 		{"commit sha", "3688ffd1c1a2b3c4d5e6f708192a3b4c5d6e7f80", false},
@@ -79,6 +85,14 @@ func TestFields(t *testing.T) {
 
 func TestText(t *testing.T) {
 	t.Parallel()
+	for _, plain := range []string{"token expired for alice", "basic setup done", "Token Service renamed"} {
+		if got := Text(plain); got != plain {
+			t.Errorf("Text(%q) = %q, want unchanged", plain, got)
+		}
+	}
+	if got := Text("sent Bearer abc.def"); got != "sent Bearer "+Placeholder {
+		t.Errorf("bearer value kept: %q", got)
+	}
 	got := Text("push failed: https://bot:ghp_" + strings.Repeat("x1Y", 12) + "@github.com/a/b token=abc")
 	if strings.Contains(got, "ghp_") || strings.Contains(got, "bot:") || strings.Contains(got, "abc") {
 		t.Fatalf("Text left a secret: %q", got)

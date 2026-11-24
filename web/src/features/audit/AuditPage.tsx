@@ -132,6 +132,13 @@ function Filters({
   const kinds = useAuditKinds();
   const [draft, setDraft] = useState(initial);
   const [toError, setToError] = useState<string>();
+  // The URL is the applied filter: Back/Forward, a shared link or the nav link replace what the form shows.
+  const [shown, setShown] = useState(initial);
+  if (shown !== initial) {
+    setShown(initial);
+    setDraft(initial);
+    setToError(undefined);
+  }
   const toRef = useRef<HTMLInputElement>(null);
   const set = (f: keyof Draft) => (e: { target: { value: string } }) => {
     setDraft((d) => ({ ...d, [f]: e.target.value }));
@@ -188,11 +195,7 @@ function Filters({
           <button
             type="button"
             className="button subtle"
-            onClick={() => {
-              setDraft(readDraft(new URLSearchParams()));
-              setToError(undefined);
-              onReset();
-            }}
+            onClick={onReset}
           >
             {t("audit.reset")}
           </button>

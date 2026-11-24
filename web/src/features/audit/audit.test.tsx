@@ -77,6 +77,16 @@ describe("audit log (owner)", () => {
     expect(last.get("kind")).toBe("invitation.created");
     expect(last.get("actor")).toBe("owner");
 
+    // The nav link drops the filter from the URL; the form follows the URL.
+    await user.click(screen.getByRole("link", { name: "Audit log" }));
+    expect(await screen.findByText("3 events shown.")).toBeInTheDocument();
+    expect(within(form).getByLabelText("Project")).toHaveValue("");
+    expect(within(form).getByLabelText("Actor")).toHaveValue("");
+    await user.click(within(form).getByRole("button", { name: "Apply filters" }));
+    await user.selectOptions(within(form).getByLabelText("Project"), "Alpha");
+    await user.click(within(form).getByRole("button", { name: "Apply filters" }));
+    expect(await screen.findByText("1 event shown.")).toBeInTheDocument();
+
     await user.click(screen.getByRole("button", { name: "Clear filters" }));
     expect(await screen.findByText("3 events shown.")).toBeInTheDocument(); // unfiltered pages come back from the cache
     expect(within(form).getByLabelText("Project")).toHaveValue("");

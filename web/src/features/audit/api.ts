@@ -24,5 +24,9 @@ export function useAuditEvents(filter: AuditFilter) {
 
 /** Event kinds recorded so far, for the filter. */
 export function useAuditKinds() {
-  return useQuery({ queryKey: ["audit", "kinds"], queryFn: ({ signal }) => api<string[]>("GET", "/api/audit/kinds", undefined, signal) });
+  return useQuery({
+    queryKey: ["audit", "kinds"],
+    refetchOnMount: "always", // new kinds appear as other contexts start recording
+    queryFn: ({ signal }) => api<string[]>("GET", "/api/audit/kinds", undefined, signal),
+  });
 }

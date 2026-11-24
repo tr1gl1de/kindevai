@@ -1,5 +1,5 @@
 // Command ai-runner is the kindevai Runner daemon: it holds the machine's Ed25519 identity, enrolls with a
-// Control Plane and (from KIN-19 on) keeps an outbound WSS connection to it and runs AI CLIs in git worktrees.
+// Control Plane, keeps an outbound WSS connection to it and (later) runs AI CLIs in git worktrees.
 package main
 
 import (
@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"runtime"
@@ -63,13 +64,14 @@ func main() {
 	}
 }
 
-// exitConfig (EX_CONFIG) marks failures a restart cannot fix (not enrolled, insecure or mismatched key); the
-// service units do not restart on it.
+// exitConfig (EX_CONFIG) marks failures a restart cannot fix (not enrolled, insecure or mismatched key, revoked
+// runner, untrusted TLS certificate, unsupported protocol); the service units do not restart on it.
 const exitConfig = 78
 
 func exitCode(err error) int {
 	for _, target := range []error{domain.ErrNotEnrolled, domain.ErrFingerprintMismatch, domain.ErrInvalidKey,
-		domain.ErrServerURL, domain.ErrPlainHTTP, app.ErrNoKey, secfile.ErrInsecure} {
+		domain.ErrServerURL, domain.ErrPlainHTTP, app.ErrNoKey, secfile.ErrInsecure, domain.ErrRunnerRevoked,
+		domain.ErrUnsupportedProtocol, domain.ErrTLSVerification, domain.ErrAudienceMismatch} {
 		if errors.Is(err, target) {
 			return exitConfig
 		}
@@ -241,8 +243,8 @@ func fingerprint(ctx context.Context, args []string, e *env) error {
 	return nil
 }
 
-// daemon validates the data directory, key and registration, then waits for shutdown. The WSS connection to the
-// Control Plane (challenge-response, heartbeat) is added by KIN-19/KIN-20.
+// daemon validates the data directory, key and registration, then keeps the outbound WebSocket connection to the
+// Control Plane (challenge-response, reconnect with backoff) until shutdown or a fatal error such as revocation.
 func daemon(ctx context.Context, args []string, e *env) error {
 	fs, dataDir := flags("run", e)
 	if err := fs.Parse(args); err != nil {
@@ -257,13 +259,12 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	if err != nil {
 		return err
 	}
-	en, _, err := svc.Ready(ctx)
+	en, id, err := svc.Ready(ctx)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(e.stderr, "ai-runner %s: runner %s enrolled with %s (fingerprint %s); data dir %s\n", version, en.RunnerID,
 		en.Server, en.Fingerprint, d.Path())
-	fmt.Fprintln(e.stderr, "the Control Plane connection is not implemented in this version yet; waiting for shutdown")
-	<-ctx.Done()
-	return nil
+	conn := &app.Connector{Dialer: controlplane.New(), Logger: slog.New(slog.NewTextHandler(e.stderr, nil))}
+	return conn.Run(ctx, en, id)
 }

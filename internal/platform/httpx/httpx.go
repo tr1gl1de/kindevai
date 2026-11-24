@@ -2,6 +2,7 @@
 package httpx
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -135,6 +136,9 @@ func (tp TrustedProxies) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		peer, err := netip.ParseAddrPort(r.RemoteAddr)
 		if err == nil && tp.trusted(peer.Addr()) {
+			r = r.WithContext(context.WithValue(r.Context(), viaProxyKey{}, viaProxy{
+				peer: peer.Addr().Unmap(), proto: strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))),
+			}))
 			hops := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
 			for i := len(hops) - 1; i >= 0; i-- {
 				a, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
@@ -151,4 +155,32 @@ func (tp TrustedProxies) Middleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+type viaProxyKey struct{}
+
+type viaProxy struct {
+	peer  netip.Addr
+	proto string
+}
+
+// Peer is the TCP peer of the request, before any trusted-proxy rewrite of RemoteAddr (invalid if unparsable).
+func Peer(r *http.Request) netip.Addr {
+	if v, ok := r.Context().Value(viaProxyKey{}).(viaProxy); ok {
+		return v.peer
+	}
+	ap, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return netip.Addr{}
+	}
+	return ap.Addr().Unmap()
+}
+
+// ForwardedProto is the lowercase X-Forwarded-Proto set by a trusted proxy (e.g. "https" from Caddy), or "" when
+// the request did not come through one: a client can never claim TLS by sending the header itself.
+func ForwardedProto(r *http.Request) string {
+	if v, ok := r.Context().Value(viaProxyKey{}).(viaProxy); ok {
+		return v.proto
+	}
+	return ""
 }

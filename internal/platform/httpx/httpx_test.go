@@ -100,3 +100,38 @@ func TestTrustedProxies(t *testing.T) {
 		t.Fatalf("no trusted proxies configured, but header was used: %q", got)
 	}
 }
+
+func TestPeerAndForwardedProto(t *testing.T) {
+	t.Parallel()
+	tp, _ := ParseTrustedProxies("172.29.240.0/24")
+	tests := []struct {
+		name, peer, xff, proto string
+		wantPeer, wantProto    string
+	}{
+		{"direct request", "127.0.0.1:5", "", "https", "127.0.0.1", ""},
+		{"untrusted peer cannot claim https", "203.0.113.9:1", "1.2.3.4", "https", "203.0.113.9", ""},
+		{"trusted proxy keeps the TCP peer", "172.29.240.5:1", "198.51.100.7", "HTTPS", "172.29.240.5", "https"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var peer, proto string
+			h := tp.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				peer, proto = Peer(r).String(), ForwardedProto(r)
+			}))
+			r := httptest.NewRequestWithContext(t.Context(), "GET", "/", nil)
+			r.RemoteAddr = tt.peer
+			r.Header.Set("X-Forwarded-For", tt.xff)
+			r.Header.Set("X-Forwarded-Proto", tt.proto)
+			h.ServeHTTP(httptest.NewRecorder(), r)
+			if peer != tt.wantPeer || proto != tt.wantProto {
+				t.Fatalf("peer %q proto %q, want %q %q", peer, proto, tt.wantPeer, tt.wantProto)
+			}
+		})
+	}
+	r := httptest.NewRequestWithContext(t.Context(), "GET", "/", nil)
+	r.RemoteAddr = "[::1]:9"
+	if Peer(r).String() != "::1" || ForwardedProto(r) != "" {
+		t.Fatal("without the middleware Peer is RemoteAddr and no proto is trusted")
+	}
+}

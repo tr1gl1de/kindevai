@@ -144,7 +144,8 @@ describe("audit log (owner)", () => {
     );
     const { container } = await renderApp("/audit", "ru");
     expect(await screen.findByRole("heading", { level: 1, name: "Журнал аудита" })).toBeInTheDocument();
-    expect(await screen.findByText("Пользователь отключён")).toBeInTheDocument();
+    // The kind filter also lists the label once /api/audit/kinds loads, so look for it in the table only.
+    expect(await screen.findByRole("cell", { name: /Пользователь отключён/ })).toBeInTheDocument();
     expect(screen.getByText("Показано 1 событие.")).toBeInTheDocument();
     await expectAccessible(container);
   });

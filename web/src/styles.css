@@ -602,3 +602,7 @@ legend {
   letter-spacing: 0.3em;
   font-variant-numeric: tabular-nums;
 }
+
+.narrow > .card {
+  margin-top: 1.5rem;
+}

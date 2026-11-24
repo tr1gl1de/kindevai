@@ -223,3 +223,25 @@ func TestConstraintErrors(t *testing.T) {
 		t.Fatal("false positive")
 	}
 }
+
+// KIN-41: import checks a database against the binary's migrations without writing to it.
+func TestCheckReportsPendingWithoutWriting(t *testing.T) {
+	t.Parallel()
+	d := openTemp(t)
+	older := fstest.MapFS{"0001_init.sql": testMigrations["0001_init.sql"]}
+	if _, err := Migrate(t.Context(), d, older); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := Check(t.Context(), d, testMigrations); err != nil || n != 1 {
+		t.Fatalf("pending %d %v", n, err)
+	}
+	if v, _ := Version(t.Context(), d); v != 1 {
+		t.Fatalf("Check wrote: version %d", v)
+	}
+	if _, err := Migrate(t.Context(), d, testMigrations); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Check(t.Context(), d, older); !errors.Is(err, ErrSchemaTooNew) {
+		t.Fatalf("newer database: %v", err)
+	}
+}

@@ -62,10 +62,20 @@ const (
 // Schedule is one scheduler pass (KIN-23): leases that ran out are handled, READY tasks start their execution, and
 // every running execution's schedulable steps are claimed for a candidate runner with an execution.assign command
 // in the same transaction. A step without a candidate waits for a runner, and a task that cannot progress is
-// BLOCKED with reason runner until a candidate appears (resumed automatically).
+// BLOCKED with reason runner until a candidate appears (resumed automatically). While Pause reports maintenance
+// mode only the lease pass runs.
 func (s *Service) Schedule(ctx context.Context) error {
 	if _, err := s.ExpireLeases(ctx); err != nil {
 		return err
+	}
+	if s.Pause != nil {
+		paused, err := s.Pause.SchedulingPaused(ctx)
+		if err != nil {
+			return err
+		}
+		if paused {
+			return nil // maintenance mode: no new executions or step claims (KIN-41)
+		}
 	}
 	ready, err := s.Repo.TasksInState(ctx, domain.TaskReady)
 	if err != nil {

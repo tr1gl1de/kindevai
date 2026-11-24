@@ -5,6 +5,7 @@ import type { Me } from "../api/types";
 import { useLogout } from "../features/identity/api";
 import { LanguageSwitcher } from "../i18n/LanguageSwitcher";
 import { useAlerts } from "../features/alerts/api";
+import { MaintenanceBanner } from "../features/maintenance/MaintenanceBanner";
 
 export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
   const { t } = useTranslation();
@@ -40,6 +41,7 @@ export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
           {me.role === "owner" && <NavLink to="/network">{t("nav.network")}</NavLink>}
           {me.role === "owner" && <NavLink to="/audit">{t("nav.audit")}</NavLink>}
           {me.role === "owner" && <NavLink to="/settings/telegram">{t("nav.telegram")}</NavLink>}
+          {me.role === "owner" && <NavLink to="/settings/maintenance">{t("nav.maintenance")}</NavLink>}
           <NavLink to="/account/password" className="nav-account">
             {t("nav.changePassword")}
           </NavLink>
@@ -56,6 +58,7 @@ export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
         </div>
       </header>
       <main id="main" className="content" tabIndex={-1}>
+        <MaintenanceBanner owner={me.role === "owner"} />
         {children}
       </main>
     </div>

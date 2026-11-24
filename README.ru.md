@@ -19,7 +19,8 @@ ZCode) на внешних runners. Проект в активной разра�
 | Путь | Содержимое |
 |---|---|
 | `cmd/ai-platform` | Бинарник Control Plane (`serve`, `version`) |
-| `internal/` | Go-пакеты Control Plane |
+| `cmd/ai-runner` | Демон раннера (`enroll`, `fingerprint`, `run`, `version`) |
+| `internal/` | Go-пакеты Control Plane (`internal/runner/...` — раннер, `internal/protocol` — общие wire-сообщения) |
 | `web/` | Dashboard на React + TypeScript (Vite); `web/embed.go` встраивает сборку |
 | `scripts/` | Вспомогательные скрипты (worktree задач, учёт времени) |
 | `.claude/` | Правила, агенты и skills Claude Code для разработки репозитория |
@@ -82,6 +83,32 @@ Owner добавляет машину на странице **Раннеры**: 
 `POST/GET /api/runners/enrollment-tokens`, `POST /api/runners/enrollment-tokens/{id}/revoke`, `GET /api/runners`,
 `GET /api/runners/{id}`, `POST /api/runners/{id}/{approve|disable|enable|revoke}`, `PUT /api/runners/{id}/projects`.
 
+### Демон раннера (`ai-runner`)
+
+`ai-runner` — второй бинарник (`cmd/ai-runner`, linux/darwin × amd64/arm64, архивы релиза
+`kindevai-runner_<версия>_<os>_<arch>.tar.gz`). Команды: `enroll`, `fingerprint`, `run`, `version`.
+
+```bash
+ai-runner enroll --server https://kindevai.example.com   # спросит токен без отображения ввода
+ai-runner fingerprint                                    # сверьте с карточкой раннера перед одобрением
+```
+
+- Токен читается из скрытого prompt, из stdin (`… | ai-runner enroll --server …`) или из `--token-file <путь>`
+  (файл с правами 0600); `--token` и позиционные аргументы отклоняются.
+- Ключ Ed25519 создаётся один раз при первом `enroll` (`keys/ed25519.pem`, PKCS#8, права 0600) и никогда не
+  заменяется: повреждённый ключ — ошибка, а ключ или конфиг, доступные другим пользователям, отклоняются (`chmod 600`).
+  Повтор с тем же токеном после обрыва использует тот же ключ. Fingerprint, который вернул Control Plane, обязан
+  совпасть с локальным ключом, иначе регистрация не сохраняется.
+- Сертификаты TLS проверяются всегда; флага insecure нет. `http://` работает только для Control Plane на
+  `localhost`/loopback. Переменные прокси (`HTTPS_PROXY`) для канала управления игнорируются, редиректы не выполняются.
+- Каталог данных (`--data-dir`): `/var/lib/kindevai-runner` под root, иначе `$XDG_DATA_HOME/kindevai-runner` или
+  `~/.local/share/kindevai-runner`. В нём `config.json` (сервер, id раннера, fingerprint; 0600), `keys/` и
+  `repos/ workspaces/ sessions/ events/ proxy/`, все с правами 0700; одновременно — только один процесс (lock-файл).
+- Сервисы: `deploy/runner/kindevai-runner.service` (системный сервис systemd под отдельным пользователем),
+  `kindevai-runner-user.service` (пользовательский сервис systemd, например в WSL2, чтобы AI CLI использовали ваши
+  логины) и `io.kindevai.runner.plist` (агент launchd для macOS); шаги установки — в каждом файле. Пока `ai-runner run`
+  проверяет ключ и регистрацию и ждёт; WSS-подключение к Control Plane появится в KIN-19.
+
 ### Интеграции и внешние вызовы
 
 Вызовы YouTrack, GitHub, Telegram и runner никогда не выполняются внутри API-запроса. Исходящие изменения
@@ -138,7 +165,7 @@ make clean            # удалить артефакты сборки и тес
 | Событие | Что выполняется |
 |---|---|
 | PR или push в `dev` / `main` | `make lint` (go vet, golangci-lint, oxlint, tsc), тесты с покрытием, `make vuln` (govulncheck, npm audit), `make build`, проверка конфига GoReleaser, actionlint, сборка Docker-образа и смоук-тест |
-| Зелёный push в `dev` | **Dev-сборка**: бинарники linux/darwin × amd64/arm64 + `SHA256SUMS` как артефакт прогона CI `ai-platform-dev-<sha>` (хранится 14 дней); образ `ghcr.io/tr1gl1de/kindevai-dev:latest` (отдельный dev-пакет) |
+| Зелёный push в `dev` | **Dev-сборка**: бинарники Control Plane и раннера linux/darwin × amd64/arm64 + `SHA256SUMS` как артефакт прогона CI `ai-platform-dev-<sha>` (хранится 14 дней); образ `ghcr.io/tr1gl1de/kindevai-dev:latest` (отдельный dev-пакет) |
 | Тег `v*` на коммите `main` (только владелец) | **Prod-релиз**: проверка, что тег на `main`, тесты, GitHub Release (changelog, checksums, provenance) и образ `:X.Y.Z`, `:X.Y`, `:latest` через защищённый environment `production` |
 
 Автоматизация никогда не пушит в `main` и не создаёт PR в `main`. Dependabot еженедельно предлагает обновления в `dev`.

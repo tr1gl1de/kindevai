@@ -19,7 +19,8 @@ Base (project `KIN`, root article `KIN-A-1`).
 | Path | Contents |
 |---|---|
 | `cmd/ai-platform` | Control Plane binary (`serve`, `version`) |
-| `internal/` | Go packages of the Control Plane |
+| `cmd/ai-runner` | Runner daemon (`enroll`, `fingerprint`, `run`, `version`) |
+| `internal/` | Go packages of the Control Plane (`internal/runner/...`: the runner, `internal/protocol`: shared wire messages) |
 | `web/` | React + TypeScript Dashboard (Vite); `web/embed.go` embeds the build |
 | `scripts/` | Developer helpers (task worktrees, time tracking) |
 | `.claude/` | Claude Code rules, agents and skills used to develop this repo |
@@ -82,6 +83,33 @@ projects, disable/enable or revoke it (revocation is final; re-enroll with a new
 `POST /api/runners/enrollment-tokens/{id}/revoke`, `GET /api/runners`, `GET /api/runners/{id}`,
 `POST /api/runners/{id}/{approve|disable|enable|revoke}`, `PUT /api/runners/{id}/projects`.
 
+### Runner daemon (`ai-runner`)
+
+`ai-runner` is the second binary (`cmd/ai-runner`, linux/darwin × amd64/arm64, release archives
+`kindevai-runner_<version>_<os>_<arch>.tar.gz`). Commands: `enroll`, `fingerprint`, `run`, `version`.
+
+```bash
+ai-runner enroll --server https://kindevai.example.com   # prompts for the token without echo
+ai-runner fingerprint                                    # compare with the runner's card before approving
+```
+
+- The token is read from the hidden prompt, from stdin (`… | ai-runner enroll --server …`) or from
+  `--token-file <path>` (the file must be mode 0600); `--token` and positional arguments are refused.
+- The Ed25519 key is generated once at the first `enroll` (`keys/ed25519.pem`, PKCS#8, mode 0600) and never replaced:
+  a corrupt key is an error, and a key or config file that other users can access is refused (`chmod 600`).
+  A retry with the same token after a dropped connection reuses the key. The fingerprint the Control Plane returns must
+  match the local key, otherwise the enrollment is not saved.
+- TLS certificates are always verified; there is no insecure flag. `http://` works only for a Control Plane on
+  `localhost`/loopback. Proxy variables (`HTTPS_PROXY`) are ignored for the management connection and redirects are
+  not followed.
+- Data directory (`--data-dir`): `/var/lib/kindevai-runner` as root, otherwise `$XDG_DATA_HOME/kindevai-runner` or
+  `~/.local/share/kindevai-runner`. It holds `config.json` (server, runner id, fingerprint; 0600), `keys/` and
+  `repos/ workspaces/ sessions/ events/ proxy/`, all mode 0700; one process at a time (lock file).
+- Services: `deploy/runner/kindevai-runner.service` (systemd system service with its own user),
+  `kindevai-runner-user.service` (systemd user service, e.g. WSL2, so AI CLIs use your logins) and
+  `io.kindevai.runner.plist` (macOS launchd agent); install steps are in each file. `ai-runner run` currently checks
+  the key and registration and waits; the WSS connection to the Control Plane arrives with KIN-19.
+
 ### Integrations and external calls
 
 Calls to YouTrack, GitHub, Telegram and runners never happen inside an API request. Outgoing changes are stored
@@ -137,7 +165,7 @@ Branches start from `dev` as `feature/KIN-<n>-<slug>`; pull requests target `dev
 | Trigger | What runs |
 |---|---|
 | PR or push to `dev` / `main` | `make lint` (go vet, golangci-lint, oxlint, tsc), tests with coverage, `make vuln` (govulncheck, npm audit), `make build`, GoReleaser config check, actionlint, Docker image build + smoke test |
-| Green push to `dev` | **Dev build**: binaries for linux/darwin × amd64/arm64 + `SHA256SUMS` as the CI run's artifact `ai-platform-dev-<sha>` (kept 14 days); image `ghcr.io/tr1gl1de/kindevai-dev:latest` (separate dev package) |
+| Green push to `dev` | **Dev build**: Control Plane and runner binaries for linux/darwin × amd64/arm64 + `SHA256SUMS` as the CI run's artifact `ai-platform-dev-<sha>` (kept 14 days); image `ghcr.io/tr1gl1de/kindevai-dev:latest` (separate dev package) |
 | Tag `v*` on a commit of `main` (owner only) | **Production release**: verifies the tag is on `main`, runs tests, publishes the GitHub Release (changelog, checksums, provenance) and image `:X.Y.Z`, `:X.Y`, `:latest` through the protected `production` environment |
 
 Automation never pushes to `main` or opens PRs against it. Dependabot proposes weekly updates to `dev`.

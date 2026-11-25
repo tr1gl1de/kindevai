@@ -34,6 +34,8 @@ type ChannelRepo interface {
 	// AddOutput counts n output bytes for the attempt at now if they fit both limits; the verdict says which
 	// limit they would exceed otherwise.
 	AddOutput(ctx context.Context, step string, fence, n int64, limits domain.OutputLimits, now time.Time) (domain.OutputVerdict, error)
+	// WorkspaceReports returns what the attempt's applied events reported about its worktree (KIN-78).
+	WorkspaceReports(ctx context.Context, runnerID, step string, fence int64) (domain.WorkspaceReports, error)
 }
 
 // Executions is the workflow as the channel needs it. runnerID comes from the authenticated session. Errors:
@@ -74,6 +76,9 @@ type AgentReporter interface {
 // checked first. A violation holds the step for a new approval; errors are those of Executions.
 type ScopeChecker interface {
 	CheckChanges(ctx context.Context, runnerID, step string, fence int64, ch protocol.WorkspaceChanges) error
+	// ChangesMissing holds the step like a violation: the attempt worked in a worktree and ended without a final
+	// workspace.changes report, so what it changed is unknown (KIN-78).
+	ChangesMissing(ctx context.Context, runnerID, step string, fence int64) error
 }
 
 // Reconciler receives the runner's runner.reconcile.response (KIN-23 resolves UNKNOWN attempts with it).
@@ -535,6 +540,19 @@ func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Ev
 		_ = json.Unmarshal(e.Body, &d) // an unreadable body only loses the CLI's report
 		if err := c.agentReport(ctx, runnerID, e, d.Agent); err != nil {
 			return err
+		}
+		if c.Scope != nil {
+			// The runner reports an attempt's final changes before its end on the same ordered event stream (an
+			// adopted attempt too: its spool survives the restart), so a missing report is never merely late.
+			w, err := c.Repo.WorkspaceReports(ctx, runnerID, e.Step, e.Fence)
+			if err != nil {
+				return err
+			}
+			if w.ChangesMissing() {
+				c.Logger.Warn("attempt completed without a final workspace.changes report; holding the step",
+					"runner", runnerID, "step", e.Step, "fence", e.Fence)
+				return c.Scope.ChangesMissing(ctx, runnerID, e.Step, e.Fence)
+			}
 		}
 		return c.Executions.CompleteAttempt(ctx, runnerID, e.Step, e.Fence, at)
 	case protocol.EventFailed:

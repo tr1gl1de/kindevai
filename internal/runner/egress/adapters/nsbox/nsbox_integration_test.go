@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -32,8 +33,13 @@ import (
 // The test binary is also the helper (KINDEV_NSBOX_HELPER) and the agent (KINDEV_NSBOX_AGENT).
 func TestMain(m *testing.M) {
 	switch {
+	case os.Getenv(RunEnv) != "": // the outer launcher of a wrapped run
+		os.Exit(RunMain(os.Stderr))
 	case os.Getenv("KINDEV_NSBOX_HELPER") == "1":
 		os.Exit(Main(os.Args[1:], os.Stderr))
+	case os.Getenv("KINDEV_NSBOX_AGENT") == "hang": // runs until a signal ends it
+		fmt.Println("agent hanging")
+		select {}
 	case os.Getenv("KINDEV_NSBOX_AGENT") == "1":
 		os.Exit(agentMain())
 	}
@@ -101,6 +107,10 @@ func agentMain() int {
 		body = string(b)
 	}
 	check("through-proxy", err == nil && body == "203.0.113.7", fmt.Sprint(body, err))
+	if want := os.Getenv("STDIN_WANT"); want != "" {
+		in, _ := io.ReadAll(os.Stdin)
+		check("stdin-relayed", string(in) == want, string(in))
+	}
 	check("worktree-writable", os.WriteFile("agent-was-here", []byte("x"), 0o600) == nil, "")
 	return fail
 }
@@ -343,4 +353,142 @@ func TestSelfTestReportsSupport(t *testing.T) {
 			t.Fatalf("self-test left %s behind", e.Name())
 		}
 	}
+}
+
+// agentCopy copies the test binary into the kept state directory (the sandbox hides /tmp, where it lives).
+func (f *fixture) agentCopy(t *testing.T) string {
+	t.Helper()
+	agent := filepath.Join(f.dir, "agent")
+	bin, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(agent, bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return agent
+}
+
+// The CLI adapters (KIN-32) start a plain command line: Wrap turns it into `sandbox-run`, which builds the same
+// sandbox, relays stdin (the prompt) and the exit status, and never starts the CLI unverified.
+func TestWrappedRun(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		expected string
+		exit     int
+	}{
+		{"verified", "203.0.113.7", 0},
+		{"egress IP mismatch", "198.51.100.1", ExitUnverified},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t)
+			agent := f.agentCopy(t)
+			path, args, env, err := f.m.Wrap(egress.BoxRequest{Dir: f.dir, Workdir: f.workdir, Profile: f.profile(tc.expected)},
+				[]string{agent}, []string{"KINDEV_NSBOX_AGENT=1", "HOST_SOCKET=" + f.socket, "DIAG_URL=" + f.diag,
+					"HOST_PID=" + strconv.Itoa(os.Getpid()), "SIBLING_SOCKET=" + f.sibling, "RUNNER_SECRET=" + f.secret,
+					"STDIN_WANT=the prompt"}, f.workdir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, kv := range env { // the credentials never travel in the environment
+				if strings.Contains(kv, f.proxy.Password) && f.proxy.Password != "" || strings.Contains(kv, "\"argv\"") {
+					t.Fatalf("run description in the environment: %s", kv)
+				}
+			}
+			cmd := exec.Command(path, args...) //nolint:noctx // killed with its group on cleanup
+			cmd.Env, cmd.Stdin = env, strings.NewReader("the prompt")
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			var out strings.Builder
+			cmd.Stdout, cmd.Stderr = &out, &out
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+			_ = cmd.Wait()
+			if code := cmd.ProcessState.ExitCode(); code != tc.exit {
+				t.Fatalf("exit %d, want %d\n%s", code, tc.exit, out.String())
+			}
+			ran := strings.Contains(out.String(), "no-capabilities")
+			if tc.exit == 0 && (!ran || strings.Contains(out.String(), "FAIL") || !strings.Contains(out.String(), "ok stdin-relayed")) {
+				t.Fatalf("agent output:\n%s", out.String())
+			}
+			if tc.exit != 0 && (ran || !strings.Contains(out.String(), UnverifiedMarker)) {
+				t.Fatalf("unverified run output:\n%s", out.String())
+			}
+			if left, _ := filepath.Glob(filepath.Join(f.dir, "sandbox-run-*.json")); len(left) != 0 {
+				t.Fatalf("run description left behind: %v", left)
+			}
+		})
+	}
+}
+
+// A cancel (SIGTERM to the process group) ends a wrapped run promptly whether it arrives while the sandbox is
+// being built (the agent then never starts) or once the agent runs.
+func TestWrappedRunCancel(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	agent := f.agentCopy(t)
+	path, args, env, err := f.m.Wrap(egress.BoxRequest{Dir: f.dir, Workdir: f.workdir, Profile: f.profile("203.0.113.7")},
+		[]string{agent}, []string{"KINDEV_NSBOX_AGENT=hang"}, f.workdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, delay := range []time.Duration{0, 5 * time.Second} {
+		cmd := exec.Command(path, args...) //nolint:noctx // killed with its group on cleanup
+		cmd.Env = env
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		out := &syncBuf{}
+		cmd.Stdout, cmd.Stderr = out, out
+		if delay > 0 { // a fresh description: the first run deleted it
+			if path, args, env, err = f.m.Wrap(egress.BoxRequest{Dir: f.dir, Workdir: f.workdir, Profile: f.profile("203.0.113.7")},
+				[]string{agent}, []string{"KINDEV_NSBOX_AGENT=hang"}, f.workdir); err != nil {
+				t.Fatal(err)
+			}
+			cmd = exec.Command(path, args...) //nolint:noctx // as above
+			cmd.Env, cmd.Stdout, cmd.Stderr = env, out, out
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		pid := cmd.Process.Pid
+		t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
+		done := make(chan struct{})
+		go func() { _ = cmd.Wait(); close(done) }()
+		if delay > 0 {
+			deadline := time.Now().Add(60 * time.Second)
+			for !strings.Contains(out.String(), "agent hanging") && time.Now().Before(deadline) {
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+		_ = syscall.Kill(-pid, syscall.SIGTERM)
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("delay %v: the run ignored the cancel\n%s", delay, out.String())
+		}
+		if code := cmd.ProcessState.ExitCode(); code == 0 {
+			t.Fatalf("delay %v: a cancelled run exited 0\n%s", delay, out.String())
+		}
+	}
+}
+
+// syncBuf is an output buffer read while the process writes it.
+type syncBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

@@ -165,6 +165,15 @@ ai-runner fingerprint                                    # compare with the runn
   completed/failed event, on the runner's clock, recorded once per attempt); it is shown per attempt, step, task and
   for the list's filter, apart from the task's calendar duration. A period without an end (a lost process) or a usable
   time is shown as "accounting incomplete", never as a complete record.
+- AI CLIs (runner, KIN-79): an assignment for `claude` or `codex` (chosen by routing) runs the CLI found on the
+  runner's PATH with the runner user's HOME (its local login) and a clean environment, as `ai-runner agent-exec` in the
+  attempt's process group: the prompt/context package is a file in the attempt's state directory (outside the
+  worktree) read on stdin, the CLI's output goes to files there (read on after a runner restart, nothing is sent
+  twice) and the timeout (default 2 h) holds without the runner. The permission bypass is granted only inside the
+  verified strict egress sandbox (KIN-31), refused elsewhere. The CLI's typed events (session, text, tool use, result,
+  failure) appear in the attempt's log; its usage (tokens, cost, turns), native session id and CLI version are stored
+  per attempt and shown next to the agent time. A usage limit or logout (`cli_limit`) parks the step and BLOCKs the task
+  (reason `cli_limit`, an alert) until the limit resets (30 min when the CLI names no time); then it is assigned again.
 - Workspaces (runner): when the step's repository is registered for the project, the attempt runs in its own git
   worktree under `workspaces/` on the branch `feature/<task>--<step>` (never main/master), started from the
   repository's integration branch fetched into a bare cache under `repos/`; the base commit is recorded. The Control

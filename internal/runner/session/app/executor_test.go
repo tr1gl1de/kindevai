@@ -56,12 +56,17 @@ type fakeLauncher struct {
 	procs    []*fakeProc
 	adopted  map[int]*fakeProc
 	termExit bool
+	err      error    // Launch fails with it
 	out      []string // what the process writes to stdout, write by write (default "hello\n")
 }
 
 func (l *fakeLauncher) Launch(_ context.Context, s LaunchSpec) (Process, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.err != nil {
+		l.launched = append(l.launched, s)
+		return nil, l.err
+	}
 	p := &fakeProc{pid: 100 + len(l.procs), exit: make(chan struct{}), termExit: l.termExit}
 	l.launched = append(l.launched, s)
 	l.procs = append(l.procs, p)

@@ -78,18 +78,47 @@ func startScheduler(ctx context.Context, wf *workflowapp.Service, every time.Dur
 type workflowRunners struct {
 	tel *runnersapp.Telemetry
 	hub *runnersapp.Hub
+	// strict says, per project, which runners' network profile is strict (KIN-31); nil: none is.
+	strict func(ctx context.Context, projectID string) (func(runnerID string) bool, error)
 }
 
+// Candidates lists the project's candidate runners. A runner whose effective network profile is strict is a
+// candidate only once its strict egress sandbox verified (runner.capabilities strictEgress): macOS and hosts
+// without namespaces never get such steps (KIN-31).
 func (w workflowRunners) Candidates(ctx context.Context, projectID string) ([]workflowapp.Candidate, error) {
 	cs, err := w.tel.Candidates(ctx, projectID, w.hub.Online)
 	if err != nil {
 		return nil, err
 	}
+	isStrict := func(string) bool { return false }
+	if w.strict != nil && len(cs) > 0 {
+		if isStrict, err = w.strict(ctx, projectID); err != nil {
+			return nil, err
+		}
+	}
+	return schedulable(cs, isStrict), nil
+}
+
+// schedulable converts candidates for the scheduler, dropping those that must enforce strict egress and cannot.
+func schedulable(cs []runnersapp.Candidate, isStrict func(runnerID string) bool) []workflowapp.Candidate {
 	out := make([]workflowapp.Candidate, 0, len(cs))
 	for _, c := range cs {
+		if !c.StrictEgress && isStrict(c.ID) {
+			continue
+		}
 		out = append(out, workflowapp.Candidate{ID: c.ID, Tools: c.Tools, DiskHeavyAllowed: c.DiskHeavyAllowed})
 	}
-	return out, nil
+	return out
+}
+
+// wireStrictEgress makes the scheduler check strict network profiles (KIN-31) once the network service exists.
+func wireStrictEgress(wf *workflowapp.Service, strict func(ctx context.Context, projectID string) (func(string) bool, error)) {
+	r, ok := wf.Runners.(workflowRunners)
+	if !ok { // a wiring error: strict steps would reach runners that cannot enforce them
+		panic("wireStrictEgress: the scheduler's runners are not workflowRunners")
+	}
+	r.strict = strict
+	wf.Runners = r
 }
 
 // runnerDispatcher queues the workflow's commands in the runner's command log (joins the caller's transaction).

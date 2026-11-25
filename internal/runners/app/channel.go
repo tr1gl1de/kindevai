@@ -49,6 +49,13 @@ type Executions interface {
 	FailAttempt(ctx context.Context, runnerID, step string, fence int64, reason string, at time.Time) error
 }
 
+// NetworkHolder is implemented by an Executions that can park a step for the network (KIN-31): a failure with
+// code protocol.FailureNetwork (the runner's strict egress sandbox was not verified; nothing ran unconfined) holds
+// the step WAITING(network) instead of failing the attempt. Without it such a failure is an ordinary failure.
+type NetworkHolder interface {
+	HoldAttemptForNetwork(ctx context.Context, runnerID, step string, fence int64, reason string, at time.Time) error
+}
+
 // ScopeChecker evaluates what an attempt reports it changed (workspace.changes) against the step's approved scope
 // (KIN-51), in the event's transaction. runnerID comes from the authenticated session and the attempt's token was
 // checked first. A violation holds the step for a new approval; errors are those of Executions.
@@ -515,6 +522,9 @@ func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Ev
 	case protocol.EventFailed:
 		var f protocol.Failure
 		_ = json.Unmarshal(e.Body, &f)
+		if h, ok := c.Executions.(NetworkHolder); ok && f.Code == protocol.FailureNetwork {
+			return h.HoldAttemptForNetwork(ctx, runnerID, e.Step, e.Fence, truncate(f.Reason, protocol.MaxReasonLen), at)
+		}
 		return c.Executions.FailAttempt(ctx, runnerID, e.Step, e.Fence, truncate(f.Reason, protocol.MaxReasonLen), at)
 	}
 	if err := c.Executions.CheckAttempt(ctx, runnerID, e.Step, e.Fence); err != nil || e.Kind != protocol.EventWorkspaceChanges ||

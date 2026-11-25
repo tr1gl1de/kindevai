@@ -133,8 +133,9 @@ func TestPublicationAndDocsViews(t *testing.T) {
 	if publicationView(nil) != nil || docsView(nil) != nil {
 		t.Fatal("views without data")
 	}
-	b, err := json.Marshal(publicationView(&app.Publication{Pending: 2, Failed: 1, Published: 3, LastError: "http_503"}))
-	if err != nil || string(b) != `{"pending":2,"failed":1,"published":3,"lastError":"http_503"}` {
+	b, err := json.Marshal(publicationView(&app.Publication{Pending: 2, Failed: 1, Published: 3, Superseded: 1,
+		LastError: "http_503"}))
+	if err != nil || string(b) != `{"pending":2,"failed":1,"published":3,"superseded":1,"lastError":"http_503"}` {
 		t.Fatalf("publication %s %v", b, err)
 	}
 	b, err = json.Marshal(docsView(&domain.DocsDecision{Status: domain.DocsUpdated, Rejected: []string{"KIN-A-12"},

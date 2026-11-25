@@ -114,10 +114,13 @@ func (r *Repository) TaskPublication(ctx context.Context, taskID string) (domain
 	var p domain.Publication
 	var last sql.NullString
 	err := r.conn(ctx).QueryRowContext(ctx, `SELECT
-		  coalesce(sum(status = 'pending'), 0), coalesce(sum(status = 'failed'), 0), coalesce(sum(status = 'published'), 0),
+		  coalesce(sum(status = 'pending'), 0), coalesce(sum(status = 'failed'), 0),
+		  coalesce(sum(status = 'published' AND coalesce(error, '') <> ?2), 0),
+		  coalesce(sum(status = 'published' AND error = ?2), 0),
 		  (SELECT error FROM youtrack_writes WHERE task_id = ?1 AND status <> 'published' AND error IS NOT NULL
 		   ORDER BY updated_at DESC, key LIMIT 1)
-		FROM youtrack_writes WHERE task_id = ?1`, taskID).Scan(&p.Pending, &p.Failed, &p.Published, &last)
+		FROM youtrack_writes WHERE task_id = ?1`, taskID, supersededCode).Scan(&p.Pending, &p.Failed, &p.Published,
+		&p.Superseded, &last)
 	if err != nil {
 		return p, fmt.Errorf("reading publication: %w", err)
 	}
@@ -125,15 +128,44 @@ func (r *Repository) TaskPublication(ctx context.Context, taskID string) (domain
 	return p, nil
 }
 
+// supersededCode is the error code of a write skipped as superseded (app.SupersededCode, KIN-117).
+const supersededCode = "superseded"
+
+// NewerWrites looks at the writes enqueued after key (rowid order = enqueue order, KIN-117): superseded when one
+// that has not failed (a failed one never reaches YouTrack) is a state write of the same issue (for a state write)
+// or a write of the same article section (for an article write; one recorded before KIN-117 has no section and is
+// never superseded); overtaken when a comment or state write of the same issue was published (not merely superseded; article
+// writes are ordered apart from the issue's). Both false for an unknown key.
+func (r *Repository) NewerWrites(ctx context.Context, key string) (superseded, overtaken bool, err error) {
+	err = r.conn(ctx).QueryRowContext(ctx, `SELECT
+		  CASE w.kind
+		    WHEN 'state' THEN EXISTS (SELECT 1 FROM youtrack_writes n WHERE n.issue_id = w.issue_id AND n.kind = 'state'
+		      AND n.rowid > w.rowid AND n.status <> 'failed')
+		    WHEN 'article' THEN instr(w.target, '#') > 0 AND EXISTS (SELECT 1 FROM youtrack_writes n
+		      WHERE n.target = w.target AND n.kind = 'article' AND n.rowid > w.rowid AND n.status <> 'failed')
+		    ELSE 0 END,
+		  EXISTS (SELECT 1 FROM youtrack_writes n WHERE n.issue_id = w.issue_id AND n.kind IN ('comment', 'state')
+		    AND n.rowid > w.rowid AND n.status = 'published' AND coalesce(n.error, '') <> ?2)
+		FROM youtrack_writes w WHERE w.key = ?1`, key, supersededCode).Scan(&superseded, &overtaken)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("reading youtrack writes: %w", err)
+	}
+	return superseded, overtaken, nil
+}
+
 // FollowsFailure reports whether key is a published write of a task whose latest failed write was enqueued before it
-// (rowid order = enqueue order) with no other published write in between.
+// (rowid order = enqueue order) with no other published write in between (one skipped as superseded published
+// nothing and does not count, KIN-117).
 func (r *Repository) FollowsFailure(ctx context.Context, key string) (bool, error) {
 	var ok bool
 	err := r.conn(ctx).QueryRowContext(ctx, `SELECT coalesce((
 		  SELECT f.rowid < w.rowid AND NOT EXISTS (SELECT 1 FROM youtrack_writes x WHERE x.task_id = w.task_id
-		    AND x.status = 'published' AND x.rowid > f.rowid AND x.rowid < w.rowid)
+		    AND x.status = 'published' AND coalesce(x.error, '') <> ?2 AND x.rowid > f.rowid AND x.rowid < w.rowid)
 		  FROM youtrack_writes w JOIN youtrack_writes f ON f.task_id = w.task_id AND f.status = 'failed'
-		  WHERE w.key = ? ORDER BY f.rowid DESC LIMIT 1), 0)`, key).Scan(&ok)
+		  WHERE w.key = ?1 ORDER BY f.rowid DESC LIMIT 1), 0)`, key, supersededCode).Scan(&ok)
 	if err != nil {
 		return false, fmt.Errorf("reading youtrack writes: %w", err)
 	}

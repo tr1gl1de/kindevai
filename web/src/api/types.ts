@@ -510,6 +510,8 @@ export interface PlanStep {
   key: string;
   title: string;
   repository: string;
+  /** "reviewer" for a review step; absent for an implementer. */
+  role?: string;
   scope: string[];
   dependsOn: string[];
   capabilities: string[];
@@ -522,7 +524,16 @@ export interface PlanRevision {
   risk: RiskLevel;
   createdBy: string;
   createdAt: string;
-  plan: { summary: string; risk: RiskLevel; maxParallel: number; steps: PlanStep[] };
+  plan: {
+    summary: string;
+    risk: RiskLevel;
+    maxParallel: number;
+    steps: PlanStep[];
+    tests: string[];
+    contracts: string[];
+    migrations: string[];
+    docs: string[];
+  };
 }
 
 export interface PlanChange {
@@ -531,6 +542,18 @@ export interface PlanChange {
   field: string;
   before: string;
   after: string;
+  /** For a list field (scope, tests, …): the items the newer revision gained and lost. */
+  added: string[];
+  removed: string[];
+}
+
+/** GET /api/tasks/{id}/revisions/{n}[?base=m] (KIN-97): a revision, the one it is compared with and what changed. */
+export interface RevisionDiff {
+  task: { id: string; title: string; state: string; planRevision: number };
+  revision: PlanRevision;
+  /** null for revision 1 (nothing to compare with). */
+  previous: PlanRevision | null;
+  changes: PlanChange[];
 }
 
 /** GET /api/approvals/{id} */

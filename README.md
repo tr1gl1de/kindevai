@@ -390,6 +390,9 @@ until the Owner approves the extra files. Only the Owner decides and edits the p
 projects' approvals and policy. API: `GET /api/approvals?state=pending|decided|all`, `GET /api/approvals/{id}`,
 `POST /api/approvals/{id}/{approve|reject}` (`planRevision`, `planHash`, `comment` — required to reject),
 `GET/PUT /api/projects/{id}/risk-policy`.
+Any plan revision of a task, with what changed since the previous one (steps added, removed or changed; scope,
+risk, tests, migrations), is at `/tasks/{id}/plan/revisions/{n}` for everyone who sees the task
+(`GET /api/tasks/{id}/revisions/{n}?base=m` compares with revision `m` instead).
 ### Audit log
 
 Security-relevant actions are recorded in an append-only audit log in the same transaction as the action itself:

@@ -1,12 +1,14 @@
-// Package httpapi exposes the Approval Center (/api/approvals) and the project risk policy
-// (/api/projects/{id}/risk-policy). Only the Owner approves or rejects; Project Admins see their projects'
-// approvals and policy.
+// Package httpapi exposes the Approval Center (/api/approvals), the project risk policy
+// (/api/projects/{id}/risk-policy) and a task's plan revisions with their diff (/api/tasks/{id}/revisions/{n}).
+// Only the Owner approves or rejects; Project Admins see their projects' approvals and policy; everyone who sees a
+// task sees its revisions.
 package httpapi
 
 import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/approvals/app"
@@ -58,6 +60,7 @@ type StepView struct {
 	Key          string   `json:"key"`
 	Title        string   `json:"title"`
 	Repository   string   `json:"repository"`
+	Role         string   `json:"role,omitempty"`
 	Scope        []string `json:"scope"`
 	DependsOn    []string `json:"dependsOn"`
 	Capabilities []string `json:"capabilities"`
@@ -69,6 +72,10 @@ type PlanView struct {
 	Risk        string     `json:"risk"`
 	MaxParallel int        `json:"maxParallel"`
 	Steps       []StepView `json:"steps"`
+	Tests       []string   `json:"tests"`
+	Contracts   []string   `json:"contracts"`
+	Migrations  []string   `json:"migrations"`
+	Docs        []string   `json:"docs"`
 }
 
 // RevisionView is a plan revision.
@@ -89,13 +96,24 @@ type TaskView struct {
 	PlanRevision int    `json:"planRevision"`
 }
 
-// ChangeView is one difference from the previous revision.
+// ChangeView is one difference from the previous revision; a list field also lists the items added and removed.
 type ChangeView struct {
-	Kind    string `json:"kind"`
-	StepKey string `json:"stepKey,omitempty"`
-	Field   string `json:"field"`
-	Before  string `json:"before"`
-	After   string `json:"after"`
+	Kind    string   `json:"kind"`
+	StepKey string   `json:"stepKey,omitempty"`
+	Field   string   `json:"field"`
+	Before  string   `json:"before"`
+	After   string   `json:"after"`
+	Added   []string `json:"added"`
+	Removed []string `json:"removed"`
+}
+
+// RevisionDiffView is GET /api/tasks/{id}/revisions/{n}: the revision, the one it is compared with (null for
+// revision 1) and what changed.
+type RevisionDiffView struct {
+	Task     TaskView      `json:"task"`
+	Revision RevisionView  `json:"revision"`
+	Previous *RevisionView `json:"previous"`
+	Changes  []ChangeView  `json:"changes"`
 }
 
 // DetailView is GET /api/approvals/{id}.
@@ -142,6 +160,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/approvals/{id}/reject", h.decide(false))
 	mux.HandleFunc("GET /api/projects/{id}/risk-policy", h.policy)
 	mux.HandleFunc("PUT /api/projects/{id}/risk-policy", h.setPolicy)
+	mux.HandleFunc("GET /api/tasks/{id}/revisions/{n}", h.revision)
 }
 
 func (h *Handler) logger() *slog.Logger {
@@ -166,7 +185,7 @@ func (h *Handler) fail(w http.ResponseWriter, err error) {
 	case errors.Is(err, domain.ErrForbidden):
 		httpx.WriteError(w, http.StatusForbidden, "forbidden", "only the Owner may do this")
 	case errors.Is(err, domain.ErrNotFound):
-		httpx.WriteError(w, http.StatusNotFound, "not_found", "approval or project not found")
+		httpx.WriteError(w, http.StatusNotFound, "not_found", "not found")
 	case errors.Is(err, domain.ErrStaleRevision):
 		httpx.WriteError(w, http.StatusConflict, "stale_revision", "the plan revision is no longer current")
 	case errors.Is(err, domain.ErrAlreadyDecided), errors.Is(err, app.ErrConflict):
@@ -207,12 +226,53 @@ func orEmpty(xs []string) []string {
 func revisionView(r app.RevisionRef) RevisionView {
 	v := RevisionView{Number: r.Number, Hash: r.Hash, Risk: string(r.Risk), CreatedBy: r.CreatedBy, CreatedAt: r.CreatedAt,
 		Plan: PlanView{Summary: r.Plan.Summary, Risk: string(r.Plan.Risk), MaxParallel: r.Plan.MaxParallel,
-			Steps: make([]StepView, 0, len(r.Plan.Steps))}}
+			Steps: make([]StepView, 0, len(r.Plan.Steps)), Tests: orEmpty(r.Plan.Tests),
+			Contracts: orEmpty(r.Plan.Contracts), Migrations: orEmpty(r.Plan.Migrations), Docs: orEmpty(r.Plan.Docs)}}
 	for _, s := range r.Plan.Steps {
-		v.Plan.Steps = append(v.Plan.Steps, StepView{Key: s.Key, Title: s.Title, Repository: s.Repository,
+		v.Plan.Steps = append(v.Plan.Steps, StepView{Key: s.Key, Title: s.Title, Repository: s.Repository, Role: s.Role,
 			Scope: orEmpty(s.Scope), DependsOn: orEmpty(s.DependsOn), Capabilities: orEmpty(s.Capabilities)})
 	}
 	return v
+}
+
+func changeViews(cs []domain.Change) []ChangeView {
+	out := make([]ChangeView, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, ChangeView{Kind: string(c.Kind), StepKey: c.StepKey, Field: c.Field, Before: c.Before,
+			After: c.After, Added: orEmpty(c.Added), Removed: orEmpty(c.Removed)})
+	}
+	return out
+}
+
+func (h *Handler) revision(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	n, err := strconv.Atoi(r.PathValue("n"))
+	if err != nil {
+		h.fail(w, domain.ErrNotFound)
+		return
+	}
+	base := 0
+	if q := r.URL.Query().Get("base"); q != "" {
+		if base, err = strconv.Atoi(q); err != nil {
+			h.fail(w, &domain.ValidationError{Field: "base", Code: "base_invalid"})
+			return
+		}
+	}
+	d, err := h.Service.RevisionDiff(r.Context(), p, r.PathValue("id"), n, base)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	out := RevisionDiffView{Task: TaskView{ID: d.Task.ID, Title: d.Task.Title, State: d.Task.State,
+		PlanRevision: d.Task.PlanRevision}, Revision: revisionView(d.Revision), Changes: changeViews(d.Changes)}
+	if d.Previous != nil {
+		pv := revisionView(*d.Previous)
+		out.Previous = &pv
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -259,15 +319,11 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 func detailView(d app.Detail) DetailView {
 	out := DetailView{Approval: approvalView(d.Approval, d.ProjectName),
 		Task:     TaskView{ID: d.Task.ID, Title: d.Task.Title, State: d.Task.State, PlanRevision: d.Task.PlanRevision},
-		Revision: revisionView(d.Revision), Changes: make([]ChangeView, 0, len(d.Changes)),
+		Revision: revisionView(d.Revision), Changes: changeViews(d.Changes),
 		Related: make([]ApprovalView, 0, len(d.Related)), CanDecide: d.CanDecide}
 	if d.Previous != nil {
 		pv := revisionView(*d.Previous)
 		out.Previous = &pv
-	}
-	for _, c := range d.Changes {
-		out.Changes = append(out.Changes, ChangeView{Kind: string(c.Kind), StepKey: c.StepKey, Field: c.Field,
-			Before: c.Before, After: c.After})
 	}
 	for _, a := range d.Related {
 		out.Related = append(out.Related, approvalView(a, d.ProjectName))

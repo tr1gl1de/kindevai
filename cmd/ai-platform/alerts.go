@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	identityapp "github.com/tr1gl1de/kindevai/internal/identity/app"
 	identity "github.com/tr1gl1de/kindevai/internal/identity/domain"
 	integrationsdb "github.com/tr1gl1de/kindevai/internal/integrations/adapters/sqlite"
+	"github.com/tr1gl1de/kindevai/internal/integrations/adapters/youtrack"
 	integrationsapp "github.com/tr1gl1de/kindevai/internal/integrations/app"
 	networkapp "github.com/tr1gl1de/kindevai/internal/network/app"
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
@@ -54,6 +56,7 @@ func newAlerts(inst *bootstrap.Installation, msg *messagingModule, audit *auditM
 		Now:       time.Now,
 		NewID:     rand.Text,
 	}
+	wireAnalysisTasks(inst, msg, svc) // KIN-61
 	ev := alertsevents.Handlers{Svc: svc}
 	msg.Outbox.Handle(runnersapp.TopicRunnerUnreachable, ev.RunnerUnreachable)
 	msg.Outbox.Handle(runnersapp.TopicRunnerRecovered, ev.RunnerRecovered)
@@ -237,4 +240,34 @@ func (p pendingApprovals) Pending(ctx context.Context, id string) (bool, error) 
 		return false, err
 	}
 	return a.State == approvals.StatePending, nil
+}
+
+// wireAnalysisTasks lets the Alert Center suggest analysis tasks (KIN-61): a confirmed suggestion enqueues
+// youtrack.create_issue, whose handler creates the issue and stores it on the alert.
+func wireAnalysisTasks(inst *bootstrap.Installation, msg *messagingModule, svc *alertsapp.Service) {
+	repo := integrationsdb.New(inst.DB)
+	conn := &integrationsapp.Service{Vault: &integrationsapp.Vault{Store: repo, Cipher: inst.Box, Now: time.Now}, Store: repo}
+	w := &integrationsapp.IssueWriter{Connection: conn, Client: &youtrack.Client{}, Outbox: msg.Outbox,
+		OnCreated: func(ctx context.Context, key, issueID, issueURL string) error {
+			id, ok := strings.CutPrefix(key, "alert/")
+			if id, ok2 := strings.CutSuffix(id, "/analysis"); ok && ok2 && id != "" {
+				return svc.AnalysisCreated(ctx, id, issueID, issueURL)
+			}
+			return nil // another context's issue
+		}}
+	svc.Tracker = alertTracker{w}
+	msg.Outbox.Handle(integrationsapp.TopicYouTrackCreateIssue, w.HandleCreateIssue)
+}
+
+// alertTracker gives the Alert Center the YouTrack issue writer.
+type alertTracker struct{ w *integrationsapp.IssueWriter }
+
+func (t alertTracker) Configured(ctx context.Context) (bool, error) { return t.w.Configured(ctx) }
+
+func (t alertTracker) Binding(ctx context.Context, projectID string) (string, error) {
+	return t.w.Binding(ctx, projectID)
+}
+
+func (t alertTracker) RequestIssue(ctx context.Context, r alertsapp.IssueRequest) error {
+	return t.w.RequestIssue(ctx, integrationsapp.IssueRequest(r))
 }

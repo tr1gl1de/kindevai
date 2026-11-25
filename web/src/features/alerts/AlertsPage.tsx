@@ -1,10 +1,17 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Alert, AlertAction } from "../../api/types";
-import { EmptyState, ErrorState, FormAlert, Loading, PageHeading } from "../../ui/feedback";
+import {
+  EmptyState,
+  ErrorState,
+  FormAlert,
+  Loading,
+  PageHeading,
+} from "../../ui/feedback";
 import { errorMessage } from "../../ui/errors";
 import { formatDateTime } from "../../ui/format";
 import { useNotify } from "../../ui/notify";
+import { AnalysisDialog, AnalysisStatus } from "./AnalysisDialog";
 import { useAlertAction, useAlerts, type AlertFilter } from "./api";
 
 const filters: AlertFilter[] = ["active", "all"];
@@ -24,7 +31,13 @@ export function AlertsPage() {
       <fieldset className="filter-group">
         <legend className="muted">{t("alerts.filterLabel")}</legend>
         {filters.map((f) => (
-          <button key={f} type="button" className="button" aria-pressed={f === filter} onClick={() => setFilter(f)}>
+          <button
+            key={f}
+            type="button"
+            className="button"
+            aria-pressed={f === filter}
+            onClick={() => setFilter(f)}
+          >
             {t(`alerts.filter_${f}`)}
           </button>
         ))}
@@ -32,9 +45,16 @@ export function AlertsPage() {
       {list.isPending ? (
         <Loading />
       ) : list.isError ? (
-        <ErrorState message={errorMessage(t, list.error)} onRetry={() => void list.refetch()} />
+        <ErrorState
+          message={errorMessage(t, list.error)}
+          onRetry={() => void list.refetch()}
+        />
       ) : list.data.length === 0 ? (
-        <EmptyState title={t(filter === "active" ? "alerts.emptyActive" : "alerts.emptyAll")} />
+        <EmptyState
+          title={t(
+            filter === "active" ? "alerts.emptyActive" : "alerts.emptyAll",
+          )}
+        />
       ) : (
         <AlertTable items={list.data} />
       )}
@@ -50,15 +70,29 @@ export function useAlertText() {
       case "runner_unreachable":
         return t("alerts.kind_runner_unreachable", { subject: a.subject });
       case "storage_level":
-        return t("alerts.kind_storage_level", { subject: a.subject, usedPercent: a.details.usedPercent ?? "?" });
+        return t("alerts.kind_storage_level", {
+          subject: a.subject,
+          usedPercent: a.details.usedPercent ?? "?",
+        });
       case "egress_check_failed":
-        return t("alerts.kind_egress_check_failed", { subject: a.subject, code: a.details.code ?? "?" });
+        return t("alerts.kind_egress_check_failed", {
+          subject: a.subject,
+          code: a.details.code ?? "?",
+        });
       case "ci_failed":
-        return t("alerts.kind_ci_failed", { subject: a.subject, conclusion: a.details.conclusion ?? "?" });
+        return t("alerts.kind_ci_failed", {
+          subject: a.subject,
+          conclusion: a.details.conclusion ?? "?",
+        });
       case "integration_circuit_open":
-        return t("alerts.kind_integration_circuit_open", { subject: a.subject });
+        return t("alerts.kind_integration_circuit_open", {
+          subject: a.subject,
+        });
       case "task_blocked":
-        return t("alerts.kind_task_blocked", { subject: a.subject, reason: a.details.reason ?? "?" });
+        return t("alerts.kind_task_blocked", {
+          subject: a.subject,
+          reason: a.details.reason ?? "?",
+        });
       case "runner_output_full":
         return t("alerts.kind_runner_output_full");
       case "cli_held":
@@ -83,6 +117,8 @@ function AlertTable({ items }: { items: Alert[] }) {
   const act = useAlertAction();
   const notify = useNotify();
   const [error, setError] = useState<string>();
+  const [analysis, setAnalysis] = useState<Alert>();
+  const closeAnalysis = useCallback(() => setAnalysis(undefined), []);
 
   async function run(a: Alert, action: AlertAction) {
     setError(undefined);
@@ -113,11 +149,17 @@ function AlertTable({ items }: { items: Alert[] }) {
             {items.map((a) => (
               <tr key={a.id} id={`alert-${a.id}`}>
                 <td>
-                  <span className={`badge level-badge level-${a.severity}`}>{t(`alerts.severity_${a.severity}`)}</span>
+                  <span className={`badge level-badge level-${a.severity}`}>
+                    {t(`alerts.severity_${a.severity}`)}
+                  </span>
                 </td>
                 <td>
                   {text(a)}
-                  {a.occurrences > 1 && <div className="muted">{t("alerts.occurrences", { count: a.occurrences })}</div>}
+                  {a.occurrences > 1 && (
+                    <div className="muted">
+                      {t("alerts.occurrences", { count: a.occurrences })}
+                    </div>
+                  )}
                 </td>
                 <td>{a.projectName ?? t("alerts.platform")}</td>
                 <td>{formatDateTime(a.lastSeenAt, i18n.language)}</td>
@@ -125,22 +167,43 @@ function AlertTable({ items }: { items: Alert[] }) {
                   <span className="badge">{t(`alerts.state_${a.state}`)}</span>
                 </td>
                 <td>
-                  {a.canManage ? (
+                  {a.canManage || a.canSuggestAnalysis || a.analysisTask ? (
                     <div className="actions">
-                      {actions
-                        .filter((x) => x !== "acknowledge" || a.state === "OPEN")
-                        .map((x) => (
+                      {a.canManage &&
+                        actions
+                          .filter(
+                            (x) => x !== "acknowledge" || a.state === "OPEN",
+                          )
+                          .map((x) => (
+                            <button
+                              key={x}
+                              type="button"
+                              className="button subtle"
+                              disabled={act.isPending}
+                              aria-label={t(`alerts.action_${x}_label`, {
+                                alert: text(a),
+                              })}
+                              onClick={() => void run(a, x)}
+                            >
+                              {t(`alerts.action_${x}`)}
+                            </button>
+                          ))}
+                      {a.analysisTask ? (
+                        <AnalysisStatus task={a.analysisTask} />
+                      ) : (
+                        a.canSuggestAnalysis && (
                           <button
-                            key={x}
                             type="button"
                             className="button subtle"
-                            disabled={act.isPending}
-                            aria-label={t(`alerts.action_${x}_label`, { alert: text(a) })}
-                            onClick={() => void run(a, x)}
+                            aria-label={t("alerts.action_analysis_label", {
+                              alert: text(a),
+                            })}
+                            onClick={() => setAnalysis(a)}
                           >
-                            {t(`alerts.action_${x}`)}
+                            {t("alerts.action_analysis")}
                           </button>
-                        ))}
+                        )
+                      )}
                     </div>
                   ) : (
                     <span className="muted">—</span>
@@ -151,6 +214,7 @@ function AlertTable({ items }: { items: Alert[] }) {
           </tbody>
         </table>
       </div>
+      {analysis && <AnalysisDialog alert={analysis} onClose={closeAnalysis} />}
     </>
   );
 }

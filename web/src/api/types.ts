@@ -265,7 +265,12 @@ export interface StorageMachine {
 
 export interface StorageOverview {
   generatedAt: string;
-  thresholds: { warningPercent: number; highPercent: number; criticalPercent: number; minHeadroomBytes: number };
+  thresholds: {
+    warningPercent: number;
+    highPercent: number;
+    criticalPercent: number;
+    minHeadroomBytes: number;
+  };
   machines: StorageMachine[];
   /** Runner output stored in the Control Plane's database (KIN-52 limit, KIN-59); absent on older servers. */
   runnerOutput?: RunnerOutputStorage;
@@ -286,7 +291,13 @@ export interface RunnerOutputStorage {
   droppedEvents: number;
   lastDroppedAt: string | null;
   /** Attempts whose output was dropped for the limit, newest first (at most 10). */
-  drops: { runnerId: string; stepId: string; fence: number; events: number; lastAt: string }[];
+  drops: {
+    runnerId: string;
+    stepId: string;
+    fence: number;
+    events: number;
+    lastAt: string;
+  }[];
 }
 
 // Infrastructure → Storage (GET /api/storage/machines/{id}?days=7|30, KIN-55).
@@ -298,7 +309,8 @@ export interface StorageSample {
   usedBytes: number;
 }
 
-export type SpaceConsumerCategory = "repos" | "workspaces" | "sessions" | "spool" | "container_cache";
+export type SpaceConsumerCategory =
+  "repos" | "workspaces" | "sessions" | "spool" | "container_cache";
 
 /** Size of one category; partial: the I/O-limited walk stopped early, so bytes is a lower bound. */
 export interface SpaceConsumer {
@@ -349,7 +361,8 @@ export interface TelegramIdentity {
   linkedAt: string;
 }
 
-export type TelegramLinkState = "awaiting_telegram" | "awaiting_code" | "linked" | "cancelled" | "expired";
+export type TelegramLinkState =
+  "awaiting_telegram" | "awaiting_code" | "linked" | "cancelled" | "expired";
 
 export interface TelegramLinkRequest {
   state: TelegramLinkState;
@@ -522,7 +535,12 @@ export interface PlanRevision {
   risk: RiskLevel;
   createdBy: string;
   createdAt: string;
-  plan: { summary: string; risk: RiskLevel; maxParallel: number; steps: PlanStep[] };
+  plan: {
+    summary: string;
+    risk: RiskLevel;
+    maxParallel: number;
+    steps: PlanStep[];
+  };
 }
 
 export interface PlanChange {
@@ -665,9 +683,34 @@ export interface Alert {
   ackedAt: string | null;
   closedAt: string | null;
   canManage: boolean;
+  // KIN-61: analysis task in YouTrack.
+  canSuggestAnalysis?: boolean;
+  analysisTask?: AlertAnalysisTask | null;
 }
 
-export type NotificationType = "approval_requested" | "alert_raised" | "task_finished";
+export interface AlertAnalysisTask {
+  projectId: string;
+  youtrackProject: string;
+  requestedAt: string;
+  issueId?: string;
+  issueUrl?: string;
+  createdAt: string | null;
+}
+
+export interface AlertAnalysisPreview {
+  summary: string;
+  description: string;
+  configured: boolean;
+  targets: {
+    projectId: string;
+    projectName: string;
+    youtrackProject: string;
+  }[];
+  task: AlertAnalysisTask | null;
+}
+
+export type NotificationType =
+  "approval_requested" | "alert_raised" | "task_finished";
 
 export interface NotificationPreferences {
   language: "en" | "ru";
@@ -688,9 +731,19 @@ export type TaskState =
   | "BLOCKED"
   | "FAILED"
   | "CANCELLED";
-export type WaitReason = "runner" | "network" | "approval" | "cli_limit" | "agent";
-export type StepState = "PENDING" | "READY" | "CLAIMED" | "RUNNING" | "SUCCEEDED" | "WAITING" | "FAILED" | "CANCELLED";
-export type AttemptState = "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "UNKNOWN";
+export type WaitReason =
+  "runner" | "network" | "approval" | "cli_limit" | "agent";
+export type StepState =
+  | "PENDING"
+  | "READY"
+  | "CLAIMED"
+  | "RUNNING"
+  | "SUCCEEDED"
+  | "WAITING"
+  | "FAILED"
+  | "CANCELLED";
+export type AttemptState =
+  "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "UNKNOWN";
 /** How far agent time is known: no CLI ran, still running, recorded, or a period lacks an end or a usable time. */
 export type WorkStatus = "none" | "running" | "complete" | "incomplete";
 
@@ -813,7 +866,8 @@ export interface TaskRevision {
   createdAt: string;
 }
 
-export type PlanningState = "PREPARING" | "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+export type PlanningState =
+  "PREPARING" | "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
 
 /** The task's latest AI planner run (KIN-34). Its attempts' logs and workspace use stepId and attempt (the fence). */
 export interface PlanningRun {
@@ -919,7 +973,8 @@ export interface AttemptEventPage {
   more: boolean;
 }
 
-export type MockScenario = "success" | "fail" | "flaky" | "crash" | "hang" | "gate" | "scope";
+export type MockScenario =
+  "success" | "fail" | "flaky" | "crash" | "hang" | "gate" | "scope";
 // Maintenance mode (KIN-41).
 export interface MaintenanceStatus {
   enabled: boolean;

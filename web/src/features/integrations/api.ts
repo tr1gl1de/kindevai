@@ -123,8 +123,8 @@ export function useAddRepository(id: string) {
 export function useUpdateRepository(id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ repoId, integrationBranch }: { repoId: string; integrationBranch: string }) =>
-      api<ProjectRepository>("PUT", `${projectPath(id)}/repositories/${encodeURIComponent(repoId)}`, { integrationBranch }),
+    mutationFn: ({ repoId, integrationBranch, testCommand }: { repoId: string; integrationBranch: string; testCommand?: string }) =>
+      api<ProjectRepository>("PUT", `${projectPath(id)}/repositories/${encodeURIComponent(repoId)}`, { integrationBranch, testCommand }),
     onSuccess: () => qc.invalidateQueries({ queryKey: keys.project(id) }),
   });
 }

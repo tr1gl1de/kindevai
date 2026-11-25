@@ -168,10 +168,9 @@ func ReviewPrompt(in ReviewInput) string {
 			fmt.Fprintf(&work, "- %s\n", f)
 		}
 	}
-	switch t := in.Tests; {
-	case t == nil:
+	if t := in.Tests; t == nil {
 		work.WriteString("Test evidence: none — the repository has no test command configured.\n")
-	default:
+	} else {
 		fmt.Fprintf(&work, "Test evidence (measured by the runner): `%s` exit code %d", t.Command, t.ExitCode)
 		if t.TimedOut {
 			work.WriteString(" (timed out)")

@@ -172,8 +172,9 @@ describe("project integrations (owner)", () => {
         return json(repo, 201);
       }),
       http.put("/api/projects/p1/repositories/r1", async ({ request }) => {
-        const { integrationBranch } = (await request.json()) as { integrationBranch: string };
-        state = { ...state, repositories: [{ ...repo, integrationBranch }] };
+        const { integrationBranch, testCommand } = (await request.json()) as { integrationBranch: string; testCommand: string };
+        if (testCommand.includes("\n")) return invalid("test_command_format", "testCommand");
+        state = { ...state, repositories: [{ ...repo, integrationBranch, testCommand }] };
         return json(state.repositories[0]);
       }),
       http.delete("/api/projects/p1/repositories/r1", () => {
@@ -206,13 +207,16 @@ describe("project integrations (owner)", () => {
     await expectStatus("acme/web added.");
     const row = (await within(section).findByRole("cell", { name: "acme/web" })).closest("tr")!;
     expect(within(row).getByText("main, master")).toBeInTheDocument();
+    expect(within(row).getByText("Not configured")).toBeInTheDocument(); // KIN-35: no test command yet
 
     await user.click(within(row).getByRole("button", { name: "Change branch of acme/web" }));
     const edit = within(row).getByLabelText("Integration branch");
     await user.clear(edit);
     await fill(user, edit, "next");
+    await fill(user, within(row).getByLabelText("Test command"), "make test");
     await user.click(within(row).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(within(section).getByRole("cell", { name: "next" })).toBeInTheDocument());
+    expect(within(section).getByText("make test")).toBeInTheDocument();
 
     const row2 = within(section).getByRole("cell", { name: "acme/web" }).closest("tr")!;
     await user.click(within(row2).getByRole("button", { name: "Remove acme/web" }));

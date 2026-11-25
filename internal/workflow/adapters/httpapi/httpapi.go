@@ -82,6 +82,86 @@ type AttemptView struct {
 	Model      string     `json:"model,omitempty"`
 	CLIVersion string     `json:"cliVersion,omitempty"`
 	Usage      *UsageView `json:"usage,omitempty"`
+	// The review loop (KIN-35): the attempt's role and fix round, and an implementer's test evidence status
+	// (passed, failed, missing, not_configured).
+	Role       string `json:"role,omitempty"`
+	Round      int    `json:"round"`
+	TestStatus string `json:"testStatus,omitempty"`
+}
+
+// ReviewLoopView is a step's implementation and review loop (KIN-35): its phase, fix round, the runner holding its
+// branch, the latest implementation's handoff artifact and the latest review's verdict.
+type ReviewLoopView struct {
+	Phase        string       `json:"phase"` // implement | review
+	Round        int          `json:"round"`
+	MaxRounds    int          `json:"maxRounds"`
+	PinnedRunner string       `json:"pinnedRunner,omitempty"`
+	Handoff      *HandoffView `json:"handoff"`
+	Verdict      *VerdictView `json:"verdict"`
+}
+
+// HandoffView is an implementation's handoff artifact: the model's account (summary, documentation impact, open
+// questions) and the runner's objective reports (base/head, changed files, test evidence).
+type HandoffView struct {
+	Attempt       int          `json:"attempt"`
+	Agent         string       `json:"agent,omitempty"`
+	Summary       string       `json:"summary"`
+	Docs          []string     `json:"docs"`
+	OpenQuestions []string     `json:"openQuestions"`
+	BaseSHA       string       `json:"baseSha,omitempty"`
+	HeadSHA       string       `json:"headSha,omitempty"`
+	Files         []string     `json:"files"`
+	FilesTotal    int          `json:"filesTotal"`
+	TestStatus    string       `json:"testStatus"`
+	Tests         *TestRunView `json:"tests"`
+}
+
+// TestRunView is the runner's test evidence.
+type TestRunView struct {
+	Command    string `json:"command"`
+	ExitCode   int    `json:"exitCode"`
+	TimedOut   bool   `json:"timedOut"`
+	DurationMs int64  `json:"durationMs"`
+	Output     string `json:"output"`
+}
+
+// VerdictView is a reviewer's structured verdict.
+type VerdictView struct {
+	Attempt  int              `json:"attempt"`
+	Agent    string           `json:"agent,omitempty"`
+	Round    int              `json:"round"`
+	Verdict  string           `json:"verdict"`
+	Summary  string           `json:"summary"`
+	Findings []domain.Finding `json:"findings"`
+}
+
+func reviewLoopView(s domain.Step) *ReviewLoopView {
+	if !s.Review {
+		return nil
+	}
+	v := &ReviewLoopView{Phase: "implement", Round: s.Round, MaxRounds: domain.MaxFixRounds, PinnedRunner: s.PinnedRunner}
+	if s.Phase == domain.PhaseReview {
+		v.Phase = "review"
+	}
+	if a, ok := s.LastImplementation(); ok {
+		h := domain.ParseHandoff(a.Report.Result)
+		v.Handoff = &HandoffView{Attempt: a.Number, Agent: a.Agent, Summary: h.Summary, Docs: orEmpty(h.Docs),
+			OpenQuestions: orEmpty(h.OpenQuestions), BaseSHA: a.BaseSHA, HeadSHA: a.HeadSHA, Files: orEmpty(a.Files),
+			FilesTotal: a.FilesTotal, TestStatus: a.TestStatus()}
+		if t := a.Tests; t != nil {
+			v.Handoff.Tests = &TestRunView{Command: t.Command, ExitCode: t.ExitCode, TimedOut: t.TimedOut,
+				DurationMs: t.DurationMS, Output: t.Output}
+		}
+	}
+	if a, r, ok := s.LastReview(); ok {
+		f := r.Findings
+		if f == nil {
+			f = []domain.Finding{}
+		}
+		v.Verdict = &VerdictView{Attempt: a.Number, Agent: a.Agent, Round: a.Round, Verdict: string(r.Verdict),
+			Summary: r.Summary, Findings: f}
+	}
+	return v
 }
 
 // UsageView is AI CLI usage: tokens, cost in USD (0 when the CLI reports none, e.g. Codex) and turns.
@@ -116,6 +196,8 @@ type StepView struct {
 	Fence      int64         `json:"fence"`
 	Attempts   []AttemptView `json:"attempts"`
 	AgentTime  AgentTimeView `json:"agentTime"`
+	// Review is the step's implementation and review loop (KIN-35); null outside it.
+	Review *ReviewLoopView `json:"review"`
 }
 
 // ExecutionView is a run of a plan revision.
@@ -392,13 +474,14 @@ func executionView(e domain.Execution, now time.Time) *ExecutionView {
 	for _, s := range e.Steps {
 		sv := StepView{ID: s.ID, Key: s.Key, Title: s.Title, Repository: s.Repository, DependsOn: orEmpty(s.DependsOn),
 			State: string(s.State), WaitReason: string(s.WaitReason), Reason: s.Reason, RunnerID: s.RunnerID, Fence: s.Fence,
-			Attempts: make([]AttemptView, 0, len(s.Attempts)), AgentTime: agentTimeView(s.AgentTime(now))}
+			Attempts: make([]AttemptView, 0, len(s.Attempts)), AgentTime: agentTimeView(s.AgentTime(now)), Review: reviewLoopView(s)}
 		for _, a := range s.Attempts {
 			st, d := a.Work(now)
 			sv.Attempts = append(sv.Attempts, AttemptView{Number: a.Number, RunnerID: a.RunnerID, Fence: a.Fence,
 				State: string(a.State), Error: a.Error, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt, Agent: a.Agent,
 				WorkStartedAt: a.WorkStart, WorkEndedAt: a.WorkEnd, WorkStatus: string(st), WorkMs: d.Milliseconds(),
-				Session: a.Report.Session, Model: a.Report.Model, CLIVersion: a.Report.Version, Usage: usageView(a.Report.Usage)})
+				Session: a.Report.Session, Model: a.Report.Model, CLIVersion: a.Report.Version, Usage: usageView(a.Report.Usage),
+				Role: a.Role, Round: a.Round, TestStatus: a.TestStatus()})
 			total.Add(a.Report.Usage)
 		}
 		v.Steps = append(v.Steps, sv)

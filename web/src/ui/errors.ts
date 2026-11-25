@@ -92,6 +92,7 @@ const validationKeys = new Set([
   "repo_name_format",
   "branch_format",
   "branch_protected",
+  "test_command_format",
   "base_url_https",
   "token_required_for_url",
   "issue_format",

@@ -222,6 +222,49 @@ describe("task detail", () => {
     await expectAccessible(container);
   });
 
+  it("shows a step's implementation and review loop: phase, handoff, test evidence and the verdict's findings (KIN-35)", async () => {
+    const base = detail();
+    const reviewed = detail({
+      execution: { ...base.execution!,
+        steps: [step({
+          attempts: [
+            { number: 1, runnerId: "r1", fence: 1, state: "SUCCEEDED", startedAt: "2026-11-24T10:00:00Z", finishedAt: "2026-11-24T10:00:30Z",
+              agent: "codex", workStartedAt: null, workEndedAt: null, workStatus: "none", workMs: 0, role: "implementer", round: 0,
+              testStatus: "failed" },
+            { number: 2, runnerId: "r1", fence: 2, state: "SUCCEEDED", startedAt: "2026-11-24T10:01:00Z", finishedAt: "2026-11-24T10:01:30Z",
+              agent: "claude", workStartedAt: null, workEndedAt: null, workStatus: "none", workMs: 0, role: "reviewer", round: 0 },
+          ],
+          review: { phase: "implement", round: 1, maxRounds: 2, pinnedRunner: "r1",
+            handoff: { attempt: 1, agent: "codex", summary: "Added the <b>endpoint</b>", docs: ["README: login"], openQuestions: ["Rate limit?"],
+              baseSha: "aaaaaaaaaaaa", headSha: "bbbbbbbbbbbb", files: ["api/login.go"], filesTotal: 1, testStatus: "passed",
+              tests: { command: "make test", exitCode: 0, timedOut: false, durationMs: 1500, output: "ok" } },
+            verdict: { attempt: 2, agent: "claude", round: 0, verdict: "changes_requested", summary: "Almost",
+              findings: [{ severity: "major", file: "api/login.go", line: 12, message: "Check the error" }] } },
+        })] },
+    });
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/tasks/t1", () => json(reviewed)),
+      http.get("/api/approvals", () => json([])),
+    );
+    const { container } = await renderApp("/tasks/t1");
+    const loop = await screen.findByRole("region", { name: "Implementation and review" });
+    expect(within(loop).getByText("Fixing review findings (round 1 of 2)")).toBeInTheDocument();
+    expect(within(loop).getByText("Added the <b>endpoint</b>")).toBeInTheDocument(); // untrusted: text, never markup
+    expect(within(loop).getByText("Commits aaaaaaaaaa…bbbbbbbbbb")).toBeInTheDocument();
+    expect(within(loop).getByText("Passed")).toBeInTheDocument();
+    expect(within(loop).getByText("make test · exit code 0 · 1.5 s")).toBeInTheDocument();
+    expect(within(loop).getByText("Rate limit?")).toBeInTheDocument();
+    expect(within(loop).getByText("Changes requested")).toBeInTheDocument();
+    const findings = within(loop).getByRole("table", { name: "Review findings (backend)" });
+    expect(within(findings).getByText("api/login.go:12")).toBeInTheDocument();
+    expect(within(findings).getByText("Major")).toBeInTheDocument();
+    const attempts = screen.getByRole("table", { name: "Attempts of step backend" });
+    expect(within(attempts).getByText("reviewer")).toBeInTheDocument();
+    await expectAccessible(container);
+  });
+
   it("cancels after naming the task, and retries a failed task (Owner / project admin only)", async () => {
     let state: TaskDetail["task"]["state"] = "RUNNING";
     let cancelBody: unknown;

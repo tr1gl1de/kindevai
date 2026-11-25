@@ -435,6 +435,8 @@ export interface ProjectRepository {
   name: string;
   fullName: string;
   integrationBranch: string;
+  /** Run by the runner after an implementer's CLI (KIN-35); "" when none is configured. */
+  testCommand?: string;
   /** Never written by automation (main, master). */
   protectedBranches: string[];
   createdAt: string;
@@ -751,6 +753,64 @@ export interface Attempt {
   model?: string;
   cliVersion?: string;
   usage?: AgentUsage;
+  /** The review loop (KIN-35): implementer or reviewer, the fix round and an implementer's test evidence. */
+  role?: "implementer" | "reviewer";
+  round?: number;
+  testStatus?: TestStatus;
+}
+
+/** Test evidence of an implementation, measured by the runner (KIN-35). */
+export type TestStatus = "passed" | "failed" | "missing" | "not_configured";
+
+export interface TestRun {
+  command: string;
+  exitCode: number;
+  timedOut: boolean;
+  durationMs: number;
+  /** The output's tail. */
+  output: string;
+}
+
+/** An implementation's handoff artifact (KIN-35). */
+export interface Handoff {
+  attempt: number;
+  agent?: string;
+  summary: string;
+  docs: string[];
+  openQuestions: string[];
+  baseSha?: string;
+  headSha?: string;
+  files: string[];
+  filesTotal: number;
+  testStatus: TestStatus;
+  tests: TestRun | null;
+}
+
+export interface Finding {
+  severity: "blocker" | "major" | "minor";
+  file?: string;
+  line?: number;
+  message: string;
+}
+
+/** A reviewer's structured verdict (KIN-35). */
+export interface Verdict {
+  attempt: number;
+  agent?: string;
+  round: number;
+  verdict: "approve" | "changes_requested";
+  summary: string;
+  findings: Finding[];
+}
+
+/** A step's implementation and review loop (KIN-35). */
+export interface ReviewLoop {
+  phase: "implement" | "review";
+  round: number;
+  maxRounds: number;
+  pinnedRunner?: string;
+  handoff: Handoff | null;
+  verdict: Verdict | null;
 }
 
 /** AI CLI usage: tokens, cost in USD (0 when the CLI reports none) and turns (KIN-79). */
@@ -776,6 +836,8 @@ export interface Step {
   fence: number;
   attempts: Attempt[];
   agentTime: AgentTime;
+  /** The implementation and review loop (KIN-35); null outside it. */
+  review?: ReviewLoop | null;
 }
 
 export interface Execution {

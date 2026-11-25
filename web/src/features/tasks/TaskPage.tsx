@@ -14,6 +14,7 @@ import { useProjects } from "../projects/api";
 import { AttemptLog } from "./AttemptLog";
 import { AttemptWorkspace } from "./AttemptWorkspace";
 import { PlanSection } from "./PlanSection";
+import { ReviewSection } from "./ReviewSection";
 import { isTerminal, useCancelTask, useMockRun, usePlanTask, useRetryTask, useTask, useTaskApprovals } from "./api";
 import { AgentTimeValue, AttemptStateBadge, CalendarValue, StepStateBadge, TaskStateBadge } from "./badges";
 import "./tasks.css";
@@ -299,6 +300,7 @@ function StepCard({ taskId, s, isOwner }: { taskId: string; s: Step; isOwner: bo
         {s.waitReason && <> · {t(`tasks.block_${s.waitReason}`)}</>}
       </p>
       {s.reason && <p>{s.reason}</p>}
+      {s.review && <ReviewSection review={s.review} stepKey={s.key} />}
       <p>
         {t("tasks.agentTime")}: <AgentTimeValue ms={s.agentTime.ms} status={s.agentTime.status} />
       </p>
@@ -337,7 +339,15 @@ function Attempts({ taskId, s, isOwner }: { taskId: string; s: Step; isOwner: bo
                 <td>
                   <RunnerRef id={a.runnerId} isOwner={isOwner} />
                 </td>
-                <td>{a.agent ?? "—"}</td>
+                <td>
+                  {a.agent ?? "—"}
+                  {a.role && (
+                    <div className="muted">
+                      {t(a.role === "reviewer" ? "tasks.roleReviewer" : "tasks.roleImplementer")}
+                      {a.round ? ` · ${t("tasks.roundShort", { n: a.round })}` : ""}
+                    </div>
+                  )}
+                </td>
                 <td>
                   <AttemptStateBadge state={a.state} />
                 </td>

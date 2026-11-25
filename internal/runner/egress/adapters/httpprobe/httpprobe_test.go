@@ -1,6 +1,8 @@
 package httpprobe_test
 
 import (
+	"bufio"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -38,17 +40,24 @@ func connectProxy(t *testing.T) *httptest.Server {
 			w.WriteHeader(http.StatusBadGateway)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
 		// Add before Hijack: until then httptest's Close waits for this handler, so the cleanup's wg.Wait cannot
 		// start with a zero counter and race this Add.
 		wg.Add(2)
-		c, _, err := http.NewResponseController(w).Hijack()
+		// Hijack before answering and tunnel from the returned reader: after a WriteHeader, Hijack flushes the 200
+		// before it stops the server's background read, which can then swallow the first byte of the client's
+		// TLS ClientHello into that reader (KIN-84).
+		c, brw, err := http.NewResponseController(w).Hijack()
 		if err != nil {
 			wg.Add(-2)
 			_ = up.Close()
 			return
 		}
-		go func() { defer wg.Done(); _, _ = io.Copy(up, c); _ = up.Close() }()
+		if _, err := io.WriteString(c, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
+			wg.Add(-2)
+			_, _ = c.Close(), up.Close()
+			return
+		}
+		go func() { defer wg.Done(); _, _ = io.Copy(up, brw.Reader); _ = up.Close() }()
 		go func() { defer wg.Done(); _, _ = io.Copy(c, up); _ = c.Close() }()
 	}))
 	t.Cleanup(func() { srv.Close(); wg.Wait() })
@@ -165,5 +174,62 @@ func TestProbeFailures(t *testing.T) {
 				t.Fatalf("result leaks a password: %s", b)
 			}
 		})
+	}
+}
+
+// pipelinedConn holds writes until the first read and sends them in one segment, then reads past the proxy's
+// CONNECT response: the CONNECT request and the TLS ClientHello reach the proxy together, as a fast client's do
+// when the proxy's 200 and the ClientHello cross.
+type pipelinedConn struct {
+	net.Conn
+	pending []byte
+	br      *bufio.Reader
+	err     error
+}
+
+func (c *pipelinedConn) Write(b []byte) (int, error) {
+	if c.br != nil {
+		return c.Conn.Write(b)
+	}
+	c.pending = append(c.pending, b...)
+	return len(b), nil
+}
+
+func (c *pipelinedConn) Read(b []byte) (int, error) {
+	if c.br == nil {
+		c.br = bufio.NewReader(c.Conn)
+		if _, c.err = c.Conn.Write(c.pending); c.err == nil {
+			var resp *http.Response
+			if resp, c.err = http.ReadResponse(c.br, nil); c.err == nil && resp.StatusCode != http.StatusOK {
+				c.err = fmt.Errorf("CONNECT: %s", resp.Status)
+			}
+		}
+	}
+	if c.err != nil {
+		return 0, c.err
+	}
+	return c.br.Read(b)
+}
+
+// The test proxy is the fixture of every probe through a proxy: bytes that reach it together with the CONNECT
+// belong to the tunnel and must not be lost (KIN-84: a swallowed first ClientHello byte failed the TLS handshake).
+func TestConnectProxyTunnelsBytesSentWithTheConnect(t *testing.T) {
+	t.Parallel()
+	f := setup(t)
+	target := strings.TrimPrefix(f.ep.URL, "https://")
+	raw, err := net.Dial("tcp", net.JoinHostPort(f.proxy.Host, strconv.Itoa(f.proxy.Port)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := base64.StdEncoding.EncodeToString([]byte(f.proxy.Username + ":" + f.proxy.Password))
+	pc := &pipelinedConn{Conn: raw, pending: fmt.Appendf(nil, "CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: Basic %s\r\n\r\n", target, target, auth)}
+	host, _ := hostPort(t, f.ep.URL)
+	tc := tls.Client(pc, &tls.Config{RootCAs: f.prober.RootCAs, ServerName: strings.Trim(host, "[]"), MinVersion: tls.VersionTLS12})
+	t.Cleanup(func() { _ = tc.Close() })
+	if err := tc.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tc.HandshakeContext(t.Context()); err != nil {
+		t.Fatalf("TLS handshake through the proxy: %v", err)
 	}
 }

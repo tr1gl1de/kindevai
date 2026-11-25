@@ -17,9 +17,14 @@ import (
 type fakeSandbox struct {
 	mu       sync.Mutex
 	released int
-	endpoint string
-	fault    chan string
-	summary  string
+	cancels  int
+	// verifying, when set, receives a value as Await starts; Await then waits for verdict (a sandbox still being
+	// built and checked). Without it Await verifies at once.
+	verifying chan struct{}
+	verdict   chan error
+	endpoint  string
+	fault     chan string
+	summary   string
 }
 
 func (s *fakeSandbox) Endpoint() string     { return s.endpoint }
@@ -30,8 +35,30 @@ func (s *fakeSandbox) Profile() string      { return "fp-1" }
 func (s *fakeSandbox) Command([]string, []string, string) (*exec.Cmd, error) {
 	return nil, errors.New("unused")
 }
-func (s *fakeSandbox) Await(context.Context) error { return nil }
-func (s *fakeSandbox) Cancel()                     {}
+func (s *fakeSandbox) Await(ctx context.Context) error {
+	if s.verifying == nil {
+		return nil
+	}
+	s.verifying <- struct{}{}
+	select {
+	case err := <-s.verdict:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *fakeSandbox) Cancel() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancels++
+}
+
+func (s *fakeSandbox) cancelled() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cancels
+}
 func (s *fakeSandbox) Release() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

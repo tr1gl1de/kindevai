@@ -83,3 +83,11 @@ type WorkspaceChanges struct {
 	InstructionsChanged []InstructionChange `json:"instructionsChanged,omitempty"`
 	Interim             bool                `json:"interim,omitempty"`
 }
+
+// WorkspacePushed is the body of workspace.pushed (KIN-36): the repository's Branch now points to HeadSHA. The
+// Control Plane checks both against the step's expected branch and reviewed head before it opens a pull request.
+type WorkspacePushed struct {
+	Repository string `json:"repository"`
+	Branch     string `json:"branch"`
+	HeadSHA    string `json:"headSha"`
+}

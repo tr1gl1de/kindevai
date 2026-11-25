@@ -112,6 +112,21 @@ type Workspaces interface {
 	Diff(ctx context.Context, step string, fence int64, from, to string, limit int) (diff string, cut bool, err error)
 }
 
+// PushRequest asks to publish a step's reviewed work branch (KIN-36).
+type PushRequest struct {
+	Step       string
+	Task       string
+	Repository string
+	Head       string // the commit the review approved
+	Token      domain.Secret
+}
+
+// Pusher is implemented by Workspaces that can publish a step's work branch (KIN-36): it pushes Head from the
+// repository cache to the step's own feature branch, fast-forward only.
+type Pusher interface {
+	Push(ctx context.Context, r PushRequest) (protocol.WorkspacePushed, error)
+}
+
 // DefaultPrepareTimeout bounds an attempt's whole workspace preparation (KIN-71; each git command has its own
 // bound too); DefaultPrepareKeepalive is how often a preparation in progress is reported (the Control Plane extends
 // the claim's lease with it, so it stays well below the lease, 60 s).
@@ -346,6 +361,13 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 	r.stream = x.Events.Attempt(a.Step, a.Fence, 0, x.reserver(r))
 	if err := r.stream.Emit(protocol.EventAccepted, nil); err != nil {
 		return x.abandon(r, fmt.Errorf("emitting accepted: %w", err))
+	}
+	if a.Publish() {
+		pctx, stop := context.WithTimeoutCause(x.lifetime(), x.prepareTimeout(), errPrepareTimeout)
+		r.stopPrep = stop
+		x.runs[k] = r
+		x.wg.Go(func() { x.publish(pctx, r, a) })
+		return nil
 	}
 	if a.Base != "" {
 		// KIN-71: the worktree (possibly a first clone) is prepared in the background, so the command is
@@ -657,6 +679,43 @@ func (x *Executor) prepareAndLaunch(ctx context.Context, r *run, a domain.Assign
 	x.mu.Unlock()
 	x.releaseWorkspace(r)
 	x.reportEnd(r, protocol.EventFailed, protocol.Failure{Reason: domain.Truncate(failure, protocol.MaxReasonLen)})
+}
+
+// publish pushes the step's reviewed head (KIN-36) in the background: no process runs. The attempt reports
+// started, then workspace.pushed and completed, or failed with the (redacted) reason. A cancel stops git.
+func (x *Executor) publish(ctx context.Context, r *run, a domain.Assignment) {
+	defer r.stopPrep()
+	if err := r.stream.Emit(protocol.EventStarted, protocol.Started{Agent: a.Adapter}); err != nil {
+		x.logger().Error("emitting started", "step", a.Step, "err", err)
+	}
+	var pushed protocol.WorkspacePushed
+	err := errors.New("this runner cannot push work branches")
+	if p, ok := x.Workspaces.(Pusher); ok {
+		pushed, err = p.Push(ctx, PushRequest{Step: a.Step, Task: a.Task, Repository: a.Repository, Head: a.DiffHead,
+			Token: a.Token})
+	}
+	x.mu.Lock()
+	r.stopPrep = nil
+	cancelled := r.cancelled
+	x.mu.Unlock()
+	switch {
+	case x.closed.Load():
+		close(r.done) // the next runner process fails it from its journal record
+		return
+	case cancelled != "":
+		x.reportEnd(r, protocol.EventFailed, protocol.Failure{Reason: "cancelled: " + cancelled})
+		return
+	case err != nil:
+		x.logger().Warn("publishing the work branch", "step", a.Step, "fence", a.Fence, "err", err)
+		x.reportEnd(r, protocol.EventFailed, protocol.Failure{Reason: domain.Truncate(r.mask("push: "+err.Error()), protocol.MaxReasonLen)})
+		return
+	}
+	if err := r.stream.Emit(protocol.EventWorkspacePushed, pushed); err != nil {
+		x.logger().Error("emitting workspace.pushed", "step", a.Step, "err", err)
+		x.reportEnd(r, protocol.EventFailed, protocol.Failure{Reason: "the push could not be reported"})
+		return
+	}
+	x.reportEnd(r, protocol.EventCompleted, protocol.Completed{})
 }
 
 // drop forgets an attempt whose end cannot be reported either (the spool is unavailable): its record is removed

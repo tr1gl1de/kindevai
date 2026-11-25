@@ -26,6 +26,15 @@ var (
 // AdapterMock is the mock agent (no real CLI); AgentClaude and AgentCodex run the AI CLIs (KIN-32/KIN-79).
 const AdapterMock = "mock"
 
+// AdapterPublish pushes a step's reviewed work branch (KIN-36): no process runs, the runner pushes DiffHead to the
+// step's feature branch with the assignment's token. Its role is RolePublisher.
+const (
+	AdapterPublish = "publish"
+	RolePublisher  = "publisher"
+)
+
+var commitRe = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
+
 // MaxPrompt bounds an assignment's prompt/context package (protocol.MaxPromptBytes).
 const MaxPrompt = 32 << 10
 
@@ -94,6 +103,9 @@ var shaRe = regexp.MustCompile(`^[0-9a-f]{4,64}$`)
 // CLI reports an assignment run by an AI CLI (not the mock agent).
 func (a Assignment) CLI() bool { return a.Adapter == AgentClaude || a.Adapter == AgentCodex }
 
+// Publish reports an assignment that publishes the step's work branch (KIN-36).
+func (a Assignment) Publish() bool { return a.Adapter == AdapterPublish }
+
 // AgentTimeout is the CLI run's timeout.
 func (a Assignment) AgentTimeout() time.Duration {
 	if a.Timeout == 0 {
@@ -159,6 +171,12 @@ func CheckAssignment(a Assignment, p Policy) error {
 	case a.CLI():
 		if err := checkAgent(a); err != nil {
 			return err
+		}
+	case a.Publish():
+		if a.Role != RolePublisher || a.Base == "" || !commitRe.MatchString(a.DiffHead) || a.DiffBase != "" ||
+			a.Model != "" || a.Prompt != "" || a.Resume != "" || a.BypassPermissions || a.Timeout != 0 ||
+			a.TestCommand != "" || a.Scenario != "" {
+			return bad("publish assignment")
 		}
 	case a.Adapter != AdapterMock:
 		return fmt.Errorf("%w: %q", ErrUnknownAdapter, a.Adapter)

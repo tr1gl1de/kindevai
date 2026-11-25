@@ -30,7 +30,10 @@ func newWorkspaces(dataDir, exe, gitBaseURL string, minFreeMiB uint64) (sessionW
 // sessionWorkspaces adapts the workspace context's Manager to the session context's port.
 type sessionWorkspaces struct{ m *workspaceapp.Manager }
 
-var _ sessionapp.Workspaces = sessionWorkspaces{}
+var (
+	_ sessionapp.Workspaces = sessionWorkspaces{}
+	_ sessionapp.Pusher     = sessionWorkspaces{}
+)
 
 func (w sessionWorkspaces) Prepare(ctx context.Context, r sessionapp.WorkspaceRequest) (string, protocol.WorkspacePrepared, error) {
 	p, err := w.m.Prepare(ctx, workspaceapp.Request{Step: r.Step, Fence: r.Fence, Task: r.Task, Repository: r.Repository,
@@ -81,4 +84,14 @@ func changes(res *workspaceapp.Result) *protocol.WorkspaceChanges {
 // Diff is the diff a reviewer reviews (KIN-35).
 func (w sessionWorkspaces) Diff(ctx context.Context, step string, fence int64, from, to string, limit int) (string, bool, error) {
 	return w.m.Diff(ctx, step, fence, from, to, limit)
+}
+
+// Push publishes a step's reviewed work branch (KIN-36).
+func (w sessionWorkspaces) Push(ctx context.Context, r sessionapp.PushRequest) (protocol.WorkspacePushed, error) {
+	branch, err := w.m.Push(ctx, workspaceapp.PushRequest{Step: r.Step, Task: r.Task, Repository: r.Repository,
+		Head: r.Head, Token: workspaceapp.NewToken(r.Token.Reveal())})
+	if err != nil {
+		return protocol.WorkspacePushed{}, err
+	}
+	return protocol.WorkspacePushed{Repository: r.Repository, Branch: branch, HeadSHA: r.Head}, nil
 }

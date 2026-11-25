@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
@@ -111,6 +112,11 @@ func (s *Service) owner(p auth.Principal) error {
 		return domain.ErrForbidden
 	}
 	return nil
+}
+
+// MayManage reports whether p may manage the project's agents (the HTTP layer checks it before reading a body).
+func (s *Service) MayManage(ctx context.Context, p auth.Principal, projectID string) error {
+	return s.mayManage(ctx, p, projectID)
 }
 
 // mayManage: the Owner or the project's admin; a project p cannot see is not found.
@@ -433,7 +439,15 @@ func (s *Service) CoolDown(ctx context.Context, runnerID, agent string, until ti
 	if limit := s.Now().Add(MaxCooldown); until.After(limit) {
 		until = limit
 	}
-	reason = strings.ToValidUTF8(strings.TrimSpace(reason), "")
+	if !until.After(s.Now()) {
+		return nil // already over: nothing to wait for
+	}
+	reason = strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, strings.ToValidUTF8(reason, ""))), " ") // one line, no control characters
 	if utf8.RuneCountInString(reason) > maxCooldownReason {
 		reason = string([]rune(reason)[:maxCooldownReason])
 	}

@@ -120,3 +120,22 @@ func TestWaitAgentIsAWaitReason(t *testing.T) {
 		t.Fatal("agent is not a valid wait reason")
 	}
 }
+
+// Review finding (KIN-33): the CLI the Control Plane assigned stays the attempt's agent; a runner reporting another
+// one cannot rewrite who authored the work.
+func TestReportedAgentDoesNotOverrideTheAssignedOne(t *testing.T) {
+	t.Parallel()
+	e := newExecution(t, 2)
+	s := e.StepByKey("backend")
+	if _, err := e.ClaimWith(s.ID, "r1", AgentChoice{Agent: "claude"}, t0, ttl); err != nil {
+		t.Fatal(err)
+	}
+	s = e.StepByKey("backend")
+	if err := e.Start(s.ID, "r1", s.Fence, t0, ttl); err != nil {
+		t.Fatal(err)
+	}
+	e.MarkWorkStart(s.ID, "r1", s.Fence, "codex", t0, t0)
+	if a := e.StepByKey("backend").Attempts[0]; a.Agent != "claude" || a.WorkStart == nil {
+		t.Fatalf("attempt agent %q start %v", a.Agent, a.WorkStart)
+	}
+}

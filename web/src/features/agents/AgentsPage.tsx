@@ -117,26 +117,24 @@ function Switches({ settings }: { settings: AgentSettings }) {
                       </div>
                     )}
                   </td>
-                  <td>
-                    <div className="row-actions">
-                      <button
-                        type="button"
-                        className="button subtle"
-                        disabled={toggle.isPending}
-                        onClick={() => void flip(s.agent, !s.enabled)}
-                      >
-                        {t(s.enabled ? "agents.disable" : "agents.enable", {
-                          cli,
-                        })}
-                      </button>
-                      <button
-                        type="button"
-                        className="button danger"
-                        onClick={() => setConfirm(s.agent)}
-                      >
-                        {t("agents.emergencyStop", { cli })}
-                      </button>
-                    </div>
+                  <td className="row-actions">
+                    <button
+                      type="button"
+                      className="button subtle"
+                      disabled={toggle.isPending}
+                      onClick={() => void flip(s.agent, !s.enabled)}
+                    >
+                      {t(s.enabled ? "agents.disable" : "agents.enable", {
+                        cli,
+                      })}
+                    </button>
+                    <button
+                      type="button"
+                      className="button danger"
+                      onClick={() => setConfirm(s.agent)}
+                    >
+                      {t("agents.emergencyStop", { cli })}
+                    </button>
                   </td>
                 </tr>
               );

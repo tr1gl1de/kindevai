@@ -149,3 +149,14 @@ func TestProjectAgentsAPI(t *testing.T) {
 		t.Fatalf("reset = %d", code)
 	}
 }
+
+// Review finding: a developer gets 403 whatever the body, before it is validated.
+func TestProjectWritesAuthorizeBeforeDecoding(t *testing.T) {
+	t.Parallel()
+	mux := server(t)
+	for _, c := range [][2]string{{"PUT", "/api/projects/p1/agents/switches/claude"}, {"PUT", "/api/projects/p1/agents/bindings/reviewer"}} {
+		if code, _ := do(t, mux, "dev", c[0], c[1], "{not json"); code != 403 {
+			t.Fatalf("%s %s = %d, want 403", c[0], c[1], code)
+		}
+	}
+}

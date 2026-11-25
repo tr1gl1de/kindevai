@@ -62,7 +62,9 @@ func (e *Execution) MarkWorkStart(stepID, runnerID string, fence int64, agent st
 	if a == nil || a.WorkStart != nil || a.WorkIncomplete {
 		return false
 	}
-	if agentRe.MatchString(agent) {
+	// The CLI the Control Plane assigned stays authoritative (KIN-33): a runner's report fills it only when the
+	// attempt has none (no routing).
+	if a.Agent == "" && agentRe.MatchString(agent) {
 		a.Agent = agent
 	}
 	if !usableWorkTime(at, now) {

@@ -332,3 +332,21 @@ func TestCooldowns(t *testing.T) {
 		t.Fatalf("cooldowns %+v", s.Cooldowns)
 	}
 }
+
+// Review finding: the runner's cool-down reason is untrusted text: control characters are dropped, and a reset in
+// the past stores nothing.
+func TestCooldownSanitizesTheRunnersText(t *testing.T) {
+	t.Parallel()
+	e := newEnv()
+	ctx := t.Context()
+	if err := e.svc.CoolDown(ctx, "r1", "claude", t0.Add(time.Hour), "limit\n\x1b[31mreset\x00 soon "); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.CoolDown(ctx, "r1", "codex", t0.Add(-time.Hour), "past"); err != nil {
+		t.Fatal(err)
+	}
+	cs, _ := e.repo.Cooldowns(ctx, t0.Add(-2*time.Hour))
+	if len(cs) != 1 || cs[0].Reason != "limit [31mreset soon" {
+		t.Fatalf("cooldowns %+v", cs)
+	}
+}

@@ -226,8 +226,21 @@ func (h *Handler) setGlobalSwitch(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *Handler) setProjectSwitch(w http.ResponseWriter, r *http.Request) {
+// projectManager returns the caller if it may manage the project's agents (before the body is read).
+func (h *Handler) projectManager(w http.ResponseWriter, r *http.Request) (auth.Principal, bool) {
 	p, ok := h.principal(w, r)
+	if !ok {
+		return p, false
+	}
+	if err := h.Service.MayManage(r.Context(), p, r.PathValue("id")); err != nil {
+		h.fail(w, err)
+		return p, false
+	}
+	return p, true
+}
+
+func (h *Handler) setProjectSwitch(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.projectManager(w, r)
 	if !ok {
 		return
 	}
@@ -289,7 +302,7 @@ func (h *Handler) setGlobalBinding(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) setProjectBinding(w http.ResponseWriter, r *http.Request) {
-	p, ok := h.principal(w, r)
+	p, ok := h.projectManager(w, r)
 	if !ok {
 		return
 	}

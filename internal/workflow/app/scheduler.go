@@ -179,13 +179,14 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 		before := e.Clone()
 		routed := s.Agents != nil && rev.CreatedBy() != MockPlanner
 		why := map[string]domain.Reason{}
+		routes := map[[2]string]AgentRoute{} // role, author → route, read once per pass
 		for i := range e.Steps {
 			st := &e.Steps[i]
 			if !schedulable(st, now) {
 				continue
 			}
 			ps := caps[st.Key]
-			c, choice, reason, ok, err := s.route(ctx, routed, &e, t.ProjectID, ps, cands, held)
+			c, choice, reason, ok, err := s.route(ctx, routed, routes, &e, t.ProjectID, ps, cands, held)
 			if err != nil {
 				return err
 			}
@@ -234,8 +235,8 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 
 // route picks the runner and AI CLI for a step (KIN-33). Unrouted (mock plans, or no router configured) it is a
 // plain runner pick; routed, the permitted chain of the step's role decides, and the reason says why nothing fits.
-func (s *Service) route(ctx context.Context, routed bool, e *domain.Execution, projectID string, ps domain.PlanStep,
-	cands []Candidate, held map[string]int) (Candidate, domain.AgentChoice, domain.Reason, bool, error) {
+func (s *Service) route(ctx context.Context, routed bool, routes map[[2]string]AgentRoute, e *domain.Execution,
+	projectID string, ps domain.PlanStep, cands []Candidate, held map[string]int) (Candidate, domain.AgentChoice, domain.Reason, bool, error) {
 	if !routed {
 		c, ok := domain.PickRunner(cands, ps.Capabilities, held)
 		var choice domain.AgentChoice
@@ -244,9 +245,14 @@ func (s *Service) route(ctx context.Context, routed bool, e *domain.Execution, p
 		}
 		return c, choice, domain.Reason{Code: domain.WaitRunner, Detail: DetailNoRunner}, ok, nil
 	}
-	r, err := s.Agents.Route(ctx, projectID, ps.StepRole(), author(e, ps))
-	if err != nil {
-		return Candidate{}, domain.AgentChoice{}, domain.Reason{}, false, fmt.Errorf("routing step %s: %w", ps.Key, err)
+	key := [2]string{ps.StepRole(), author(e, ps)}
+	r, cached := routes[key]
+	if !cached {
+		var err error
+		if r, err = s.Agents.Route(ctx, projectID, key[0], key[1]); err != nil {
+			return Candidate{}, domain.AgentChoice{}, domain.Reason{}, false, fmt.Errorf("routing step %s: %w", ps.Key, err)
+		}
+		routes[key] = r
 	}
 	if len(r.Chain) == 0 {
 		detail := r.Blocked
@@ -259,8 +265,9 @@ func (s *Service) route(ctx context.Context, routed bool, e *domain.Execution, p
 	return c, choice, reason, ok, nil
 }
 
-// author is the AI CLI that did the work a step reviews: the agent of the newest finished attempt among its
-// dependencies ("" when none is known, e.g. mock or no dependency).
+// author is the AI CLI that did the work a step reviews: the CLI the Control Plane assigned to the latest claim of
+// a succeeded dependency (never what a runner reports), the most recently finished one first; "" when none is
+// known (mock, no dependency).
 func author(e *domain.Execution, ps domain.PlanStep) string {
 	if ps.StepRole() != domain.StepRoleReviewer {
 		return ""
@@ -269,16 +276,15 @@ func author(e *domain.Execution, ps domain.PlanStep) string {
 	var at time.Time
 	for _, key := range ps.DependsOn {
 		d := e.StepByKey(key)
-		if d == nil {
+		if d == nil || d.State != domain.StepSucceeded || d.Agent == "" || d.Agent == AgentMock || len(d.Attempts) == 0 {
 			continue
 		}
-		for _, a := range d.Attempts {
-			if a.State == domain.AttemptSucceeded && a.Agent != "" && a.FinishedAt != nil && !a.FinishedAt.Before(at) {
-				best, at = a.Agent, *a.FinishedAt
-			}
-		}
-		if best == "" && d.Agent != "" && d.Agent != AgentMock {
+		last := d.Attempts[len(d.Attempts)-1]
+		if f := last.FinishedAt; best == "" || f != nil && f.After(at) {
 			best = d.Agent
+			if f != nil {
+				at = *f
+			}
 		}
 	}
 	return best

@@ -162,6 +162,11 @@ func (h *Handler) connect(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusServiceUnavailable, protocol.ErrCodeBusy, "too many runner handshakes")
 		return
 	}
+	// Counted before the upgrade hijacks the connection: from then on http.Server.Shutdown no longer waits for it, and
+	// Wait (called after Shutdown) must see it (KIN-74).
+	h.live.Add(1)
+	h.active.Add(1)
+	defer func() { h.active.Add(-1); h.live.Done() }()
 	// The http.Server's read/write timeouts are deadlines on the TCP connection; they would kill a long-lived
 	// WebSocket, so clear them. Liveness is the keepalive ping below instead.
 	rc := http.NewResponseController(w)
@@ -176,9 +181,6 @@ func (h *Handler) connect(w http.ResponseWriter, r *http.Request) {
 		h.logger().Warn("runner websocket upgrade failed", "client", client, "err", err)
 		return
 	}
-	h.live.Add(1)
-	h.active.Add(1)
-	defer func() { h.active.Add(-1); h.live.Done() }()
 	defer func() { _ = c.CloseNow() }()
 	c.SetReadLimit(protocol.MaxMessageBytes)
 
@@ -436,7 +438,7 @@ func printable(s string) string {
 	}, s)
 }
 
-// Wait blocks until every upgraded connection handler has returned or ctx ends. Call it after the hub's
+// Wait blocks until every upgrading or upgraded connection handler has returned or ctx ends. Call it after the hub's
 // Shutdown, so the going-away close frames reach the runners before the process exits.
 func (h *Handler) Wait(ctx context.Context) error {
 	done := make(chan struct{})
@@ -449,7 +451,7 @@ func (h *Handler) Wait(ctx context.Context) error {
 	}
 }
 
-// Live is the number of upgraded connections still being served.
+// Live is the number of runner connections being upgraded or served.
 func (h *Handler) Live() int { return int(h.active.Load()) }
 
 // hijackRecorder keeps the hijacked TCP connection, so a session can be cut off without waiting for the

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -99,6 +100,7 @@ type controlPlane struct {
 	inst    *bootstrap.Installation
 	wf      *workflowapp.Service
 	hub     *runnersapp.Hub
+	tel     *runnersapp.Telemetry
 	clock   *e2eClock
 	stop    func()
 }
@@ -149,7 +151,8 @@ func startCPWithClock(t *testing.T, dataDir, addr string, clock *e2eClock) *cont
 	srv.RegisterOnShutdown(hub.Shutdown)
 	go func() { _ = srv.Serve(ln) }()
 	stopScheduler := startScheduler(ctx, apv.Workflow, e2eSchedule, logger)
-	cp := &controlPlane{dataDir: dataDir, addr: ln.Addr().String(), inst: inst, wf: apv.Workflow, hub: hub, clock: clock}
+	cp := &controlPlane{dataDir: dataDir, addr: ln.Addr().String(), inst: inst, wf: apv.Workflow, hub: hub, tel: tel,
+		clock: clock}
 	var once sync.Once
 	cp.stop = func() {
 		once.Do(func() {
@@ -359,9 +362,31 @@ func (cp *controlPlane) waitTask(t *testing.T, taskID string, ok func(workflowap
 	var d workflowapp.TaskDetail
 	waitFor(t, "task "+taskID, func() (bool, string) {
 		d = cp.detail(t, taskID)
-		return ok(d), describe(d)
+		if ok(d) {
+			return true, ""
+		}
+		state := describe(d)
+		if d.Task.State == workflow.TaskBlocked && d.Task.BlockReason == workflow.WaitRunner {
+			state += cp.describeRunners(t)
+		}
+		return false, state
 	})
 	return d
+}
+
+// describeRunners is the runners' side of a task waiting for a runner: session and heartbeat presence.
+func (cp *controlPlane) describeRunners(t *testing.T) string {
+	t.Helper()
+	pres, err := cp.tel.Presence(t.Context())
+	if err != nil {
+		return " runners: " + err.Error()
+	}
+	s := " runners:"
+	for id, p := range pres {
+		s += fmt.Sprintf(" %s(session=%t %s heartbeat=%v tools=%v)", id, cp.hub.Online(id), p.Availability, p.LastHeartbeatAt,
+			p.Capabilities != nil)
+	}
+	return s
 }
 
 func (cp *controlPlane) mockTask(t *testing.T, project, scenario string) string {

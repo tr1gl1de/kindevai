@@ -360,6 +360,7 @@ export const en = {
     analysisDone: "Analysis task requested. It appears in YouTrack in a moment.",
     analysisPending: "Analysis task requested ({{project}})",
     analysisIssue: "Analysis task {{issue}}",
+    analysisFailed: "YouTrack refused the analysis task ({{project}}: {{code}}). Fix the cause and suggest it again.",
   },
   notifications: {
     title: "Notifications",
@@ -1498,6 +1499,7 @@ export const en = {
       alert_resolved: "Alert resolved",
       alert_analysis_task_requested: "Analysis task requested",
       alert_analysis_task_created: "Analysis task created in YouTrack",
+      alert_analysis_task_failed: "YouTrack refused the analysis task",
       notifications_preferences_updated: "Notification settings changed",
     },
   },

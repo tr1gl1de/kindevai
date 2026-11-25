@@ -17,6 +17,9 @@ export function AnalysisStatus({ task }: { task: AlertAnalysisTask }) {
       </a>
     );
   }
+  if (task.failure) {
+    return <span className="muted">{t("alerts.analysisFailed", { project: task.youtrackProject, code: task.failure })}</span>;
+  }
   return <span className="muted">{t("alerts.analysisPending", { project: task.youtrackProject })}</span>;
 }
 

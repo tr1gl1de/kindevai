@@ -16,6 +16,9 @@ type AnalysisTaskView struct {
 	IssueID         string     `json:"issueId,omitempty"`
 	IssueURL        string     `json:"issueUrl,omitempty"`
 	CreatedAt       *time.Time `json:"createdAt"`
+	Attempt         int        `json:"attempt"`
+	Failure         string     `json:"failure,omitempty"` // code of a permanent failure; a new confirmation retries
+	FailedAt        *time.Time `json:"failedAt"`
 }
 
 // AnalysisTargetView is a project the issue may go to.
@@ -45,7 +48,8 @@ func analysisView(t *domain.AnalysisTask) *AnalysisTaskView {
 		return nil
 	}
 	return &AnalysisTaskView{ProjectID: t.ProjectID, YouTrackProject: t.YouTrackProject, RequestedAt: t.RequestedAt,
-		IssueID: t.IssueID, IssueURL: t.IssueURL, CreatedAt: t.CreatedAt}
+		IssueID: t.IssueID, IssueURL: t.IssueURL, CreatedAt: t.CreatedAt, Attempt: t.Attempt, Failure: t.Failure,
+		FailedAt: t.FailedAt}
 }
 
 func language(w http.ResponseWriter, s string) (domain.Language, bool) {

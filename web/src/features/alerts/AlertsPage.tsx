@@ -145,9 +145,8 @@ function AlertTable({ items }: { items: Alert[] }) {
                               {t(`alerts.action_${x}`)}
                             </button>
                           ))}
-                      {a.analysisTask ? (
-                        <AnalysisStatus task={a.analysisTask} />
-                      ) : (
+                      {a.analysisTask && <AnalysisStatus task={a.analysisTask} />}
+                      {(!a.analysisTask || a.analysisTask.failure) &&
                         a.canSuggestAnalysis && (
                           <button
                             type="button"
@@ -157,8 +156,7 @@ function AlertTable({ items }: { items: Alert[] }) {
                           >
                             {t("alerts.action_analysis")}
                           </button>
-                        )
-                      )}
+                        )}
                     </div>
                   ) : (
                     <span className="muted">—</span>

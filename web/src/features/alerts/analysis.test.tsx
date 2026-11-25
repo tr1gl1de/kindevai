@@ -160,4 +160,17 @@ describe("analysis task from an alert (KIN-61)", () => {
     await user.click(within(dialog).getByRole("button", { name: "Create task" }));
     await waitFor(() => expect(posted).toEqual({ language: "en", projectId: "p2" }));
   });
+
+  it("shows a refused request and offers to suggest it again", async () => {
+    const failed: Alert = {
+      ...ci,
+      analysisTask: { projectId: "p1", youtrackProject: "SHOP", requestedAt: ci.lastSeenAt, createdAt: null, attempt: 1,
+        failure: "project_not_found", failedAt: ci.lastSeenAt },
+    };
+    server.use(http.get("/api/auth/me", () => json(owner)), http.get("/api/alerts", () => json([failed])));
+    await renderApp("/alerts");
+    const row = (await screen.findByText("CI failed on acme/app dev (failure)")).closest("tr")!;
+    expect(within(row).getByText(/YouTrack refused the analysis task \(SHOP: project_not_found\)/)).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: /^Suggest an analysis task/ })).toBeInTheDocument();
+  });
 });

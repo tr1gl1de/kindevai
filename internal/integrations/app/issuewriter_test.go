@@ -72,8 +72,16 @@ func (c *issueClient) CreateIssue(_ context.Context, _ string, _ domain.Secret, 
 }
 
 type created struct {
-	mu   sync.Mutex
-	seen []string
+	mu     sync.Mutex
+	seen   []string
+	failed []string
+}
+
+func (c *created) fail(_ context.Context, key, code string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failed = append(c.failed, key+" "+code)
+	return nil
 }
 
 func (c *created) record(_ context.Context, key, id, url string) error {
@@ -98,7 +106,7 @@ func (q *queue) Enqueue(_ context.Context, m messaging.Message) error {
 func writer() (*app.IssueWriter, *issueClient, *created, *queue) {
 	c, cr, q := &issueClient{}, &created{}, &queue{}
 	return &app.IssueWriter{Connection: ytConn{bindings: map[string]string{"p1": "SHOP"}}, Client: c, Outbox: q,
-		OnCreated: cr.record}, c, cr, q
+		OnCreated: cr.record, OnFailed: cr.fail}, c, cr, q
 }
 
 func req() app.IssueRequest {
@@ -166,6 +174,9 @@ func TestHandleCreateIssueIsIdempotent(t *testing.T) {
 	if err := w.HandleCreateIssue(ctx, delivery(t, q, 2)); err != nil {
 		t.Fatal(err)
 	}
+	if err := w.HandleCreateIssue(ctx, delivery(t, q, 1)); err != nil { // an operator retry restarts at attempt 1
+		t.Fatal(err)
+	}
 	if err := w.HandleCreateIssue(ctx, delivery(t, q, 3)); err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +187,7 @@ func TestHandleCreateIssueIsIdempotent(t *testing.T) {
 		t.Fatalf("issue = %+v", c.created[0])
 	}
 	want := "alert/A1/analysis SHOP-1 https://yt.example/issue/SHOP-1"
-	if len(cr.seen) != 2 || cr.seen[0] != want || cr.seen[1] != want {
+	if len(cr.seen) != 3 || cr.seen[0] != want || cr.seen[2] != want {
 		t.Fatalf("reported = %q", cr.seen)
 	}
 }
@@ -188,11 +199,13 @@ func TestHandleCreateIssueErrors(t *testing.T) {
 	cases := map[string]struct {
 		setup     func(w *app.IssueWriter, c *issueClient)
 		permanent bool
+		code      string
 	}{
-		"not configured": {func(w *app.IssueWriter, _ *issueClient) { w.Connection = ytConn{err: domain.ErrNotConfigured} }, true},
-		"no token":       {func(w *app.IssueWriter, _ *issueClient) { w.Connection = ytConn{err: domain.ErrSecretNotSet} }, true},
-		"forbidden":      {func(_ *app.IssueWriter, c *issueClient) { c.err = &app.StatusError{Status: 403} }, true},
-		"unavailable":    {func(_ *app.IssueWriter, c *issueClient) { c.err = &app.StatusError{Status: 503} }, false},
+		"not configured": {func(w *app.IssueWriter, _ *issueClient) { w.Connection = ytConn{err: domain.ErrNotConfigured} }, true, "not_configured"},
+		"no token":       {func(w *app.IssueWriter, _ *issueClient) { w.Connection = ytConn{err: domain.ErrSecretNotSet} }, true, "not_configured"},
+		"forbidden":      {func(_ *app.IssueWriter, c *issueClient) { c.err = &app.StatusError{Status: 403} }, true, "unauthorized"},
+		"bad request":    {func(_ *app.IssueWriter, c *issueClient) { c.err = &app.StatusError{Status: 400} }, true, "http_400"},
+		"unavailable":    {func(_ *app.IssueWriter, c *issueClient) { c.err = &app.StatusError{Status: 503} }, false, ""},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -208,6 +221,9 @@ func TestHandleCreateIssueErrors(t *testing.T) {
 			}
 			if len(cr.seen) != 0 {
 				t.Fatalf("reported %q", cr.seen)
+			}
+			if tc.code == "" && len(cr.failed) != 0 || tc.code != "" && (len(cr.failed) != 1 || cr.failed[0] != "alert/A1/analysis "+tc.code) {
+				t.Fatalf("failures = %q", cr.failed)
 			}
 		})
 	}

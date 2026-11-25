@@ -677,6 +677,10 @@ export interface AlertAnalysisTask {
   issueId?: string;
   issueUrl?: string;
   createdAt: string | null;
+  attempt?: number;
+  /** Code of a permanent failure; confirming again retries. */
+  failure?: string;
+  failedAt?: string | null;
 }
 
 export interface AlertAnalysisPreview {

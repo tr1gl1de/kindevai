@@ -149,7 +149,7 @@ func TestSuggestAnalysisEnqueuesOncePerAlert(t *testing.T) {
 		t.Fatalf("requests = %+v", tr.requests)
 	}
 	r := tr.requests[0]
-	if r.Key != "alert/A1/analysis" || r.Project != "SHOP" || r.Marker != domain.AnalysisMarker("A1") ||
+	if r.Key != "alert/A1/analysis/1" || r.Project != "SHOP" || r.Marker != domain.AnalysisMarker("A1") ||
 		!strings.HasPrefix(r.Summary, "Analyze alert") || strings.Contains(r.Description, "ghp_") {
 		t.Fatalf("request = %+v", r)
 	}
@@ -244,5 +244,80 @@ func TestSuggestAnalysisNeedsYouTrack(t *testing.T) {
 	}
 	if len(tr.requests) != 0 {
 		t.Fatalf("requests = %+v", tr.requests)
+	}
+}
+
+// A secret that a field clip would cut in half is masked before clipping, so no prefix of it leaks.
+func TestAnalysisDraftMasksSecretsBeforeClipping(t *testing.T) {
+	t.Parallel()
+	f, tr := analysisFixture(t)
+	ctx := t.Context()
+	secret := "ghp_" + strings.Repeat("aB3dE5fG7h", 6)
+	long := domain.Occurrence{ProjectID: "p1", Kind: domain.KindCIFailed, Severity: domain.SeverityWarning,
+		DedupKey: "ci/long", Subject: "dev",
+		Details: map[string]string{"log": strings.Repeat("x ", 55) + secret}}
+	if err := f.svc.Raise(ctx, "e3", long); err != nil {
+		t.Fatal(err)
+	}
+	vs, _ := f.svc.List(ctx, owner, true)
+	var id string
+	for _, v := range vs {
+		if v.Alert.DedupKey == "ci/long" {
+			id = v.Alert.ID
+		}
+	}
+	p, err := f.svc.PreviewAnalysis(ctx, owner, id, domain.LangEN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(p.Draft.Description, "ghp_") || strings.Contains(p.Draft.Description, "aB3dE5fG7h") {
+		t.Fatalf("a secret prefix leaked:\n%s", p.Draft.Description)
+	}
+	_ = tr
+}
+
+// A permanent failure is shown on the alert and a new confirmation retries it as a new attempt.
+func TestAnalysisFailureCanBeRetried(t *testing.T) {
+	t.Parallel()
+	f, tr := analysisFixture(t)
+	ctx := t.Context()
+	if _, err := f.svc.SuggestAnalysis(ctx, admin, "A1", "", domain.LangEN); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.AnalysisFailed(ctx, "A1", 0, "rejected"); err != nil { // stale attempt: ignored
+		t.Fatal(err)
+	}
+	if err := f.svc.AnalysisFailed(ctx, "A1", 1, "project_not_found"); err != nil {
+		t.Fatal(err)
+	}
+	vs, _ := f.svc.List(ctx, admin, true)
+	if vs[0].Analysis == nil || vs[0].Analysis.Failure != "project_not_found" {
+		t.Fatalf("analysis = %+v", vs[0].Analysis)
+	}
+	v, err := f.svc.SuggestAnalysis(ctx, admin, "A1", "", domain.LangEN)
+	if err != nil || v.Analysis.Attempt != 2 || v.Analysis.Failed() {
+		t.Fatalf("retry = %+v, %v", v.Analysis, err)
+	}
+	if len(tr.requests) != 2 || tr.requests[1].Key != "alert/A1/analysis/2" || tr.requests[1].Marker != domain.AnalysisMarker("A1") {
+		t.Fatalf("requests = %+v", tr.requests)
+	}
+	want := strings.Join([]string{app.KindAnalysisRequested, app.KindAnalysisFailed, app.KindAnalysisRequested}, ",")
+	if got := strings.Join(f.audit.kinds, ","); got != want {
+		t.Fatalf("audit = %s", got)
+	}
+	if err := f.svc.AnalysisFailed(ctx, "gone", 1, "rejected"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAnalysisKeyRoundTrip(t *testing.T) {
+	t.Parallel()
+	if id, n, ok := app.ParseAnalysisKey(app.AnalysisKey("A1", 3)); !ok || id != "A1" || n != 3 {
+		t.Fatalf("parsed %q %d %v", id, n, ok)
+	}
+	for _, k := range []string{"alert/A1/analysis", "alert//analysis/1", "task/A1/analysis/1", "alert/A1/analysis/0", "alert/a/b/analysis/1"} {
+		if _, _, ok := app.ParseAnalysisKey(k); ok {
+			t.Errorf("%q parsed", k)
+		}
 	}
 }

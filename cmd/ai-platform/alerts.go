@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -249,11 +248,16 @@ func wireAnalysisTasks(inst *bootstrap.Installation, msg *messagingModule, svc *
 	conn := &integrationsapp.Service{Vault: &integrationsapp.Vault{Store: repo, Cipher: inst.Box, Now: time.Now}, Store: repo}
 	w := &integrationsapp.IssueWriter{Connection: conn, Client: &youtrack.Client{}, Outbox: msg.Outbox,
 		OnCreated: func(ctx context.Context, key, issueID, issueURL string) error {
-			id, ok := strings.CutPrefix(key, "alert/")
-			if id, ok2 := strings.CutSuffix(id, "/analysis"); ok && ok2 && id != "" {
+			if id, _, ok := alertsapp.ParseAnalysisKey(key); ok {
 				return svc.AnalysisCreated(ctx, id, issueID, issueURL)
 			}
 			return nil // another context's issue
+		},
+		OnFailed: func(ctx context.Context, key, code string) error {
+			if id, attempt, ok := alertsapp.ParseAnalysisKey(key); ok {
+				return svc.AnalysisFailed(ctx, id, attempt, code)
+			}
+			return nil
 		}}
 	svc.Tracker = alertTracker{w}
 	msg.Outbox.Handle(integrationsapp.TopicYouTrackCreateIssue, w.HandleCreateIssue)

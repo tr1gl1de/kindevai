@@ -260,14 +260,14 @@ func (r *Repository) DeleteClosed(ctx context.Context, before time.Time, limit i
 }
 
 const analysisColumns = `alert_id, project_id, youtrack_project, coalesce(requested_by, ''), requested_at,
-	coalesce(issue_id, ''), coalesce(issue_url, ''), created_at`
+	coalesce(issue_id, ''), coalesce(issue_url, ''), created_at, attempt, coalesce(failure, ''), failed_at`
 
 func scanAnalysis(row rowScanner) (domain.AnalysisTask, error) {
 	var t domain.AnalysisTask
 	var requested string
-	var created sql.NullString
+	var created, failed sql.NullString
 	if err := row.Scan(&t.AlertID, &t.ProjectID, &t.YouTrackProject, &t.RequestedBy, &requested, &t.IssueID,
-		&t.IssueURL, &created); err != nil {
+		&t.IssueURL, &created, &t.Attempt, &t.Failure, &failed); err != nil {
 		return domain.AnalysisTask{}, err
 	}
 	var err error
@@ -275,6 +275,9 @@ func scanAnalysis(row rowScanner) (domain.AnalysisTask, error) {
 		return domain.AnalysisTask{}, err
 	}
 	if t.CreatedAt, err = parseNullTS(created); err != nil {
+		return domain.AnalysisTask{}, err
+	}
+	if t.FailedAt, err = parseNullTS(failed); err != nil {
 		return domain.AnalysisTask{}, err
 	}
 	return t, nil
@@ -322,19 +325,25 @@ func (r *Repository) Analyses(ctx context.Context, alertIDs []string) (map[strin
 // CreateAnalysis inserts an alert's analysis task; a second one for the same alert fails.
 func (r *Repository) CreateAnalysis(ctx context.Context, t domain.AnalysisTask) error {
 	_, err := r.conn(ctx).ExecContext(ctx, `INSERT INTO alert_analysis_tasks (alert_id, project_id, youtrack_project,
-		requested_by, requested_at, issue_id, issue_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		requested_by, requested_at, issue_id, issue_url, created_at, attempt, failure, failed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.AlertID, t.ProjectID, t.YouTrackProject, nullStr(t.RequestedBy), ts(t.RequestedAt), nullStr(t.IssueID),
-		nullStr(t.IssueURL), nullTS(t.CreatedAt))
+		nullStr(t.IssueURL), nullTS(t.CreatedAt), attempt(t), nullStr(t.Failure), nullTS(t.FailedAt))
 	if err != nil {
 		return fmt.Errorf("inserting analysis task: %w", err)
 	}
 	return nil
 }
 
-// SaveAnalysis stores the created issue of an analysis task.
+func attempt(t domain.AnalysisTask) int { return max(t.Attempt, 1) }
+
+// SaveAnalysis stores an analysis task's changes: its issue, failure or new attempt.
 func (r *Repository) SaveAnalysis(ctx context.Context, t domain.AnalysisTask) error {
-	res, err := r.conn(ctx).ExecContext(ctx, `UPDATE alert_analysis_tasks SET issue_id = ?, issue_url = ?, created_at = ?
-		WHERE alert_id = ?`, nullStr(t.IssueID), nullStr(t.IssueURL), nullTS(t.CreatedAt), t.AlertID)
+	res, err := r.conn(ctx).ExecContext(ctx, `UPDATE alert_analysis_tasks SET project_id = ?, youtrack_project = ?,
+		requested_by = ?, requested_at = ?, issue_id = ?, issue_url = ?, created_at = ?, attempt = ?, failure = ?,
+		failed_at = ? WHERE alert_id = ?`, t.ProjectID, t.YouTrackProject, nullStr(t.RequestedBy), ts(t.RequestedAt),
+		nullStr(t.IssueID), nullStr(t.IssueURL), nullTS(t.CreatedAt), attempt(t), nullStr(t.Failure), nullTS(t.FailedAt),
+		t.AlertID)
 	if err != nil {
 		return fmt.Errorf("updating analysis task: %w", err)
 	}

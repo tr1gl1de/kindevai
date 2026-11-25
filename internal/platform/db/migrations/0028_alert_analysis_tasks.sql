@@ -10,5 +10,8 @@ CREATE TABLE alert_analysis_tasks (
   issue_id         TEXT,
   issue_url        TEXT,
   created_at       TEXT,
+  attempt          INTEGER NOT NULL DEFAULT 1 CHECK (attempt >= 1), -- a permanently failed request may be retried
+  failure          TEXT,                                            -- code of the current attempt's permanent failure
+  failed_at        TEXT,
   CHECK ((issue_id IS NULL) = (created_at IS NULL))
 ) STRICT;

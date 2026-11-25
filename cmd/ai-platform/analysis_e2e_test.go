@@ -27,6 +27,8 @@ func (f *fakeYouTrack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/admin/projects":
 		_, _ = w.Write([]byte(`[{"id":"0-5","shortName":"SHOP"}]`))
+	case r.Method == http.MethodGet && r.URL.Path == "/api/issues": // marker search: nothing yet
+		_, _ = w.Write([]byte(`[]`))
 	case r.Method == http.MethodPost && r.URL.Path == "/api/issues":
 		b, _ := io.ReadAll(r.Body)
 		f.mu.Lock()

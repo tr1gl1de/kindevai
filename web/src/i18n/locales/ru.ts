@@ -360,6 +360,7 @@ export const ru: Messages = {
     analysisDone: "Задача анализа запрошена. Она появится в YouTrack через несколько секунд.",
     analysisPending: "Задача анализа запрошена ({{project}})",
     analysisIssue: "Задача анализа {{issue}}",
+    analysisFailed: "YouTrack отклонил задачу анализа ({{project}}: {{code}}). Устраните причину и предложите её снова.",
   },
   notifications: {
     title: "Уведомления",
@@ -1498,6 +1499,7 @@ export const ru: Messages = {
       alert_resolved: "Алерт решён",
       alert_analysis_task_requested: "Запрошена задача анализа",
       alert_analysis_task_created: "Задача анализа создана в YouTrack",
+      alert_analysis_task_failed: "YouTrack отклонил задачу анализа",
       notifications_preferences_updated: "Изменены настройки уведомлений",
     },
   },

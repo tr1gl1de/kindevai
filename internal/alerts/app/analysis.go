@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/tr1gl1de/kindevai/internal/alerts/domain"
@@ -17,6 +18,7 @@ import (
 const (
 	KindAnalysisRequested = "alert.analysis_task_requested"
 	KindAnalysisCreated   = "alert.analysis_task_created"
+	KindAnalysisFailed    = "alert.analysis_task_failed"
 )
 
 // IssueRequest asks the integrations context to create a YouTrack issue through the outbox. Key makes it
@@ -105,9 +107,21 @@ func (s *Service) configured(ctx context.Context) (bool, error) {
 }
 
 // draft is the issue text of a, with anything credential-shaped masked: alert details come from monitors and
-// webhooks, so they are not trusted to be free of secrets.
+// webhooks, so they are not trusted to be free of secrets. Every field is masked before the draft clips it (a cut
+// secret would no longer be recognised), and the result once more.
 func draft(l domain.Language, a domain.Alert, projectName string) domain.AnalysisDraft {
-	d := domain.DraftAnalysis(l, a, projectName)
+	a.Subject = redact.Text(a.Subject)
+	if len(a.Details) > 0 {
+		details := make(map[string]string, len(a.Details))
+		for k, v := range a.Details {
+			if redact.SecretKey(k) {
+				v = redact.Placeholder
+			}
+			details[redact.Text(k)] = redact.Text(v)
+		}
+		a.Details = details
+	}
+	d := domain.DraftAnalysis(l, a, redact.Text(projectName))
 	return domain.AnalysisDraft{Summary: redact.Text(d.Summary), Description: redact.Text(d.Description)}
 }
 
@@ -153,8 +167,11 @@ func (s *Service) SuggestAnalysis(ctx context.Context, p auth.Principal, id, pro
 			return err
 		}
 		out = View{Alert: a, ProjectName: acc.roles[a.ProjectID].Name, CanManage: true, CanSuggest: true}
-		if out.Analysis, err = s.analysis(ctx, a.ID); err != nil || out.Analysis != nil {
+		if out.Analysis, err = s.analysis(ctx, a.ID); err != nil {
 			return err
+		}
+		if out.Analysis != nil && !out.Analysis.Failed() {
+			return nil // one issue per alert: requested or created already
 		}
 		if ok, err := s.configured(ctx); err != nil {
 			return err
@@ -180,22 +197,32 @@ func (s *Service) SuggestAnalysis(ctx context.Context, p auth.Principal, id, pro
 		if target == nil {
 			return &domain.ValidationError{Field: "projectId", Code: "youtrack_unbound"}
 		}
-		task, err := domain.NewAnalysisTask(a.ID, target.ProjectID, target.YouTrackProject, p.UserID, s.Now())
-		if err != nil {
-			return err
-		}
-		if err := s.Repo.CreateAnalysis(ctx, task); err != nil {
-			return fmt.Errorf("saving analysis task: %w", err)
+		var task domain.AnalysisTask
+		if out.Analysis != nil { // a failed request: a new attempt
+			task = *out.Analysis
+			if err := task.Retry(target.ProjectID, target.YouTrackProject, p.UserID, s.Now()); err != nil {
+				return err
+			}
+			if err := s.Repo.SaveAnalysis(ctx, task); err != nil {
+				return fmt.Errorf("saving analysis task: %w", err)
+			}
+		} else {
+			if task, err = domain.NewAnalysisTask(a.ID, target.ProjectID, target.YouTrackProject, p.UserID, s.Now()); err != nil {
+				return err
+			}
+			if err := s.Repo.CreateAnalysis(ctx, task); err != nil {
+				return fmt.Errorf("saving analysis task: %w", err)
+			}
 		}
 		d := draft(l, a, acc.roles[a.ProjectID].Name)
-		if err := s.Tracker.RequestIssue(ctx, IssueRequest{Key: "alert/" + a.ID + "/analysis", Project: task.YouTrackProject,
+		if err := s.Tracker.RequestIssue(ctx, IssueRequest{Key: AnalysisKey(a.ID, task.Attempt), Project: task.YouTrackProject,
 			Summary: d.Summary, Description: d.Description, Marker: domain.AnalysisMarker(a.ID)}); err != nil {
 			return fmt.Errorf("requesting youtrack issue: %w", err)
 		}
 		out.Analysis = &task
 		return s.Audit.Record(ctx, auditapp.Entry{Actor: auditapp.UserActor(p), Kind: KindAnalysisRequested,
 			ProjectID: task.ProjectID, Subject: "alert:" + a.ID, Details: map[string]string{"kind": string(a.Kind),
-				"youtrackProject": task.YouTrackProject}})
+				"youtrackProject": task.YouTrackProject, "attempt": strconv.Itoa(task.Attempt)}})
 	})
 	return out, err
 }
@@ -222,6 +249,52 @@ func (s *Service) AnalysisCreated(ctx context.Context, alertID, issueID, issueUR
 		}
 		return s.Audit.Record(ctx, auditapp.Entry{Actor: auditapp.System(), Kind: KindAnalysisCreated,
 			ProjectID: t.ProjectID, Subject: "alert:" + alertID, Details: map[string]string{"issue": issueID}})
+	})
+}
+
+// AnalysisKey is the idempotency key of an attempt's issue request: one message per alert and attempt.
+func AnalysisKey(alertID string, attempt int) string {
+	return "alert/" + alertID + "/analysis/" + strconv.Itoa(attempt)
+}
+
+// ParseAnalysisKey reverses AnalysisKey.
+func ParseAnalysisKey(key string) (alertID string, attempt int, ok bool) {
+	rest, ok := strings.CutPrefix(key, "alert/")
+	if !ok {
+		return "", 0, false
+	}
+	id, n, ok := strings.Cut(rest, "/analysis/")
+	if !ok || id == "" || strings.Contains(id, "/") {
+		return "", 0, false
+	}
+	attempt, err := strconv.Atoi(n)
+	if err != nil || attempt < 1 {
+		return "", 0, false
+	}
+	return id, attempt, true
+}
+
+// AnalysisFailed records that YouTrack permanently refused an attempt (code is short and credential-free, e.g.
+// "project_not_found"); the user may then confirm again. A stale attempt, a created issue or a deleted alert is a
+// no-op.
+func (s *Service) AnalysisFailed(ctx context.Context, alertID string, attempt int, code string) error {
+	return s.Tx.InTx(ctx, func(ctx context.Context) error {
+		t, err := s.Repo.Analysis(ctx, alertID)
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("loading analysis task: %w", err)
+		}
+		if !t.MarkFailed(attempt, redact.Text(code), s.Now()) {
+			return nil
+		}
+		if err := s.Repo.SaveAnalysis(ctx, t); err != nil {
+			return fmt.Errorf("saving analysis task: %w", err)
+		}
+		return s.Audit.Record(ctx, auditapp.Entry{Actor: auditapp.System(), Kind: KindAnalysisFailed,
+			ProjectID: t.ProjectID, Subject: "alert:" + alertID, Details: map[string]string{"code": t.Failure,
+				"attempt": strconv.Itoa(attempt)}})
 	})
 }
 

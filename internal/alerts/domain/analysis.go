@@ -126,6 +126,10 @@ type AnalysisTask struct {
 	IssueID         string // "" until created
 	IssueURL        string
 	CreatedAt       *time.Time
+	// Attempt numbers the requests: a permanently failed one may be retried as a new attempt.
+	Attempt  int
+	Failure  string // short code of a permanent failure of the current attempt, "" otherwise
+	FailedAt *time.Time
 }
 
 var (
@@ -146,7 +150,36 @@ func NewAnalysisTask(alertID, projectID, youtrackProject, userID string, now tim
 		return AnalysisTask{}, &ValidationError{Field: "requestedBy", Code: "required"}
 	}
 	return AnalysisTask{AlertID: alertID, ProjectID: projectID, YouTrackProject: youtrackProject, RequestedBy: userID,
-		RequestedAt: now}, nil
+		RequestedAt: now, Attempt: 1}, nil
+}
+
+// Failed reports a permanently failed request that has not been retried yet.
+func (t AnalysisTask) Failed() bool { return t.Failure != "" && !t.Created() }
+
+// MarkFailed records a permanent failure of attempt; a stale attempt or a created issue is ignored (false).
+func (t *AnalysisTask) MarkFailed(attempt int, code string, now time.Time) bool {
+	if t.Created() || attempt != t.Attempt {
+		return false
+	}
+	if code == "" {
+		code = "failed"
+	}
+	t.Failure, t.FailedAt = clipRunes(oneLine(code), 64), &now
+	return true
+}
+
+// Retry starts a new attempt of a failed request, possibly to another target.
+func (t *AnalysisTask) Retry(projectID, youtrackProject, userID string, now time.Time) error {
+	if !t.Failed() {
+		return fmt.Errorf("analysis task of alert %s is not failed: %w", t.AlertID, ErrInvalidTransition)
+	}
+	n, err := NewAnalysisTask(t.AlertID, projectID, youtrackProject, userID, now)
+	if err != nil {
+		return err
+	}
+	n.Attempt = t.Attempt + 1
+	*t = n
+	return nil
 }
 
 // Created reports whether the issue exists in YouTrack.
@@ -167,5 +200,6 @@ func (t *AnalysisTask) MarkCreated(issueID, issueURL string, now time.Time) erro
 		return fmt.Errorf("alert %s already has issue %s: %w", t.AlertID, t.IssueID, ErrInvalidTransition)
 	}
 	t.IssueID, t.IssueURL, t.CreatedAt = issueID, issueURL, &now
+	t.Failure, t.FailedAt = "", nil
 	return nil
 }

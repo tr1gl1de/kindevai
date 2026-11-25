@@ -103,3 +103,36 @@ func TestAnalysisTaskIsRequestedOnceThenCreated(t *testing.T) {
 		t.Error("a malformed issue id / URL is accepted")
 	}
 }
+
+// A permanently failed request can be retried; the retry is a new attempt (new outbox key, same marker).
+func TestAnalysisTaskFailsAndIsRetried(t *testing.T) {
+	t.Parallel()
+	task, err := domain.NewAnalysisTask("A1", "p1", "KIN", "u1", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Attempt != 1 || task.Failed() {
+		t.Fatalf("new task = %+v", task)
+	}
+	if err := task.Retry("p1", "KIN", "u2", t0); !errors.Is(err, domain.ErrInvalidTransition) {
+		t.Fatalf("retry of a pending task: %v", err)
+	}
+	if !task.MarkFailed(1, "rejected", t0) || !task.Failed() || task.Failure != "rejected" {
+		t.Fatalf("failed = %+v", task)
+	}
+	if task.MarkFailed(0, "rejected", t0) {
+		t.Fatal("a stale attempt's failure was applied")
+	}
+	if err := task.Retry("p2", "OPS", "u2", t0); err != nil {
+		t.Fatal(err)
+	}
+	if task.Attempt != 2 || task.Failed() || task.RequestedBy != "u2" || task.YouTrackProject != "OPS" || task.ProjectID != "p2" {
+		t.Fatalf("retried = %+v", task)
+	}
+	if err := task.MarkCreated("OPS-1", "https://yt.example/issue/OPS-1", t0); err != nil {
+		t.Fatal(err)
+	}
+	if task.MarkFailed(2, "rejected", t0) || task.Failed() {
+		t.Fatal("a created task was marked failed")
+	}
+}

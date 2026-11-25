@@ -31,6 +31,22 @@ func TestAnalysisTaskRoundTripOnePerAlert(t *testing.T) {
 	if err := r.CreateAnalysis(ctx, task); err == nil {
 		t.Fatal("a second analysis task for the alert was stored")
 	}
+	// A failed attempt is stored and retried.
+	if !task.MarkFailed(1, "rejected", t0) {
+		t.Fatal("not failed")
+	}
+	if err := r.SaveAnalysis(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.Analysis(ctx, "a1"); err != nil || got.Failure != "rejected" || got.FailedAt == nil || got.Attempt != 1 {
+		t.Fatalf("failed = %+v, %v", got, err)
+	}
+	if err := task.Retry("p1", "KIN", "u1", t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SaveAnalysis(ctx, task); err != nil {
+		t.Fatal(err)
+	}
 	// The alert closes (immutable from now on); the issue is still recorded.
 	if err := a.Resolve("u1", t0); err != nil {
 		t.Fatal(err)
@@ -46,7 +62,8 @@ func TestAnalysisTaskRoundTripOnePerAlert(t *testing.T) {
 	}
 	got, err := r.Analysis(ctx, "a1")
 	if err != nil || got.IssueID != "KIN-7" || got.IssueURL != "https://yt.example/issue/KIN-7" || got.YouTrackProject != "KIN" ||
-		got.RequestedBy != "u1" || !got.RequestedAt.Equal(t0) || got.CreatedAt == nil || got.ProjectID != "p1" {
+		got.RequestedBy != "u1" || !got.RequestedAt.Equal(t0) || got.CreatedAt == nil || got.ProjectID != "p1" ||
+		got.Attempt != 2 || got.Failure != "" || got.FailedAt != nil {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 	m, err := r.Analyses(ctx, []string{"a1", "a2"})

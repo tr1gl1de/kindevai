@@ -154,11 +154,6 @@ func run(ctx context.Context, args []string, e *env) error {
 			return exitError(code)
 		}
 		return nil
-	case "sandbox-run": // the outer launcher of a CLI run in the strict egress sandbox (KIN-31); not for users
-		if code := nsbox.RunMain(e.stderr); code != 0 {
-			return exitError(code)
-		}
-		return nil
 	case "sandbox-exec": // the strict egress sandbox's helper (KIN-31); started by the daemon, not by users
 		if code := nsbox.Main(args[1:], e.stderr); code != 0 {
 			return exitError(code)

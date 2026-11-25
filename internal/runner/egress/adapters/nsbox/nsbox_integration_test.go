@@ -34,8 +34,6 @@ import (
 // The test binary is also the helper (KINDEV_NSBOX_HELPER) and the agent (KINDEV_NSBOX_AGENT).
 func TestMain(m *testing.M) {
 	switch {
-	case os.Getenv(RunEnv) != "": // the outer launcher of a wrapped run
-		os.Exit(RunMain(os.Stderr))
 	case os.Getenv("KINDEV_NSBOX_HELPER") == "1":
 		os.Exit(Main(os.Args[1:], os.Stderr))
 	case os.Getenv("KINDEV_NSBOX_AGENT") == "hang": // runs until a signal ends it
@@ -508,105 +506,53 @@ func (f *fixture) agentCopy(t *testing.T) string {
 	return agent
 }
 
-// The CLI adapters (KIN-32) start a plain command line: Wrap turns it into `sandbox-run`, which builds the same
-// sandbox, relays stdin (the prompt) and the exit status, and never starts the CLI unverified.
-func TestWrappedRun(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name     string
-		expected string
-		exit     int
-	}{
-		{"verified", "203.0.113.7", 0},
-		{"egress IP mismatch", "198.51.100.1", ExitUnverified},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			f := newFixture(t)
-			agent := f.agentCopy(t)
-			path, args, env, err := f.m.Wrap(egress.BoxRequest{Dir: f.dir, Workdir: f.workdir, Profile: f.profile(tc.expected)},
-				[]string{agent}, []string{"KINDEV_NSBOX_AGENT=1", "HOST_SOCKET=" + f.socket, "DIAG_URL=" + f.diag,
-					"HOST_PID=" + strconv.Itoa(os.Getpid()), "SIBLING_SOCKET=" + f.sibling, "RUNNER_SECRET=" + f.secret,
-					"STDIN_WANT=the prompt"}, f.workdir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, kv := range env { // the credentials never travel in the environment
-				if strings.Contains(kv, f.proxy.Password) && f.proxy.Password != "" || strings.Contains(kv, "\"argv\"") {
-					t.Fatalf("run description in the environment: %s", kv)
-				}
-			}
-			cmd := exec.Command(path, args...) //nolint:noctx // killed with its group on cleanup
-			cmd.Env, cmd.Stdin = env, strings.NewReader("the prompt")
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			var out strings.Builder
-			cmd.Stdout, cmd.Stderr = &out, &out
-			if err := cmd.Start(); err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
-			_ = cmd.Wait()
-			if code := cmd.ProcessState.ExitCode(); code != tc.exit {
-				t.Fatalf("exit %d, want %d\n%s", code, tc.exit, out.String())
-			}
-			ran := strings.Contains(out.String(), "no-capabilities")
-			if tc.exit == 0 && (!ran || strings.Contains(out.String(), "FAIL") || !strings.Contains(out.String(), "ok stdin-relayed")) {
-				t.Fatalf("agent output:\n%s", out.String())
-			}
-			if tc.exit != 0 && (ran || !strings.Contains(out.String(), UnverifiedMarker)) {
-				t.Fatalf("unverified run output:\n%s", out.String())
-			}
-			if left, _ := filepath.Glob(filepath.Join(f.dir, "sandbox-run-*.json")); len(left) != 0 {
-				t.Fatalf("run description left behind: %v", left)
-			}
-			// KIN-88: the refusal is recorded outside the sandbox, only for the unverified run.
-			if got := f.m.Refused(env); got != (tc.exit == ExitUnverified) {
-				t.Fatalf("Refused = %v for exit %d", got, tc.exit)
-			}
-		})
-	}
-}
-
-// A cancel (SIGTERM to the process group) ends a wrapped run promptly whether it arrives while the sandbox is
-// being built (the agent then never starts) or once the agent runs.
-func TestWrappedRunCancel(t *testing.T) {
+// A cancel ends a sandboxed run promptly whether it arrives while the sandbox is being built or once the agent runs.
+// The executor sends SIGTERM to the attempt's process group and SIGKILL after its grace period: a running agent ends
+// on the SIGTERM (the helper relays it); during the build the helper, the PID namespace's init, may not handle
+// SIGTERM yet, and the SIGKILL ends the whole sandbox. (Moved from the removed `sandbox-run` launcher's tests,
+// KIN-102: Box.Command is the one way a CLI starts.)
+func TestSandboxRunCancel(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	agent := f.agentCopy(t)
-	path, args, env, err := f.m.Wrap(egress.BoxRequest{Dir: f.dir, Workdir: f.workdir, Profile: f.profile("203.0.113.7")},
-		[]string{agent}, []string{"KINDEV_NSBOX_AGENT=hang"}, f.workdir)
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, delay := range []time.Duration{0, 5 * time.Second} {
-		cmd := exec.Command(path, args...) //nolint:noctx // killed with its group on cleanup
-		cmd.Env = env
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		box, err := f.m.Open(t.Context(), egress.BoxRequest{Dir: f.dir, Workdir: f.workdir, Profile: f.profile("203.0.113.7")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := box.(*Box)
+		cmd, err := b.Command([]string{agent}, []string{"KINDEV_NSBOX_AGENT=hang"}, f.workdir)
+		if err != nil {
+			b.Release()
+			t.Fatal(err)
+		}
 		out := &syncBuf{}
 		cmd.Stdout, cmd.Stderr = out, out
-		if delay > 0 { // a fresh description: the first run deleted it
-			if path, args, env, err = f.m.Wrap(egress.BoxRequest{Dir: f.dir, Workdir: f.workdir, Profile: f.profile("203.0.113.7")},
-				[]string{agent}, []string{"KINDEV_NSBOX_AGENT=hang"}, f.workdir); err != nil {
-				t.Fatal(err)
-			}
-			cmd = exec.Command(path, args...) //nolint:noctx // as above
-			cmd.Env, cmd.Stdout, cmd.Stderr = env, out, out
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		}
 		if err := cmd.Start(); err != nil {
+			b.Release()
 			t.Fatal(err)
 		}
 		pid := cmd.Process.Pid
 		t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
+		verdict := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+			defer cancel()
+			verdict <- b.Await(ctx)
+		}()
 		done := make(chan struct{})
 		go func() { _ = cmd.Wait(); close(done) }()
 		if delay > 0 {
-			deadline := time.Now().Add(60 * time.Second)
-			for !strings.Contains(out.String(), "agent hanging") && time.Now().Before(deadline) {
-				time.Sleep(50 * time.Millisecond)
+			if err := <-verdict; err != nil {
+				t.Fatalf("verdict: %v\n%s", err, out)
 			}
+			waitOutput(t, out, "agent hanging", 1)
 		}
 		_ = syscall.Kill(-pid, syscall.SIGTERM)
+		if delay == 0 {
+			escalate := time.AfterFunc(2*time.Second, func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
+			defer escalate.Stop()
+		}
 		select {
 		case <-done:
 		case <-time.After(30 * time.Second):
@@ -615,6 +561,7 @@ func TestWrappedRunCancel(t *testing.T) {
 		if code := cmd.ProcessState.ExitCode(); code == 0 {
 			t.Fatalf("delay %v: a cancelled run exited 0\n%s", delay, out.String())
 		}
+		b.Release()
 	}
 }
 

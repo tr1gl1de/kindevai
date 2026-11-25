@@ -89,8 +89,6 @@ type Manager struct {
 	// Program and Args start the helper: `<Program> <Args...>` (the runner's own binary with "sandbox-exec").
 	Program string
 	Args    []string
-	// RunArgs start the outer launcher of a wrapped run (Wrap): `<Program> <RunArgs...>`; "sandbox-run" when nil.
-	RunArgs []string
 	Env     []string // the helper's environment (empty: none)
 	DataDir string   // the runner's data directory, hidden from agents
 	// Home is the runner user's HOME, hidden from agents (os.UserHomeDir when empty).

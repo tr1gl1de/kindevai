@@ -234,3 +234,8 @@ func TestBypassOutsideTheSandboxIsRefused(t *testing.T) {
 		t.Fatalf("the CLI ran with the bypass outside the sandbox: %v", err)
 	}
 }
+
+func strictProfile() protocol.NetworkProfile {
+	return protocol.NetworkProfile{Enforcement: "strict", DNS: "proxy", Proxy: &protocol.NetworkProxy{Scheme: "socks5",
+		Host: "proxy.example", Port: 1080, Username: "u", Password: "p@ss"}, DiagnosticURL: "https://ip.example"}
+}

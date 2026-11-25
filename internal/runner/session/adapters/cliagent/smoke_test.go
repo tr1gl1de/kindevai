@@ -12,7 +12,7 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/runner/session/domain"
 )
 
-// TestRealCLISmoke runs the installed CLIs once through the adapter. It spends subscription quota and needs the
+// TestRealCLISmoke runs the installed CLIs once through the adapter and agent-exec. It spends subscription quota and needs the
 // runner user's login, so it runs only with KINDEV_REAL_CLI_SMOKE=1 (never in CI):
 //
 //	KINDEV_REAL_CLI_SMOKE=1 go test -run TestRealCLISmoke -v ./internal/runner/session/adapters/cliagent/
@@ -52,12 +52,9 @@ func TestRealCLISmoke(t *testing.T) {
 				t.Fatal(err)
 			}
 			a := &Adapter{Dialect: d, Config: Config{Binary: bin, Home: home, Env: env}}
-			r, err := a.Start(t.Context(), domain.AgentRequest{Agent: d.Name(), Workdir: ws, PromptFile: prompt,
-				Timeout: 3 * time.Minute}, Hooks{OnEvent: func(e domain.AgentEvent) { t.Logf("%s %s%s", e.Kind, e.Tool, e.Text) }})
-			if err != nil {
-				t.Fatal(err)
-			}
-			res := r.Wait()
+			// Through agent-exec and the output follower, as the daemon runs a CLI (KIN-79).
+			res := runCLI(t, a, domain.AgentRequest{Agent: d.Name(), Workdir: ws, PromptFile: prompt,
+				Timeout: 3 * time.Minute}, domain.PermissionsSafe, nil).res
 			if ok, reason := res.Outcome(); !ok {
 				t.Fatalf("%s failed: %s", d.Name(), reason)
 			}
@@ -69,12 +66,8 @@ func TestRealCLISmoke(t *testing.T) {
 			if err := os.WriteFile(prompt, []byte("Repeat your previous reply exactly.\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			r, err = a.Start(t.Context(), domain.AgentRequest{Agent: d.Name(), Workdir: ws, PromptFile: prompt,
-				Resume: res.Session, Timeout: 3 * time.Minute}, Hooks{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			again := r.Wait()
+			again := runCLI(t, a, domain.AgentRequest{Agent: d.Name(), Workdir: ws, PromptFile: prompt,
+				Resume: res.Session, Timeout: 3 * time.Minute}, domain.PermissionsSafe, nil).res
 			if ok, reason := again.Outcome(); !ok || again.Text != res.Text {
 				t.Fatalf("resume: %s, result %q", reason, again.Text)
 			}

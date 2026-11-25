@@ -456,7 +456,7 @@ func runAgent(s Spec, port int, stderr io.Writer) int {
 		path = p
 	}
 	cmd := &exec.Cmd{Path: path, Args: s.Argv, Env: proxyEnv(s.Env, port), Dir: s.Dir,
-		Stdout: os.Stdout, Stderr: os.Stderr}
+		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr} // stdin: e.g. a CLI's prompt
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags:  syscall.CLONE_NEWUSER,
 		UidMappings: []syscall.SysProcIDMap{{ContainerID: s.UID, HostID: 0, Size: 1}},

@@ -16,6 +16,10 @@ func (l storedLog) AttemptEvents(context.Context, string, int64, int64, int) ([]
 	return l, nil
 }
 
+func (l storedLog) LatestAttemptEvent(context.Context, string, int64, string) (domain.AttemptEvent, bool, error) {
+	return domain.AttemptEvent{}, false, nil
+}
+
 // KIN-77: the task UI's attempt log masks secrets again when it reads them (defence in depth: events stored before
 // ingest redaction, or by a future path that skips it), keeping the lines.
 func TestAttemptLogRedactsStoredOutput(t *testing.T) {

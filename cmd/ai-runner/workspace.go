@@ -34,7 +34,7 @@ var _ sessionapp.Workspaces = sessionWorkspaces{}
 
 func (w sessionWorkspaces) Prepare(ctx context.Context, r sessionapp.WorkspaceRequest) (string, protocol.WorkspacePrepared, error) {
 	p, err := w.m.Prepare(ctx, workspaceapp.Request{Step: r.Step, Fence: r.Fence, Task: r.Task, Repository: r.Repository,
-		Base: r.Base, Token: workspaceapp.NewToken(r.Token.Reveal()), Progress: r.Progress})
+		Base: r.Base, Token: workspaceapp.NewToken(r.Token.Reveal()), Progress: r.Progress, ReadOnly: r.ReadOnly})
 	if err != nil {
 		return "", protocol.WorkspacePrepared{}, err
 	}

@@ -95,9 +95,17 @@ func (e *Execution) ClaimStep(stepID, runnerID string, c StepClaim, now time.Tim
 	s.Review = s.Review || c.Review
 	s.TestCommand = ""
 	if s.Review && s.Phase == PhaseImplement {
-		s.TestCommand = cutUTF8(strings.TrimSpace(c.TestCommand), maxTestCommand)
+		// Never cut: a prefix of a shell command is another command. The registry bounds it; a longer one is refused
+		// by the runner and the attempt fails with that reason.
+		s.TestCommand = strings.TrimSpace(c.TestCommand)
 	}
 	return l, nil
+}
+
+// restartReview starts the step's review loop over (KIN-35): the runner that held its work branch is gone, so the
+// next attempt implements again from the base on another runner, with fresh budgets.
+func (s *Step) restartReview() {
+	s.PinnedRunner, s.Phase, s.Round, s.AttemptBase = "", PhaseImplement, 0, len(s.Attempts)
 }
 
 // attemptRole is the role of the step's next attempt: "" outside the review loop.
@@ -157,7 +165,7 @@ func (a *Attempt) TestStatus() string {
 
 // lastImplementation is the latest succeeded implementer attempt: the work the review looks at.
 func (s *Step) lastImplementation() *Attempt {
-	for i := len(s.Attempts) - 1; i >= 0; i-- {
+	for i := len(s.Attempts) - 1; i >= s.AttemptBase; i-- {
 		if a := &s.Attempts[i]; a.Role == StepRoleImplementer && a.State == AttemptSucceeded {
 			return a
 		}
@@ -192,7 +200,7 @@ func (s *Step) LastImplementation() (Attempt, bool) {
 
 // LastReview returns a copy of the latest reviewer attempt that gave a verdict, and the verdict.
 func (s *Step) LastReview() (Attempt, Review, bool) {
-	for i := len(s.Attempts) - 1; i >= 0; i-- {
+	for i := len(s.Attempts) - 1; i >= s.AttemptBase; i-- {
 		a := s.Attempts[i]
 		if a.Role != StepRoleReviewer || a.State != AttemptSucceeded {
 			continue
@@ -373,6 +381,8 @@ func ParseVerdict(answer string) (Review, error) {
 		return Review{}, invalid("findings", "too_many")
 	case r.Verdict == VerdictChangesRequested && len(r.Findings) == 0:
 		return Review{}, invalid("findings", "findings_required")
+	case r.Verdict == VerdictApprove && slices.ContainsFunc(r.Findings, func(f Finding) bool { return f.Severity == "blocker" }):
+		return Review{}, invalid("verdict", "approve_with_blocker")
 	}
 	for i := range r.Findings {
 		f := &r.Findings[i]

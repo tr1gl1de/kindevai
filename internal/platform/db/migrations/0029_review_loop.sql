@@ -8,6 +8,8 @@ ALTER TABLE workflow_steps ADD COLUMN phase TEXT NOT NULL DEFAULT '' CHECK (phas
 ALTER TABLE workflow_steps ADD COLUMN review_round INTEGER NOT NULL DEFAULT 0 CHECK (review_round >= 0);
 ALTER TABLE workflow_steps ADD COLUMN pinned_runner TEXT NOT NULL DEFAULT '';
 ALTER TABLE workflow_steps ADD COLUMN test_command TEXT NOT NULL DEFAULT '';
+-- the number of attempts before the loop last started over (the runner holding its branch was released)
+ALTER TABLE workflow_steps ADD COLUMN attempt_base INTEGER NOT NULL DEFAULT 0 CHECK (attempt_base >= 0);
 ALTER TABLE step_attempts ADD COLUMN role TEXT NOT NULL DEFAULT '';
 ALTER TABLE step_attempts ADD COLUMN review_round INTEGER NOT NULL DEFAULT 0 CHECK (review_round >= 0);
 ALTER TABLE step_attempts ADD COLUMN agent_result TEXT NOT NULL DEFAULT '';

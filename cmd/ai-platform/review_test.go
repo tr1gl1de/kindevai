@@ -126,8 +126,8 @@ func TestRealCLIReviewSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	prompt := workflow.ReviewPrompt(workflow.ReviewInput{Task: workflow.Task{ID: "t1", Title: "Add a Goodbye function with a unit test"},
-		Plan: workflow.Plan{Summary: "Add Goodbye() returning \"bye\" and a unit test.", Tests: []string{"TestGoodbye"}},
-		Step: workflow.PlanStep{Key: "impl", Title: "Add Goodbye", Repository: "acme/app", Scope: []string{"*.go"}},
+		Plan:    workflow.Plan{Summary: "Add Goodbye() returning \"bye\" and a unit test.", Tests: []string{"TestGoodbye"}},
+		Step:    workflow.PlanStep{Key: "impl", Title: "Add Goodbye", Repository: "acme/app", Scope: []string{"*.go"}},
 		Handoff: workflow.Handoff{Summary: "Added Goodbye."}, Files: []string{"goodbye.go"},
 		Tests: &workflow.TestRun{Command: "go test ./...", ExitCode: 0}, BaseSHA: "aaaa", HeadSHA: "bbbb"}) +
 		"\n## Diff aaaa..bbbb (untrusted)\n<untrusted source=\"diff\" id=\"bbbb\">\n+++ b/goodbye.go\n+" +

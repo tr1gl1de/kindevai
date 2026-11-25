@@ -178,6 +178,9 @@ type Step struct {
 	Round        int
 	PinnedRunner string
 	TestCommand  string
+	// AttemptBase is the number of attempts before the loop last started over (its runner was released): only later
+	// attempts count for the loop's budgets and evidence.
+	AttemptBase int
 }
 
 // WaitingForNetwork is what the UI shows as WAITING_FOR_NETWORK.
@@ -604,6 +607,13 @@ func (e *Execution) ReleaseRunner(runnerID, msg string, now time.Time, maxAttemp
 		// A step that uses up its budget fails the execution, which cancels the remaining steps (no longer held).
 		e.failAttempt(s, msg, now, maxAttempts)
 	}
+	// A review loop whose work branch lives on this runner starts over elsewhere (KIN-35): nothing else can reach it.
+	for i := range e.Steps {
+		if s := &e.Steps[i]; s.PinnedRunner == runnerID && !s.Holding() && e.State == ExecutionRunning &&
+			(s.State == StepReady || s.State == StepWaiting) {
+			s.restartReview()
+		}
+	}
 	return out
 }
 
@@ -737,7 +747,7 @@ func (e *Execution) hold(stepID, runnerID string, fence int64, msg string, reaso
 func (s *Step) countedAttempts() int {
 	n := 0
 	role := s.attemptRole()
-	for _, a := range s.Attempts {
+	for _, a := range s.Attempts[min(s.AttemptBase, len(s.Attempts)):] {
 		if a.State != AttemptCancelled && a.Role == role && a.Round == s.Round {
 			n++
 		}

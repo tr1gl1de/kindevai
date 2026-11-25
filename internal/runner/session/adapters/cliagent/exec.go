@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -30,6 +31,9 @@ const (
 	TestsCommandFile = "tests.cmd"
 	TestsOutputFile  = "tests.out"
 	TestsEndFile     = "tests.json"
+	// TestsHome is the test run's HOME, a fresh directory in the state directory: the tests never see the runner
+	// user's home and the CLI logins in it.
+	TestsHome = "tests-home"
 )
 
 // TestsEnd is how the test command ended, as `ai-runner agent-exec` recorded it (Code -1: killed or not started).
@@ -47,7 +51,7 @@ const (
 
 // testEnv are the variables a test run inherits from the CLI's environment: what builds need, never the CLI's
 // credentials or configuration (a repository's tests are untrusted code).
-var testEnv = []string{"PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TERM",
+var testEnv = []string{"PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TERM",
 	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "GOPATH", "GOCACHE", "GOMODCACHE",
 	"GOFLAGS", "GOPROXY", "GOTOOLCHAIN", "CGO_ENABLED", "NODE_OPTIONS", "npm_config_cache", "PIP_CACHE_DIR"}
 
@@ -240,7 +244,12 @@ func runTests(state, file string, timeout, grace time.Duration, stderr io.Writer
 	}
 	defer out.Close()
 	cmd := exec.Command("/bin/sh", "-c", string(cmdText)) //nolint:gosec,noctx // the repository's configured test command
-	cmd.Env = append(filterEnv(os.Environ(), testEnv), "CI=true")
+	home := filepath.Join(state, TestsHome)
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		_, _ = fmt.Fprintf(out, "creating the test home: %v\n", err)
+		return
+	}
+	cmd.Env = append(filterEnv(os.Environ(), testEnv), "CI=true", "HOME="+home)
 	w := &capped{f: out, left: MaxTestsOutput, name: "test output"}
 	cmd.Stdout, cmd.Stderr = w, w
 	cmd.WaitDelay = grace
@@ -267,12 +276,21 @@ func runTests(state, file string, timeout, grace time.Duration, stderr io.Writer
 	}
 }
 
+// filterEnv keeps the variables named in keep; a proxy URL loses its credentials.
 func filterEnv(env, keep []string) []string {
 	var out []string
 	for _, kv := range env {
-		if k, _, ok := strings.Cut(kv, "="); ok && slices.Contains(keep, k) {
-			out = append(out, kv)
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || !slices.Contains(keep, k) {
+			continue
 		}
+		if strings.HasSuffix(strings.ToLower(k), "_proxy") && !strings.EqualFold(k, "no_proxy") {
+			if u, err := url.Parse(v); err == nil && u.User != nil {
+				u.User = nil
+				v = u.String()
+			}
+		}
+		out = append(out, k+"="+v)
 	}
 	return out
 }

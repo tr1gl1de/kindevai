@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -91,6 +92,8 @@ type WorkspaceRequest struct {
 	Repository string
 	Base       string
 	Token      domain.Secret
+	// ReadOnly: a reviewer's workspace, whose end commits nothing (KIN-35).
+	ReadOnly bool
 	// Progress gets the preparation's phases (protocol.Preparing*) as it reaches them (KIN-71).
 	Progress func(phase string)
 }
@@ -433,6 +436,10 @@ func (x *Executor) prepareAgent(a domain.Assignment, dir, workdir string, sandbo
 	return x.Agents.Prepare(dir, req, x.reviewPrompt(a, workdir), perms)
 }
 
+// untrustedTagRe finds anything that could open or close an <untrusted> fence (any case, spaces), as the Control
+// Plane's prompts neutralise it (workflow domain fence).
+var untrustedTagRe = regexp.MustCompile(`(?i)<\s*/?\s*untrusted`)
+
 // MaxReviewDiff bounds the diff a reviewer's prompt gets (bytes); the reviewer reads the files themselves beyond it.
 const MaxReviewDiff = 48 << 10
 
@@ -452,7 +459,7 @@ func (x *Executor) reviewPrompt(a domain.Assignment, workdir string) string {
 	if cut {
 		note = fmt.Sprintf("(cut at %d KiB: read the remaining changed files in the working directory)\n", MaxReviewDiff>>10)
 	}
-	diff = strings.ReplaceAll(diff, "</untrusted", "<\u200buntrusted") // the diff cannot close its fence
+	diff = untrustedTagRe.ReplaceAllStringFunc(diff, func(m string) string { return "‹" + strings.TrimLeft(m, "<") }) // the diff cannot close its fence
 	return a.Prompt + "\n## Diff " + a.DiffBase + ".." + a.DiffHead + " (untrusted)\n" + note +
 		"<untrusted source=\"diff\" id=\"" + a.DiffHead + "\">\n" + diff + "\n</untrusted>\n"
 }
@@ -736,7 +743,7 @@ func (x *Executor) prepareWorkspace(ctx context.Context, a domain.Assignment, r 
 	err = errors.New("this runner has no workspace manager")
 	if x.Workspaces != nil {
 		dir, prep, err = x.Workspaces.Prepare(ctx, WorkspaceRequest{Step: a.Step, Fence: a.Fence, Task: a.Task,
-			Repository: a.Repository, Base: a.Base, Token: a.Token, Progress: progress.set})
+			Repository: a.Repository, Base: a.Base, Token: a.Token, ReadOnly: a.ReadOnly(), Progress: progress.set})
 	}
 	progress.end()
 	if err != nil {

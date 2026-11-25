@@ -322,13 +322,13 @@ func (r *Repository) SetIntegrationBranch(branch string, now time.Time) error {
 	return nil
 }
 
-// MaxTestCommand bounds a repository's test command (characters).
+// MaxTestCommand bounds a repository's test command (bytes, the runner's limit).
 const MaxTestCommand = 500
 
 // SetTestCommand changes the repository's test command: one line of printable text ("" for none).
 func (r *Repository) SetTestCommand(cmd string, now time.Time) error {
 	cmd = strings.TrimSpace(cmd)
-	if utf8.RuneCountInString(cmd) > MaxTestCommand || !utf8.ValidString(cmd) ||
+	if len(cmd) > MaxTestCommand || !utf8.ValidString(cmd) ||
 		strings.ContainsFunc(cmd, func(c rune) bool { return unicode.IsControl(c) }) {
 		return invalid("testCommand", "test_command_format")
 	}

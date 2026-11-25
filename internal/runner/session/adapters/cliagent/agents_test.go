@@ -294,14 +294,17 @@ func TestExecRunsTheTestsAfterASuccessfulCLI(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	state := t.TempDir()
-	cmd := runExecWith(t, f, state, time.Minute, []string{"--tests", testsFile(t, `pwd; echo "key=${ANTHROPIC_API_KEY:-none} ci=$CI"; exit 3`)},
-		"FAKE_STREAM="+abs(t, "testdata/claude/read.jsonl"), "ANTHROPIC_API_KEY=sk-secret")
+	cmd := runExecWith(t, f, state, time.Minute, []string{"--tests",
+		testsFile(t, `pwd; echo "key=${ANTHROPIC_API_KEY:-none} ci=$CI home=$HOME proxy=$HTTPS_PROXY"; exit 3`)},
+		"FAKE_STREAM="+abs(t, "testdata/claude/read.jsonl"), "ANTHROPIC_API_KEY=sk-secret", "HOME=/home/runner",
+		"HTTPS_PROXY=http://user:hunter2@proxy.local:3128")
 	_ = cmd.Wait()
 	end, out, ok := ReadTests(state, 1<<10)
 	if !ok || end.Code != 3 || end.TimedOut {
 		t.Fatalf("tests %+v %v", end, ok)
 	}
-	if !strings.Contains(out, f.workdir) || !strings.Contains(out, "key=none ci=true") {
+	if !strings.Contains(out, f.workdir) || !strings.Contains(out, "key=none ci=true home="+filepath.Join(state, TestsHome)) ||
+		!strings.Contains(out, "proxy=http://proxy.local:3128") || strings.Contains(out, "hunter2") {
 		t.Fatalf("test output %q", out)
 	}
 	if e, ok := ReadEnd(state); !ok || e.Code != 0 {

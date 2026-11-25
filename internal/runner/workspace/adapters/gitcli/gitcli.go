@@ -289,6 +289,11 @@ func (g *Git) Snapshot(ctx context.Context, admin, dir, message string) (string,
 			return "", err
 		}
 	}
+	return g.Head(ctx, admin)
+}
+
+// Head implements app.Git: the worktree's HEAD commit (nothing is staged or committed).
+func (g *Git) Head(ctx context.Context, admin string) (string, error) {
 	out, err := g.worktreeRun(ctx, admin, "", "rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
 		return "", err

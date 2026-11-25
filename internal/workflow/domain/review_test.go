@@ -27,17 +27,18 @@ func TestParseVerdictRefusesWhatIsNoVerdict(t *testing.T) {
 	t.Parallel()
 	long := strings.Repeat("x", maxFindingLen+1)
 	for name, answer := range map[string]string{
-		"no json":               "Looks good to me!",
-		"unknown verdict":       `{"verdict":"lgtm","summary":"ok","findings":[]}`,
-		"unknown field":         `{"verdict":"approve","summary":"ok","findings":[],"merge":true}`,
-		"changes, no finding":   `{"verdict":"changes_requested","summary":"fix it","findings":[]}`,
-		"finding without text":  `{"verdict":"changes_requested","summary":"s","findings":[{"severity":"major","message":" "}]}`,
-		"bad severity":          `{"verdict":"changes_requested","summary":"s","findings":[{"severity":"urgent","message":"m"}]}`,
-		"finding message long":  `{"verdict":"changes_requested","summary":"s","findings":[{"severity":"minor","message":"` + long + `"}]}`,
-		"control characters":    "{\"verdict\":\"approve\",\"summary\":\"a\\u0000b\",\"findings\":[]}",
-		"too many findings":     `{"verdict":"changes_requested","summary":"s","findings":[` + strings.Repeat(`{"severity":"minor","message":"m"},`, MaxFindings) + `{"severity":"minor","message":"m"}]}`,
-		"negative line":         `{"verdict":"changes_requested","summary":"s","findings":[{"severity":"minor","message":"m","line":-1}]}`,
-		"absolute finding path": `{"verdict":"changes_requested","summary":"s","findings":[{"severity":"minor","message":"m","file":"/etc/passwd"}]}`,
+		"no json":                "Looks good to me!",
+		"unknown verdict":        `{"verdict":"lgtm","summary":"ok","findings":[]}`,
+		"unknown field":          `{"verdict":"approve","summary":"ok","findings":[],"merge":true}`,
+		"changes, no finding":    `{"verdict":"changes_requested","summary":"fix it","findings":[]}`,
+		"finding without text":   `{"verdict":"changes_requested","summary":"s","findings":[{"severity":"major","message":" "}]}`,
+		"bad severity":           `{"verdict":"changes_requested","summary":"s","findings":[{"severity":"urgent","message":"m"}]}`,
+		"finding message long":   `{"verdict":"changes_requested","summary":"s","findings":[{"severity":"minor","message":"` + long + `"}]}`,
+		"control characters":     "{\"verdict\":\"approve\",\"summary\":\"a\\u0000b\",\"findings\":[]}",
+		"too many findings":      `{"verdict":"changes_requested","summary":"s","findings":[` + strings.Repeat(`{"severity":"minor","message":"m"},`, MaxFindings) + `{"severity":"minor","message":"m"}]}`,
+		"negative line":          `{"verdict":"changes_requested","summary":"s","findings":[{"severity":"minor","message":"m","line":-1}]}`,
+		"approve with a blocker": `{"verdict":"approve","summary":"s","findings":[{"severity":"blocker","message":"m"}]}`,
+		"absolute finding path":  `{"verdict":"changes_requested","summary":"s","findings":[{"severity":"minor","message":"m","file":"/etc/passwd"}]}`,
 	} {
 		if _, err := ParseVerdict(answer); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -338,5 +339,36 @@ func TestStepPromptCarriesPlanTestsAndFixFeedback(t *testing.T) {
 	}
 	if p := ImplementerPrompt(ImplementerInput{Task: task, Plan: Plan{Summary: "plan"}, Step: ps}); !strings.Contains(p, "no test command") {
 		t.Errorf("a prompt without a test command does not say so:\n%s", p)
+	}
+}
+
+// Review finding (KIN-35): when the Owner releases the runner that holds a step's work branch, the loop starts over
+// on another runner with fresh budgets instead of waiting for that runner forever.
+func TestReleasingThePinnedRunnerStartsTheLoopOver(t *testing.T) {
+	t.Parallel()
+	e, id := reviewExecution(t)
+	implement(t, &e, id)
+	reviewWith(t, &e, id, changes) // round 1, pinned to r1
+	f := runPhase(t, &e, id, "r1", implClaim)
+	passTests(t, &e, id, "r1", f, 1) // the fix fails once: one attempt of the round's budget used
+	if err := e.Succeed(id, "r1", f, t0); err != nil {
+		t.Fatal(err)
+	}
+	e.ReleaseRunner("r1", "runner disabled", t0, DefaultMaxAttempts)
+	s := e.Step(id)
+	if s.PinnedRunner != "" || s.Phase != PhaseImplement || s.Round != 0 || s.State != StepReady || e.State != ExecutionRunning {
+		t.Fatalf("after the release: pinned %q phase %q round %d state %s", s.PinnedRunner, s.Phase, s.Round, s.State)
+	}
+	if _, ok := s.LastImplementation(); ok {
+		t.Fatal("the released runner's work still counts as the reviewed implementation")
+	}
+	// Another runner implements from scratch; two failures are needed to use up the fresh budget.
+	f = runPhase(t, &e, id, "r2", implClaim)
+	passTests(t, &e, id, "r2", f, 1)
+	if err := e.Succeed(id, "r2", f, t0); err != nil {
+		t.Fatal(err)
+	}
+	if e.State != ExecutionRunning || e.Step(id).State != StepReady {
+		t.Fatalf("a fresh budget was not given: execution %s step %s", e.State, e.Step(id).State)
 	}
 }

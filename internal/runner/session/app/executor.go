@@ -167,7 +167,10 @@ type run struct {
 	cancelled string
 	// stopPrep stops the attempt's workspace preparation (KIN-71); set while it is prepared in the background.
 	stopPrep context.CancelFunc
-	sandbox  Sandbox       // released once the process ended
+	sandbox  Sandbox // released once the process ended
+	// network is why the attempt lost its strict egress sandbox (KIN-81: a runtime check failed, or a restarted
+	// runner could not serve its adapter again): it was stopped and ends with code network.
+	network  string
 	follower AgentFollower // the AI CLI's output (KIN-79); nil for the mock agent
 	agent    string
 	done     chan struct{}
@@ -387,10 +390,16 @@ func (x *Executor) launch(ctx context.Context, r *run, a domain.Assignment, dir,
 		x.logger().Warn("process start time unknown: after a restart a reused pid cannot be told apart", "step", a.Step,
 			"pid", proc.PID())
 	}
-	if err := r.save(x.Journal, func(rec *domain.Record) { rec.PID, rec.PGID, rec.Start = proc.PID(), proc.PGID(), proc.StartTime() }); err != nil {
+	if err := r.save(x.Journal, func(rec *domain.Record) {
+		rec.PID, rec.PGID, rec.Start = proc.PID(), proc.PGID(), proc.StartTime()
+		if sandbox != nil { // KIN-81: a restarted runner serves its adapter again
+			rec.Sandbox = &domain.SandboxRef{Endpoint: sandbox.Endpoint(), Role: a.Adapter, Profile: sandbox.Profile()}
+		}
+	}); err != nil {
 		x.logger().Error("recording the attempt's process", "step", a.Step, "err", err)
 	}
 	x.runs[k] = r
+	x.guardEgress(r)
 	if err := r.stream.Emit(protocol.EventStarted, protocol.Started{Agent: a.Adapter}); err != nil {
 		x.logger().Error("emitting started", "step", a.Step, "err", err)
 	}
@@ -874,6 +883,74 @@ func (g guardedWriter) Write(p []byte) (int, error) {
 	return g.w.Write(p)
 }
 
+// networkFailure is the end of an attempt stopped because it lost its strict egress sandbox (KIN-81): code network,
+// so the step waits for the network without using its retry budget; the CLI's report is kept.
+func (r *run) networkFailure(why string, end any) protocol.Failure {
+	f := protocol.Failure{Reason: domain.Truncate(r.mask(why), protocol.MaxReasonLen), Code: protocol.FailureNetwork}
+	switch b := end.(type) {
+	case protocol.Completed:
+		f.Agent = b.Agent
+	case protocol.Failure:
+		f.Agent = b.Agent
+	}
+	return f
+}
+
+// guardEgress stops the attempt when its sandbox reports at runtime that the egress is no longer the verified
+// one (KIN-81; the adapter has already cut every connection).
+func (x *Executor) guardEgress(r *run) {
+	if r.sandbox == nil {
+		return
+	}
+	fault := r.sandbox.Fault()
+	if fault == nil {
+		return
+	}
+	x.wg.Go(func() {
+		select {
+		case <-r.done:
+		case why, ok := <-fault:
+			if !ok {
+				return
+			}
+			x.mu.Lock()
+			defer x.mu.Unlock()
+			if x.closed.Load() || ended(r) || r.network != "" || r.cancelled != "" {
+				return
+			}
+			k := r.key()
+			x.logger().Warn("strict egress lost while the attempt ran; stopping it", "step", k.step, "fence", k.fence, "check", why)
+			r.network = "strict egress lost while the attempt ran: " + why
+			x.terminate(r, r.network)
+		}
+	})
+}
+
+// reattach serves the strict egress sandbox of an attempt adopted after a restart again (KIN-81): its proxy
+// adapter lived in the old runner process. When it cannot be, the attempt is stopped (it has no way out) and ends
+// with code network. Called under x.mu, before the run is watched.
+func (x *Executor) reattach(ctx context.Context, r *run, rec domain.Record, dir string) {
+	if p, ok := r.proc.(interface{ Running() bool }); ok && !p.Running() {
+		return // it ended while no runner served it: its result is reported as it is
+	}
+	err := errors.New("this runner has no strict egress")
+	if x.Egress != nil {
+		var sb Sandbox
+		if sb, err = x.Egress.Reattach(ctx, rec, dir); err == nil && sb != nil {
+			r.sandbox = sb
+			x.logger().Info("strict egress adapter restored after restart", "step", rec.Step, "fence", rec.Fence)
+			return
+		}
+		if err == nil {
+			err = errors.New("no sandbox")
+		}
+	}
+	x.logger().Error("strict egress adapter not restored after restart; stopping the attempt", "step", rec.Step,
+		"fence", rec.Fence, "err", err)
+	r.network = "strict egress sandbox lost by a runner restart: " + err.Error()
+	x.terminate(r, r.network)
+}
+
 // reportRetry is how often a failed report of an attempt's end is retried.
 const reportRetry = time.Second
 
@@ -891,12 +968,19 @@ func (x *Executor) watch(r *run) {
 			v := r.follower.Finish(exit, cancelled)
 			res = &v
 		}
+		summary := ""
 		if r.sandbox != nil {
+			summary = r.sandbox.Summary()
 			r.sandbox.Release()
 		}
 		for _, s := range r.output { // the pipes are drained: send the held-back partial lines before the end
 			if err := s.Flush(); err != nil {
 				x.logger().Warn("sending the attempt's last output", "step", r.rec.Step, "err", err)
+			}
+		}
+		if summary != "" { // KIN-81: what the strict egress sandbox denied, after the process's own output
+			if _, err := io.WriteString(x.guard(r.stream.Output("stderr")), r.mask(summary)+"\n"); err != nil {
+				x.logger().Warn("sending the sandbox summary", "step", r.rec.Step, "err", err)
 			}
 		}
 		stopReports() // the worktree is about to be saved and removed
@@ -906,6 +990,7 @@ func (x *Executor) watch(r *run) {
 		close(r.done)
 		x.mu.Lock()
 		ok, reason := domain.Outcome(exit, r.cancelled)
+		network := r.network
 		x.mu.Unlock()
 		kind, body := protocol.EventCompleted, any(nil)
 		if !ok {
@@ -913,6 +998,9 @@ func (x *Executor) watch(r *run) {
 		}
 		if res != nil {
 			kind, body = r.agentEnd(*res)
+		}
+		if network != "" {
+			kind, body = protocol.EventFailed, r.networkFailure(network, body)
 		}
 		for {
 			if x.closed.Load() {
@@ -988,7 +1076,7 @@ func (x *Executor) terminate(r *run, reason string) {
 
 // Recover adopts the attempts of the journal after a (re)start: a process still alive is watched again, a finished
 // one is reported with the result it left, and a record that never got a process fails.
-func (x *Executor) Recover(_ context.Context) error {
+func (x *Executor) Recover(ctx context.Context) error {
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	x.init()
@@ -1033,9 +1121,13 @@ func (x *Executor) Recover(_ context.Context) error {
 				r.follower = x.follow(r, d, rec.Output, x.redacted(r, "stdout"), x.redacted(r, "stderr"))
 			}
 		}
+		if rec.Sandbox != nil {
+			x.reattach(ctx, r, rec, d)
+		}
 		x.runs[k] = r
 		x.logger().Info("adopted attempt after restart", "step", rec.Step, "fence", rec.Fence, "pid", rec.PID)
 		x.watch(r)
+		x.guardEgress(r)
 	}
 	return nil
 }

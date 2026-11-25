@@ -8,6 +8,8 @@ export class ApiError extends Error {
     readonly field?: string,
     /** Machine detail from the body's message (e.g. a validation code). */
     readonly detail?: string,
+    /** The whole error body, for errors that carry more than a code (e.g. a limit's retryAfterSec). */
+    readonly body?: Record<string, unknown>,
   ) {
     super(`${status} ${code}`);
     this.name = "ApiError";
@@ -43,7 +45,8 @@ export async function api<T>(method: string, path: string, body?: unknown, signa
   }
   if (!res.ok) {
     const err = data as Partial<ApiErrorBody> | undefined;
-    throw new ApiError(res.status, err?.error ?? "unknown", err?.field, err?.message);
+    const extra = data !== null && typeof data === "object" ? (data as Record<string, unknown>) : undefined;
+    throw new ApiError(res.status, err?.error ?? "unknown", err?.field, err?.message, extra);
   }
   return data as T;
 }

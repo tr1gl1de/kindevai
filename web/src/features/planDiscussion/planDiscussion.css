@@ -1,0 +1,125 @@
+/* Plan discussion with the AI (KIN-44): mobile first, works from 320 px and in the Telegram Mini App theme. */
+.discussion {
+  margin-top: var(--space);
+  min-width: 0;
+}
+.discussion-log {
+  max-height: 70vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.discussion-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+.discussion-msg {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  overflow-wrap: anywhere;
+}
+.discussion-user {
+  border-left: 4px solid var(--accent);
+}
+.discussion-assistant {
+  border-left: 4px solid var(--muted);
+}
+.discussion-system {
+  padding: 0;
+  border: 0;
+  background: none;
+}
+.discussion-revision-current {
+  border: 2px solid var(--accent);
+}
+.discussion-revision h3,
+.discussion-revision h4 {
+  margin: 0 0 8px;
+}
+.discussion-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin: 0 0 8px;
+}
+.discussion-meta a {
+  min-height: var(--tap);
+  display: inline-flex;
+  align-items: center;
+}
+.discussion-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.discussion-status .spinner,
+.discussion-busy .spinner {
+  width: 14px;
+  height: 14px;
+}
+.status-FAILED {
+  border-color: var(--danger);
+}
+.status-PENDING,
+.status-DELIVERED {
+  border-color: var(--warn-border);
+}
+.discussion-text {
+  white-space: pre-wrap;
+  margin: 0;
+}
+.discussion-busy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.discussion-empty {
+  padding: 16px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+.discussion-composer textarea {
+  width: 100%;
+  resize: vertical;
+}
+.discussion-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.discussion-counter {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.discussion-counter.over {
+  color: var(--danger);
+  font-weight: 600;
+}
+.rich-text p,
+.rich-text ul,
+.rich-text ol {
+  margin: 0 0 8px;
+}
+.rich-text pre {
+  margin: 0 0 8px;
+  padding: 8px;
+  max-width: 100%;
+  background: var(--surface);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.rich-plan summary {
+  min-height: var(--tap);
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}

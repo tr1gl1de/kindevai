@@ -9,6 +9,7 @@ import { ErrorState, FormAlert, Loading, PageHeading } from "../../ui/feedback";
 import { errorMessage, validationMessage } from "../../ui/errors";
 import { formatDateTime } from "../../ui/format";
 import { useNotify } from "../../ui/notify";
+import { DiscussionPanel } from "../planDiscussion/DiscussionPanel";
 import { useApproval, useDecide } from "./api";
 import { RiskBadge, StateBadge } from "./badges";
 
@@ -151,6 +152,10 @@ function ApprovalCard({ d }: { d: ApprovalDetail }) {
       {d.previous && <Diff previous={d.previous} changes={d.changes} />}
       <Plan revision={d.revision} />
 
+      {a.scope === "execute" && d.revision.number > 0 && (
+        <DiscussionPanel taskId={d.task.id} currentRevision={d.task.planRevision} approvals={d.related} level={2} />
+      )}
+
       {others.length > 0 && (
         <section aria-labelledby="approval-related" className="page-section">
           <h2 id="approval-related">{t("approvals.relatedTitle")}</h2>
@@ -186,8 +191,10 @@ function Decision({ d, waitsForVerification }: { d: ApprovalDetail; waitsForVeri
   const [comment, setComment] = useState("");
   const [fieldError, setFieldError] = useState<string>();
   const [error, setError] = useState<string>();
+  const [stale, setStale] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
 
+  if (stale && a.state !== "pending") return <StaleRevision d={d} />;
   if (a.state !== "pending") return null;
   // Merging into dev is decided after verification: until then there is nothing to approve.
   if (waitsForVerification) return <p className="warning page-section">{t("approvals.integrateWait")}</p>;
@@ -196,6 +203,7 @@ function Decision({ d, waitsForVerification }: { d: ApprovalDetail; waitsForVeri
   async function submit(approve: boolean, ev?: FormEvent) {
     ev?.preventDefault();
     setError(undefined);
+    setStale(false);
     if (!approve && comment.trim() === "") {
       setFieldError(t("validation.comment_required"));
       setError(t("form.summary", { count: 1 }));
@@ -207,6 +215,10 @@ function Decision({ d, waitsForVerification }: { d: ApprovalDetail; waitsForVeri
       await decide.mutateAsync({ approve, planRevision: a.planRevision, planHash: a.planHash, comment });
       notify(t(approve ? "approvals.approved" : "approvals.rejected"));
     } catch (err) {
+      if (isApiError(err, "stale_revision")) {
+        setStale(true);
+        return;
+      }
       if (isApiError(err, "validation") && err.field === "comment") {
         setFieldError(validationMessage(t, err.detail) ?? t("errors.unknown"));
         setError(t("form.summary", { count: 1 }));
@@ -220,7 +232,7 @@ function Decision({ d, waitsForVerification }: { d: ApprovalDetail; waitsForVeri
   return (
     <form noValidate className="card form-card page-section" aria-labelledby="decide-title" onSubmit={(e) => void submit(true, e)}>
       <h2 id="decide-title">{t("approvals.decideTitle")}</h2>
-      <FormAlert message={error} />
+      {stale ? <StaleRevision d={d} /> : <FormAlert message={error} />}
       <TextAreaField
         ref={ref}
         label={t("approvals.comment")}
@@ -239,10 +251,32 @@ function Decision({ d, waitsForVerification }: { d: ApprovalDetail; waitsForVeri
           {decide.isPending ? t("form.submitting") : t("approvals.approve", { number: a.planRevision })}
         </button>
         <button type="button" className="button danger" disabled={decide.isPending} onClick={() => void submit(false)}>
-          {t("approvals.reject")}
+          {t("approvals.reject", { number: a.planRevision })}
         </button>
       </div>
     </form>
+  );
+}
+
+/** A decision on a revision that is no longer current (409 stale_revision): say so and offer the current one. */
+function StaleRevision({ d }: { d: ApprovalDetail }) {
+  const { t } = useTranslation();
+  const current = d.related.find(
+    (r) => r.scope === "execute" && r.planRevision === d.task.planRevision && r.id !== d.approval.id && r.state === "pending",
+  );
+  return (
+    <div role="alert" className="card warn page-section">
+      <p>{t("approvals.staleTitle", { number: d.approval.planRevision })}</p>
+      {current ? (
+        <Link className="button primary" to={`/approvals/${encodeURIComponent(current.id)}`}>
+          {t("approvals.staleOpen", { number: current.planRevision })}
+        </Link>
+      ) : (
+        <Link className="button" to={`/tasks/${encodeURIComponent(d.task.id)}`}>
+          {t("approvals.staleTask")}
+        </Link>
+      )}
+    </div>
   );
 }
 

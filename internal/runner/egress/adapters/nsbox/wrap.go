@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	egress "github.com/tr1gl1de/kindevai/internal/runner/egress/app"
@@ -39,6 +40,45 @@ const StatusDir = "sandbox-status"
 // statusPath is where `sandbox-run` records that the sandbox of the run described at desc did not verify.
 func statusPath(dataDir, desc string) string {
 	return filepath.Join(dataDir, StatusDir, strings.TrimSuffix(filepath.Base(desc), ".json")+".unverified")
+}
+
+// statusVisible reports whether the status directory lies in a directory bound into the sandbox, as given or with
+// symlinks resolved on either side.
+func statusVisible(status string, binds []string) bool {
+	resolved := func(p string) []string {
+		out := []string{p}
+		if r, err := filepath.EvalSymlinks(p); err == nil && r != p {
+			out = append(out, r)
+		}
+		return out
+	}
+	for _, b := range binds {
+		if b == "" {
+			continue
+		}
+		for _, sp := range resolved(status) {
+			if withinAny(sp, resolved(b)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// statusMaxAge is how long a refusal status nobody read (the launcher died) is kept.
+const statusMaxAge = 24 * time.Hour
+
+// pruneStatus removes refusal statuses older than statusMaxAge.
+func pruneStatus(dir string, now time.Time) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range ents {
+		if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) > statusMaxAge {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 // recordUnverified writes the refusal status of the run described at desc (best effort: without it the run counts
@@ -104,12 +144,17 @@ func (m *Manager) Wrap(r egress.BoxRequest, argv, env []string, dir string) (str
 		return "", nil, nil, errors.New("no data directory for the sandbox status")
 	}
 	status := filepath.Join(m.DataDir, StatusDir)
-	if within(status, r.Dir) || r.Workdir != "" && within(status, r.Workdir) {
-		return "", nil, nil, errors.New("the sandbox status directory would be visible in the sandbox")
-	}
 	if err := os.MkdirAll(status, 0o700); err != nil {
 		return "", nil, nil, fmt.Errorf("creating the sandbox status directory: %w", err)
 	}
+	binds := []string{r.Dir, r.Workdir}
+	for _, hb := range r.HomeBinds {
+		binds = append(binds, hb.Source)
+	}
+	if statusVisible(status, binds) {
+		return "", nil, nil, errors.New("the sandbox status directory would be visible in the sandbox")
+	}
+	pruneStatus(status, time.Now())
 	rs := RunSpec{Request: r, Argv: argv, Env: env, Dir: dir, HelperArgs: m.Args, HelperEnv: m.Env,
 		DataDir: m.DataDir, Home: m.home(), Sockets: m.Sockets}
 	b, err := json.Marshal(rs)

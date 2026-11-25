@@ -190,6 +190,13 @@ func TestAlertObservedAt(t *testing.T) {
 	if !a.ObservedAfter(t0.Add(59*time.Second)) || a.Details["since"] != "newer" || a.Occurrences != 3 {
 		t.Fatalf("a late older occurrence replaced the newer one: %+v", a)
 	}
+	// An occurrence without a time (an older producer) keeps the alert's observation time.
+	if _, err := a.Recur(occ(domain.SeverityWarning), t0.Add(3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if !a.ObservedAfter(t0.Add(59 * time.Second)) {
+		t.Fatalf("an untimed occurrence dropped the observation time: %v", a.Details)
+	}
 	untimed, _ := domain.NewAlert("a2", occ(domain.SeverityWarning), t0)
 	if untimed.ObservedAfter(t0.Add(-time.Hour)) {
 		t.Fatal("an alert without an observation time is never newer")

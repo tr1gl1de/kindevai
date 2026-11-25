@@ -183,7 +183,15 @@ func (a *Alert) Recur(o Occurrence, now time.Time) (bool, error) {
 	if !o.ObservedAt.IsZero() && a.ObservedAfter(o.ObservedAt) {
 		return false, nil // older than what the alert shows already
 	}
-	a.Subject, a.Details = o.Subject, o.details()
+	d := o.details()
+	if prev, ok := a.Details[DetailObservedAt]; ok && o.ObservedAt.IsZero() {
+		d = maps.Clone(d) // an untimed occurrence keeps the latest observation time
+		if d == nil {
+			d = map[string]string{}
+		}
+		d[DetailObservedAt] = prev
+	}
+	a.Subject, a.Details = o.Subject, d
 	if o.Severity.rank() <= a.Severity.rank() && !o.Notify {
 		return false, nil
 	}

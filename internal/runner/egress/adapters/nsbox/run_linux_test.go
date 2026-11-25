@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	egress "github.com/tr1gl1de/kindevai/internal/runner/egress/app"
@@ -81,17 +82,57 @@ func TestWrapNeedsAHiddenStatusDirectory(t *testing.T) {
 	data := t.TempDir()
 	strict := egress.BoxRequest{Profile: protocol.NetworkProfile{Enforcement: "strict",
 		Proxy: &protocol.NetworkProxy{Scheme: "socks5", Host: "p", Port: 1}}}
+	link := filepath.Join(t.TempDir(), "attempt-link")
+	if err := os.Symlink(data, link); err != nil {
+		t.Fatal(err)
+	}
 	for name, c := range map[string]struct {
-		data, dir, workdir string
+		data, dir, workdir, home string
 	}{
-		"no data directory":          {"", t.TempDir(), ""},
-		"attempt is the data dir":    {data, data, ""},
-		"workdir holds the data dir": {data, t.TempDir(), filepath.Dir(data)},
+		"no data directory":          {"", t.TempDir(), "", ""},
+		"attempt is the data dir":    {data, data, "", ""},
+		"workdir holds the data dir": {data, t.TempDir(), filepath.Dir(data), ""},
+		"attempt links to it":        {data, link, "", ""},
+		"home bind holds it":         {data, t.TempDir(), "", data},
 	} {
 		r := strict
 		r.Dir, r.Workdir = c.dir, c.workdir
+		if c.home != "" {
+			r.HomeBinds = []egress.HomeBind{{Source: c.home, Rel: ".claude"}}
+		}
 		if _, _, _, err := (&Manager{Program: "/x", DataDir: c.data}).Wrap(r, []string{"/bin/true"}, nil, "/"); err == nil {
 			t.Errorf("%s: Wrap accepted it", name)
 		}
+	}
+}
+
+// KIN-88: refusal statuses nobody read (the launcher died) are pruned after a day.
+func TestWrapPrunesOldStatus(t *testing.T) {
+	t.Parallel()
+	data := t.TempDir()
+	dir := filepath.Join(data, StatusDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old, fresh := filepath.Join(dir, "old.unverified"), filepath.Join(dir, "fresh.unverified")
+	for _, p := range []string{old, fresh} {
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(old, past, past); err != nil {
+		t.Fatal(err)
+	}
+	r := egress.BoxRequest{Dir: t.TempDir(), Profile: protocol.NetworkProfile{Enforcement: "strict",
+		Proxy: &protocol.NetworkProxy{Scheme: "socks5", Host: "p", Port: 1}}}
+	if _, _, _, err := (&Manager{Program: "/x", DataDir: data}).Wrap(r, []string{"/bin/true"}, nil, "/"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatal("an old status was kept")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatal("a fresh status was pruned")
 	}
 }

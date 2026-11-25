@@ -181,42 +181,45 @@ func socketBase() string {
 	return "/tmp"
 }
 
-// staleAge is how old a socket directory without a socket must be before a sweep may remove it (one being created
-// has no socket yet).
+// staleAge is how long a socket directory must have been left unchanged before a sweep may remove it: one being
+// created has no socket yet, or a socket that is bound but not listening yet (it refuses connections like a dead
+// one; KIN-98). Binding the socket, or replacing it on a reattach, changes the directory.
 const staleAge = time.Minute
 
 // sweepStale removes adapter socket directories nobody serves any more, left by a launcher or runner that was
-// killed before it could clean up, and returns them: a socket that refuses connections, or no socket after
-// staleAge. A directory whose socket still accepts connections is in use.
+// killed before it could clean up, and returns them: unchanged for staleAge and with no socket or one that refuses
+// connections. A directory whose socket still accepts connections is in use.
 func sweepStale(base string, now time.Time) []string {
 	dirs, _ := filepath.Glob(filepath.Join(base, "kindev-egress-*"))
 	var removed []string
 	for _, d := range dirs {
 		fi, err := os.Lstat(d)
-		if err != nil || !fi.IsDir() {
-			continue
+		if err != nil || !fi.IsDir() || now.Sub(fi.ModTime()) < staleAge {
+			continue // gone, not ours, or being set up
 		}
-		sock := filepath.Join(d, "s")
-		if _, err := os.Lstat(sock); err != nil {
-			if now.Sub(fi.ModTime()) < staleAge {
-				continue // being created
-			}
-		} else {
-			dl := net.Dialer{Timeout: time.Second}
-			c, err := dl.DialContext(context.Background(), "unix", sock)
-			if err == nil {
-				_ = c.Close()
-				continue
-			}
-			if !errors.Is(err, syscall.ECONNREFUSED) {
-				continue // not provably abandoned
-			}
+		if sock := filepath.Join(d, "s"); exists(sock) && !refused(sock) {
+			continue // served, or not provably abandoned
 		}
 		if os.RemoveAll(d) == nil { // fails harmlessly for another user's directory (sticky /tmp)
 			removed = append(removed, d)
 		}
 	}
 	return removed
+}
+
+func exists(p string) bool {
+	_, err := os.Lstat(p)
+	return err == nil
+}
+
+// refused reports whether the socket sock refuses connections: nobody listens on it.
+func refused(sock string) bool {
+	dl := net.Dialer{Timeout: time.Second}
+	c, err := dl.DialContext(context.Background(), "unix", sock)
+	if err == nil {
+		_ = c.Close()
+	}
+	return errors.Is(err, syscall.ECONNREFUSED)
 }
 
 // Box is one attempt's sandbox: its proxy adapter, the runtime monitor of its egress and the helper's verdict pipe.

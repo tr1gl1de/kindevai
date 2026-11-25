@@ -6,6 +6,7 @@ import type { Runner } from "../../api/types";
 import { useProjects } from "../projects/api";
 import { ConfirmDialog } from "../../ui/ConfirmDialog";
 import { EmptyState, ErrorState, FormAlert, Loading, PageHeading } from "../../ui/feedback";
+import { TextField } from "../../ui/Field";
 import { errorMessage, validationMessage } from "../../ui/errors";
 import { formatDateTime } from "../../ui/format";
 import { useNotify } from "../../ui/notify";
@@ -109,6 +110,16 @@ function RunnerCard({ runner: r }: { runner: Runner }) {
       </section>
 
       {r.status !== "pending" && <CapabilitiesSection runner={r} />}
+
+      {r.status !== "revoked" && (
+        <ParallelStepsForm
+          runner={r}
+          busy={action.isPending}
+          onSubmit={(maxParallelSteps) => action.mutateAsync({ kind: "maxParallel", maxParallelSteps }).then(() => {
+            notify(t("runners.parallelSaved"));
+          })}
+        />
+      )}
 
       {r.status !== "revoked" && (
         <ProjectsForm
@@ -223,6 +234,76 @@ function ProjectsForm({ runner, busy, onSubmit }: { runner: Runner; busy: boolea
         </button>
       </div>
     </form>
+  );
+}
+
+/**
+ * The Owner's parallel-step limit of the runner (KIN-116). The scheduler applies the lower of it and the runner's own
+ * --max-parallel-steps; empty uses the flag, so the Owner can only lower what the machine's operator allowed.
+ */
+function ParallelStepsForm({ runner, busy, onSubmit }: { runner: Runner; busy: boolean; onSubmit: (n: number | null) => Promise<void> }) {
+  const { t } = useTranslation();
+  const [value, setValue] = useState(runner.maxParallelSteps ? String(runner.maxParallelSteps) : "");
+  const [error, setError] = useState<string>();
+  const flag = runner.capabilities?.maxParallelSteps;
+  const steps = (n: number) => (n > 0 ? t("runners.parallelSteps", { count: n }) : t("runners.parallelNoLimit"));
+
+  async function submit(ev: FormEvent) {
+    ev.preventDefault();
+    const v = value.trim();
+    const n = v === "" ? null : /^\d+$/.test(v) ? Number(v) : NaN;
+    if (n !== null && !(n >= 1 && n <= 64)) {
+      setError(t("runners.parallelInvalid"));
+      return;
+    }
+    setError(undefined);
+    try {
+      await onSubmit(n);
+    } catch (err) {
+      setError(isApiError(err, "validation") ? t("runners.parallelInvalid") : errorMessage(t, err));
+    }
+  }
+
+  return (
+    <section aria-labelledby="parallel-title" className="page-section">
+      <h2 id="parallel-title">{t("runners.parallelTitle")}</h2>
+      <p className="muted">{t("runners.parallelHint")}</p>
+      <dl className="details">
+        <dt>{t("runners.parallelFlag")}</dt>
+        <dd>
+          {flag === undefined ? (
+            t("runners.parallelFlagUnknown")
+          ) : flag > 0 ? (
+            <code>{`--max-parallel-steps ${flag}`}</code>
+          ) : (
+            t("runners.parallelNoLimit")
+          )}
+        </dd>
+        <dt>{t("runners.parallelEffective")}</dt>
+        <dd>{steps(runner.effectiveMaxParallelSteps ?? 0)}</dd>
+      </dl>
+      <form noValidate onSubmit={(e) => void submit(e)} className="card form-card">
+        <TextField
+          label={t("runners.parallelLabel")}
+          hint={t("runners.parallelFieldHint")}
+          error={error}
+          type="number"
+          inputMode="numeric"
+          min={1}
+          max={64}
+          value={value}
+          onChange={(e) => {
+            setValue(e.target.value);
+            setError(undefined);
+          }}
+        />
+        <div className="form-actions">
+          <button type="submit" className="button primary" disabled={busy}>
+            {busy ? t("form.submitting") : t("runners.parallelSave")}
+          </button>
+        </div>
+      </form>
+    </section>
   );
 }
 

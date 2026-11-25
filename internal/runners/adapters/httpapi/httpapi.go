@@ -70,6 +70,16 @@ type RunnerView struct {
 	Availability    string            `json:"availability"`
 	LastHeartbeatAt *time.Time        `json:"lastHeartbeatAt"`
 	Capabilities    *CapabilitiesView `json:"capabilities"`
+	// KIN-116: the Owner's parallel-step limit (null: the runner's --max-parallel-steps applies) and the limit the
+	// scheduler applies, the lower of it and the runner's reported flag (0: no limit).
+	MaxParallelSteps          *int `json:"maxParallelSteps"`
+	EffectiveMaxParallelSteps int  `json:"effectiveMaxParallelSteps"`
+}
+
+// MaxParallelStepsRequest is the body of PUT /api/runners/{id}/max-parallel-steps: 1..64, or null to use the
+// runner's own --max-parallel-steps (KIN-116).
+type MaxParallelStepsRequest struct {
+	MaxParallelSteps *int `json:"maxParallelSteps"`
 }
 
 // ProjectsRequest is the body of approve and PUT projects: the explicit, non-empty list of project ids.
@@ -93,6 +103,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/runners/{id}", h.get)
 	mux.HandleFunc("POST /api/runners/{id}/approve", h.withProjects(h.Service.Approve))
 	mux.HandleFunc("PUT /api/runners/{id}/projects", h.withProjects(h.Service.SetProjects))
+	mux.HandleFunc("PUT /api/runners/{id}/max-parallel-steps", h.setMaxParallelSteps)
 	mux.HandleFunc("POST /api/runners/{id}/disable", h.action(h.Service.Disable))
 	mux.HandleFunc("POST /api/runners/{id}/enable", h.action(h.Service.Enable))
 	mux.HandleFunc("POST /api/runners/{id}/revoke", h.action(h.Service.Revoke))
@@ -160,6 +171,10 @@ func runnerView(v app.RunnerView) RunnerView {
 	for _, p := range v.Projects {
 		out.Projects = append(out.Projects, ProjectRef(p))
 	}
+	if n := r.MaxParallelSteps; n > 0 {
+		out.MaxParallelSteps = &n
+	}
+	out.EffectiveMaxParallelSteps = r.MaxParallelSteps
 	return out
 }
 
@@ -264,6 +279,35 @@ func (h *Handler) withProjects(op projectsOp) http.HandlerFunc {
 		}
 		httpx.WriteJSON(w, http.StatusOK, withPresence(runnerView(v), h.presence(r.Context())))
 	}
+}
+
+// setMaxParallelSteps sets or clears the Owner's parallel-step limit of a runner (KIN-116).
+func (h *Handler) setMaxParallelSteps(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	if !p.Owner { // answer 403 before looking at the body
+		h.fail(w, domain.ErrForbidden)
+		return
+	}
+	var in MaxParallelStepsRequest
+	if !httpx.DecodeJSON(w, r, &in) {
+		return
+	}
+	n := 0
+	if in.MaxParallelSteps != nil {
+		if n = *in.MaxParallelSteps; n < 1 { // 0 would read as "cleared": clearing is null
+			h.fail(w, &domain.ValidationError{Field: "maxParallelSteps", Code: "out_of_range"})
+			return
+		}
+	}
+	v, err := h.Service.SetMaxParallelSteps(r.Context(), p, r.PathValue("id"), n)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, withPresence(runnerView(v), h.presence(r.Context())))
 }
 
 func (h *Handler) action(op runnerOp) http.HandlerFunc {

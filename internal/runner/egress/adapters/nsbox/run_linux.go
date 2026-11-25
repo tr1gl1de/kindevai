@@ -41,7 +41,7 @@ func RunMain(stderr io.Writer) int {
 	if err != nil {
 		return unverified(stderr, err)
 	}
-	m := &Manager{Program: exe, Args: rs.HelperArgs, Env: rs.HelperEnv, DataDir: rs.DataDir, Sockets: rs.Sockets}
+	m := &Manager{Program: exe, Args: rs.HelperArgs, Env: rs.HelperEnv, DataDir: rs.DataDir, Home: rs.Home, Sockets: rs.Sockets}
 	b, err := m.open(rs.Request)
 	if err != nil {
 		return unverified(stderr, err)

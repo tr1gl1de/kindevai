@@ -4,12 +4,15 @@
 //
 //   - brings up the namespace's own loopback, its only interface: there is no route to the host or anywhere else;
 //   - loads the nftables ruleset (domain.Ruleset) that rejects everything leaving that loopback, DNS included;
-//   - covers /run, /tmp, the WSL mounts and the runner's data directory with empty tmpfs mounts, so no host Unix
-//     socket (Docker daemon, D-Bus, WSL interop, other attempts' adapters) is reachable, and binds the attempt's
-//     worktree and state directory back;
+//   - pivots into a minimal filesystem view (fsview.go, KIN-80): the system directories read-only, the attempt's
+//     worktree and state directory, a private /tmp and HOME holding only the CLI's login files; the runner's
+//     HOME and data directory, /run (Docker, D-Bus, other attempts' adapters), the WSL mounts and Windows drives
+//     are simply absent;
 //   - forwards 127.0.0.1:<port> to the attempt's proxy adapter (a Unix socket the runner serves; it alone holds
 //     the upstream proxy and its credentials) and points HTTP(S)_PROXY/ALL_PROXY at it;
-//   - runs the preflight: every leak test must fail, the proxy path must work and the egress IP must match;
+//   - runs the preflight: every leak test must fail (network, host sockets, and the filesystem: the runner's HOME
+//     and data directory must be invisible, / and the system directories unwritable), the proxy path must work
+//     and the egress IP must match;
 //   - reports the verdict on fd 3 and only then starts the agent, in a nested user namespace without any
 //     capability (it cannot change the rules or the mounts).
 //
@@ -29,7 +32,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -47,8 +49,11 @@ type Spec struct {
 	Socket  string   `json:"socket"`  // the proxy adapter's Unix socket
 	Ruleset string   `json:"ruleset"` // nftables ruleset of the namespace
 	NFT     string   `json:"nft"`     // path of the nft binary
-	Hide    []string `json:"hide"`    // directories covered with an empty tmpfs
-	Keep    []string `json:"keep"`    // directories bound back inside hidden ones
+	Keep    []string `json:"keep"`    // directories bound read-write into the sandbox (state directory, worktree)
+	// Home and DataDir are the runner user's HOME and the runner's data directory: the preflight checks that
+	// nothing of them is visible but what the view places there.
+	Home    string `json:"home,omitempty"`
+	DataDir string `json:"dataDir,omitempty"`
 	// Sockets are host Unix sockets the leak test tries (besides the well-known ones).
 	Sockets []string `json:"sockets,omitempty"`
 	// Probe checks the proxy path and egress IP; nil in a self-test.
@@ -84,6 +89,8 @@ type Manager struct {
 	RunArgs []string
 	Env     []string // the helper's environment (empty: none)
 	DataDir string   // the runner's data directory, hidden from agents
+	// Home is the runner user's HOME, hidden from agents (os.UserHomeDir when empty).
+	Home string
 	// Sockets are extra host Unix sockets the leak test must not reach.
 	Sockets []string
 	Logger  *slog.Logger
@@ -125,23 +132,16 @@ func (m *Manager) nft() (string, error) {
 	return "", errors.New("nft not found")
 }
 
-// hidden are the host directories covered in every sandbox (those that exist).
-var hidden = []string{"/run", "/var/run", "/tmp", "/var/tmp", "/dev/shm", "/mnt/wsl", "/mnt/wslg"}
-
-func (m *Manager) hide() []string {
-	out := slices.Clone(hidden)
-	if m.DataDir != "" {
-		d := m.DataDir
-		if r, err := filepath.EvalSymlinks(d); err == nil {
-			d = r // hide the real directory, not a symlink to it
-		}
-		out = append(out, d)
+func (m *Manager) home() string {
+	if m.Home != "" {
+		return m.Home
 	}
-	return out
+	h, _ := os.UserHomeDir()
+	return h
 }
 
-// socketBase is where adapter sockets live: the user's runtime directory under /run, else /tmp. Both are hidden in
-// every sandbox, so an agent never sees another attempt's adapter (the helper refuses any other place).
+// socketBase is where adapter sockets live: the user's runtime directory under /run, else /tmp. Neither is part of
+// the sandbox's view, so an agent never sees another attempt's adapter.
 func socketBase() string {
 	if d := os.Getenv("XDG_RUNTIME_DIR"); strings.HasPrefix(d, "/run/") && len(d) < 64 {
 		if fi, err := os.Stat(d); err == nil && fi.IsDir() { //nolint:gosec // G703: the user's own runtime directory
@@ -247,7 +247,7 @@ func (m *Manager) open(r egress.BoxRequest) (*Box, error) {
 	if r.Workdir != "" {
 		keep = append(keep, r.Workdir)
 	}
-	b.spec = Spec{Socket: sock, Ruleset: rules, NFT: nft, Hide: m.hide(), Keep: keep, Sockets: m.Sockets,
+	b.spec = Spec{Socket: sock, Ruleset: rules, NFT: nft, Keep: keep, Home: m.home(), DataDir: m.DataDir, Sockets: m.Sockets,
 		Probe: &ProbeSpec{DiagnosticURL: p.DiagnosticURL, ExpectedIPv4: p.ExpectedIPv4, ExpectedIPv6: p.ExpectedIPv6},
 		UID:   os.Getuid(), GID: os.Getgid()}
 	return b, nil

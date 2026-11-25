@@ -112,6 +112,31 @@ func agentMain() int {
 		check("stdin-relayed", string(in) == want, string(in))
 	}
 	check("worktree-writable", os.WriteFile("agent-was-here", []byte("x"), 0o600) == nil, "")
+	if home := os.Getenv("HOME"); os.Getenv("HOME_SECRET") != "" { // the filesystem view (KIN-80)
+		_, err = os.ReadFile(os.Getenv("HOME_SECRET"))
+		check("home-hidden", err != nil, fmt.Sprint(err))
+		_, err = os.Stat(filepath.Join(home, ".claude", "history.jsonl"))
+		check("home-history-hidden", err != nil, "")
+		b, err := os.ReadFile(filepath.Join(home, ".claude", ".credentials.json"))
+		check("cli-login-copied", err == nil && string(b) == os.Getenv("CRED_WANT"), string(b))
+		check("home-private", os.WriteFile(filepath.Join(home, "agent-note"), []byte("x"), 0o600) == nil, "")
+		_, err = os.ReadFile(os.Getenv("RUNNER_KEY"))
+		check("runner-key-hidden", err != nil, "")
+		for _, d := range []string{"/", "/usr", "/etc", "/bin", filepath.Join(os.Getenv("MIRROR"), "objects")} {
+			err := os.WriteFile(filepath.Join(d, "agent-was-here"), []byte("x"), 0o600)
+			check("readonly "+d, err != nil, fmt.Sprint(err))
+		}
+		_, err = os.ReadFile(filepath.Join(os.Getenv("MIRROR"), "HEAD"))
+		check("mirror-readable", err == nil, fmt.Sprint(err))
+		check("admin-writable", os.WriteFile(filepath.Join(os.Getenv("ADMIN"), "index"), []byte("x"), 0o600) == nil, "")
+		_, err = os.ReadDir(os.Getenv("OTHER_REPO"))
+		check("other-repo-hidden", err != nil, "")
+		_, err = os.Stat("/mnt/c")
+		check("windows-drive-hidden", err != nil, "")
+		if r := os.Getenv("REFRESHED"); r != "" {
+			_ = os.WriteFile(filepath.Join(home, ".claude", ".credentials.json"), []byte(r), 0o600)
+		}
+	}
 	return fail
 }
 
@@ -182,7 +207,17 @@ type fixture struct {
 	last    *Box
 	sibling string // another attempt's adapter socket
 	secret  string // a file in the runner's data directory
+	home    string // the runner user's HOME (and the CLI's)
+	key     string // the runner's Ed25519 key
+	mirror  string // the worktree's repository mirror
+	admin   string // the worktree's administrative directory in the mirror
+	other   string // another project's mirror
 }
+
+const (
+	credOrig      = `{"claudeAiOauth":{"accessToken":"a1","refreshToken":"r1","expiresAt":1}}`
+	credRefreshed = `{"claudeAiOauth":{"accessToken":"a2","refreshToken":"r2","expiresAt":2}}`
+)
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
@@ -224,6 +259,31 @@ func newFixture(t *testing.T) *fixture {
 	if err := os.WriteFile(f.secret, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The runner user's HOME, with the CLI's login, an SSH key and history the agent must not see.
+	f.home = filepath.Join(t.TempDir(), "home", "runner")
+	m.Home = f.home
+	f.key = filepath.Join(data, "keys", "ed25519.pem")
+	f.mirror = filepath.Join(data, "repos", "o", "n.git")
+	f.admin = filepath.Join(f.mirror, "worktrees", "w")
+	f.other = filepath.Join(data, "repos", "x", "other.git")
+	for p, c := range map[string]string{
+		filepath.Join(f.home, ".ssh", "id_ed25519"):           "ssh key",
+		filepath.Join(f.home, ".claude", ".credentials.json"): credOrig,
+		filepath.Join(f.home, ".claude", "history.jsonl"):     "history",
+		f.key:                           "runner key",
+		filepath.Join(f.mirror, "HEAD"): "ref: refs/heads/main\n",
+		filepath.Join(f.mirror, "objects", "pack", "p"): "objects",
+		filepath.Join(f.admin, "gitdir"):                filepath.Join(f.workdir, ".git") + "\n",
+		filepath.Join(f.workdir, ".git"):                "gitdir: " + f.admin + "\n",
+		filepath.Join(f.other, "HEAD"):                  "ref: refs/heads/main\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(c), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return f
 }
 
@@ -254,7 +314,10 @@ func (f *fixture) run(t *testing.T, p protocol.NetworkProfile) (error, string, e
 	}
 	cmd, err := b.Command([]string{agent}, []string{"KINDEV_NSBOX_AGENT=1", "HOST_SOCKET=" + f.socket,
 		"DIAG_URL=" + f.diag, "HOST_PID=" + strconv.Itoa(os.Getpid()),
-		"SIBLING_SOCKET=" + f.sibling, "RUNNER_SECRET=" + f.secret, "SSH_AUTH_SOCK=/tmp/agent.sock"}, f.workdir)
+		"SIBLING_SOCKET=" + f.sibling, "RUNNER_SECRET=" + f.secret, "SSH_AUTH_SOCK=/tmp/agent.sock",
+		"HOME=" + f.home, "HOME_SECRET=" + filepath.Join(f.home, ".ssh", "id_ed25519"), "CRED_WANT=" + credOrig,
+		"REFRESHED=" + credRefreshed, "RUNNER_KEY=" + f.key, "MIRROR=" + f.mirror, "ADMIN=" + f.admin,
+		"OTHER_REPO=" + f.other}, f.workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,10 +347,26 @@ func TestSandboxVerifiesThenConfinesTheAgent(t *testing.T) {
 	for _, want := range []string{"ok no-capabilities", "ok direct-tcp-blocked", "ok host-socket-hidden", "ok run-hidden",
 		"ok through-proxy", "ok host-processes-hidden",
 		"ok signals-not-ignored", "ok vsock-refused", "ok sibling-adapter-hidden", "ok runner-data-hidden",
-		"ok helper-not-readable", "ok worktree-writable"} {
+		"ok helper-not-readable", "ok worktree-writable", "ok home-hidden", "ok home-history-hidden",
+		"ok cli-login-copied", "ok home-private", "ok runner-key-hidden", "ok readonly /", "ok readonly /usr",
+		"ok readonly /etc", "ok readonly " + filepath.Join(f.mirror, "objects"), "ok mirror-readable", "ok admin-writable",
+		"ok other-repo-hidden", "ok windows-drive-hidden"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in\n%s", want, out)
 		}
+	}
+	// Nothing the agent wrote outside the worktree reached the host, but its refreshed CLI login did.
+	if _, err := os.Stat(filepath.Join(f.home, "agent-note")); !os.IsNotExist(err) {
+		t.Errorf("the agent's private HOME leaked to the host: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(f.mirror, "objects", "agent-was-here")); !os.IsNotExist(err) {
+		t.Errorf("the agent wrote into the shared mirror: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(f.admin, "index")); string(b) != "x" {
+		t.Errorf("the worktree's index was not writable: %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(f.home, ".claude", ".credentials.json")); string(b) != credRefreshed {
+		t.Errorf("the refreshed CLI login was not written back: %s", b)
 	}
 	if _, err := os.Stat(filepath.Join(f.workdir, "agent-was-here")); err != nil {
 		t.Fatalf("the agent's write did not reach the real worktree: %v", err)

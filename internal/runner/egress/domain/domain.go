@@ -151,10 +151,15 @@ const (
 	LeakNoProxy = "http_ignore_proxy" // an HTTP request by a tool that ignores HTTP_PROXY
 	LeakUnix    = "unix_socket"       // a host Unix socket (Docker daemon, D-Bus, WSL interop)
 	LeakVsock   = "vsock"             // an AF_VSOCK socket (the WSL2/Hyper-V host channel, outside any netns)
+	// Filesystem leak tests (KIN-80): the path that was visible or written is the Target.
+	LeakFSHome  = "fs_home"     // a file of the runner user's HOME outside the CLI's login files
+	LeakFSData  = "fs_data_dir" // the runner's data directory (its Ed25519 key, other attempts, mirrors)
+	LeakFSWrite = "fs_write"    // a write to / or a system directory (only the worktree and scratch space are writable)
 )
 
 // LeakTests is every leak test, in report order.
-var LeakTests = []string{LeakTCP4, LeakTCP6, LeakDNS, LeakNoProxy, LeakUnix, LeakVsock}
+var LeakTests = []string{LeakTCP4, LeakTCP6, LeakDNS, LeakNoProxy, LeakUnix, LeakVsock, LeakFSHome, LeakFSData,
+	LeakFSWrite}
 
 // Stable failure codes of a sandbox verdict.
 const (

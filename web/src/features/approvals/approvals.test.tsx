@@ -4,7 +4,7 @@ import { http } from "msw";
 import { describe, expect, it } from "vitest";
 import type { Approval, ApprovalDetail, Me, PlanRevision, Project, RiskPolicy } from "../../api/types";
 import { apiError, json, owner, server } from "../../test/msw";
-import { expectAccessible, expectStatus, renderApp } from "../../test/render";
+import { expectAccessible, expectStatus, fill, renderApp } from "../../test/render";
 
 const H1 = "1".repeat(64);
 const H2 = "2".repeat(64);
@@ -100,7 +100,7 @@ describe("approval center (owner)", () => {
     expect(within(others).getByText("Merge into dev")).toBeInTheDocument();
     await expectAccessible(container);
 
-    await user.type(screen.getByLabelText("Comment"), "migration reviewed");
+    await fill(user, screen.getByLabelText("Comment"), "migration reviewed");
     await user.click(screen.getByRole("button", { name: "Approve revision 2" }));
     await expectStatus("Approved.");
     expect(body).toEqual({ planRevision: 2, planHash: H2, comment: "migration reviewed" });
@@ -128,7 +128,7 @@ describe("approval center (owner)", () => {
     expect(comment).toHaveFocus();
     expect(calls).toBe(0);
 
-    await user.type(comment, "split the migration");
+    await fill(user, comment, "split the migration");
     await user.click(screen.getByRole("button", { name: "Reject" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(/newer plan revision/i);
     expect(calls).toBe(1);
@@ -239,7 +239,7 @@ describe("project risk policy", () => {
     expect(paths).toHaveAttribute("aria-invalid", "true");
 
     await user.clear(paths);
-    await user.type(paths, "billing/**");
+    await fill(user, paths, "billing/**");
     await user.selectOptions(within(section).getByLabelText("Paths: minimum risk"), "L3");
     await user.click(within(section).getByRole("button", { name: "Save risk policy" }));
     await expectStatus("Risk policy saved.");

@@ -4,7 +4,7 @@ import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 import type { Me, Project, YouTrackConnection } from "../../api/types";
 import { json, owner, server } from "../../test/msw";
-import { expectAccessible, expectStatus, renderApp } from "../../test/render";
+import { expectAccessible, expectStatus, fill, renderApp } from "../../test/render";
 import type { IntakeSettings, ProjectYouTrack } from "./intakeApi";
 
 const member: Me = { id: "u2", login: "alice", role: "user", mustChangePassword: false };
@@ -90,11 +90,11 @@ describe("YouTrack intake settings (owner)", () => {
     const poll = screen.getByRole("form", { name: "Polling" });
     const interval = within(poll).getByLabelText("Poll interval, seconds");
     await user.clear(interval);
-    await user.type(interval, "5");
+    await fill(user, interval, "5");
     await user.click(within(poll).getByRole("button", { name: "Save interval" }));
     expect(interval).toHaveAttribute("aria-invalid", "true");
     await user.clear(interval);
-    await user.type(interval, "120");
+    await fill(user, interval, "120");
     await user.click(within(poll).getByRole("button", { name: "Save interval" }));
     await expectStatus("Poll interval saved.");
 
@@ -110,12 +110,12 @@ describe("YouTrack intake settings (owner)", () => {
     expect(await screen.findByText(/Webhook enabled, secret updated/)).toBeInTheDocument();
 
     const link = screen.getByRole("form", { name: "Link user" });
-    await user.type(within(link).getByLabelText("Platform login"), "alice");
-    await user.type(within(link).getByLabelText("YouTrack login"), "taken");
+    await fill(user, within(link).getByLabelText("Platform login"), "alice");
+    await fill(user, within(link).getByLabelText("YouTrack login"), "taken");
     await user.click(within(link).getByRole("button", { name: "Link user" }));
     expect(await within(link).findByText("This YouTrack login is already linked to another account.")).toBeInTheDocument();
     await user.clear(within(link).getByLabelText("YouTrack login"));
-    await user.type(within(link).getByLabelText("YouTrack login"), "a.smith");
+    await fill(user, within(link).getByLabelText("YouTrack login"), "a.smith");
     await user.click(within(link).getByRole("button", { name: "Link user" }));
     await expectStatus("alice is linked to YouTrack login a.smith.");
     await user.click(await screen.findByRole("button", { name: "Unlink alice" }));
@@ -161,11 +161,11 @@ describe("project YouTrack panel", () => {
     const form = screen.getByRole("form", { name: "Run by issue ID" });
     await user.click(within(form).getByRole("button", { name: "Run" }));
     expect(within(form).getByLabelText("Issue ID")).toHaveFocus();
-    await user.type(within(form).getByLabelText("Issue ID"), "X-1");
+    await fill(user, within(form).getByLabelText("Issue ID"), "X-1");
     await user.click(within(form).getByRole("button", { name: "Run" }));
     expect(await within(form).findByText("This issue belongs to another YouTrack project than the one linked here.")).toBeInTheDocument();
     await user.clear(within(form).getByLabelText("Issue ID"));
-    await user.type(within(form).getByLabelText("Issue ID"), "KIN-5");
+    await fill(user, within(form).getByLabelText("Issue ID"), "KIN-5");
     await user.click(within(form).getByRole("button", { name: "Run" }));
     await expectStatus("KIN-5 queued. It appears below once YouTrack answers.");
     expect(await screen.findByText("Queued")).toBeInTheDocument();
@@ -213,7 +213,7 @@ describe("project YouTrack panel", () => {
     await user.click(screen.getByRole("button", { name: "Save tag" }));
     expect(await screen.findByText(/Use up to 50 letters/)).toBeInTheDocument();
     await user.clear(screen.getByLabelText("Trigger tag"));
-    await user.type(screen.getByLabelText("Trigger tag"), "ai run");
+    await fill(user, screen.getByLabelText("Trigger tag"), "ai run");
     await user.click(screen.getByRole("button", { name: "Save tag" }));
     await expectStatus("Trigger tag saved.");
     expect(await screen.findByText("Issues of YouTrack project KIN tagged “ai run” become tasks.")).toBeInTheDocument();

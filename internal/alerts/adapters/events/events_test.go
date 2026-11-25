@@ -51,6 +51,9 @@ func newEnv(t *testing.T) *env {
 	if _, err := d.ExecContext(t.Context(), "INSERT INTO projects(id, slug, name, created_at) VALUES ('p1', 'alpha', 'Alpha', 'x')"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := d.ExecContext(t.Context(), "INSERT INTO users(id, login, password_hash, platform_role, created_at) VALUES ('u1', 'owner', 'h', 'owner', 'x')"); err != nil {
+		t.Fatal(err)
+	}
 	e := &env{repo: alertsdb.New(d)}
 	ids := 0
 	e.h = events.Handlers{Svc: &app.Service{Repo: e.repo, Projects: nobody{}, People: nobody{}, Approvals: nobody{},
@@ -273,5 +276,50 @@ func TestCLIHeldEscalatesAndResolves(t *testing.T) {
 		if err := e.deliver(t, fn, "x", map[string]any{"runnerId": "r1"}); !messaging.IsPermanent(err) {
 			t.Fatalf("incomplete event: %v", err)
 		}
+	}
+}
+
+// KIN-88: outbox deliveries of different keys may reorder. A cli_ready observed before the alert's last cli_held
+// (event times in the payloads) does not resolve it; a later one does. Parking the hold (already critical) notifies
+// again: an acknowledged alert opens again.
+func TestCLIReadyOlderThanTheLastHoldKeepsTheAlert(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	t0 := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	key := events.CLIDedupKey("r1", "claude")
+	held := func(strikes int, parked bool, at time.Time) {
+		t.Helper()
+		if err := e.deliver(t, e.h.CLIHeld, "alerts.cli_held", map[string]any{"runnerId": "r1", "agent": "claude",
+			"cause": "auth", "strikes": strikes, "escalated": strikes >= 3, "parked": parked,
+			"at": at.Format(time.RFC3339Nano)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ready := func(at time.Time) {
+		t.Helper()
+		if err := e.deliver(t, e.h.CLIReady, "alerts.cli_ready", map[string]any{"runnerId": "r1", "agent": "claude",
+			"at": at.Format(time.RFC3339Nano)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	held(3, false, t0.Add(time.Hour))
+	a, _ := e.active(t, key)
+	if err := a.Acknowledge("u1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.repo.Save(t.Context(), a); err != nil {
+		t.Fatal(err)
+	}
+	held(4, true, t0.Add(2*time.Hour))
+	if a, ok := e.active(t, key); !ok || a.State != domain.StateOpen || a.Details["parked"] != "true" {
+		t.Fatalf("parked alert %+v %v", a, ok)
+	}
+	ready(t0) // the success that preceded the holds, delivered late
+	if _, ok := e.active(t, key); !ok {
+		t.Fatal("a stale cli_ready resolved the alert")
+	}
+	ready(t0.Add(3 * time.Hour))
+	if _, ok := e.active(t, key); ok {
+		t.Fatal("the Owner's ready did not resolve the alert")
 	}
 }

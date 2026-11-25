@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runner/egress/adapters/nsbox"
@@ -62,9 +61,11 @@ func (c cliSandbox) Wrap(ctx context.Context, cmd cliagent.Command) (cliagent.Co
 	return cliagent.Command{Path: path, Args: args, Env: env, Dir: cmd.Dir}, nil
 }
 
-// Refused reports a run that `sandbox-run` ended because its sandbox did not verify: exit nsbox.ExitUnverified
-// with nsbox.UnverifiedMarker on stderr (a CLI that merely exits 121 is a CLI error). The run fails with code
+// Refused reports a run that `sandbox-run` ended because its sandbox did not verify: exit nsbox.ExitUnverified and
+// the refusal it recorded, before the CLI could start, in the runner's data directory, which the confined CLI cannot
+// write (KIN-88; a CLI that exits 121 and prints nsbox.UnverifiedMarker is a CLI error). The run fails with code
 // network and the step waits for the network (KIN-31, KIN-83).
-func (c cliSandbox) Refused(exit domain.Exit, stderrTail string) bool {
-	return !exit.Signaled && exit.Code == nsbox.ExitUnverified && strings.Contains(stderrTail, nsbox.UnverifiedMarker)
+func (c cliSandbox) Refused(wrapped cliagent.Command, exit domain.Exit) bool {
+	recorded := c.boxes.Refused(wrapped.Env) // read once, and removed, whatever the exit
+	return recorded && !exit.Signaled && exit.Code == nsbox.ExitUnverified
 }

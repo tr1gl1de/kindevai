@@ -246,7 +246,7 @@ type End struct {
 	TimedOut   bool
 	Cancelled  string // the cancel reason; empty when not cancelled
 	// SandboxRefused: the strict egress sandbox did not verify and the CLI never started (the launcher's sandbox
-	// recognised its own exit, KIN-31).
+	// recognised its own refusal, KIN-31, on a signal the CLI cannot forge, KIN-88).
 	SandboxRefused bool
 }
 

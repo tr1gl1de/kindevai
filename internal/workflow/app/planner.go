@@ -520,6 +520,12 @@ func (s *Service) RecordPlanningReport(ctx context.Context, stepID, runnerID str
 // that is no valid plan queues the repeat with the reason, or FAILS the task after the last attempt.
 func (s *Service) CompletePlanningAttempt(ctx context.Context, stepID, runnerID string, fence int64) error {
 	return s.updatePlanningAttempt(ctx, stepID, runnerID, fence, func(ctx context.Context, run *domain.PlanningRun, now time.Time) error {
+		// The planner's CLI answered: it works on that runner, like a successful step (KIN-88), whatever the answer.
+		if s.CLILimits != nil && run.Agent != "" {
+			if err := s.CLILimits.CLIWorked(ctx, runnerID, run.Agent); err != nil {
+				return err
+			}
+		}
 		if run.Kind == domain.PlanningKindDiscussion {
 			return s.completeDiscussion(ctx, run, now)
 		}

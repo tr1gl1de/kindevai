@@ -5,7 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
+	"strings"
+	"syscall"
+	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	egress "github.com/tr1gl1de/kindevai/internal/runner/egress/app"
@@ -17,6 +21,9 @@ import (
 // `ai-runner sandbox-run` (RunMain), runs on the host: it starts the run's proxy adapter, builds the sandbox like
 // Box does, waits for the verdict and, once verified, relays the agent's stdin, output, signals and exit status.
 // An unverified sandbox ends it with ExitUnverified, and UnverifiedMarker on stderr, before the agent ever starts.
+// It also records the refusal in a status file the confined CLI cannot write (KIN-88): in StatusDir under the
+// runner's data directory, which is hidden in the sandbox (only the attempt's state directory and the worktree are
+// bound into it). The launcher believes that file, never the exit code or stderr a CLI could imitate (Refused).
 
 // RunEnv carries the path of the run's description to `ai-runner sandbox-run`, which reads and deletes the file
 // first thing. The description holds the upstream proxy credentials and the CLI's environment, so it never
@@ -26,6 +33,90 @@ const RunEnv = "KINDEV_SANDBOX_RUN"
 // UnverifiedMarker is the stderr line `sandbox-run` writes before exiting with ExitUnverified: the launcher tells
 // "the sandbox did not verify" (the step waits for the network) from a CLI that happened to exit with that code.
 const UnverifiedMarker = "kindev: strict egress sandbox not verified"
+
+// StatusDir is the directory under the runner's data directory that holds the refusal status of wrapped runs.
+const StatusDir = "sandbox-status"
+
+// statusPath is where `sandbox-run` records that the sandbox of the run described at desc did not verify.
+func statusPath(dataDir, desc string) string {
+	return filepath.Join(dataDir, StatusDir, strings.TrimSuffix(filepath.Base(desc), ".json")+".unverified")
+}
+
+// statusVisible reports whether the status directory lies in a directory bound into the sandbox, as given or with
+// symlinks resolved on either side.
+func statusVisible(status string, binds []string) bool {
+	resolved := func(p string) []string {
+		out := []string{p}
+		if r, err := filepath.EvalSymlinks(p); err == nil && r != p {
+			out = append(out, r)
+		}
+		return out
+	}
+	for _, b := range binds {
+		if b == "" {
+			continue
+		}
+		for _, sp := range resolved(status) {
+			if withinAny(sp, resolved(b)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// statusMaxAge is how long a refusal status nobody read (the launcher died) is kept.
+const statusMaxAge = 24 * time.Hour
+
+// pruneStatus removes refusal statuses older than statusMaxAge.
+func pruneStatus(dir string, now time.Time) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range ents {
+		if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) > statusMaxAge {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
+}
+
+// recordUnverified writes the refusal status of the run described at desc (best effort: without it the run counts
+// as a CLI error, never as a verified run).
+func recordUnverified(dataDir, desc string) {
+	if dataDir == "" || !filepath.IsAbs(dataDir) || desc == "" {
+		return
+	}
+	p := statusPath(dataDir, desc)
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return
+	}
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600) //nolint:gosec // G304: the runner's own data directory
+	if err == nil {
+		_ = f.Close()
+	}
+}
+
+// Refused reports, once, that the wrapped run with environment env (Wrap's) ended because its sandbox did not
+// verify: `sandbox-run` recorded it before any CLI could start. The status is removed as it is read.
+func (m *Manager) Refused(env []string) bool {
+	desc := ""
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, RunEnv+"="); ok {
+			desc = v
+		}
+	}
+	if desc == "" || !filepath.IsAbs(desc) || m.DataDir == "" {
+		return false
+	}
+	p := statusPath(m.DataDir, desc)
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return false
+	}
+	_ = os.Remove(p)
+	return fi.Mode().IsRegular()
+}
 
 // RunSpec is the description of a wrapped run.
 type RunSpec struct {
@@ -49,6 +140,21 @@ func (m *Manager) Wrap(r egress.BoxRequest, argv, env []string, dir string) (str
 	if !profileStrict(r.Profile) {
 		return "", nil, nil, errors.New("not a strict profile with a proxy")
 	}
+	if m.DataDir == "" || !filepath.IsAbs(m.DataDir) {
+		return "", nil, nil, errors.New("no data directory for the sandbox status")
+	}
+	status := filepath.Join(m.DataDir, StatusDir)
+	if err := os.MkdirAll(status, 0o700); err != nil {
+		return "", nil, nil, fmt.Errorf("creating the sandbox status directory: %w", err)
+	}
+	binds := []string{r.Dir, r.Workdir}
+	for _, hb := range r.HomeBinds {
+		binds = append(binds, hb.Source)
+	}
+	if statusVisible(status, binds) {
+		return "", nil, nil, errors.New("the sandbox status directory would be visible in the sandbox")
+	}
+	pruneStatus(status, time.Now())
 	rs := RunSpec{Request: r, Argv: argv, Env: env, Dir: dir, HelperArgs: m.Args, HelperEnv: m.Env,
 		DataDir: m.DataDir, Home: m.home(), Sockets: m.Sockets}
 	b, err := json.Marshal(rs)

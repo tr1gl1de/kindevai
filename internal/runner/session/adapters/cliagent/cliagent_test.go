@@ -486,16 +486,20 @@ func TestStartValidates(t *testing.T) {
 }
 
 // refusingSandbox ends the wrapped command like `ai-runner sandbox-run` whose sandbox did not verify: a marker on
-// stderr and exit code 121, the CLI never started.
-type refusingSandbox struct{ marker string }
+// stderr and exit code 121, the CLI never started. recorded is the launcher's own signal (KIN-88: the status the
+// CLI cannot write); it is told the wrapped command, which carries the run's environment.
+type refusingSandbox struct {
+	marker   string
+	recorded bool
+}
 
 func (refusingSandbox) StrictEgress(context.Context) bool { return true }
 func (s refusingSandbox) Wrap(_ context.Context, c Command) (Command, error) {
 	return Command{Path: "/bin/sh", Args: []string{"-c", "echo \"$0: egress ip mismatch\" >&2; exit 121", s.marker},
-		Env: c.Env, Dir: c.Dir}, nil
+		Env: append(c.Env, "KINDEV_SANDBOX_RUN=/state/run.json"), Dir: c.Dir}, nil
 }
-func (s refusingSandbox) Refused(exit domain.Exit, stderrTail string) bool {
-	return exit.Code == 121 && strings.Contains(stderrTail, "kindev: strict egress sandbox not verified")
+func (s refusingSandbox) Refused(wrapped Command, exit domain.Exit) bool {
+	return exit.Code == 121 && s.recorded && slices.Contains(wrapped.Env, "KINDEV_SANDBOX_RUN=/state/run.json")
 }
 
 // KIN-31 follow-up (KIN-83): a CLI run whose strict egress sandbox did not verify fails with code network (the step
@@ -503,16 +507,21 @@ func (s refusingSandbox) Refused(exit domain.Exit, stderrTail string) bool {
 // error.
 func TestUnverifiedSandboxFailsWithNetwork(t *testing.T) {
 	t.Parallel()
-	for marker, want := range map[string]domain.FailureCode{
-		"kindev: strict egress sandbox not verified": domain.FailureNetwork,
-		"some CLI": domain.FailureCLI,
+	for _, c := range []struct {
+		sb   refusingSandbox
+		want domain.FailureCode
+	}{
+		{refusingSandbox{marker: "kindev: strict egress sandbox not verified", recorded: true}, domain.FailureNetwork},
+		// KIN-88: a CLI printing the marker and exiting 121 is not the sandbox refusing.
+		{refusingSandbox{marker: "kindev: strict egress sandbox not verified"}, domain.FailureCLI},
+		{refusingSandbox{marker: "some CLI"}, domain.FailureCLI},
 	} {
 		f := newFixture(t)
 		a := f.adapter(Claude{})
-		a.Config.Sandbox = refusingSandbox{marker: marker}
+		a.Config.Sandbox = c.sb
 		res := waitResult(t, start(t, a, f.request(domain.AgentClaude), Hooks{}))
-		if res.Failure == nil || res.Failure.Code != want || res.Exit.Code != 121 {
-			t.Fatalf("%s: result %+v %+v, want %s", marker, res, res.Failure, want)
+		if res.Failure == nil || res.Failure.Code != c.want || res.Exit.Code != 121 {
+			t.Fatalf("%+v: result %+v %+v, want %s", c.sb, res, res.Failure, c.want)
 		}
 	}
 }

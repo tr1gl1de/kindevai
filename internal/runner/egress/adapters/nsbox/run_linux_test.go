@@ -7,6 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/tr1gl1de/kindevai/internal/protocol"
+	egress "github.com/tr1gl1de/kindevai/internal/runner/egress/app"
 )
 
 // A launcher without a usable run description starts nothing.
@@ -32,5 +36,103 @@ func TestRelayedKeepsReservedCodes(t *testing.T) {
 		if got := relayed(in); got != want {
 			t.Errorf("relayed(%d) = %d, want %d", in, got, want)
 		}
+	}
+}
+
+// KIN-88: a sandbox that does not verify is recorded where the confined CLI cannot write (a status file in the
+// runner's data directory, outside every directory bound into the sandbox), written before any CLI could start;
+// the launcher reads it once. Without it an exit 121 is the CLI's own.
+func TestRunMainRecordsTheRefusalOutsideTheSandbox(t *testing.T) { // not parallel: t.Setenv
+	data := t.TempDir()
+	attempt := filepath.Join(data, "attempts", "a1")
+	if err := os.MkdirAll(attempt, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{Program: "/x", DataDir: data}
+	desc := filepath.Join(attempt, "sandbox-run-1.json")
+	raw := `{"request":{"dir":"` + attempt + `","profile":{"enforcement":"none"}},"argv":["/bin/true"],"dataDir":"` + data + `"}`
+	if err := os.WriteFile(desc, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"HOME=/h", RunEnv + "=" + desc}
+	if m.Refused(env) {
+		t.Fatal("refused before the run")
+	}
+	t.Setenv(RunEnv, desc)
+	if code := RunMain(io.Discard); code != ExitUnverified {
+		t.Fatalf("exit %d, want %d", code, ExitUnverified)
+	}
+	if left, _ := filepath.Glob(filepath.Join(attempt, "*")); len(left) != 0 {
+		t.Fatalf("the refusal is visible in the attempt directory: %v", left)
+	}
+	if !m.Refused(env) {
+		t.Fatal("the refusal was not recorded")
+	}
+	if m.Refused(env) {
+		t.Fatal("the refusal was read twice")
+	}
+	if m.Refused([]string{RunEnv + "=relative.json"}) || m.Refused(nil) {
+		t.Fatal("refused without a run description")
+	}
+}
+
+// KIN-88: Wrap refuses when the refusal status would be visible inside the sandbox (or there is no data directory).
+func TestWrapNeedsAHiddenStatusDirectory(t *testing.T) {
+	t.Parallel()
+	data := t.TempDir()
+	strict := egress.BoxRequest{Profile: protocol.NetworkProfile{Enforcement: "strict",
+		Proxy: &protocol.NetworkProxy{Scheme: "socks5", Host: "p", Port: 1}}}
+	link := filepath.Join(t.TempDir(), "attempt-link")
+	if err := os.Symlink(data, link); err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]struct {
+		data, dir, workdir, home string
+	}{
+		"no data directory":          {"", t.TempDir(), "", ""},
+		"attempt is the data dir":    {data, data, "", ""},
+		"workdir holds the data dir": {data, t.TempDir(), filepath.Dir(data), ""},
+		"attempt links to it":        {data, link, "", ""},
+		"home bind holds it":         {data, t.TempDir(), "", data},
+	} {
+		r := strict
+		r.Dir, r.Workdir = c.dir, c.workdir
+		if c.home != "" {
+			r.HomeBinds = []egress.HomeBind{{Source: c.home, Rel: ".claude"}}
+		}
+		if _, _, _, err := (&Manager{Program: "/x", DataDir: c.data}).Wrap(r, []string{"/bin/true"}, nil, "/"); err == nil {
+			t.Errorf("%s: Wrap accepted it", name)
+		}
+	}
+}
+
+// KIN-88: refusal statuses nobody read (the launcher died) are pruned after a day.
+func TestWrapPrunesOldStatus(t *testing.T) {
+	t.Parallel()
+	data := t.TempDir()
+	dir := filepath.Join(data, StatusDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old, fresh := filepath.Join(dir, "old.unverified"), filepath.Join(dir, "fresh.unverified")
+	for _, p := range []string{old, fresh} {
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(old, past, past); err != nil {
+		t.Fatal(err)
+	}
+	r := egress.BoxRequest{Dir: t.TempDir(), Profile: protocol.NetworkProfile{Enforcement: "strict",
+		Proxy: &protocol.NetworkProxy{Scheme: "socks5", Host: "p", Port: 1}}}
+	if _, _, _, err := (&Manager{Program: "/x", DataDir: data}).Wrap(r, []string{"/bin/true"}, nil, "/"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatal("an old status was kept")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatal("a fresh status was pruned")
 	}
 }

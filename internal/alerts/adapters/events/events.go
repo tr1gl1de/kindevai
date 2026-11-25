@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -367,9 +368,10 @@ func (h Handlers) TaskUnblocked(ctx context.Context, d messaging.Delivery) error
 // CLIDedupKey groups a runner's CLI hold alerts until it works again or the Owner marks it ready (KIN-83).
 func CLIDedupKey(runnerID, agent string) string { return "cli/" + runnerID + "/" + agent }
 
-// CLIHeld handles alerts.cli_held {runnerId, agent, cause, strikes, escalated, parked, until}: a platform alert
+// CLIHeld handles alerts.cli_held {runnerId, agent, cause, strikes, escalated, parked, until, at}: a platform alert
 // naming the runner and the CLI; escalated (EscalateAfter holds of the same cause in a row) it is critical and
-// notifies again.
+// notifies again, and a parked hold (no more automatic retries) notifies once more (KIN-88). at is when routing
+// decided the hold.
 func (h Handlers) CLIHeld(ctx context.Context, d messaging.Delivery) error {
 	var p struct {
 		RunnerID  string `json:"runnerId"`
@@ -379,6 +381,7 @@ func (h Handlers) CLIHeld(ctx context.Context, d messaging.Delivery) error {
 		Escalated bool   `json:"escalated"`
 		Parked    bool   `json:"parked"`
 		Until     string `json:"until"`
+		At        string `json:"at"`
 	}
 	if err := decode(d, &p); err != nil {
 		return err
@@ -391,16 +394,20 @@ func (h Handlers) CLIHeld(ctx context.Context, d messaging.Delivery) error {
 		sev = domain.SeverityCritical
 	}
 	return permanent(h.Svc.Raise(ctx, d.Key, domain.Occurrence{Kind: domain.KindCLIHeld, Severity: sev,
+		ObservedAt: eventTime(p.At), Notify: p.Parked,
 		DedupKey: CLIDedupKey(clip(p.RunnerID), clip(p.Agent)), Subject: clip(p.Agent + " @ " + p.RunnerID),
 		Details: map[string]string{"runnerId": clip(p.RunnerID), "agent": clip(p.Agent), "cause": clip(p.Cause),
 			"strikes": strconv.Itoa(p.Strikes), "parked": strconv.FormatBool(p.Parked), "until": clip(p.Until)}}))
 }
 
-// CLIReady handles alerts.cli_ready {runnerId, agent}: the CLI worked again or the Owner marked it ready.
+// CLIReady handles alerts.cli_ready {runnerId, agent, at}: the CLI worked again or the Owner marked it ready. A
+// cli_ready observed before the alert's last cli_held (outbox deliveries of different keys may reorder) leaves it
+// active (KIN-88).
 func (h Handlers) CLIReady(ctx context.Context, d messaging.Delivery) error {
 	var p struct {
 		RunnerID string `json:"runnerId"`
 		Agent    string `json:"agent"`
+		At       string `json:"at"`
 	}
 	if err := decode(d, &p); err != nil {
 		return err
@@ -408,7 +415,17 @@ func (h Handlers) CLIReady(ctx context.Context, d messaging.Delivery) error {
 	if p.RunnerID == "" || p.Agent == "" {
 		return messaging.Permanent(errors.New("cli_ready: no runnerId or agent"))
 	}
-	return h.Svc.ResolveKey(ctx, CLIDedupKey(clip(p.RunnerID), clip(p.Agent)))
+	return h.Svc.ResolveKeyObservedAt(ctx, CLIDedupKey(clip(p.RunnerID), clip(p.Agent)), eventTime(p.At))
+}
+
+// eventTime parses an event's RFC 3339 time; a missing or malformed one is zero (unknown: the event applies as
+// before KIN-88).
+func eventTime(s string) time.Time {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // clip bounds a free-form value from a monitor to what an alert stores (domain.Occurrence rejects longer values).

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -525,5 +526,28 @@ func TestPlanningOnALoggedOutCLIWaitsForTheOwner(t *testing.T) {
 	e.clock.Add(2 * time.Hour)
 	if e.schedule(t); len(e.disp.takeAssigned()) != 0 {
 		t.Fatal("a parked planner was assigned again")
+	}
+}
+
+// KIN-88: a planner's CLI that answered worked, like a successful step: routing ends the runner+CLI hold streak
+// (CLIWorked), whether or not the answer is a valid plan.
+func TestSuccessfulPlannerRunClearsTheCLIHold(t *testing.T) {
+	t.Parallel()
+	e := newPlannerEnv()
+	e.pool.set("p1", cliRunner("r1", "claude"))
+	task := e.newTask(t, "")
+	a := e.plan(t, task.ID)
+	if err := e.answer(t, a, "r1", "s", "no plan here"); err != nil {
+		t.Fatal(err)
+	}
+	a = e.assigned(t)
+	if err := e.answer(t, a, "r1", "s", goodPlan); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(e.limits.worked, []string{"r1 claude", "r1 claude"}) {
+		t.Fatalf("worked %v", e.limits.worked)
+	}
+	if got := e.task(t, task.ID); got.PlanRevision != 1 {
+		t.Fatalf("task %+v", got)
 	}
 }

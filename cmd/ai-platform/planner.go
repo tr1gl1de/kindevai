@@ -15,10 +15,12 @@ import (
 )
 
 // wirePlanner turns on the planner step (KIN-34): planning runs are stored with the workflow, and a task linked to a
-// YouTrack issue gets its context package (issue text, linked Knowledge Base articles) read by an outbox handler.
+// YouTrack issue gets its context package (issue text, linked Knowledge Base articles) read by an outbox handler; the
+// plan discussion (KIN-43) keeps its messages with the workflow and runs its turns as planner attempts.
 // Call it before msg.start.
 func wirePlanner(wf *workflowapp.Service, inst *bootstrap.Installation, msg *messagingModule, integ *integrationsModule) {
 	wf.Planning = workflowdb.New(inst.DB)
+	wf.Discussion = workflowdb.New(inst.DB)
 	wf.IssueContext = plannerContext{reader: integrationsapp.IssueContextReader{Settings: integ.Service.YouTrackSettings,
 		Source: &youtrack.Client{}}}
 	msg.Outbox.Handle(workflowapp.TopicPlanningContext, wf.HandlePlanningContext)

@@ -114,6 +114,10 @@ type Service struct {
 	// context package from the outbox handler (with Outbox); nil: planners get the task title only.
 	Planning     PlanningRepository
 	IssueContext IssueContextSource
+	// Discussion stores the plan discussion (KIN-43; with Planning); nil: the plan chat is off. Audit records its
+	// messages, answers and limits (KIN-16); nil: not audited.
+	Discussion DiscussionRepository
+	Audit      AuditLog
 }
 
 // Pause reports whether the scheduler must not hand out new work (maintenance mode, KIN-41). Running attempts

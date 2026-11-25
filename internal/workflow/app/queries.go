@@ -150,7 +150,7 @@ func (s *Service) TaskDetail(ctx context.Context, p auth.Principal, id string) (
 		return TaskDetail{}, err
 	}
 	if s.Planning != nil {
-		run, err := s.Planning.LatestPlanningRun(ctx, t.ID)
+		run, err := s.Planning.LatestPlanRun(ctx, t.ID)
 		switch {
 		case err == nil:
 			d.Planning = &run

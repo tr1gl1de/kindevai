@@ -93,3 +93,38 @@ func TestPlanningRunsRoundTripWithOneActiveRunPerTask(t *testing.T) {
 		t.Fatalf("latest %+v %v", l, err)
 	}
 }
+
+// KIN-85: the auto-start cap counts a project's runs created since a time.
+func TestPlanningRunsSinceCountsTheProjectsRecentRuns(t *testing.T) {
+	t.Parallel()
+	d, _ := testDB(t)
+	ctx := t.Context()
+	if _, err := d.ExecContext(ctx, "INSERT INTO projects(id, slug, name, created_at) VALUES ('p2', 'beta', 'Beta', 'x')"); err != nil {
+		t.Fatal(err)
+	}
+	repo := sqlite.New(d)
+	add := func(project, id string, at time.Time) {
+		t.Helper()
+		task, err := domain.NewTask("T"+id, project, "Login "+id, "", "u1", t0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.CreateTask(ctx, &task); err != nil {
+			t.Fatal(err)
+		}
+		r := domain.NewPlanningRun(id, task.ID, "u1", false, at)
+		if err := repo.CreatePlanningRun(ctx, &r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("p1", "old", t0.Add(-2*time.Hour))
+	add("p1", "a", t0)
+	add("p1", "b", t0.Add(time.Minute))
+	add("p2", "other", t0)
+	if n, err := repo.PlanningRunsSince(ctx, "p1", t0); err != nil || n != 2 {
+		t.Fatalf("p1: %d %v", n, err)
+	}
+	if n, err := repo.PlanningRunsSince(ctx, "p2", t0.Add(time.Second)); err != nil || n != 0 {
+		t.Fatalf("p2: %d %v", n, err)
+	}
+}

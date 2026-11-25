@@ -85,8 +85,9 @@ func ytIssue(id string, updated int64, reporter string, tags ...string) string {
 }
 
 type memTasks struct {
-	mu     sync.Mutex
-	issues map[string]string
+	mu      sync.Mutex
+	issues  map[string]string
+	planned int // AutoStartPlanning calls
 }
 
 func (m *memTasks) TaskForIssue(_ context.Context, p, i string) (string, bool, error) {
@@ -106,10 +107,21 @@ func (m *memTasks) CreateIssueTask(_ context.Context, p, i, _, _ string) (string
 
 func (m *memTasks) RetitleTask(context.Context, string, string) (bool, error) { return false, nil }
 
+func (m *memTasks) AutoStartPlanning(context.Context, string, string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.planned++
+	return app.AutoPlanStarted, nil
+}
+
 // owner1 may start AI in p1; bob1 may not.
 type memAccess struct{}
 
 func (memAccess) CanRunAI(_ context.Context, projectID, userID string) (bool, error) {
+	return projectID == "p1" && userID == "owner1", nil
+}
+
+func (memAccess) CanManageAI(_ context.Context, projectID, userID string) (bool, error) {
 	return projectID == "p1" && userID == "owner1", nil
 }
 
@@ -370,5 +382,26 @@ func TestIntakeSettingsAPI(t *testing.T) {
 	}
 	if w := e.do(t, "owner", "DELETE", "/api/integrations/youtrack/webhook", nil); w.Code != http.StatusNoContent {
 		t.Fatalf("delete webhook: %d", w.Code)
+	}
+}
+
+// KIN-85: PUT /api/projects/{id}/integrations/youtrack/autoplan switches automatic planning; the project view shows it.
+func TestAutoPlanAPI(t *testing.T) {
+	t.Parallel()
+	e := newIntakeEnv(t)
+	path := "/api/projects/p1/integrations/youtrack/autoplan"
+	if w := e.do(t, "bob", "PUT", path, AutoPlanRequest{AutoPlan: true}); w.Code != http.StatusNotFound {
+		t.Fatalf("outsider: %d", w.Code)
+	}
+	if w := e.do(t, "owner", "PUT", "/api/projects/p2/integrations/youtrack/autoplan", AutoPlanRequest{AutoPlan: true}); w.Code != http.StatusConflict {
+		t.Fatalf("unbound: %d", w.Code)
+	}
+	w := e.do(t, "owner", "PUT", path, AutoPlanRequest{AutoPlan: true})
+	if w.Code != http.StatusOK || !decode[Binding](t, w).AutoPlan {
+		t.Fatalf("on: %d %s", w.Code, w.Body)
+	}
+	w = e.do(t, "owner", "GET", "/api/projects/p1/youtrack", nil)
+	if v := decode[ProjectYouTrack](t, w); v.Binding == nil || !v.Binding.AutoPlan {
+		t.Fatalf("view: %s", w.Body)
 	}
 }

@@ -153,3 +153,40 @@ func TestIntakeRecords(t *testing.T) {
 		t.Fatalf("recent %+v, %v", recent, err)
 	}
 }
+
+// KIN-85: auto-planning is off for a new binding, saved per project and kept when the binding is saved again.
+func TestBindingAutoPlan(t *testing.T) {
+	t.Parallel()
+	d := testDB(t)
+	r := sqlite.New(d)
+	ctx := t.Context()
+	if err := r.SetAutoPlan(ctx, "p1", true, t0); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("unbound: %v", err)
+	}
+	for _, p := range []string{"p1", "p2"} {
+		if err := r.SetProjectYouTrack(ctx, p, "K"+p, t0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if b, _ := r.Binding(ctx, "p1"); b.AutoPlan {
+		t.Fatal("on by default")
+	}
+	if err := r.SetAutoPlan(ctx, "p1", true, t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetProjectYouTrack(ctx, "p1", "KP1", t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := r.BindingByShortName(ctx, "KP1"); !b.AutoPlan {
+		t.Fatalf("not saved: %+v", b)
+	}
+	if b, _ := r.Binding(ctx, "p2"); b.AutoPlan {
+		t.Fatal("another project changed")
+	}
+	if err := r.SetAutoPlan(ctx, "p1", false, t0); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := r.Binding(ctx, "p1"); b.AutoPlan {
+		t.Fatal("not turned off")
+	}
+}

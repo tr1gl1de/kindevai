@@ -35,7 +35,7 @@ func TestIntakeTasksAdapterOnTheWorkflowContext(t *testing.T) {
 		}
 	}
 	integ := &integrationsapp.Service{Store: integrationsdb.New(d)}
-	tasks := intakeTasks{&workflowapp.Service{Repo: workflowdb.New(d), Tx: db.Transactor{DB: d}, Now: time.Now, NewID: rand.Text,
+	tasks := intakeTasks{wf: &workflowapp.Service{Repo: workflowdb.New(d), Tx: db.Transactor{DB: d}, Now: time.Now, NewID: rand.Text,
 		Projects: workflowProjects{projects: &projectsapp.Service{Repo: projectsdb.New(d)}, integrations: integ}}}
 	ctx := t.Context()
 	if _, found, err := tasks.TaskForIssue(ctx, "p1", "KIN-1"); err != nil || found {
@@ -53,5 +53,18 @@ func TestIntakeTasksAdapterOnTheWorkflowContext(t *testing.T) {
 	}
 	if _, err := tasks.CreateIssueTask(ctx, "missing", "KIN-2", "KIN-2: x", "u1"); err == nil {
 		t.Fatal("task for an unknown project")
+	}
+	// KIN-85: without the planner wired the task is not planned; with it the first start runs, a second does not.
+	if out, err := tasks.AutoStartPlanning(ctx, id, "u1"); err != nil || out == integrationsapp.AutoPlanStarted {
+		t.Fatalf("without planner: %q %v", out, err)
+	}
+	planner := *tasks.wf
+	planner.Planning = workflowdb.New(d)
+	tasks.planner = &planner
+	if out, err := tasks.AutoStartPlanning(ctx, id, "u1"); err != nil || out != integrationsapp.AutoPlanStarted {
+		t.Fatalf("auto-start: %q %v", out, err)
+	}
+	if out, err := tasks.AutoStartPlanning(ctx, id, "u1"); err != nil || out == integrationsapp.AutoPlanStarted {
+		t.Fatalf("second auto-start: %q %v", out, err)
 	}
 }

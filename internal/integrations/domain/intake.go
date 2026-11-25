@@ -116,6 +116,7 @@ type Binding struct {
 	TriggerTag   string
 	Cursor       int64      // the newest issue `updated` (Unix ms) polling has handed to the inbox; 0 = from the start
 	LastPolledAt *time.Time // last successful poll of this binding
+	AutoPlan     bool       // KIN-85: tasks the intake creates go to the AI planner at once (default off)
 }
 
 // Wants reports whether the binding takes the issue: it belongs to the bound YouTrack project and carries the

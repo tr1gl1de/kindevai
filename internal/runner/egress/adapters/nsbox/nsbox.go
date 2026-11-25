@@ -32,6 +32,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
@@ -150,27 +151,42 @@ func socketBase() string {
 	return "/tmp"
 }
 
-// staleAge is how old a socket directory must be before a sweep may remove it (one being created has no
-// listener yet).
+// staleAge is how old a socket directory without a socket must be before a sweep may remove it (one being created
+// has no socket yet).
 const staleAge = time.Minute
 
-// sweepStale removes adapter socket directories nobody serves any more: left by a launcher or runner that was
-// killed before it could clean up. A directory whose socket still accepts connections is in use.
-func sweepStale(base string, now time.Time) {
+// sweepStale removes adapter socket directories nobody serves any more, left by a launcher or runner that was
+// killed before it could clean up, and returns them: a socket that refuses connections, or no socket after
+// staleAge. A directory whose socket still accepts connections is in use.
+func sweepStale(base string, now time.Time) []string {
 	dirs, _ := filepath.Glob(filepath.Join(base, "kindev-egress-*"))
+	var removed []string
 	for _, d := range dirs {
 		fi, err := os.Lstat(d)
-		if err != nil || !fi.IsDir() || now.Sub(fi.ModTime()) < staleAge {
+		if err != nil || !fi.IsDir() {
 			continue
 		}
-		dl := net.Dialer{Timeout: 200 * time.Millisecond}
-		c, err := dl.DialContext(context.Background(), "unix", filepath.Join(d, "s"))
-		if err == nil {
-			_ = c.Close()
-			continue
+		sock := filepath.Join(d, "s")
+		if _, err := os.Lstat(sock); err != nil {
+			if now.Sub(fi.ModTime()) < staleAge {
+				continue // being created
+			}
+		} else {
+			dl := net.Dialer{Timeout: time.Second}
+			c, err := dl.DialContext(context.Background(), "unix", sock)
+			if err == nil {
+				_ = c.Close()
+				continue
+			}
+			if !errors.Is(err, syscall.ECONNREFUSED) {
+				continue // not provably abandoned
+			}
 		}
-		_ = os.RemoveAll(d) // fails harmlessly for another user's directory (sticky /tmp)
+		if os.RemoveAll(d) == nil { // fails harmlessly for another user's directory (sticky /tmp)
+			removed = append(removed, d)
+		}
 	}
+	return removed
 }
 
 // Box is one attempt's sandbox: its proxy adapter and the helper's verdict pipe.

@@ -172,3 +172,49 @@ func (l workflowAttemptLog) AttemptEvents(ctx context.Context, stepID string, fe
 	}
 	return out, nil
 }
+
+// AttemptWorkspace decodes the attempt's latest workspace reports (KIN-70) — the same recorded events the scope check
+// reads. A missing or unreadable body is no report. Paths and hashes stay the runner's untrusted text.
+func (l workflowAttemptLog) AttemptWorkspace(ctx context.Context, stepID string, fence int64) (workflowapp.AttemptWorkspace, error) {
+	var out workflowapp.AttemptWorkspace
+	var p protocol.WorkspacePrepared
+	at, ok, err := l.latest(ctx, stepID, fence, protocol.EventWorkspacePrepared, &p)
+	if err != nil {
+		return out, err
+	}
+	if ok {
+		v := &workflowapp.WorkspacePrepared{At: at, Repository: p.Repository, Branch: p.Branch, Base: p.Base, BaseSHA: p.BaseSHA,
+			Instructions: make([]workflowapp.InstructionFile, 0, len(p.Instructions)), InstructionsTruncated: p.InstructionsTruncated}
+		for _, f := range p.Instructions {
+			v.Instructions = append(v.Instructions, workflowapp.InstructionFile(f))
+		}
+		out.Prepared = v
+	}
+	var c protocol.WorkspaceChanges
+	at, ok, err = l.latest(ctx, stepID, fence, protocol.EventWorkspaceChanges, &c)
+	if err != nil {
+		return out, err
+	}
+	if ok {
+		v := &workflowapp.WorkspaceChanges{At: at, Branch: c.Branch, BaseSHA: c.BaseSHA, HeadSHA: c.HeadSHA,
+			Files: make([]workflowapp.ChangedFile, 0, len(c.Files)), FilesTotal: c.FilesTotal, Truncated: c.Truncated,
+			InstructionsChanged: make([]workflowapp.InstructionChange, 0, len(c.InstructionsChanged))}
+		for _, f := range c.Files {
+			v.Files = append(v.Files, workflowapp.ChangedFile(f))
+		}
+		for _, f := range c.InstructionsChanged {
+			v.InstructionsChanged = append(v.InstructionsChanged, workflowapp.InstructionChange(f))
+		}
+		out.Changes = v
+	}
+	return out, nil
+}
+
+// latest decodes the attempt's newest event of the kind into body; ok is false when there is none or it is unreadable.
+func (l workflowAttemptLog) latest(ctx context.Context, stepID string, fence int64, kind string, body any) (time.Time, bool, error) {
+	e, ok, err := l.log.Latest(ctx, stepID, fence, kind)
+	if err != nil || !ok || e.Body == nil || json.Unmarshal(e.Body, body) != nil {
+		return time.Time{}, false, err
+	}
+	return e.RunnerAt, true, nil
+}

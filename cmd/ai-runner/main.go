@@ -349,6 +349,8 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	if home, err := os.UserHomeDir(); err == nil {  // KIN-79 CLI agents (set before Recover)
 		x.Agents = cliAgents(home, exec.LookPath, logger)
 	}
+	strict := strictEgress(d, exe, logger) // KIN-31: strict profiles run only in a verified sandbox
+	x.Egress = confiner{strict}            // before Recover: adopted strict attempts get their adapter back (KIN-81)
 	if err := x.Recover(ctx); err != nil {
 		return fmt.Errorf("recovering running attempts: %w", err)
 	}
@@ -356,8 +358,6 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	agent.Context = ctx
 	x.KnownSecrets = agent.Secrets // KIN-77: proxy passwords are masked in attempt output
 	ch.Commands = withNetwork(agent, ch.Commands)
-	strict := strictEgress(d, exe, logger) // KIN-31: strict profiles run only in a verified sandbox
-	x.Egress = confiner{strict}
 	pr := probe.New(d.Path())
 	pr.StrictEgress = func(ctx context.Context) bool { ok, _ := strict.Supported(ctx); return ok }
 	rep := &app.Reporter{Probe: pr} // KIN-20 heartbeat, capabilities, storage

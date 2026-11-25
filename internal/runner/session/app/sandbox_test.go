@@ -17,7 +17,14 @@ import (
 type fakeSandbox struct {
 	mu       sync.Mutex
 	released int
+	endpoint string
+	fault    chan string
+	summary  string
 }
+
+func (s *fakeSandbox) Endpoint() string     { return s.endpoint }
+func (s *fakeSandbox) Fault() <-chan string { return s.fault }
+func (s *fakeSandbox) Summary() string      { return s.summary }
 
 func (s *fakeSandbox) Command([]string, []string, string) (*exec.Cmd, error) {
 	return nil, errors.New("unused")
@@ -39,6 +46,20 @@ type fakeConfiner struct {
 	box *fakeSandbox
 	err error
 	got []domain.Assignment
+
+	mu         sync.Mutex
+	reattach   *fakeSandbox // what Reattach returns (nil: an error)
+	reattached []domain.Record
+}
+
+func (c *fakeConfiner) Reattach(_ context.Context, rec domain.Record, _ string) (Sandbox, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reattached = append(c.reattached, rec)
+	if c.reattach == nil {
+		return nil, errors.New("the adapter socket directory is gone")
+	}
+	return c.reattach, nil
 }
 
 func (c *fakeConfiner) Confine(_ context.Context, a domain.Assignment, _, _ string) (Sandbox, error) {

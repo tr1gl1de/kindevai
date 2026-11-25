@@ -29,6 +29,9 @@ func (s *stubSandbox) Command(argv, env []string, dir string) (*exec.Cmd, error)
 }
 func (s *stubSandbox) Await(context.Context) error { return s.verdict }
 func (s *stubSandbox) Release()                    {}
+func (s *stubSandbox) Endpoint() string            { return "" }
+func (s *stubSandbox) Fault() <-chan string        { return nil }
+func (s *stubSandbox) Summary() string             { return "" }
 
 func TestLaunchRunsThroughTheSandbox(t *testing.T) {
 	t.Parallel()

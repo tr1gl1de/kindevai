@@ -138,6 +138,24 @@ func (c confiner) Confine(ctx context.Context, a sessiondomain.Assignment, dir, 
 	return sb, nil
 }
 
+// Reattach serves the sandbox of an attempt adopted after a restart again (KIN-81), with the profile of its project
+// and CLI role.
+func (c confiner) Reattach(ctx context.Context, rec sessiondomain.Record, dir string) (sessionapp.Sandbox, error) {
+	if rec.Sandbox == nil {
+		return nil, errors.New("the attempt has no sandbox")
+	}
+	b, err := c.s.Reattach(ctx, rec.Project, rec.Sandbox.Role, dir, rec.Sandbox.Endpoint)
+	if err != nil {
+		return nil, err
+	}
+	sb, ok := b.(sessionapp.Sandbox)
+	if !ok {
+		b.Release()
+		return nil, errors.New("the sandbox cannot be monitored")
+	}
+	return sb, nil
+}
+
 // printStrictEgress reports whether this machine can enforce strict egress, and why not.
 func printStrictEgress(ctx context.Context, w io.Writer, s *egress.Sandboxes) {
 	if ok, why := s.Supported(ctx); ok {

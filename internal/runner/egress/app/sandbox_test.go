@@ -53,6 +53,19 @@ type fakeBoxes struct {
 	support int
 	opened  []BoxRequest
 	err     error
+	// reattached: the requests and endpoints Reattach got
+	reattached []BoxRequest
+	endpoints  []string
+}
+
+func (f *fakeBoxes) Reattach(_ context.Context, r BoxRequest, endpoint string) (Box, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.reattached, f.endpoints = append(f.reattached, r), append(f.endpoints, endpoint)
+	return &fakeBox{}, nil
 }
 
 func (f *fakeBoxes) Open(_ context.Context, r BoxRequest) (Box, error) {
@@ -152,5 +165,44 @@ func TestSupportedIsCached(t *testing.T) {
 	b.ok, b.why = false, "self-test failed"
 	if ok, why := s.Supported(t.Context()); ok || why != "self-test failed" || b.support != 2 {
 		t.Fatalf("after MaxAge: %v %q (runs %d)", ok, why, b.support)
+	}
+}
+
+// KIN-81: a restarted runner serves an adopted strict attempt's adapter again, with the attempt's current profile
+// from the stored configuration (no self-test: the sandbox already verified); anything else fails closed.
+func TestReattach(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	t.Run("strict: the adapter is served again at the endpoint", func(t *testing.T) {
+		t.Parallel()
+		b := &fakeBoxes{}
+		box, err := (&Sandboxes{Config: config("strict"), Boxes: b}).Reattach(ctx, "p", "claude", "/d", "/run/x/s")
+		if err != nil || box == nil {
+			t.Fatalf("box %v, err %v", box, err)
+		}
+		if len(b.endpoints) != 1 || b.endpoints[0] != "/run/x/s" || b.reattached[0].Profile.Enforcement != "strict" ||
+			b.reattached[0].Dir != "/d" {
+			t.Fatalf("reattached %+v at %v", b.reattached, b.endpoints)
+		}
+		if b.support != 0 {
+			t.Fatal("a self-test sandbox ran before the adapter was back")
+		}
+	})
+	for _, tc := range []struct {
+		name string
+		cfg  func() (protocol.ConfigUpdate, bool, error)
+		err  error
+	}{
+		{"no longer strict", config("monitor"), nil},
+		{"no configuration", func() (protocol.ConfigUpdate, bool, error) { return protocol.ConfigUpdate{}, false, nil }, nil},
+		{"the adapter cannot be served", config("strict"), errors.New("socket directory gone")},
+	} {
+		t.Run(tc.name+" fails closed", func(t *testing.T) {
+			t.Parallel()
+			b := &fakeBoxes{err: tc.err}
+			if box, err := (&Sandboxes{Config: tc.cfg, Boxes: b}).Reattach(ctx, "p", "", "/d", "/run/x/s"); box != nil || err == nil {
+				t.Fatalf("box %v, err %v", box, err)
+			}
+		})
 	}
 }

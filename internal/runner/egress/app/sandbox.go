@@ -68,6 +68,9 @@ type Boxes interface {
 	Open(ctx context.Context, r BoxRequest) (Box, error)
 	// Support runs the platform checks and the self-test sandbox: ok, or why not.
 	Support(ctx context.Context) (bool, string)
+	// Reattach serves the proxy adapter of a sandbox built by an earlier runner process again at endpoint (its
+	// socket, which the sandbox's forwarder dials), with r's profile (KIN-81).
+	Reattach(ctx context.Context, r BoxRequest, endpoint string) (Box, error)
 }
 
 // ErrUnsupported: the profile is strict and this runner cannot enforce it (fail-closed: the attempt does not run).
@@ -155,6 +158,30 @@ func (s *Sandboxes) Confine(ctx context.Context, project, role, dir, workdir str
 	b, err := s.Boxes.Open(ctx, BoxRequest{Dir: dir, Workdir: workdir, Profile: p})
 	if err != nil {
 		return nil, fmt.Errorf("building the strict egress sandbox: %w", err)
+	}
+	return b, nil
+}
+
+// Reattach serves the sandbox of an attempt adopted after a runner restart again (KIN-81): the attempt's proxy
+// adapter lived in the old runner process, so the sandbox has no way out until it is back at endpoint. The profile
+// is the attempt's current one from the stored configuration; one that is no longer strict, or no configuration,
+// fails closed (the caller stops the attempt). No self-test runs first: the sandbox verified when it was built, and
+// a self-test would sweep the adapter's socket directory as abandoned.
+func (s *Sandboxes) Reattach(ctx context.Context, project, role, dir, endpoint string) (Box, error) {
+	cu, ok, err := s.Config()
+	if err != nil {
+		return nil, fmt.Errorf("reading the network configuration: %w", err)
+	}
+	if !ok {
+		return nil, errors.New("no network configuration stored")
+	}
+	p := ProfileFor(cu.Network, project, role)
+	if p.Enforcement != domain.EnforcementStrict {
+		return nil, errors.New("the attempt's network profile is no longer strict")
+	}
+	b, err := s.Boxes.Reattach(ctx, BoxRequest{Dir: dir, Profile: p}, endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("serving the strict egress adapter again: %w", err)
 	}
 	return b, nil
 }

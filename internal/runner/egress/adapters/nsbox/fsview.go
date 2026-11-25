@@ -17,7 +17,8 @@ import (
 //     (no service configuration of the host: /etc/<service> may hold tokens the runner's uid can read);
 //   - its own /dev (null, zero, full, random, urandom, tty), /proc, /tmp, /var/tmp and /dev/shm;
 //   - the agent's HOME: a private tmpfs with copies of the CLI's login files (domain.CLIHomeFiles), never copied
-//     back;
+//     back, and the task's CLI session store bound read-write where the CLI keeps its sessions (Spec.HomeBinds,
+//     KIN-86);
 //   - the attempt's worktree and state directory, read-write;
 //   - of the worktree's repository mirror only mirrorEntries, read-only, and the worktree's own administrative
 //     directory (index, HEAD) read-write;

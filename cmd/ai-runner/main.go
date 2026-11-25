@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/term"
 
@@ -54,6 +55,8 @@ type env struct {
 	readSecret     func(prompt string) (string, error)
 	defaultDataDir string
 	hostname       func() (string, error)
+	// lookPath finds a CLI (exec.LookPath when nil).
+	lookPath func(string) (string, error)
 }
 
 func main() {
@@ -115,11 +118,17 @@ commands:
   fingerprint  print the key fingerprint to compare with the runner's card in Dashboard -> Runners
   run          run the daemon (systemd/launchd services start this)
   test-network check the proxy, egress IP and required endpoints with the network profile from the Control Plane
+  cli-login    log an AI CLI in for this runner, in its CLI home (--cli-home):
+               ai-runner cli-login claude   store the long-lived token from ` + "`claude setup-token`" + ` (prompt or stdin)
+               ai-runner cli-login codex [-- <codex login flags>]   run ` + "`codex login`" + ` with HOME=<cli home>
+               ai-runner cli-login status   show what each CLI is logged in with
   version      print the version
 
 common flags:
   --data-dir   runner data directory (default /var/lib/kindevai-runner as root,
                ~/.local/share/kindevai-runner otherwise)
+  --cli-home   (run, cli-login) the AI CLIs' HOME, where their logins live (default $KINDEV_RUNNER_CLI_HOME,
+               else the runner user's HOME); outside the data directory
 `
 
 func run(ctx context.Context, args []string, e *env) error {
@@ -161,6 +170,8 @@ func run(ctx context.Context, args []string, e *env) error {
 		return nil
 	case "test-network":
 		return testNetwork(ctx, args[1:], e)
+	case "cli-login":
+		return cliLogin(ctx, args[1:], e)
 	case "version":
 		fmt.Fprintf(e.stdout, "ai-runner %s %s/%s\n", version, runtime.GOOS, runtime.GOARCH)
 		return nil
@@ -253,28 +264,34 @@ func enroll(ctx context.Context, args []string, e *env) error {
 
 // readToken takes the token from --token-file (owner-only), the no-echo prompt on a terminal, or stdin.
 func readToken(path string, e *env) (domain.Token, error) {
-	var raw string
+	raw, err := readSecretInput(path, "Enrollment token (input hidden): ", e)
+	if err != nil {
+		return domain.Token{}, err
+	}
+	return domain.ParseToken(raw)
+}
+
+// readSecretInput reads a secret from path (owner-only), the no-echo prompt on a terminal, or one line of stdin.
+func readSecretInput(path, prompt string, e *env) (string, error) {
 	switch {
 	case path != "":
 		b, err := secfile.ReadPrivate(path, maxTokenInput)
 		if err != nil {
-			return domain.Token{}, fmt.Errorf("token file: %w", err)
+			return "", fmt.Errorf("token file: %w", err)
 		}
-		raw = string(b)
+		return string(b), nil
 	case e.readSecret != nil:
-		s, err := e.readSecret("Enrollment token (input hidden): ")
+		s, err := e.readSecret(prompt)
 		if err != nil {
-			return domain.Token{}, fmt.Errorf("reading the token: %w", err)
+			return "", fmt.Errorf("reading the token: %w", err)
 		}
-		raw = s
-	default:
-		line, err := bufio.NewReader(io.LimitReader(e.stdin, maxTokenInput)).ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			return domain.Token{}, fmt.Errorf("reading the token from stdin: %w", err)
-		}
-		raw = line
+		return s, nil
 	}
-	return domain.ParseToken(raw)
+	line, err := bufio.NewReader(io.LimitReader(e.stdin, maxTokenInput)).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("reading the token from stdin: %w", err)
+	}
+	return line, nil
 }
 
 func fingerprint(ctx context.Context, args []string, e *env) error {
@@ -309,6 +326,7 @@ func daemon(ctx context.Context, args []string, e *env) error {
 		"where repositories are fetched from (owner/name -> <url>/owner/name.git); tokens are sent only to this host")
 	minFree := fs.Uint64("workspace-min-free-mib", workspaceapp.DefaultMinFree>>20,
 		"free space (MiB) the data dir's filesystem needs before a workspace is prepared")
+	cliHomeFlag := cliHomeFlag(fs)
 	measureSpace := fs.Bool("measure-space", false,
 		"allow measuring what takes space in the data dir and docker (I/O-limited, every 6 h; KIN-55)")
 	if err := fs.Parse(args); err != nil {
@@ -346,18 +364,24 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	x := newExecutor(ch, d.Path(), exe, splitList(*projects), logger)
 	x.Workspaces, x.ChangesEvery = ws, changesEvery // KIN-51: interim changed-file reports while an attempt runs
 	defer x.Close()                                 // running attempts keep running; the next start adopts them
-	if home, err := os.UserHomeDir(); err == nil {  // KIN-79 CLI agents (set before Recover)
-		x.Agents = cliAgents(home, exec.LookPath, logger)
+	home, err := cliHome(*cliHomeFlag, d.Path())
+	if err != nil {
+		return err
 	}
+	agents := cliAgents(home, exec.LookPath, logger) // KIN-79 CLI agents (set before Recover)
+	x.Agents = agents
+	logCLILogins(agents, logger, time.Now())
 	if err := x.Recover(ctx); err != nil {
 		return fmt.Errorf("recovering running attempts: %w", err)
 	}
 	agent := networkAgent(d, logger) // KIN-30 network profiles and Test Network
 	agent.Context = ctx
-	x.KnownSecrets = agent.Secrets // KIN-77: proxy passwords are masked in attempt output
+	// KIN-77, KIN-86: proxy passwords and the CLIs' stored tokens are masked in attempt output.
+	x.KnownSecrets = func() []string { return append(agent.Secrets(), agents.Secrets()...) }
 	ch.Commands = withNetwork(agent, ch.Commands)
 	strict := strictEgress(d, exe, logger) // KIN-31: strict profiles run only in a verified sandbox
-	x.Egress = confiner{strict}
+	// KIN-86: a sandboxed CLI attempt gets its task's session store, so the next attempt can resume.
+	x.Egress = confiner{s: strict, sessions: sessionBinds(&cliagent.SessionStore{Root: filepath.Join(resolved(d.Path()), "cli-sessions")})}
 	pr := probe.New(d.Path())
 	pr.StrictEgress = func(ctx context.Context) bool { ok, _ := strict.Supported(ctx); return ok }
 	rep := &app.Reporter{Probe: pr} // KIN-20 heartbeat, capabilities, storage

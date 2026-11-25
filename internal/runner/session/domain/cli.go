@@ -46,6 +46,9 @@ type AgentRequest struct {
 	BypassPermissions bool
 	// Timeout bounds the run (wall clock); the process group is stopped when it passes.
 	Timeout time.Duration
+	// Confined: the run happens in the strict egress sandbox, where the CLI sees only copies of its login files and
+	// the runner's token (KIN-86); without one it cannot log in, so the run is refused before it starts.
+	Confined bool
 }
 
 var (

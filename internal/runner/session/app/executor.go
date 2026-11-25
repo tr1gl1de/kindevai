@@ -94,6 +94,9 @@ type Workspaces interface {
 	// Finish commits leftover work to the attempt's branch, removes the worktree and returns what changed
 	// (workspace.changes); nil for an attempt without a workspace.
 	Finish(ctx context.Context, step string, fence int64) (*protocol.WorkspaceChanges, error)
+	// Changes lists what the running attempt changed so far without committing (an Interim workspace.changes,
+	// KIN-51); nil for an attempt without a workspace held by this process.
+	Changes(ctx context.Context, step string, fence int64) (*protocol.WorkspaceChanges, error)
 }
 
 // DefaultGrace is how long a cancelled process group has between SIGTERM and SIGKILL.
@@ -109,7 +112,10 @@ type Executor struct {
 	// fails.
 	Workspaces Workspaces
 	Grace      time.Duration // DefaultGrace when zero
-	Logger     *slog.Logger
+	// ChangesEvery is how often a running attempt's worktree changes are reported (KIN-51; only when they differ
+	// from the last report); zero reports them only at the attempt's end.
+	ChangesEvery time.Duration
+	Logger       *slog.Logger
 
 	mu     sync.Mutex
 	runs   map[key]*run
@@ -382,13 +388,75 @@ func (x *Executor) finishWorkspace(r *run) {
 	ch, err := x.Workspaces.Finish(context.Background(), step, fence)
 	if err != nil {
 		x.logger().Error("finishing the workspace; the worktree is kept", "step", step, "fence", fence, "err", err)
-		return
+		// The attempt's changes are unknown: a truncated report makes the Control Plane hold the step (KIN-51)
+		// instead of completing it unchecked.
+		ch = &protocol.WorkspaceChanges{Truncated: true}
 	}
 	if ch != nil {
 		if err := r.stream.Emit(protocol.EventWorkspaceChanges, ch); err != nil {
 			x.logger().Error("emitting workspace.changes", "step", step, "fence", fence, "err", err)
 		}
 	}
+}
+
+// reportChanges reports the running attempt's worktree changes every ChangesEvery when they differ from the last
+// report, so the Control Plane can stop a step that leaves its approved scope while it runs (KIN-51). The returned
+// stop ends the reports and waits for one in progress.
+func (x *Executor) reportChanges(r *run) (stop func()) {
+	r.recMu.Lock()
+	step, fence, wd := r.rec.Step, r.rec.Fence, r.rec.Workdir
+	r.recMu.Unlock()
+	if x.ChangesEvery <= 0 || x.Workspaces == nil || wd == "" {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(x.ChangesEvery)
+		defer t.Stop()
+		last := ""
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			if x.closed.Load() {
+				return
+			}
+			ch, err := x.Workspaces.Changes(ctx, step, fence)
+			if err != nil || ch == nil {
+				if err != nil && ctx.Err() == nil {
+					x.logger().Warn("listing the attempt's changes", "step", step, "fence", fence, "err", err)
+				}
+				continue
+			}
+			sig := changesSignature(ch)
+			if sig == last {
+				continue
+			}
+			if err := r.stream.Emit(protocol.EventWorkspaceChanges, ch); err != nil {
+				x.logger().Warn("emitting workspace.changes", "step", step, "fence", fence, "err", err)
+				continue
+			}
+			last = sig
+		}
+	}()
+	return func() { cancel(); <-done }
+}
+
+// changesSignature identifies a change list; an empty list matches the start (nothing to report).
+func changesSignature(ch *protocol.WorkspaceChanges) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d/%t", ch.FilesTotal, ch.Truncated)
+	if ch.FilesTotal == 0 && !ch.Truncated {
+		return ""
+	}
+	for _, f := range ch.Files {
+		b.WriteString("\x00" + f.Status + f.Path)
+	}
+	return b.String()
 }
 
 // releaseWorkspace finishes the workspace of an attempt that never ran (no report). It does not rely on the
@@ -439,8 +507,10 @@ const reportRetry = time.Second
 // watch waits for the process in the background and reports its end; a report that fails (e.g. the disk is full)
 // is retried, and until it succeeds the attempt is listed with its result for reconciliation.
 func (x *Executor) watch(r *run) {
+	stopReports := x.reportChanges(r)
 	x.wg.Go(func() {
 		exit := r.proc.Wait()
+		stopReports() // the worktree is about to be saved and removed
 		if !x.closed.Load() {
 			x.finishWorkspace(r) // before done: a newer attempt of the step waits for the worktree's release
 		}

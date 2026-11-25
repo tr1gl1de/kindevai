@@ -319,3 +319,46 @@ func TestTokenNeedsHTTPS(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// KIN-51: the interim report lists what the worktree changed against the base while the agent runs, without
+// committing: tracked edits, the agent's own commits, deletions, renames (as delete + add) and untracked files,
+// symlinks as paths (never followed).
+func TestChangesListTheWorktreeAgainstTheBase(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	sha, _ := e.git.FetchBase(ctx, e.mirror, "acme/api", "dev", app.Token{})
+	_, admin, err := e.git.AddWorktree(ctx, e.mirror, e.wt, "feature/KIN-1-s1", sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files, err := e.git.Changes(ctx, admin, e.wt, sha); err != nil || len(files) != 0 {
+		t.Fatalf("fresh worktree: %+v %v", files, err)
+	}
+	write(t, filepath.Join(e.wt, "committed.go"), "package x\n")
+	sh(t, e.wt, "add", "committed.go")
+	sh(t, e.wt, "commit", "-q", "-m", "agent commit")
+	write(t, filepath.Join(e.wt, "README.md"), "changed\n")
+	sh(t, e.wt, "mv", "CLAUDE.md", "AGENTS.md")
+	if err := os.Remove(filepath.Join(e.wt, "old.txt")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(e.wt, "dir", "new file.go"), "package x\n")
+	if err := os.Symlink("../../../etc/passwd", filepath.Join(e.wt, "link")); err != nil {
+		t.Fatal(err)
+	}
+	head := sh(t, e.wt, "rev-parse", "HEAD")
+	files, err := e.git.Changes(ctx, admin, e.wt, sha)
+	want := []domain.Change{{Path: "AGENTS.md", Status: "A"}, {Path: "CLAUDE.md", Status: "D"}, {Path: "README.md", Status: "M"},
+		{Path: "committed.go", Status: "A"}, {Path: "dir/new file.go", Status: "A"}, {Path: "link", Status: "A"},
+		{Path: "old.txt", Status: "D"}}
+	if err != nil || !slices.Equal(files, want) {
+		t.Fatalf("changes: %+v %v", files, err)
+	}
+	if now := sh(t, e.wt, "rev-parse", "HEAD"); now != head {
+		t.Fatal("the interim report committed")
+	}
+	if _, err := e.git.Changes(ctx, admin, e.wt, "not-a-sha"); err == nil {
+		t.Fatal("a non-commit base was accepted")
+	}
+}

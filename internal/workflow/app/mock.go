@@ -10,12 +10,16 @@ import (
 )
 
 // MockScenarios are the mock agent's behaviours (KIN-23); the mock planner names its step after the scenario.
-var MockScenarios = []string{"success", "fail", "flaky", "crash", "hang", "gate"}
+var MockScenarios = []string{"success", "fail", "flaky", "crash", "hang", "gate", "scope"}
+
+// MockScope is the scope of the mock plan's step: the mock agent's own directory (the scope scenario also writes
+// outside it, KIN-51).
+const MockScope = "mock"
 
 // MockPlanner is the author of mock plans.
 const MockPlanner = "mock-planner"
 
-// MockPlan is the fixed plan of a mock run: one step on the project's first repository, run by the mock agent
+// MockPlan is the fixed plan of a mock run: one step on the project's first repository (scope MockScope), run by the mock agent
 // with the scenario (no AI). Its proposed risk is L1; the Policy Evaluator may still raise it.
 func MockPlan(repos []string, scenario string) (domain.Plan, error) {
 	if !slices.Contains(MockScenarios, scenario) {
@@ -25,7 +29,8 @@ func MockPlan(repos []string, scenario string) (domain.Plan, error) {
 		return domain.Plan{}, &domain.ValidationError{Field: "projectId", Code: "repository_required"}
 	}
 	return domain.Plan{Risk: domain.RiskL1, MaxParallel: 1, Summary: "Mock execution, scenario " + scenario + " (no AI)",
-		Steps: []domain.PlanStep{{Key: scenario, Title: "Mock agent: " + scenario, Repository: repos[0]}}}, nil
+		Steps: []domain.PlanStep{{Key: scenario, Title: "Mock agent: " + scenario, Repository: repos[0],
+			Scope: []string{MockScope}}}}, nil
 }
 
 // RunMock plans the task with the mock planner: CREATED goes to ANALYZING, the mock plan becomes the next revision

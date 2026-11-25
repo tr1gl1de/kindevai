@@ -859,7 +859,7 @@ export interface AttemptEventPage {
   more: boolean;
 }
 
-export type MockScenario = "success" | "fail" | "flaky" | "crash" | "hang" | "gate";
+export type MockScenario = "success" | "fail" | "flaky" | "crash" | "hang" | "gate" | "scope";
 // Maintenance mode (KIN-41).
 export interface MaintenanceStatus {
   enabled: boolean;

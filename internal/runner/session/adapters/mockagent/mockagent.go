@@ -36,7 +36,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	signal.Ignore(syscall.SIGPIPE)
 	fs := flag.NewFlagSet("mock-agent", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	scenario := fs.String("scenario", "success", "success|fail|flaky|crash|hang|gate")
+	scenario := fs.String("scenario", "success", "success|fail|flaky|crash|hang|gate|scope")
 	attempt := fs.Int64("attempt", 1, "attempt fencing token")
 	poll := fs.Duration("poll", 20*time.Millisecond, "gate: how often to look for the release file")
 	state := fs.String("state", ".", "directory of the result and release files")
@@ -66,14 +66,27 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "mock agent: hanging until cancelled")
 		select {}
 	case "gate":
-		fmt.Fprintln(stdout, "mock agent: waiting for release")
-		for {
-			if _, err := os.Stat(filepath.Join(*state, ReleaseFile)); err == nil {
-				fmt.Fprintln(stdout, "mock agent: released")
-				return finish(*state, 0)
-			}
-			time.Sleep(*poll)
+		return gate(stdout, *state, *poll)
+	case "scope": // KIN-51: changes files in the working directory (the attempt's worktree)
+		files := []string{filepath.Join("mock", "scope.txt")}
+		if *attempt <= 1 {
+			files = append(files, "outside.txt") // beyond the mock plan's scope
 		}
+		for _, f := range files {
+			if err := os.MkdirAll(filepath.Dir(f), 0o750); err != nil {
+				fmt.Fprintln(stderr, "mock agent:", err)
+				return finish(*state, 1)
+			}
+			if err := os.WriteFile(f, fmt.Appendf(nil, "attempt %d\n", *attempt), 0o600); err != nil {
+				fmt.Fprintln(stderr, "mock agent:", err)
+				return finish(*state, 1)
+			}
+			fmt.Fprintln(stdout, "mock agent: wrote", f)
+		}
+		if *attempt <= 1 {
+			return gate(stdout, *state, *poll)
+		}
+		return finish(*state, 0)
 	}
 	fmt.Fprintf(stderr, "mock agent: unknown scenario %q\n", *scenario)
 	return finish(*state, 2)
@@ -100,4 +113,16 @@ func ReadResult(dir string) (code int, ok bool) {
 		return 0, false
 	}
 	return r.ExitCode, true
+}
+
+// gate waits for the release file in the state directory, then exits 0.
+func gate(stdout io.Writer, state string, poll time.Duration) int {
+	fmt.Fprintln(stdout, "mock agent: waiting for release")
+	for {
+		if _, err := os.Stat(filepath.Join(state, ReleaseFile)); err == nil {
+			fmt.Fprintln(stdout, "mock agent: released")
+			return finish(state, 0)
+		}
+		time.Sleep(poll)
+	}
 }

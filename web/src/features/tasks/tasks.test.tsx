@@ -65,6 +65,7 @@ const detail = (over: Partial<TaskDetail> = {}): TaskDetail => ({
     ],
   },
   canManage: true,
+  pullRequests: [],
   time: { agentMs: 70_000, agentStatus: "incomplete", calendarMs: 300_000, running: false, started: true },
   ...over,
 });
@@ -266,6 +267,56 @@ describe("task detail", () => {
     const attempts = screen.getByRole("table", { name: "Attempts of step backend" });
     expect(within(attempts).getByText("reviewer")).toBeInTheDocument();
     await expectAccessible(container);
+  });
+
+  it("links the task's pull requests and shows the publish phase (KIN-36)", async () => {
+    const base = detail();
+    const published = detail({
+      execution: { ...base.execution!, state: "RUNNING",
+        steps: [step({ state: "READY",
+          attempts: [{ number: 3, runnerId: "r1", fence: 3, state: "FAILED", error: "push: rejected", startedAt: "2026-11-24T10:00:00Z",
+            finishedAt: "2026-11-24T10:00:30Z", agent: "publish", workStartedAt: null, workEndedAt: null, workStatus: "none",
+            workMs: 0, role: "publisher", round: 0 }],
+          review: { phase: "publish", round: 0, maxRounds: 2, handoff: null, verdict: null } })] },
+      pullRequests: [
+        { repository: "acme/app", branch: "feature/t1--s1", headSha: "bbbbbbbbbbbbbbbb", state: "open", number: 7,
+          url: "https://github.com/acme/app/pull/7", base: "dev", updatedAt: "2026-11-24T10:06:00Z" },
+        { repository: "acme/web", branch: "feature/t1--s2", headSha: "cccccccccccccccc", state: "opening", updatedAt: "2026-11-24T10:06:00Z" },
+        { repository: "acme/docs", branch: "feature/t1--s3", headSha: "dddddddddddddddd", state: "failed",
+          error: "the App is not installed", updatedAt: "2026-11-24T10:06:00Z" },
+      ],
+    });
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/tasks/t1", () => json(published)),
+      http.get("/api/approvals", () => json([])),
+    );
+    const { container } = await renderApp("/tasks/t1");
+    const prs = await screen.findByRole("region", { name: "Pull requests" });
+    const link = within(prs).getByRole("link", { name: "acme/app #7" });
+    expect(link).toHaveAttribute("href", "https://github.com/acme/app/pull/7");
+    expect(within(prs).getByText("feature/t1--s1 → dev · bbbbbbbbbb")).toBeInTheDocument();
+    expect(within(prs).getByText("Opening the pull request…")).toBeInTheDocument();
+    expect(within(prs).getByText("Not opened: the App is not installed")).toBeInTheDocument();
+    const loop = screen.getByRole("region", { name: "Implementation and review" });
+    expect(within(loop).getByText("Publishing the approved work")).toBeInTheDocument();
+    const attempts = screen.getByRole("table", { name: "Attempts of step backend" });
+    expect(within(attempts).getByText("publisher")).toBeInTheDocument();
+    await expectAccessible(container);
+  });
+
+  it("names the pull requests in Russian", async () => {
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/tasks/t1", () => json(detail({ pullRequests: [{ repository: "acme/app", branch: "feature/t1--s1",
+        headSha: "bbbbbbbbbbbb", state: "opening", updatedAt: "2026-11-24T10:06:00Z" }] }))),
+      http.get("/api/approvals", () => json([])),
+    );
+    await renderApp("/tasks/t1", "ru");
+    const prs = await screen.findByRole("region", { name: "Пул-реквесты" });
+    expect(within(prs).getByText("Пул-реквест открывается…")).toBeInTheDocument();
   });
 
   it("cancels after naming the task, and retries a failed task (Owner / project admin only)", async () => {

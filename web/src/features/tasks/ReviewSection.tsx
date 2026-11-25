@@ -7,7 +7,9 @@ const shownFiles = 20;
 export function ReviewSection({ review, stepKey }: { review: ReviewLoop; stepKey: string }) {
   const { t } = useTranslation();
   const phase =
-    review.phase === "review"
+    review.phase === "publish"
+      ? t("tasks.reviewPhasePublish")
+      : review.phase === "review"
       ? t("tasks.reviewPhaseReview")
       : review.round > 0
         ? t("tasks.reviewPhaseImplementFix", { round: review.round, max: review.maxRounds })

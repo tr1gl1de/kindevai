@@ -66,6 +66,13 @@ type CLILimitHolder interface {
 	HoldAttemptForCLILimit(ctx context.Context, runnerID, step string, fence int64, cause, reason string, resetsAt, at time.Time) error
 }
 
+// AttemptRenewer is implemented by an Executions that extends a claimed step's lease (KIN-71): the runner reports
+// workspace.preparing while it prepares the attempt's worktree in the background, which can outlast the claim's
+// lease. Without it the event is only fence-checked.
+type AttemptRenewer interface {
+	RenewAttempt(ctx context.Context, runnerID, step string, fence int64) error
+}
+
 // AgentReporter is implemented by an Executions that stores what an attempt's AI CLI reported (usage, native
 // session, model, version; KIN-79), applied before the attempt's end in the event's transaction.
 type AgentReporter interface {
@@ -574,6 +581,9 @@ func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Ev
 			return h.HoldAttemptForNetwork(ctx, runnerID, e.Step, e.Fence, reason, at)
 		}
 		return c.Executions.FailAttempt(ctx, runnerID, e.Step, e.Fence, reason, at)
+	}
+	if r, ok := c.Executions.(AttemptRenewer); ok && e.Kind == protocol.EventWorkspacePreparing {
+		return r.RenewAttempt(ctx, runnerID, e.Step, e.Fence)
 	}
 	if err := c.Executions.CheckAttempt(ctx, runnerID, e.Step, e.Fence); err != nil || e.Kind != protocol.EventWorkspaceChanges ||
 		c.Scope == nil {

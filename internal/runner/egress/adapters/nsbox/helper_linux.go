@@ -16,7 +16,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -103,7 +102,7 @@ func Main(args []string, stderr io.Writer) int {
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	port, err := setup(ctx, s)
+	port, fs, err := setup(ctx, s)
 	if err != nil {
 		return report(verdict, domain.Verdict{Setup: err.Error()}, stderr)
 	}
@@ -115,7 +114,7 @@ func Main(args []string, stderr io.Writer) int {
 	if err := confineSockets(); err != nil {
 		return report(verdict, domain.Verdict{Setup: err.Error()}, stderr)
 	}
-	v := domain.Verdict{Leaks: leaks(ctx, s)}
+	v := domain.Verdict{Leaks: append(leaks(ctx, s), fs.leaks()...)}
 	if s.Probe != nil {
 		v.ProxyChecked = true
 		v.Probe = probe(ctx, s.Probe, port)
@@ -141,90 +140,30 @@ func report(f *os.File, v domain.Verdict, stderr io.Writer) int {
 	return 0
 }
 
-// setup builds the sandbox and returns the forwarder's port on the namespace's loopback.
-func setup(ctx context.Context, s Spec) (int, error) {
-	if err := hideHost(s); err != nil {
-		return 0, err
-	}
+// setup builds the sandbox (network, then the filesystem view) and returns the forwarder's port on the
+// namespace's loopback and the view.
+func setup(ctx context.Context, s Spec) (int, *view, error) {
 	if err := loopbackUp(); err != nil {
-		return 0, fmt.Errorf("loopback: %w", err)
+		return 0, nil, fmt.Errorf("loopback: %w", err)
 	}
 	if err := loadRules(ctx, s); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	return forward(ctx, s.Socket)
-}
-
-// hideHost covers the hidden directories with empty tmpfs mounts and binds the kept ones back.
-func hideHost(s Spec) error {
-	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
-		return fmt.Errorf("private mounts: %w", err)
+	// The adapter's socket is outside the view: reach it through a descriptor opened before.
+	dirfd, err := unix.Open(filepath.Dir(s.Socket), unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return 0, nil, fmt.Errorf("adapter socket: %w", err)
 	}
-	type kept struct {
-		path string
-		fd   int
+	v, err := buildView(s)
+	if err != nil {
+		_ = unix.Close(dirfd)
+		return 0, nil, err
 	}
-	var keep []kept
-	for _, p := range append(append([]string{}, s.Keep...), filepath.Dir(s.Socket)) {
-		fd, err := unix.Open(p, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-		if err != nil {
-			return fmt.Errorf("opening a kept directory: %w", err)
-		}
-		keep = append(keep, kept{p, fd})
+	port, err := forward(ctx, dirfd, filepath.Base(s.Socket))
+	if err != nil {
+		return 0, nil, err
 	}
-	defer func() {
-		for _, k := range keep {
-			_ = unix.Close(k.fd)
-		}
-	}()
-	var covered []string
-	for _, h := range s.Hide {
-		if r, err := filepath.EvalSymlinks(h); err == nil {
-			h = r // /var/run -> /run; a data directory reached through a symlink
-		}
-		fi, err := os.Lstat(h)
-		if err != nil || !fi.IsDir() || slices.Contains(covered, h) { // missing or already covered
-			continue
-		}
-		opts, flags := "mode=0755,size=16m", uintptr(unix.MS_NOSUID|unix.MS_NODEV)
-		if h == "/tmp" || h == "/var/tmp" || h == "/dev/shm" {
-			opts = "mode=1777,size=512m"
-		}
-		if err := unix.Mount("tmpfs", h, "tmpfs", flags, opts); err != nil {
-			return fmt.Errorf("hiding %s: %w", h, err)
-		}
-		covered = append(covered, h)
-	}
-	// The adapter sockets' directory must be covered: other attempts' sockets live next to this one.
-	if !under(filepath.Dir(filepath.Dir(s.Socket)), covered) {
-		return errors.New("the adapter socket directory is not hidden")
-	}
-	// A /proc of the sandbox's PID namespace only.
-	if err := unix.Mount("proc", "/proc", "proc", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
-		return fmt.Errorf("mounting /proc: %w", err)
-	}
-	for _, k := range keep {
-		if !under(k.path, covered) {
-			continue
-		}
-		if err := os.MkdirAll(k.path, 0o700); err != nil {
-			return fmt.Errorf("binding a kept directory: %w", err)
-		}
-		src := "/proc/self/fd/" + strconv.Itoa(k.fd)
-		if err := unix.Mount(src, k.path, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
-			return fmt.Errorf("binding a kept directory: %w", err)
-		}
-	}
-	return nil
-}
-
-func under(p string, dirs []string) bool {
-	for _, d := range dirs {
-		if p == d || strings.HasPrefix(p, strings.TrimSuffix(d, "/")+"/") {
-			return true
-		}
-	}
-	return false
+	return port, v, nil
 }
 
 func loopbackUp() error {
@@ -269,14 +208,10 @@ func firstLine(b []byte) string {
 	return l
 }
 
-// forward listens on the namespace's loopback and relays every connection to the proxy adapter's socket.
-func forward(ctx context.Context, socket string) (int, error) {
-	dirfd, err := unix.Open(filepath.Dir(socket), unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return 0, fmt.Errorf("adapter socket: %w", err)
-	}
-	// The socket's directory may be covered now; reach it through the descriptor opened before.
-	target := "/proc/self/fd/" + strconv.Itoa(dirfd) + "/" + filepath.Base(socket)
+// forward listens on the namespace's loopback and relays every connection to the proxy adapter's socket (name in
+// the directory dirfd, which it takes over).
+func forward(ctx context.Context, dirfd int, name string) (int, error) {
+	target := "/proc/self/fd/" + strconv.Itoa(dirfd) + "/" + name
 	var lc net.ListenConfig
 	l, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
 	if err != nil {

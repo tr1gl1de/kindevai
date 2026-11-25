@@ -5,11 +5,16 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"syscall"
 	"testing"
 	"time"
 )
 
 // Socket directories of killed launchers are swept; a fresh one or one still served is kept.
+//
+// KIN-98: a fresh directory whose socket refuses connections is kept too: net.Listen binds the socket file before
+// it listens, and a sweep by a parallel Open in that gap took the new attempt's directory for an abandoned one.
 //
 // Not parallel: the "dead" socket's listener fd lives in this process, and a parallel test that forks a sandbox
 // helper holds a copy of every fd while the child waits for its uid_map; a connect would then still succeed.
@@ -38,18 +43,32 @@ func TestSweepStale(t *testing.T) {
 		}
 		return d
 	}
-	stale := mk("kindev-egress-stale", 0, false) // a dead socket: abandoned whatever its age
+	stale := mk("kindev-egress-stale", 2*staleAge, false) // a dead socket, not touched since: abandoned
 	served := mk("kindev-egress-served", time.Hour, true)
 	empty := filepath.Join(base, "kindev-egress-empty") // no socket yet: kept while young
 	if err := os.Mkdir(empty, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binding := filepath.Join(base, "kindev-egress-binding") // bound, not listening yet: kept while young
+	if err := os.Mkdir(binding, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Close(fd) })
+	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: filepath.Join(binding, "s")}); err != nil {
 		t.Fatal(err)
 	}
 	removed := sweepStale(base, time.Now())
 	if len(removed) != 1 || removed[0] != stale {
 		t.Fatalf("removed %v, want only %s", removed, stale)
 	}
-	if got := sweepStale(base, time.Now().Add(staleAge)); len(got) != 1 || got[0] != empty {
-		t.Fatalf("later sweep removed %v, want the empty directory", got)
+	got := sweepStale(base, time.Now().Add(staleAge))
+	slices.Sort(got)
+	if want := []string{binding, empty}; !slices.Equal(got, want) {
+		t.Fatalf("later sweep removed %v, want %v", got, want)
 	}
 	for _, d := range []string{served} {
 		if _, err := os.Stat(d); err != nil {

@@ -20,8 +20,9 @@ type Prober interface {
 }
 
 // Reporter sends the runner's telemetry over an authorized link: a heartbeat at once and every HeartbeatEvery;
-// capabilities, then storage at once and every StorageEvery. Probes run apart from the heartbeat, so a slow or
-// hung probe (a stale /mnt/c, a CLI that does not answer --version) never delays heartbeats or blocks stopping.
+// capabilities once and storage at once and every StorageEvery. Probes run apart from the heartbeat and from each
+// other, so a slow or hung probe (a stale /mnt/c, a CLI that does not answer --version, the strict-egress
+// self-test) never delays heartbeats, the other report or stopping (KIN-87).
 type Reporter struct {
 	Probe          Prober
 	HeartbeatEvery time.Duration // default protocol.HeartbeatIntervalSeconds
@@ -65,8 +66,9 @@ func (r *Reporter) Report(ctx context.Context, s Sender) error {
 	if err := beat(); err != nil { // liveness first, before any probe
 		return err
 	}
-	probeErr := make(chan error, 1)
-	go func() { probeErr <- r.probes(ctx, s) }()
+	probeErr, running := make(chan error, 2), 2
+	go func() { probeErr <- r.capabilities(ctx, s) }()
+	go func() { probeErr <- r.storage(ctx, s) }()
 	hb := time.NewTicker(hbEvery)
 	defer hb.Stop()
 	for {
@@ -77,7 +79,9 @@ func (r *Reporter) Report(ctx context.Context, s Sender) error {
 			if err != nil {
 				return err
 			}
-			probeErr = nil // probes stopped cleanly (ctx ended); keep beating until it is noticed
+			if running--; running == 0 {
+				probeErr = nil // probes stopped cleanly (ctx ended); keep beating until it is noticed
+			}
 		case <-hb.C:
 			if err := beat(); err != nil {
 				return err
@@ -94,27 +98,31 @@ func (r *Reporter) Serve(ctx context.Context, c Conn) error { return r.Report(ct
 // Handle takes no Control Plane messages: telemetry is runner → server only.
 func (r *Reporter) Handle(context.Context, Conn, protocol.Envelope) (bool, error) { return false, nil }
 
-// probes sends capabilities and storage; each probe runs in its own goroutine so cancellation is never blocked.
-func (r *Reporter) probes(ctx context.Context, s Sender) error {
+// sendProbe runs probe in its own goroutine, so cancellation is never blocked, and sends its result.
+func sendProbe(ctx context.Context, s Sender, typ string, probe func() any) error {
+	res := make(chan any, 1)
+	go func() { res <- probe() }()
+	select {
+	case <-ctx.Done():
+		return nil
+	case payload := <-res:
+		if err := s.Send(ctx, typ, payload); err != nil && ctx.Err() == nil {
+			return err
+		}
+		return nil
+	}
+}
+
+// capabilities sends the capabilities once per link.
+func (r *Reporter) capabilities(ctx context.Context, s Sender) error {
+	return sendProbe(ctx, s, protocol.TypeCapabilities, func() any { return r.Probe.Capabilities(ctx) })
+}
+
+// storage sends storage at once, every StorageEvery and whenever the meter finished a measurement.
+func (r *Reporter) storage(ctx context.Context, s Sender) error {
 	stEvery := r.StorageEvery
 	if stEvery <= 0 {
 		stEvery = protocol.StorageIntervalSeconds * time.Second
-	}
-	send := func(typ string, probe func() any) error {
-		res := make(chan any, 1)
-		go func() { res <- probe() }()
-		select {
-		case <-ctx.Done():
-			return nil
-		case payload := <-res:
-			if err := s.Send(ctx, typ, payload); err != nil && ctx.Err() == nil {
-				return err
-			}
-			return nil
-		}
-	}
-	if err := send(protocol.TypeCapabilities, func() any { return r.Probe.Capabilities(ctx) }); err != nil {
-		return err
 	}
 	st := time.NewTicker(stEvery)
 	defer st.Stop()
@@ -124,7 +132,7 @@ func (r *Reporter) probes(ctx context.Context, s Sender) error {
 	}
 	for {
 		c := r.take()
-		err := send(protocol.TypeStorage, func() any { s := r.Probe.Storage(ctx); s.Consumers = c; return s })
+		err := sendProbe(ctx, s, protocol.TypeStorage, func() any { s := r.Probe.Storage(ctx); s.Consumers = c; return s })
 		if err != nil || ctx.Err() != nil {
 			r.putBack(c) // not delivered: the next link sends it
 			return err

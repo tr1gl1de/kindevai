@@ -25,6 +25,9 @@ func wireWriteBack(wf *workflowapp.Service, inst *bootstrap.Installation, msg *m
 		Tx: db.Transactor{DB: inst.DB}, Now: time.Now}
 	wf.IssueSync, wf.Docs, wf.TaskLinkBase = workflowIssueSync{s}, workflowdb.New(inst.DB), taskLinkBase(publicURL)
 	msg.Outbox.Handle(integrationsapp.TopicYouTrackWrite, s.HandleWrite)
+	// KIN-108: a write whose message dies outside HandleWrite fails (code "dead") with its alert; a retry reopens it.
+	msg.Outbox.OnDead(integrationsapp.TopicYouTrackWrite, s.HandleDead)
+	msg.Outbox.OnRetry(integrationsapp.TopicYouTrackWrite, s.HandleRetried)
 }
 
 // taskLinkBase is the first origin of --public-url ("" when none or malformed; main validates the flag).

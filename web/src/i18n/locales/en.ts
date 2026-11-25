@@ -572,6 +572,7 @@ export const en = {
     publicationError_unauthorized: "YouTrack refused the integration token",
     publicationError_not_configured: "YouTrack is not connected",
     publicationError_not_found: "the issue or article was not found",
+    publicationError_dead: "delivery stopped by an internal error",
     publicationErrorOther: "YouTrack unavailable: {{code}}",
     docsTitle: "Knowledge Base",
     docs_updated: "Updated sections:",

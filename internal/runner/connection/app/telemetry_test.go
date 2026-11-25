@@ -289,3 +289,40 @@ func TestInterruptedMeasurementIsRetriedOnlyAfterABackoff(t *testing.T) {
 		}
 	}
 }
+
+// chanSender signals every message type it sends.
+type chanSender chan string
+
+func (s chanSender) Send(ctx context.Context, typ string, _ any) error {
+	select {
+	case s <- typ:
+	case <-ctx.Done():
+	}
+	return nil
+}
+
+// KIN-87: a slow capability probe (the strict-egress self-test, a CLI that answers --version slowly) does not delay
+// the storage report: the Control Plane learns the runner's volumes at once.
+func TestSlowCapabilitiesProbeDoesNotDelayStorage(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	defer close(release)
+	s := make(chanSender)
+	r := &Reporter{Probe: hungProbe{release: release}, HeartbeatEvery: time.Hour, StorageEvery: time.Hour}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() { _ = r.Report(ctx, s) }()
+	for {
+		select {
+		case typ := <-s:
+			if typ == protocol.TypeCapabilities {
+				t.Fatal("capabilities sent while the probe hung")
+			}
+			if typ == protocol.TypeStorage {
+				return
+			}
+		case <-t.Context().Done():
+			t.Fatal("storage waited for the hung capabilities probe")
+		}
+	}
+}

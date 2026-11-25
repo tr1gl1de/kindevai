@@ -155,11 +155,18 @@ func (o *Outbox) deliver(ctx context.Context, r record) error {
 	var onDead func(context.Context) error
 	o.mu.RLock()
 	if hook := o.onDead[r.topic]; hook != nil {
-		onDead = func(ctx context.Context) error { return hook(ctx, r.delivery(), err) }
+		onDead = func(ctx context.Context) (herr error) {
+			defer func() {
+				if p := recover(); p != nil { // the panic value is not logged, it may hold request data
+					herr = errHookPanic
+				}
+			}()
+			return hook(ctx, r.delivery(), err)
+		}
 	}
 	o.mu.RUnlock()
 	dead, ferr := o.q.finish(ctx, r, err, onDead)
-	if dead {
+	if dead && ferr == nil { // a failed dead hook rolled the mark back: the message is still leased
 		o.q.cfg.Logger.Warn("outbox message dead", "id", r.id, "adapter", r.endpoint, "topic", r.topic,
 			"attempts", r.attempts, "err", errorText(err))
 	}
@@ -168,6 +175,9 @@ func (o *Outbox) deliver(ctx context.Context, r record) error {
 
 // errMissingHandler: no handler is registered for the topic (a message goes dead; Retry after deploying one).
 var errMissingHandler = errors.New("no handler for topic")
+
+// errHookPanic replaces a dead hook's panic: the dead mark rolls back like on a hook error.
+var errHookPanic = errors.New("dead hook panic")
 
 // errPanic replaces a handler panic; the panic value is not stored or logged, it may hold request data.
 var errPanic = errors.New("handler panic")

@@ -214,3 +214,23 @@ func TestOutboxRetryUnhandledRunsRetryHook(t *testing.T) {
 		t.Fatalf("retry hook rows = %d, want 1", n)
 	}
 }
+
+// Review finding: a panicking dead hook does not crash the dispatcher; it fails like a hook error.
+func TestOutboxOnDeadPanicKeepsMessagePending(t *testing.T) {
+	t.Parallel()
+	d, _ := newDB(t)
+	o := messaging.NewOutbox(d, config(newClock()))
+	o.OnDead("youtrack.comment", func(context.Context, messaging.Delivery, error) error { panic("hook bug") })
+	o.Handle("youtrack.comment", func(context.Context, messaging.Delivery) error {
+		return messaging.Permanent(errors.New("rejected"))
+	})
+	if err := o.Enqueue(t.Context(), msg("k-hookpanic")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := o.Poll(t.Context()); err == nil {
+		t.Fatal("Poll = nil, want the hook's panic as an error")
+	}
+	if n := count(t, d, "SELECT count(*) FROM outbox_events WHERE status = 'pending'"); n != 1 {
+		t.Fatalf("pending = %d, want the message kept pending", n)
+	}
+}

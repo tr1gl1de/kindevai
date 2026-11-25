@@ -75,4 +75,12 @@ func TestServedWriteBackFollowsDeadAndRetriedMessages(t *testing.T) {
 	if w, err := writes.IssueWrite(ctx, key); err != nil || w.Status != integrations.WritePending {
 		t.Fatalf("retried write = %+v, %v, want pending", w, err)
 	}
+	// Review finding: dying again after the retry raises the alert again (its first one may be closed by now).
+	if _, err := msg.Outbox.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := inst.DB.QueryRowContext(ctx, "SELECT count(*) FROM outbox_events WHERE topic = ?",
+		integrationsapp.TopicYouTrackWriteFailed).Scan(&alerts); err != nil || alerts != 2 {
+		t.Fatalf("failure alerts after the second death = %d, %v, want 2", alerts, err)
+	}
 }

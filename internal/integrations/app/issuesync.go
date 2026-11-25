@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -294,7 +295,9 @@ func (s *IssueSync) alertFailed(ctx context.Context, key string, p writePayload,
 	if p.ProjectID == "" {
 		return nil
 	}
-	return s.alert(ctx, TopicYouTrackWriteFailed, "youtrack/"+key+"/failed", p.TaskID, map[string]string{
+	// The key is unique per failure: a write that fails again after a retry raises the alert again (KIN-108).
+	failure := "youtrack/" + key + "/failed/" + strconv.FormatInt(s.now().UnixNano(), 10)
+	return s.alert(ctx, TopicYouTrackWriteFailed, failure, p.TaskID, map[string]string{
 		"projectId": p.ProjectID, "taskId": p.TaskID, "issue": clip(p.Issue, 64), "kind": string(p.Kind), "code": code})
 }
 

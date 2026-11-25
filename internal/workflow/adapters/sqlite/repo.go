@@ -464,6 +464,29 @@ func (r *Repository) HeldSteps(ctx context.Context) (map[string]int, error) {
 	return out, rows.Err()
 }
 
+// RecentFailures counts, per runner, the attempts that FAILED since (by their end) or were lost (UNKNOWN, by their
+// start: a lost attempt has no end) — the scheduler's failure penalty (KIN-76). The partial index
+// step_attempts_failures (migration 0040) keeps it off the full attempt history.
+func (r *Repository) RecentFailures(ctx context.Context, since time.Time) (map[string]int, error) {
+	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, `SELECT runner_id, COUNT(*) FROM step_attempts
+		WHERE state IN ('FAILED', 'UNKNOWN') AND coalesce(finished_at, started_at) >= ?
+		GROUP BY runner_id`, ts(since))
+	if err != nil {
+		return nil, fmt.Errorf("counting recent failures: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, fmt.Errorf("counting recent failures: %w", err)
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}
+
 // taskWhere is the WHERE clause (on tasks aliased t) and arguments for f; ok is false when f selects nothing.
 func taskWhere(f app.TaskFilter) (string, []any, bool) {
 	if len(f.ProjectIDs) == 0 && len(f.TaskIDs) == 0 {

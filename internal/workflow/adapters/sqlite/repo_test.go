@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -757,5 +758,62 @@ func TestAgentReportAndCLILimitWaitAreStored(t *testing.T) {
 	}
 	if st.WaitReason != domain.WaitCLILimit || st.WaitUntil == nil || !st.WaitUntil.Equal(resets) {
 		t.Fatalf("step %+v", st)
+	}
+}
+
+// KIN-76: a runner's recent failures are its attempts that FAILED (finished since) or were lost (UNKNOWN, started
+// since); succeeded and cancelled attempts and older failures do not count.
+func TestRecentFailures(t *testing.T) {
+	t.Parallel()
+	d, _ := testDB(t)
+	ctx := t.Context()
+	svc := service(d, fixed)
+	_, e := running(t, svc)
+	back, front, lint := e.StepByKey("backend").ID, e.StepByKey("frontend").ID, e.StepByKey("lint").ID
+	ins := func(step string, n int, runner, state string, started time.Time, finished *time.Time) {
+		t.Helper()
+		var fin any
+		if finished != nil {
+			fin = finished.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+		}
+		if _, err := d.ExecContext(ctx, `INSERT INTO step_attempts(step_id, number, runner_id, fence, state, started_at,
+			finished_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, step, n, runner, n, state, started.UTC().Format("2006-01-02T15:04:05.000000000Z07:00"),
+			fin); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at := func(d time.Duration) *time.Time { x := t0.Add(d); return &x }
+	ins(back, 1, "r1", "FAILED", t0.Add(-3*time.Hour), at(-2*time.Hour)) // too old
+	ins(back, 2, "r1", "FAILED", t0.Add(-40*time.Minute), at(-30*time.Minute))
+	ins(back, 3, "r1", "FAILED", t0.Add(-90*time.Minute), at(-20*time.Minute)) // started before, finished since
+	ins(lint, 1, "r2", "UNKNOWN", t0.Add(-10*time.Minute), nil)
+	ins(lint, 2, "r3", "SUCCEEDED", t0.Add(-10*time.Minute), at(-5*time.Minute))
+	ins(front, 1, "r3", "CANCELLED", t0.Add(-10*time.Minute), at(-5*time.Minute))
+	ins(front, 2, "r3", "RUNNING", t0.Add(-time.Minute), nil)
+	got, err := sqlite.New(d).RecentFailures(ctx, t0.Add(-time.Hour))
+	if err != nil || len(got) != 2 || got["r1"] != 2 || got["r2"] != 1 {
+		t.Fatalf("recent failures %v %v", got, err)
+	}
+	// The count reads the partial index, not the whole attempt history.
+	var plan strings.Builder
+	rows, err := d.QueryContext(ctx, `EXPLAIN QUERY PLAN SELECT runner_id, COUNT(*) FROM step_attempts
+		WHERE state IN ('FAILED', 'UNKNOWN') AND coalesce(finished_at, started_at) >= ? GROUP BY runner_id`, "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan.WriteString(detail + "\n")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan.String(), "step_attempts_failures") {
+		t.Fatalf("query plan:\n%s", plan.String())
 	}
 }

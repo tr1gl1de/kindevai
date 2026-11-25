@@ -246,3 +246,22 @@ func TestVolumeRecoveredHasHysteresis(t *testing.T) {
 		t.Error("a small disk under the absolute headroom is not recovered")
 	}
 }
+
+// KIN-76: a runner may declare a parallel-step limit (0 = none), bounded.
+func TestCapabilitiesMaxParallelSteps(t *testing.T) {
+	t.Parallel()
+	c, err := domain.NewCapabilities("linux", "amd64", false, false, nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int{0, 1, domain.MaxParallelSteps} {
+		if got, err := c.WithMaxParallelSteps(n); err != nil || got.MaxParallelSteps != n {
+			t.Errorf("%d: %+v %v", n, got, err)
+		}
+	}
+	for _, n := range []int{-1, domain.MaxParallelSteps + 1} {
+		if _, err := c.WithMaxParallelSteps(n); err == nil {
+			t.Errorf("%d accepted", n)
+		}
+	}
+}

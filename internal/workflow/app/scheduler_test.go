@@ -440,6 +440,54 @@ func TestSchedulePrefersTheLeastLoadedEligibleRunner(t *testing.T) {
 	}
 }
 
+// KIN-76: a runner at its parallel-step limit takes no more steps: the step it cannot take waits as WAITING(runner)
+// saying so, and goes to it once a step it held is done.
+func TestScheduleRespectsTheRunnersParallelStepLimit(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	task := e.task(t, twoParallelSteps())
+	e.pool.set("p1", Candidate{ID: "r1", Tools: []string{"git"}, DiskHeavyAllowed: true, MaxParallel: 1})
+	e.schedule(t)
+	got, ex := e.state(t, task.ID)
+	back, front := ex.StepByKey("backend"), ex.StepByKey("frontend")
+	if back.RunnerID != "r1" || front.State != domain.StepWaiting || front.WaitReason != domain.WaitRunner {
+		t.Fatalf("backend %+v frontend %+v", back, front)
+	}
+	if got.State != domain.TaskRunning { // a step runs: the task is not blocked
+		t.Fatalf("task %s", got.State)
+	}
+	// Alone and at the limit (held by another task): the task is BLOCKED(runner) with the limit as the reason.
+	other := e.task(t, onlyStep("git"))
+	e.schedule(t)
+	if got, _ := e.state(t, other.ID); got.State != domain.TaskBlocked || got.BlockReason != domain.WaitRunner ||
+		got.Reason.Detail != domain.DetailRunnersAtLimit {
+		t.Fatalf("other task %s %+v", got.State, got.Reason)
+	}
+}
+
+// KIN-76: recent failed or lost attempts (within the failure window) rank a runner after a clean one, though its id
+// is lower and it is idle; it stays a candidate when it is the only one.
+func TestSchedulePrefersARunnerWithoutRecentFailures(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	e.repo.failures = map[string]int{"r1": domain.FailingAttempts}
+	e.pool.set("p1", gitRunner("r1"), gitRunner("r2"))
+	task := e.task(t, onlyStep("git"))
+	e.schedule(t)
+	if _, ex := e.state(t, task.ID); ex.Steps[0].RunnerID != "r2" {
+		t.Fatalf("picked %q", ex.Steps[0].RunnerID)
+	}
+	if want := e.clock.Now().Add(-domain.FailureWindow); !e.repo.since.Equal(want) {
+		t.Fatalf("failures since %v, want %v", e.repo.since, want)
+	}
+	e.pool.set("p1", gitRunner("r1"))
+	alone := e.task(t, onlyStep("git"))
+	e.schedule(t)
+	if _, ex := e.state(t, alone.ID); ex.Steps[0].RunnerID != "r1" {
+		t.Fatalf("alone: picked %q", ex.Steps[0].RunnerID)
+	}
+}
+
 // KIN-31: a runner that cannot verify the strict egress sandbox holds the step WAITING(network); the scheduler
 // leaves it alone until the retry delay passed, then assigns it again (with a new token).
 func TestStepHeldForNetworkIsRetriedAfterTheDelay(t *testing.T) {

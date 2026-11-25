@@ -19,8 +19,9 @@ const (
 
 // Bounds of telemetry payloads; a payload beyond them closes the connection with CloseProtocolError.
 const (
-	MaxTools   = 16
-	MaxVolumes = 8
+	MaxTools         = 16
+	MaxVolumes       = 8
+	MaxParallelSteps = 64 // Capabilities.MaxParallelSteps (KIN-76)
 )
 
 // Heartbeat is the payload of runner.heartbeat. Running assignments and capacity arrive with the scheduler
@@ -42,6 +43,9 @@ type Capabilities struct {
 	WSL          bool   `json:"wsl"`          // Linux under WSL2
 	Tools        []Tool `json:"tools"`        // found tools only
 	StrictEgress bool   `json:"strictEgress"` // the runner can enforce strict egress (KIN-30); false until then
+	// MaxParallelSteps is the runner's parallel-step limit set by its operator (KIN-76): the Control Plane assigns
+	// it no more steps at once. 0 (or absent): no limit.
+	MaxParallelSteps int `json:"maxParallelSteps,omitempty"`
 }
 
 // Volume roles of runner.storage.

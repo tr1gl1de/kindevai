@@ -21,6 +21,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/configfile"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/controlplane"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/keyfile"
@@ -325,8 +326,13 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	cliHomeFlag := cliHomeFlag(fs)
 	measureSpace := fs.Bool("measure-space", false,
 		"allow measuring what takes space in the data dir and docker (I/O-limited, every 6 h; KIN-55)")
+	maxParallel := fs.Int("max-parallel-steps", 0,
+		"most steps the Control Plane assigns this runner at once (KIN-76); 0: no limit")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *maxParallel < 0 || *maxParallel > protocol.MaxParallelSteps {
+		return fmt.Errorf("--max-parallel-steps %d: must be 0 (no limit) to %d", *maxParallel, protocol.MaxParallelSteps)
 	}
 	d, err := datadir.Open(*dataDir)
 	if err != nil {
@@ -378,6 +384,7 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	ch.Commands = withNetwork(agent, ch.Commands)
 	pr := probe.New(d.Path())
 	pr.StrictEgress = func(ctx context.Context) bool { ok, _ := strict.Supported(ctx); return ok }
+	pr.MaxParallelSteps = *maxParallel
 	rep := &app.Reporter{Probe: pr} // KIN-20 heartbeat, capabilities, storage
 	if *measureSpace {              // KIN-55: only with the operator's explicit permission
 		rep.Meter = probe.NewSpaceMeter(d.Path()).Measure

@@ -67,6 +67,7 @@ type capsJSON struct {
 	WSL          bool       `json:"wsl"`
 	StrictEgress bool       `json:"strictEgress"`
 	Tools        []toolJSON `json:"tools"`
+	MaxParallel  int        `json:"maxParallelSteps,omitempty"` // KIN-76
 }
 
 type toolJSON struct {
@@ -76,7 +77,8 @@ type toolJSON struct {
 
 // SaveCapabilities stores the runner's last capability report.
 func (r *Repository) SaveCapabilities(ctx context.Context, runnerID string, c domain.Capabilities) error {
-	j := capsJSON{OS: c.OS, Arch: c.Arch, WSL: c.WSL, StrictEgress: c.StrictEgress, Tools: make([]toolJSON, 0, len(c.Tools))}
+	j := capsJSON{OS: c.OS, Arch: c.Arch, WSL: c.WSL, StrictEgress: c.StrictEgress, Tools: make([]toolJSON, 0, len(c.Tools)),
+		MaxParallel: c.MaxParallelSteps}
 	for _, t := range c.Tools {
 		j.Tools = append(j.Tools, toolJSON(t))
 	}
@@ -131,7 +133,8 @@ func parseCaps(s string, at sql.NullString) (*domain.Capabilities, error) {
 	if err := json.Unmarshal([]byte(s), &j); err != nil {
 		return nil, err
 	}
-	c := domain.Capabilities{OS: j.OS, Arch: j.Arch, WSL: j.WSL, StrictEgress: j.StrictEgress, Tools: make([]domain.Tool, 0, len(j.Tools))}
+	c := domain.Capabilities{OS: j.OS, Arch: j.Arch, WSL: j.WSL, StrictEgress: j.StrictEgress, Tools: make([]domain.Tool, 0, len(j.Tools)),
+		MaxParallelSteps: j.MaxParallel}
 	for _, t := range j.Tools {
 		c.Tools = append(c.Tools, domain.Tool(t))
 	}

@@ -57,3 +57,74 @@ func TestPickRunnerIsOrderIndependent(t *testing.T) {
 		}
 	}
 }
+
+// KIN-76: a runner's parallel-step limit, its recent attempt failures and its disk level, and the order in which they
+// rank: at the limit a runner is no candidate; then not failing before failing, ok disk before warning before high,
+// fewer held steps, smaller id.
+func TestPickRunnerFactors(t *testing.T) {
+	t.Parallel()
+	r := func(id string, opts ...func(*RunnerCandidate)) RunnerCandidate {
+		c := RunnerCandidate{ID: id, Tools: []string{"git"}, DiskHeavyAllowed: true}
+		for _, o := range opts {
+			o(&c)
+		}
+		return c
+	}
+	limit := func(n int) func(*RunnerCandidate) { return func(c *RunnerCandidate) { c.MaxParallel = n } }
+	fails := func(n int) func(*RunnerCandidate) { return func(c *RunnerCandidate) { c.RecentFailures = n } }
+	disk := func(l DiskLevel) func(*RunnerCandidate) { return func(c *RunnerCandidate) { c.Disk = l } }
+	tests := []struct {
+		name  string
+		cands []RunnerCandidate
+		held  map[string]int
+		want  string // "" = no runner
+	}{
+		{"at its limit a runner is no candidate", []RunnerCandidate{r("r1", limit(2))}, map[string]int{"r1": 2}, ""},
+		{"over its limit (limit lowered) neither", []RunnerCandidate{r("r1", limit(1))}, map[string]int{"r1": 3}, ""},
+		{"below its limit it is", []RunnerCandidate{r("r1", limit(2))}, map[string]int{"r1": 1}, "r1"},
+		{"no limit (0) is unlimited", []RunnerCandidate{r("r1")}, map[string]int{"r1": 50}, "r1"},
+		{"a full runner leaves the step to a busier one", []RunnerCandidate{r("r1", limit(1)), r("r2")},
+			map[string]int{"r1": 1, "r2": 4}, "r2"},
+		{"one failure is no penalty", []RunnerCandidate{r("r1", fails(1)), r("r2")}, nil, "r1"},
+		{"a failing runner ranks after a clean one", []RunnerCandidate{r("r1", fails(FailingAttempts)), r("r2")},
+			nil, "r2"},
+		{"a failing runner stays eligible", []RunnerCandidate{r("r1", fails(9))}, nil, "r1"},
+		{"failing outranks load", []RunnerCandidate{r("r1", fails(2)), r("r2")}, map[string]int{"r2": 5}, "r2"},
+		{"disk warning ranks below ok", []RunnerCandidate{r("r1", disk(DiskWarning)), r("r2")}, nil, "r2"},
+		{"disk high ranks below warning", []RunnerCandidate{r("r1", disk(DiskHigh)), r("r2", disk(DiskWarning))},
+			nil, "r2"},
+		{"disk outranks load", []RunnerCandidate{r("r1", disk(DiskWarning)), r("r2")}, map[string]int{"r2": 5}, "r2"},
+		{"failing outranks disk", []RunnerCandidate{r("r1", fails(2)), r("r2", disk(DiskHigh))}, nil, "r2"},
+		{"all failing: disk then load decide", []RunnerCandidate{r("r1", fails(3), disk(DiskWarning)),
+			r("r2", fails(2)), r("r3", fails(2))}, map[string]int{"r2": 1}, "r3"},
+		{"critical disk is still never picked", []RunnerCandidate{{ID: "r0", Tools: []string{"git"}}, r("r1", fails(5))},
+			nil, "r1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := PickRunner(tt.cands, []string{"git"}, tt.held)
+			if ok != (tt.want != "") || got.ID != tt.want {
+				t.Fatalf("PickRunner = %q, %v; want %q", got.ID, ok, tt.want)
+			}
+		})
+	}
+}
+
+// KIN-76: a step that only runners at their limit could take waits for a runner, and the reason says they are busy.
+func TestPickRouteRunnersAtLimit(t *testing.T) {
+	t.Parallel()
+	busy := RunnerCandidate{ID: "r1", Tools: []string{"git", "claude"}, DiskHeavyAllowed: true, MaxParallel: 1}
+	chain := []AgentChoice{{Agent: "claude"}}
+	_, _, reason, ok := PickRoute([]RunnerCandidate{busy}, []string{"git"}, map[string]int{"r1": 1}, chain, nil)
+	if ok || reason.Code != WaitRunner || reason.Detail != DetailRunnersAtLimit {
+		t.Fatalf("PickRoute = %v %+v", ok, reason)
+	}
+	if !AtLimit([]RunnerCandidate{busy}, []string{"git"}, map[string]int{"r1": 1}) ||
+		AtLimit([]RunnerCandidate{busy}, []string{"git"}, nil) {
+		t.Fatal("AtLimit")
+	}
+	if c, _, _, ok := PickRoute([]RunnerCandidate{busy}, []string{"git"}, nil, chain, nil); !ok || c.ID != "r1" {
+		t.Fatalf("below the limit: %q %v", c.ID, ok)
+	}
+}

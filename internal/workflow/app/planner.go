@@ -371,9 +371,9 @@ func (s *Service) routePlanner(ctx context.Context, projectID string) (Candidate
 	if err != nil {
 		return Candidate{}, domain.AgentChoice{}, domain.Reason{}, false, fmt.Errorf("runner candidates: %w", err)
 	}
-	held, err := s.Repo.HeldSteps(ctx)
+	cands, held, err := s.runnerLoad(ctx, cands)
 	if err != nil {
-		return Candidate{}, domain.AgentChoice{}, domain.Reason{}, false, fmt.Errorf("runner load: %w", err)
+		return Candidate{}, domain.AgentChoice{}, domain.Reason{}, false, err
 	}
 	c, choice, reason, ok := domain.PickRoute(cands, nil, held, r.Chain, r.Cooling)
 	return c, choice, reason, ok, nil

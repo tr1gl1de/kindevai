@@ -11,9 +11,11 @@ import (
 // Candidate is a runner the workflow scheduler may assign a project's steps to now (KIN-23).
 type Candidate struct {
 	ID               string
-	Tools            []string // names of the tools it reported (capabilities)
-	DiskHeavyAllowed bool     // false while a volume of the runner is critical (KIN-20)
-	StrictEgress     bool     // its strict egress sandbox verified (KIN-31)
+	Tools            []string     // names of the tools it reported (capabilities)
+	DiskHeavyAllowed bool         // false while a volume of the runner is critical (KIN-20)
+	StrictEgress     bool         // its strict egress sandbox verified (KIN-31)
+	Disk             domain.Level // the highest level of its volumes (KIN-76: a fuller disk ranks lower)
+	MaxParallelSteps int          // the parallel-step limit it declared; 0 = none (KIN-76)
 }
 
 // Candidates lists, by id, the runners that may receive the project's steps now: APPROVED and granted the project
@@ -39,9 +41,15 @@ func (t *Telemetry) Candidates(ctx context.Context, projectID string, online fun
 			continue
 		}
 		c := Candidate{ID: r.ID, Tools: []string{}, DiskHeavyAllowed: !slices.ContainsFunc(vols[r.ID],
-			func(v domain.Volume) bool { return !v.DiskHeavyAllowed() })}
+			func(v domain.Volume) bool { return !v.DiskHeavyAllowed() }), Disk: domain.LevelOK}
+		for _, v := range vols[r.ID] {
+			if l := v.Level(); l.Above(c.Disk) {
+				c.Disk = l
+			}
+		}
 		if p.Capabilities != nil {
 			c.StrictEgress = p.Capabilities.StrictEgress
+			c.MaxParallelSteps = p.Capabilities.MaxParallelSteps
 			for _, tool := range p.Capabilities.Tools {
 				c.Tools = append(c.Tools, tool.Name)
 			}

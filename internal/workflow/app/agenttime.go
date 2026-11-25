@@ -51,6 +51,20 @@ func (s *Service) taskTimes(ctx context.Context, f TaskFilter, ids []string) (ma
 	if err != nil {
 		return nil, total, err
 	}
+	if s.Discussion != nil {
+		// The CLI's time on plan discussion answers (KIN-43) is agent time of the task too.
+		work, err := s.Discussion.DiscussionWork(ctx, f)
+		if err != nil {
+			return nil, total, err
+		}
+		for id, d := range work {
+			total.Add(domain.WorkComplete, d)
+			if t, ok := out[id]; ok {
+				t.Agent.Add(domain.WorkComplete, d)
+				out[id] = t
+			}
+		}
+	}
 	if len(ids) == 0 {
 		return out, total, nil
 	}

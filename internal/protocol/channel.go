@@ -50,6 +50,9 @@ const (
 	// Workspace events (KIN-29), sent before the attempt's process starts and before its terminal event.
 	EventWorkspacePrepared = "workspace.prepared" // body: WorkspacePrepared
 	EventWorkspaceChanges  = "workspace.changes"  // body: WorkspaceChanges
+	// EventWorkspacePreparing reports that the runner is preparing the attempt's workspace (KIN-71), when it starts
+	// and periodically while it lasts; the Control Plane extends the claim's lease with it.
+	EventWorkspacePreparing = "workspace.preparing" // body: WorkspacePreparing
 	// EventAgent is one typed event of the attempt's AI CLI (KIN-79): its session, text, tool use, result or
 	// failure, parsed from the CLI's output (the raw output goes as execution.output).
 	EventAgent = "execution.agent" // body: AgentEvent
@@ -59,7 +62,8 @@ const (
 func TerminalEvent(kind string) bool { return kind == EventCompleted || kind == EventFailed }
 
 var eventKinds = map[string]bool{EventAccepted: true, EventStarted: true, EventOutput: true, EventOutputDropped: true,
-	EventCompleted: true, EventFailed: true, EventWorkspacePrepared: true, EventWorkspaceChanges: true, EventAgent: true}
+	EventCompleted: true, EventFailed: true, EventWorkspacePrepared: true, EventWorkspaceChanges: true, EventAgent: true,
+	EventWorkspacePreparing: true}
 
 // Limits of the channel. MaxOutputChunk raw bytes of output escape to at most 6× in JSON (\u00XX), so an output
 // event stays below MaxMessageBytes.

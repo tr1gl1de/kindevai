@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -22,6 +23,11 @@ type fakeWorkspaces struct {
 	checks   int      // Changes calls
 	late     bool     // Changes was called after Finish
 	finErr   error    // Finish fails
+	// KIN-71: phases reports these phases through the request's Progress; gate, when set, then holds Prepare until
+	// it is closed or its context ends (a slow fetch); started gets each Prepare as it begins.
+	phases  []string
+	gate    chan struct{}
+	started chan string
 }
 
 func (w *fakeWorkspaces) Changes(_ context.Context, step string, fence int64) (*protocol.WorkspaceChanges, error) {
@@ -50,10 +56,26 @@ func (w *fakeWorkspaces) calls() int {
 	return w.checks
 }
 
-func (w *fakeWorkspaces) Prepare(_ context.Context, r WorkspaceRequest) (string, protocol.WorkspacePrepared, error) {
+func (w *fakeWorkspaces) Prepare(ctx context.Context, r WorkspaceRequest) (string, protocol.WorkspacePrepared, error) {
+	w.mu.Lock()
+	w.reqs = append(w.reqs, r)
+	phases, gate, started := w.phases, w.gate, w.started
+	w.mu.Unlock()
+	for _, p := range phases {
+		r.Progress(p)
+	}
+	if started != nil {
+		started <- jkey(r.Step, r.Fence)
+	}
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return "", protocol.WorkspacePrepared{}, fmt.Errorf("git fetch: %w", ctx.Err())
+		}
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.reqs = append(w.reqs, r)
 	if w.err != nil {
 		return "", protocol.WorkspacePrepared{}, w.err
 	}
@@ -92,6 +114,7 @@ func TestAssignmentWithABaseRunsInItsWorktree(t *testing.T) {
 	if err := x.Assign(t.Context(), repoAssignment()); err != nil {
 		t.Fatal(err)
 	}
+	waitFor(t, "launch", func() bool { return l.count() == 1 })
 	if s := l.launched[0]; s.Workdir != "/ws/S1" || s.Dir != "/work/S1-1" {
 		t.Fatalf("launch %+v", s)
 	}
@@ -101,9 +124,10 @@ func TestAssignmentWithABaseRunsInItsWorktree(t *testing.T) {
 	if recs, _ := j.List(); len(recs) != 1 || recs[0].Workdir != "/ws/S1" {
 		t.Fatalf("journal %+v", recs)
 	}
+	waitFor(t, "launch", func() bool { return l.count() == 1 })
 	l.proc(0).end(domain.Exit{Code: 0})
 	waitFor(t, "completed", func() bool { return slices.Contains(ev.kinds(), protocol.EventCompleted) })
-	want := []string{protocol.EventAccepted, protocol.EventWorkspacePrepared, protocol.EventOutput, protocol.EventStarted,
+	want := []string{protocol.EventAccepted, protocol.EventWorkspacePreparing, protocol.EventWorkspacePrepared, protocol.EventOutput, protocol.EventStarted,
 		protocol.EventWorkspaceChanges, protocol.EventCompleted}
 	if k := ev.kinds(); !slices.Equal(k, want) {
 		t.Fatalf("events %v", k)
@@ -125,6 +149,8 @@ func TestWorkspaceFailureFailsTheAttemptWithoutLaunching(t *testing.T) {
 	if err := x.Assign(t.Context(), repoAssignment()); err != nil {
 		t.Fatal(err)
 	}
+	waitFor(t, "failed", func() bool { return slices.Contains(ev.kinds(), protocol.EventFailed) })
+	waitFor(t, "finished", func() bool { done, _ := j.Finished("S1", 1); return done })
 	if l.count() != 0 {
 		t.Fatal("launched without a workspace")
 	}
@@ -146,6 +172,7 @@ func TestWorkspaceFailureReasonIsRedacted(t *testing.T) {
 	if err := x.Assign(t.Context(), a); err != nil {
 		t.Fatal(err)
 	}
+	waitFor(t, "failed", func() bool { return slices.Contains(ev.kinds(), protocol.EventFailed) })
 	if e := ev.last(); e.kind != protocol.EventFailed || strings.Contains(e.body, "plainToken") || !strings.Contains(e.body, "[redacted]") {
 		t.Fatalf("%+v", e)
 	}
@@ -172,25 +199,21 @@ func TestAssignmentSecretIsRedacted(t *testing.T) {
 	}
 }
 
-// A preparation cut short by the connection's end is not the attempt's failure: the command is re-sent.
-func TestInterruptedPreparationIsRetried(t *testing.T) {
+// KIN-71: the preparation belongs to the attempt, not to the command: the connection's end does not stop it.
+func TestPreparationOutlivesTheCommandContext(t *testing.T) {
 	t.Parallel()
-	x, l, j, ev := newExecutor(domain.Policy{})
-	x.Workspaces = &fakeWorkspaces{err: context.Canceled}
+	x, l, _, _ := newExecutor(domain.Policy{})
+	ws := &fakeWorkspaces{gate: make(chan struct{}), started: make(chan string, 1)}
+	x.Workspaces = ws
 	ctx, cancel := context.WithCancel(t.Context())
+	if err := x.Assign(ctx, repoAssignment()); err != nil {
+		t.Fatal(err)
+	}
+	<-ws.started
 	cancel()
-	if err := x.Assign(ctx, repoAssignment()); err == nil {
-		t.Fatal("no error: the command would not be re-sent")
-	}
-	if l.count() != 0 || slices.Contains(ev.kinds(), protocol.EventFailed) {
-		t.Fatalf("events %v", ev.kinds())
-	}
-	if recs, _ := j.List(); len(recs) != 0 {
-		t.Fatal("record left")
-	}
-	if done, _ := j.Finished("S1", 1); done {
-		t.Fatal("attempt finished")
-	}
+	close(ws.gate)
+	waitFor(t, "launch", func() bool { return l.count() == 1 })
+	x.KillAll()
 }
 
 type failingJournal struct{ *memJournal }
@@ -202,20 +225,64 @@ func (j failingJournal) Save(r domain.Record) error {
 	return j.memJournal.Save(r)
 }
 
-// A workspace prepared for an attempt that is then dropped (its record could not be saved) is released, so the
-// re-sent assignment can take it again.
-func TestDroppedAttemptReleasesItsWorkspace(t *testing.T) {
+// A workspace prepared for an attempt whose record cannot be saved is released and the attempt fails (KIN-71: the
+// assignment was already acknowledged, so it is reported rather than left to the claim's lease).
+func TestUnrecordableWorkspaceFailsTheAttempt(t *testing.T) {
 	t.Parallel()
-	x, l, j, _ := newExecutor(domain.Policy{})
+	x, l, j, ev := newExecutor(domain.Policy{})
 	x.Journal = failingJournal{j}
 	ws := &fakeWorkspaces{}
 	x.Workspaces = ws
-	if err := x.Assign(t.Context(), repoAssignment()); err == nil {
-		t.Fatal("no error")
+	if err := x.Assign(t.Context(), repoAssignment()); err != nil {
+		t.Fatal(err)
 	}
-	if l.count() != 0 || !slices.Equal(ws.done(), []string{"S1-1"}) {
-		t.Fatalf("launched %d, released %v", l.count(), ws.done())
+	waitFor(t, "failed", func() bool { return slices.Contains(ev.kinds(), protocol.EventFailed) })
+	x.wg.Wait()
+	if e := ev.last(); !strings.Contains(e.body, "recording the workspace") {
+		t.Fatalf("failure %s", e.body)
 	}
+	if l.count() != 0 || !slices.Equal(ws.done(), []string{"S1-1"}) || len(x.Attempts()) != 0 {
+		t.Fatalf("launched %d, released %v, attempts %+v", l.count(), ws.done(), x.Attempts())
+	}
+	if done, _ := j.Finished("S1", 1); !done {
+		t.Fatal("attempt not finished")
+	}
+}
+
+// When nothing can be reported either (the spool is full), the attempt is dropped: no record, workspace released;
+// the Control Plane's claim runs out and the step is assigned again.
+func TestUnreportableAttemptIsDropped(t *testing.T) {
+	t.Parallel()
+	x, l, j, ev := newExecutor(domain.Policy{})
+	x.Journal = failingJournal{j}
+	ws := &fakeWorkspaces{started: make(chan string, 1), gate: make(chan struct{})}
+	x.Workspaces = ws
+	if err := x.Assign(t.Context(), repoAssignment()); err != nil {
+		t.Fatal(err)
+	}
+	<-ws.started
+	ev.mu.Lock()
+	ev.fail = true
+	ev.mu.Unlock()
+	close(ws.gate)
+	waitFor(t, "release", func() bool { return len(ws.done()) == 1 })
+	x.wg.Wait()
+	recs, _ := j.List()
+	if l.count() != 0 || len(x.Attempts()) != 0 || len(recs) != 0 {
+		t.Fatalf("launched %d, attempts %+v, journal %+v", l.count(), x.Attempts(), recs)
+	}
+	// A newer attempt of the step is not held up by the dropped one.
+	ev.mu.Lock()
+	ev.fail = false
+	ev.mu.Unlock()
+	newer := repoAssignment()
+	newer.Fence = 2
+	x.Journal = j
+	if err := x.Assign(t.Context(), newer); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "launch", func() bool { return l.count() == 1 })
+	x.KillAll()
 }
 
 // Before the worktree is saved and removed, whatever the agent left running in its process group is killed.
@@ -226,6 +293,7 @@ func TestLeftoverProcessesAreKilledBeforeTheWorkspaceIsFinished(t *testing.T) {
 	if err := x.Assign(t.Context(), repoAssignment()); err != nil {
 		t.Fatal(err)
 	}
+	waitFor(t, "launch", func() bool { return l.count() == 1 })
 	l.proc(0).end(domain.Exit{Code: 0})
 	waitFor(t, "completed", func() bool { return slices.Contains(ev.kinds(), protocol.EventCompleted) })
 	if s := l.proc(0).sent(); !slices.Contains(s, true) {
@@ -267,6 +335,7 @@ func TestRunningAttemptReportsItsChangesPeriodically(t *testing.T) {
 	}
 	ws.setInterim("outside.txt", "more.txt")
 	waitFor(t, "second interim report", func() bool { return len(interim()) == 2 })
+	waitFor(t, "launch", func() bool { return l.count() == 1 })
 	l.proc(0).end(domain.Exit{Code: 0})
 	waitFor(t, "completed", func() bool { return slices.Contains(ev.kinds(), protocol.EventCompleted) })
 	ev.mu.Lock()
@@ -292,6 +361,7 @@ func TestUnlistableChangesAreReportedAsTruncated(t *testing.T) {
 	if err := x.Assign(t.Context(), repoAssignment()); err != nil {
 		t.Fatal(err)
 	}
+	waitFor(t, "launch", func() bool { return l.count() == 1 })
 	l.proc(0).end(domain.Exit{Code: 0})
 	waitFor(t, "completed", func() bool { return slices.Contains(ev.kinds(), protocol.EventCompleted) })
 	ev.mu.Lock()

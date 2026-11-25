@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -574,6 +575,23 @@ func (s *stallingHijack) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return c, brw, err
 }
 
+// awaitHijack returns once the stalled handler has hijacked the connection, or with the dial's error if the dial
+// failed first. A successful dial is not a failure: websocket.Accept writes the 101 before it hijacks and net/http
+// flushes it inside Hijack, so the runner can finish its dial just before close(hijacked) runs (KIN-94). The
+// handler has then already reached Hijack, so waiting for hijacked cannot hang.
+func awaitHijack(hijacked <-chan struct{}, dialed <-chan error) error {
+	select {
+	case <-hijacked:
+		return nil
+	case err := <-dialed:
+		if err != nil {
+			return err
+		}
+		<-hijacked
+		return nil
+	}
+}
+
 // KIN-74: srv.Shutdown stops tracking a connection once it is hijacked, so the gateway must already count it then;
 // otherwise Wait (called after Shutdown) returns while that handler still runs and races its WaitGroup.Add.
 func TestWaitCountsAConnectionHijackedDuringShutdown(t *testing.T) {
@@ -596,9 +614,7 @@ func TestWaitCountsAConnectionHijackedDuringShutdown(t *testing.T) {
 		}
 		dialed <- err
 	}()
-	select {
-	case <-hijacked:
-	case err := <-dialed:
+	if err := awaitHijack(hijacked, dialed); err != nil {
 		t.Fatalf("dial ended before the upgrade: %v", err)
 	}
 	if err := e.srv.Config.Shutdown(t.Context()); err != nil {
@@ -610,5 +626,25 @@ func TestWaitCountsAConnectionHijackedDuringShutdown(t *testing.T) {
 	unstall()
 	if err := e.h.Wait(t.Context()); err != nil || e.h.Live() != 0 {
 		t.Fatalf("Wait = %v, live %d", err, e.h.Live())
+	}
+}
+
+// KIN-94: when the dial has already succeeded by the time the test looks, a select between the two outcomes chose
+// at random and failed about half the time. Both outcomes are ready here on every round, so a random pick would fail.
+func TestAwaitHijackAcceptsADialThatFinishedFirst(t *testing.T) {
+	t.Parallel()
+	hijacked := make(chan struct{})
+	close(hijacked)
+	for range 100 {
+		dialed := make(chan error, 1)
+		dialed <- nil
+		if err := awaitHijack(hijacked, dialed); err != nil {
+			t.Fatalf("awaitHijack = %v, want nil", err)
+		}
+	}
+	failed := make(chan error, 1)
+	failed <- errors.New("refused")
+	if err := awaitHijack(make(chan struct{}), failed); err == nil {
+		t.Fatal("a failed dial must be reported")
 	}
 }

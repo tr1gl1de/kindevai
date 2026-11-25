@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
 	"github.com/tr1gl1de/kindevai/internal/workflow/app"
@@ -118,4 +119,15 @@ func (r *Repository) ActivePlanningRuns(ctx context.Context) ([]string, error) {
 func (r *Repository) PlanningRunsHeldBy(ctx context.Context, runnerID string) ([]string, error) {
 	return r.ids(ctx, "listing held planning runs", `SELECT id FROM planning_runs WHERE state = 'RUNNING' AND runner_id = ?
 		ORDER BY created_at, rowid`, runnerID)
+}
+
+// PlanningRunsSince counts the project's runs created at or after since.
+func (r *Repository) PlanningRunsSince(ctx context.Context, projectID string, since time.Time) (int, error) {
+	var n int
+	err := db.Conn(ctx, r.db).QueryRowContext(ctx, `SELECT count(*) FROM planning_runs p JOIN tasks t ON t.id = p.task_id
+		WHERE t.project_id = ? AND p.created_at >= ?`, projectID, ts(since)).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("counting planning runs: %w", err)
+	}
+	return n, nil
 }

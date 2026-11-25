@@ -231,3 +231,25 @@ func TestCanRunAI(t *testing.T) {
 		t.Fatalf("disabled member: %v, %v", ok, err)
 	}
 }
+
+// KIN-85: who may change how AI works in a project (auto-planning of intake tasks): the Owner and the project admin.
+func TestCanManageAI(t *testing.T) {
+	t.Parallel()
+	s, web, api := seeded(t)
+	ctx := t.Context()
+	for _, c := range []struct {
+		name, project, user string
+		want                bool
+	}{
+		{"owner anywhere", api.ID, "u-owner", true},
+		{"project admin of the project", web.ID, "u-alice", true},
+		{"member of the project", api.ID, "u-bob", false},
+		{"unknown user", web.ID, "u-ghost", false},
+		{"unknown project", "missing", "u-owner", false},
+	} {
+		got, err := s.CanManageAI(ctx, c.project, c.user)
+		if err != nil || got != c.want {
+			t.Errorf("%s: CanManageAI = %v, %v; want %v", c.name, got, err, c.want)
+		}
+	}
+}

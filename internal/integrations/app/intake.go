@@ -47,6 +47,10 @@ const (
 	KindYouTrackTriggerChanged = "integration.youtrack_trigger_changed"
 	KindYouTrackUserLinked     = "integration.youtrack_user_linked"
 	KindYouTrackUserUnlinked   = "integration.youtrack_user_unlinked"
+	// KIN-85 automatic planning of intake tasks.
+	KindYouTrackAutoPlanChanged = "integration.youtrack_autoplan_changed"
+	KindYouTrackPlanningStarted = "integration.youtrack_planning_started"
+	KindYouTrackPlanningSkipped = "integration.youtrack_planning_skipped"
 )
 
 const (
@@ -65,6 +69,7 @@ type IntakeStore interface {
 	Binding(ctx context.Context, projectID string) (domain.Binding, error)            // domain.ErrNotFound
 	BindingByShortName(ctx context.Context, shortName string) (domain.Binding, error) // domain.ErrNotFound
 	SetTriggerTag(ctx context.Context, projectID, tag string, at time.Time) error     // domain.ErrNotFound
+	SetAutoPlan(ctx context.Context, projectID string, on bool, at time.Time) error   // domain.ErrNotFound
 	AdvanceCursor(ctx context.Context, projectID, shortName string, cursor int64, at time.Time) error
 
 	IntakeSettings(ctx context.Context) (domain.IntakeSettings, error)
@@ -85,11 +90,19 @@ type Tasks interface {
 	TaskForIssue(ctx context.Context, projectID, issueID string) (taskID string, found bool, err error)
 	CreateIssueTask(ctx context.Context, projectID, issueID, title, createdBy string) (taskID string, err error)
 	RetitleTask(ctx context.Context, taskID, title string) (changed bool, err error)
+	// AutoStartPlanning hands a task the intake just created to the AI planner on behalf of requestedBy (KIN-85).
+	// The outcome is AutoPlanStarted or why the workflow declined (the task then stays as it is).
+	AutoStartPlanning(ctx context.Context, taskID, requestedBy string) (outcome string, err error)
 }
+
+// AutoPlanStarted is the Tasks.AutoStartPlanning outcome of a started planning run.
+const AutoPlanStarted = "started"
 
 // Access is the projects context's permission check: may the account start AI work in the project?
 type Access interface {
 	CanRunAI(ctx context.Context, projectID, userID string) (bool, error)
+	// CanManageAI: may the account change how AI works in the project (Owner, project admin)?
+	CanManageAI(ctx context.Context, projectID, userID string) (bool, error)
 }
 
 // UserRef is how the intake sees an account (owned by the identity context).
@@ -499,8 +512,29 @@ func (in *Intake) HandleIssue(ctx context.Context, e messaging.InboundEvent) err
 	if err := in.Store.SaveIntakeRecord(ctx, rec); err != nil {
 		return err
 	}
-	return in.Integrations.record(ctx, auditapp.System(), KindYouTrackTaskCreated, b.ProjectID, "task:"+rec.TaskID,
-		map[string]string{"issue": s.ID, "initiator": initiator, "tagger": rec.Tagger, "channel": p.Channel})
+	if err := in.Integrations.record(ctx, auditapp.System(), KindYouTrackTaskCreated, b.ProjectID, "task:"+rec.TaskID,
+		map[string]string{"issue": s.ID, "initiator": initiator, "tagger": rec.Tagger, "channel": p.Channel}); err != nil {
+		return err
+	}
+	if !b.AutoPlan {
+		return nil
+	}
+	return in.autoPlan(ctx, b.ProjectID, rec.TaskID, s.ID, initiator)
+}
+
+// autoPlan hands a task the intake just created to the planner (KIN-85) in the same transaction. Only a new task
+// gets here, so a redelivered or changed issue never plans twice; the workflow refuses a second start as well.
+func (in *Intake) autoPlan(ctx context.Context, projectID, taskID, issueID, initiator string) error {
+	outcome, err := in.Tasks.AutoStartPlanning(ctx, taskID, initiator)
+	if err != nil {
+		return err
+	}
+	details := map[string]string{"issue": issueID, "initiator": initiator}
+	if outcome == AutoPlanStarted {
+		return in.Integrations.record(ctx, auditapp.System(), KindYouTrackPlanningStarted, projectID, "task:"+taskID, details)
+	}
+	details["reason"] = outcome
+	return in.Integrations.record(ctx, auditapp.System(), KindYouTrackPlanningSkipped, projectID, "task:"+taskID, details)
 }
 
 func (in *Intake) reject(ctx context.Context, rec domain.IntakeRecord, reason string) error {
@@ -919,6 +953,42 @@ func (in *Intake) SetTriggerTag(ctx context.Context, actor auth.Principal, proje
 		b.TriggerTag = t
 		return in.Integrations.record(ctx, auditapp.UserActor(actor), KindYouTrackTriggerChanged, projectID,
 			"project:"+projectID, map[string]string{"triggerTag": t})
+	})
+	return b, err
+}
+
+// SetAutoPlan turns automatic planning of the project's intake tasks on or off (KIN-85): the Owner or the project's
+// admin; other members are refused, everybody else learns nothing about the project.
+func (in *Intake) SetAutoPlan(ctx context.Context, actor auth.Principal, projectID string, on bool) (domain.Binding, error) {
+	if !actor.Owner {
+		ok, err := in.Access.CanManageAI(ctx, projectID, actor.UserID)
+		if err != nil {
+			return domain.Binding{}, err
+		}
+		if !ok {
+			if err := in.mayRun(ctx, actor, projectID); err != nil {
+				return domain.Binding{}, err
+			}
+			return domain.Binding{}, domain.ErrForbidden
+		}
+	}
+	var b domain.Binding
+	err := in.Integrations.inTx(ctx, func(ctx context.Context) error {
+		var err error
+		if b, err = in.Store.Binding(ctx, projectID); errors.Is(err, domain.ErrNotFound) {
+			return domain.ErrNotBound
+		} else if err != nil {
+			return err
+		}
+		if b.AutoPlan == on {
+			return nil
+		}
+		if err := in.Store.SetAutoPlan(ctx, projectID, on, in.now()); err != nil {
+			return err
+		}
+		b.AutoPlan = on
+		return in.Integrations.record(ctx, auditapp.UserActor(actor), KindYouTrackAutoPlanChanged, projectID,
+			"project:"+projectID, map[string]string{"autoPlan": fmt.Sprint(on)})
 	})
 	return b, err
 }

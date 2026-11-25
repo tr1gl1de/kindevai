@@ -3,6 +3,7 @@
 package cliagent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,13 +124,14 @@ func writeAged(t *testing.T, dir, name string, size int, at time.Time) string {
 	return p
 }
 
-// AC (KIN-96): a task's store is limited in size. Over the limit, Prepare removes the task's oldest session files
-// (of all its CLIs) until the store fits, keeps the newest ones and says so; within the limit nothing is touched.
+// AC (KIN-96, KIN-115): a task's store is limited in size. Over 3/4 of the limit (headroom for the attempt, which
+// is stopped over the limit itself), Prepare removes the task's oldest session files (of all its CLIs) until the
+// store fits, keeps the newest ones and says so; within it nothing is touched.
 func TestSessionStorePrepareEnforcesLimit(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "cli-sessions")
 	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
-	s := &SessionStore{Root: root, Limit: 500, Now: func() time.Time { return now }}
+	s := &SessionStore{Root: root, Limit: 700, Now: func() time.Time { return now }}
 	st, err := s.Prepare("p", "t", domain.AgentClaude)
 	if err != nil || st.Notice != "" {
 		t.Fatalf("fresh store %+v %v", st, err)
@@ -238,5 +240,116 @@ func TestSessionStoreUnreadableDirAndSweep(t *testing.T) {
 	}
 	if _, err := os.Lstat(old); !os.IsNotExist(err) {
 		t.Fatalf("old file kept: %v", err)
+	}
+}
+
+// AC (KIN-115): entries count too (files, directories, symlinks: an agent could exhaust the inodes with empty
+// files). Over 3/4 of the entry limit, Prepare removes the oldest entries that are not directories and the
+// directories that leaves empty, and says so.
+func TestSessionStorePrepareEnforcesEntryLimit(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "cli-sessions")
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	s := &SessionStore{Root: root, EntryLimit: 8, Now: func() time.Time { return now }}
+	st, err := s.Prepare("p", "t", domain.AgentClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files, links []string
+	for i := range 4 { // the claude directory, d/, 4 old files and 4 new symlinks: 10 entries
+		files = append(files, writeAged(t, st.Source, fmt.Sprintf("d/f%d", i), 1, now.Add(-time.Duration(10-i)*time.Hour)))
+		l := filepath.Join(st.Source, fmt.Sprintf("l%d", i))
+		if err := os.Symlink("/nowhere", l); err != nil { // its mtime is the wall clock's: newer than the files
+			t.Fatal(err)
+		}
+		links = append(links, l)
+	}
+	st, err = s.Prepare("p", "t", domain.AgentClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"entries", "removed 4"} {
+		if !strings.Contains(st.Notice, want) {
+			t.Errorf("notice %q lacks %q", st.Notice, want)
+		}
+	}
+	for _, gone := range append(files, filepath.Join(st.Source, "d")) {
+		if _, err := os.Lstat(gone); !os.IsNotExist(err) {
+			t.Errorf("%s kept: %v", gone, err)
+		}
+	}
+	for _, kept := range links {
+		if _, err := os.Lstat(kept); err != nil {
+			t.Errorf("%s removed: %v", kept, err)
+		}
+	}
+	if (&SessionStore{}).entryLimit() != DefaultSessionEntryLimit || DefaultSessionEntryLimit != 20000 {
+		t.Errorf("default entry limit %d", DefaultSessionEntryLimit)
+	}
+}
+
+// AC (KIN-115): while an attempt runs the store is measured against the limits themselves: within them OverQuota
+// says nothing; over the bytes or the entries it says which, also when the agent hid a directory (mode 0).
+func TestSessionStoreOverQuota(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "cli-sessions")
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	s := &SessionStore{Root: root, Limit: 1000, EntryLimit: 20, Now: func() time.Time { return now }}
+	if why := s.OverQuota("p", "t"); why != "" {
+		t.Fatalf("no store yet: %q", why)
+	}
+	st, err := s.Prepare("p", "t", domain.AgentClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAged(t, st.Source, "a.jsonl", 900, now)
+	if why := s.OverQuota("p", "t"); why != "" {
+		t.Fatalf("within the quota: %q", why)
+	}
+	hidden := filepath.Join(st.Source, "hidden")
+	writeAged(t, hidden, "b.jsonl", 200, now)
+	if err := os.Chmod(hidden, 0); err != nil {
+		t.Fatal(err)
+	}
+	if why := s.OverQuota("p", "t"); !strings.Contains(why, "over its quota") || !strings.Contains(why, "1000 B") {
+		t.Fatalf("over the bytes: %q", why)
+	}
+
+	u, err := s.Prepare("p", "u", domain.AgentCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 25 {
+		writeAged(t, u.Source, fmt.Sprintf("e%d", i), 0, now)
+	}
+	if why := s.OverQuota("p", "u"); !strings.Contains(why, "entries") || !strings.Contains(why, "> 20") {
+		t.Fatalf("over the entries: %q", why)
+	}
+}
+
+// AC (KIN-115): a store with far more entries than its limit is not listed whole before an attempt: every session
+// file of the task is removed (the CLIs' store directories stay, they are bound into the sandbox), and it says so.
+func TestSessionStoreWipesAHugeStore(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "cli-sessions")
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	s := &SessionStore{Root: root, EntryLimit: 2, Now: func() time.Time { return now }}
+	st, err := s.Prepare("p", "t", domain.AgentClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 12 {
+		writeAged(t, st.Source, fmt.Sprintf("d%d/f", i%3), 1, now)
+		writeAged(t, st.Source, fmt.Sprintf("f%d", i), 1, now)
+	}
+	if err := os.Chmod(filepath.Join(st.Source, "d1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	st, err = s.Prepare("p", "t", domain.AgentClaude)
+	if err != nil || !strings.Contains(st.Notice, "removed all") {
+		t.Fatalf("%+v %v", st, err)
+	}
+	if left, err := os.ReadDir(st.Source); err != nil || len(left) != 0 {
+		t.Fatalf("left %v %v", left, err)
 	}
 }

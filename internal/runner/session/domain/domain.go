@@ -269,8 +269,11 @@ type Record struct {
 	Fence     int64  `json:"fence"`
 	Execution string `json:"execution"`
 	Project   string `json:"project"`
-	Scenario  string `json:"scenario"`
-	Workdir   string `json:"workdir,omitempty"` // the attempt's git worktree (KIN-29); empty: its journal directory
+	// Task is the attempt's task (KIN-115: a restarted runner watches the task's CLI session store again); empty in
+	// records written before.
+	Task     string `json:"task,omitempty"`
+	Scenario string `json:"scenario"`
+	Workdir  string `json:"workdir,omitempty"` // the attempt's git worktree (KIN-29); empty: its journal directory
 	// Preparing: the attempt has a workspace to prepare (KIN-71), in the background after the assignment was
 	// acknowledged; with no Workdir yet, a restart interrupted the preparation.
 	Preparing bool `json:"preparing,omitempty"`

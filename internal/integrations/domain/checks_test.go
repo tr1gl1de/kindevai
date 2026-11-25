@@ -21,9 +21,17 @@ func TestCombineChecks(t *testing.T) {
 		"red":     {[]CheckRun{done("lint", "success"), done("test", "failure"), {Name: "e2e", Status: "queued"}}, CIStateFailed, "test (failure)"},
 		"timeout": {[]CheckRun{done("build", "timed_out"), done("vet", "cancelled")}, CIStateFailed, "build (timed_out), vet (cancelled)"},
 	} {
-		state, detail := CombineChecks(tc.runs)
+		state, detail := CombineChecks(tc.runs, len(tc.runs))
 		if state != tc.state || !strings.Contains(detail, tc.detail) {
 			t.Errorf("%s: %s %q", name, state, detail)
 		}
+	}
+	// Review: a partial page of green runs is never green; a failure on it still fails.
+	green := []CheckRun{done("lint", "success")}
+	if st, _ := CombineChecks(green, 150); st != CIStatePending {
+		t.Errorf("partial green: %s", st)
+	}
+	if st, _ := CombineChecks([]CheckRun{done("lint", "failure")}, 150); st != CIStateFailed {
+		t.Errorf("partial red: %s", st)
 	}
 }

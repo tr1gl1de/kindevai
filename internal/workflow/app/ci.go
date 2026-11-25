@@ -46,7 +46,7 @@ const (
 // ReconcileCIEvery is the period of the CI reconciliation; reconcileBatch bounds the artifacts checked per pass.
 const (
 	ReconcileCIEvery = time.Minute
-	reconcileBatch   = 200
+	reconcileBatch   = 1000
 )
 
 // ErrHeadMoved: the pull request's head is no longer the commit the platform published and CI checked; it is not
@@ -221,9 +221,11 @@ func (s *Service) HandleCICheck(ctx context.Context, d messaging.Delivery) error
 		}
 		switch st.State {
 		case domain.CIFailed:
-			if !changed || t.State != domain.TaskVerifying {
-				return nil // this failure was handled already, or the Owner has it
+			if t.State != domain.TaskVerifying {
+				return nil // a fix round runs, or the Owner has it (BLOCKED)
 			}
+			// A new failure, or one still there after the Owner resumed the task: a fix round, or blocked again
+			// once the rounds are used up (a fix round makes the task RUNNING, so this never repeats one).
 			return s.ciFailed(ctx, &t, cur, now)
 		case domain.CIPassed:
 			if t.State == domain.TaskBlocked {
@@ -361,8 +363,17 @@ func (s *Service) HandleMerge(ctx context.Context, d messaging.Delivery) error {
 			return serr
 		}
 		i := indexArtifact(arts, target)
-		if i < 0 || arts[i].HeadSHA != target.HeadSHA || arts[i].Merge == domain.MergeMerged {
+		if i < 0 || arts[i].Merge == domain.MergeMerged {
 			return nil
+		}
+		if arts[i].HeadSHA != target.HeadSHA {
+			if err != nil {
+				return nil
+			}
+			// The change set moved on while GitHub merged the checked head: keep the record of what was merged.
+			entry := mergeEntry(t, target, KindMerged, "merged while the change set moved to "+arts[i].HeadSHA)
+			entry.Details["mergeCommit"] = sha
+			return s.record(ctx, entry)
 		}
 		a, now := &arts[i], s.now()
 		if err != nil {

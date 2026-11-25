@@ -72,7 +72,7 @@ type GitHubAPI interface {
 	OpenPullRequest(ctx context.Context, tok domain.Secret, owner, name string, in domain.PullRequestInput) (domain.PullRequestRef, error)
 	// CheckRuns lists a commit's latest check runs; PullRequest reads one; MergePullRequest merges it into base
 	// (merge commit) only while its head is sha: domain.ErrHeadMoved, domain.ErrNotMergeable (KIN-37).
-	CheckRuns(ctx context.Context, tok domain.Secret, owner, name, sha string) ([]domain.CheckRun, error)
+	CheckRuns(ctx context.Context, tok domain.Secret, owner, name, sha string) (runs []domain.CheckRun, total int, err error)
 	PullRequest(ctx context.Context, tok domain.Secret, owner, name string, number int) (domain.PullRequestState, error)
 	MergePullRequest(ctx context.Context, tok domain.Secret, owner, name string, number int, sha, base string) (string, error)
 }
@@ -713,11 +713,11 @@ func (s *GitHubService) CIStatus(ctx context.Context, projectID, repository, sha
 	if err != nil {
 		return "", "", err
 	}
-	runs, err := s.API.CheckRuns(ctx, tok, r.Owner, r.Name, sha)
+	runs, total, err := s.API.CheckRuns(ctx, tok, r.Owner, r.Name, sha)
 	if err != nil {
 		return "", "", err
 	}
-	state, detail = domain.CombineChecks(runs)
+	state, detail = domain.CombineChecks(runs, total)
 	return state, detail, nil
 }
 

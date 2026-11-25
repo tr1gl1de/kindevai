@@ -12,11 +12,12 @@ import (
 // maxCheckRuns bounds the check runs read per commit (one page).
 const maxCheckRuns = 100
 
-// CheckRuns lists the latest check runs of commit sha (KIN-37), at most maxCheckRuns.
-func (c *Client) CheckRuns(ctx context.Context, tok domain.Secret, owner, name, sha string) ([]domain.CheckRun, error) {
+// CheckRuns lists the latest check runs of commit sha (KIN-37), at most maxCheckRuns, and how many there are.
+func (c *Client) CheckRuns(ctx context.Context, tok domain.Secret, owner, name, sha string) ([]domain.CheckRun, int, error) {
 	q := url.Values{"filter": {"latest"}, "per_page": {strconv.Itoa(maxCheckRuns)}}
 	var out struct {
-		CheckRuns []struct {
+		TotalCount int `json:"total_count"`
+		CheckRuns  []struct {
 			Name       string `json:"name"`
 			Status     string `json:"status"`
 			Conclusion string `json:"conclusion"`
@@ -24,13 +25,13 @@ func (c *Client) CheckRuns(ctx context.Context, tok domain.Secret, owner, name, 
 	}
 	if _, err := c.call(ctx, http.MethodGet, repoPath(owner, name)+"/commits/"+url.PathEscape(sha)+"/check-runs?"+q.Encode(),
 		tok.Reveal(), nil, &out, http.StatusOK); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	runs := make([]domain.CheckRun, 0, len(out.CheckRuns))
 	for _, r := range out.CheckRuns {
 		runs = append(runs, domain.CheckRun{Name: r.Name, Status: r.Status, Conclusion: r.Conclusion})
 	}
-	return runs, nil
+	return runs, max(out.TotalCount, len(runs)), nil
 }
 
 // PullRequest reads pull request number.

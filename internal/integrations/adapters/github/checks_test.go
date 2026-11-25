@@ -66,8 +66,8 @@ func TestChecksPullRequestAndMerge(t *testing.T) {
 	c := &github.Client{BaseURL: srv.URL, HTTP: srv.Client()}
 	tok, _ := domain.NewSecret("ghs_tok")
 	ctx := t.Context()
-	runs, err := c.CheckRuns(ctx, tok, "acme", "api", "h1")
-	if st, detail := domain.CombineChecks(runs); err != nil || st != domain.CIStateFailed || detail != "failed checks: test (failure)" {
+	runs, total, err := c.CheckRuns(ctx, tok, "acme", "api", "h1")
+	if st, detail := domain.CombineChecks(runs, total); err != nil || total != 2 || st != domain.CIStateFailed || detail != "failed checks: test (failure)" {
 		t.Fatalf("checks %+v %v", runs, err)
 	}
 	pr, err := c.PullRequest(ctx, tok, "acme", "api", 7)

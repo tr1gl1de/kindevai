@@ -10,11 +10,11 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/integrations/domain"
 )
 
-func (g *githubAPI) CheckRuns(_ context.Context, tok domain.Secret, owner, name, sha string) ([]domain.CheckRun, error) {
+func (g *githubAPI) CheckRuns(_ context.Context, tok domain.Secret, owner, name, sha string) ([]domain.CheckRun, int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.calls = append(g.calls, "checks "+owner+"/"+name+" "+sha+" "+tok.Reveal())
-	return g.runs, nil
+	return g.runs, len(g.runs), nil
 }
 
 func (g *githubAPI) PullRequest(_ context.Context, _ domain.Secret, owner, name string, number int) (domain.PullRequestState, error) {

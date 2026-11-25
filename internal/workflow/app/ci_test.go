@@ -337,6 +337,14 @@ func TestExhaustedCIFixBudgetBlocksTheTask(t *testing.T) {
 	if !slices.Contains(e.topics(), TopicTaskBlocked) || !slices.Contains(e.audit.kinds(), KindCIBudgetExhausted) {
 		t.Fatalf("topics %v audit %v", e.topics(), e.audit.kinds())
 	}
+	// Review: the Owner resuming the task while CI is still red blocks it again (no fix round is left).
+	if _, err := e.svc.ResumeTask(t.Context(), task.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.ciEvent(t, a, "still-red")
+	if tk, _ := e.state(t, task.ID); tk.State != domain.TaskBlocked || tk.BlockReason != domain.WaitCI {
+		t.Fatalf("resumed while red: %s", tk.State)
+	}
 	e.ci.set("h1", CIStatus{State: domain.CIPassed})
 	e.ciEvent(t, a, "rerun")
 	if tk, _ := e.state(t, task.ID); tk.State != domain.TaskCompleted {

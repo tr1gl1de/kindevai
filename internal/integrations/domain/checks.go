@@ -33,10 +33,11 @@ type CheckRun struct {
 
 const maxCIDetail = 2000
 
-// CombineChecks is the CI state of a commit from its latest check runs: pending while there is none or one is not
-// completed; passed when every one concluded success, neutral or skipped; failed otherwise, with the failed checks
-// named in detail ("name (conclusion)", bounded).
-func CombineChecks(runs []CheckRun) (state, detail string) {
+// CombineChecks is the CI state of a commit from its latest check runs (total: how many GitHub has, maybe more than
+// were read): pending while there is none, one is not completed or some were not read (never green on a partial
+// list); passed when every one concluded success, neutral or skipped; failed otherwise, with the failed checks named
+// in detail ("name (conclusion)", bounded).
+func CombineChecks(runs []CheckRun, total int) (state, detail string) {
 	if len(runs) == 0 {
 		return CIStatePending, ""
 	}
@@ -54,7 +55,7 @@ func CombineChecks(runs []CheckRun) (state, detail string) {
 	switch {
 	case len(failed) > 0:
 		return CIStateFailed, truncate("failed checks: "+strings.Join(failed, ", "), maxCIDetail)
-	case pending:
+	case pending || total > len(runs):
 		return CIStatePending, ""
 	}
 	return CIStatePassed, ""

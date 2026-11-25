@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useParams } from "react-router";
 import { isApiError } from "../../api/client";
-import type { Attempt, MockScenario, Step, TaskDetail } from "../../api/types";
+import type { AgentUsage, Attempt, MockScenario, Step, TaskDetail } from "../../api/types";
 import { ConfirmDialog } from "../../ui/ConfirmDialog";
 import { SelectField } from "../../ui/Field";
 import { ErrorState, FormAlert, Loading, PageHeading } from "../../ui/feedback";
@@ -260,6 +260,12 @@ function StepsSection({ d, isOwner }: { d: TaskDetail; isOwner: boolean }) {
           <p>
             {t("tasks.execution")}: {t("tasks.executionValue", { state: t(`tasks.step_${e.state}`), revision: e.planRevision })} ·{" "}
             {t("tasks.agentTime")}: <AgentTimeValue ms={e.agentTime.ms} status={e.agentTime.status} />
+            {e.usage && (
+              <>
+                {" · "}
+                {t("tasks.usage")}: <UsageValue u={e.usage} />
+              </>
+            )}
           </p>
           {e.reason && <p className="muted">{e.reason}</p>}
           <ol className="stages">
@@ -328,6 +334,7 @@ function Attempts({ taskId, s, isOwner }: { taskId: string; s: Step; isOwner: bo
               <th scope="col">{t("tasks.colState")}</th>
               <th scope="col">{t("tasks.colStarted")}</th>
               <th scope="col">{t("tasks.colWork")}</th>
+              <th scope="col">{t("tasks.colUsage")}</th>
               <th scope="col">{t("tasks.colError")}</th>
             </tr>
           </thead>
@@ -345,6 +352,16 @@ function Attempts({ taskId, s, isOwner }: { taskId: string; s: Step; isOwner: bo
                 <td>{formatDateTime(a.workStartedAt ?? a.startedAt, i18n.language)}</td>
                 <td>
                   <AgentTimeValue ms={a.workMs} status={a.workStatus} />
+                </td>
+                <td>
+                  {a.usage ? <UsageValue u={a.usage} /> : "—"}
+                  {(a.session || a.cliVersion) && (
+                    <div className="muted">
+                      {[a.session && t("tasks.usageSession", { session: a.session }), a.cliVersion && t("tasks.usageVersion", { version: a.cliVersion })]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </div>
+                  )}
                 </td>
                 <td>{a.error ?? ""}</td>
               </tr>
@@ -404,5 +421,25 @@ function TaskApprovals({ taskId }: { taskId: string }) {
         </ul>
       )}
     </section>
+  );
+}
+
+/** AI CLI usage (KIN-79): total tokens, cost and turns; the token breakdown in the title. */
+function UsageValue({ u }: { u: AgentUsage }) {
+  const { t, i18n } = useTranslation();
+  const n = new Intl.NumberFormat(i18n.language);
+  const cost = new Intl.NumberFormat(i18n.language, { style: "currency", currency: "USD", maximumFractionDigits: 4 });
+  const tokens = u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheWriteTokens;
+  return (
+    <span
+      title={t("tasks.usageTitle", {
+        input: n.format(u.inputTokens),
+        output: n.format(u.outputTokens),
+        cacheRead: n.format(u.cacheReadTokens),
+        cacheWrite: n.format(u.cacheWriteTokens),
+      })}
+    >
+      {t("tasks.usageValue", { tokens: n.format(tokens), cost: cost.format(u.costUsd), turns: n.format(u.turns) })}
+    </span>
   );
 }

@@ -746,6 +746,21 @@ export interface Attempt {
   workEndedAt: string | null;
   workStatus: WorkStatus;
   workMs: number;
+  /** What the AI CLI reported (KIN-79); absent for the mock agent. */
+  session?: string;
+  model?: string;
+  cliVersion?: string;
+  usage?: AgentUsage;
+}
+
+/** AI CLI usage: tokens, cost in USD (0 when the CLI reports none) and turns (KIN-79). */
+export interface AgentUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number;
+  turns: number;
 }
 
 export interface Step {
@@ -773,6 +788,8 @@ export interface Execution {
   finishedAt: string | null;
   steps: Step[];
   agentTime: AgentTime;
+  /** The AI CLI usage of all attempts (KIN-79). */
+  usage?: AgentUsage;
 }
 
 export interface TaskRevision {

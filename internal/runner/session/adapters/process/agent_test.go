@@ -4,6 +4,7 @@ package process
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -91,5 +92,68 @@ func TestAdoptedCLIAttemptIsReadOnAfterARestart(t *testing.T) {
 	all, _ := os.ReadFile("../cliagent/testdata/claude/read.jsonl")
 	if out.String() != string(all[10:]) {
 		t.Fatalf("output after the restart: %d bytes, want %d", len(out.String()), len(all)-10)
+	}
+}
+
+// TestRealCLISmokeThroughAgentExec runs the installed Claude Code CLI the way the executor does (KIN-79): started
+// by the launcher as agent-exec, its output read from the attempt's files. It spends subscription quota, so it runs
+// only with KINDEV_REAL_CLI_SMOKE=1 (never in CI):
+//
+//	KINDEV_REAL_CLI_SMOKE=1 go test -run TestRealCLISmokeThroughAgentExec -v ./internal/runner/session/adapters/process/
+func TestRealCLISmokeThroughAgentExec(t *testing.T) {
+	t.Parallel()
+	if os.Getenv("KINDEV_REAL_CLI_SMOKE") != "1" {
+		t.Skip("set KINDEV_REAL_CLI_SMOKE=1 to run the installed CLI")
+	}
+	bin, err := exec.LookPath("claude")
+	if err != nil {
+		t.Skip("claude is not installed")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env []string
+	for _, k := range []string{"HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy"} {
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
+		}
+	}
+	root := t.TempDir()
+	state, ws := filepath.Join(root, "S1-1"), filepath.Join(root, "ws")
+	for _, d := range []string{state, ws} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(ws, "hello.txt"), []byte("kindevai smoke\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := &cliagent.Agents{Adapters: map[string]*cliagent.Adapter{domain.AgentClaude: {Dialect: cliagent.Claude{},
+		Config: cliagent.Config{Binary: bin, Home: home, Env: env}}}}
+	cmd, err := g.Prepare(state, domain.AgentRequest{Agent: domain.AgentClaude, Workdir: ws, Timeout: 3 * time.Minute},
+		"Read hello.txt and reply with exactly its content.\n", domain.PermissionsSafe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := launcher(t).Launch(t.Context(), app.LaunchSpec{Dir: state, Workdir: cmd.Dir, Attempt: 1, Stdout: &syncBuf{},
+		Stderr: &syncBuf{}, Agent: &cmd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Signal(true) })
+	fl, err := g.Follow(domain.AgentClaude, state, app.AgentFollow{OnEvent: func(e domain.AgentEvent) {
+		t.Logf("%s %s%s", e.Kind, e.Tool, e.Text)
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := fl.Finish(p.Wait(), "")
+	if ok, reason := res.Outcome(); !ok {
+		t.Fatalf("claude failed: %s", reason)
+	}
+	t.Logf("session %s, version %s, usage %+v, result %q", res.Session, res.Version, res.Usage, res.Text)
+	if res.Session == "" || res.Version == "" || res.Usage.OutputTokens == 0 {
+		t.Fatalf("incomplete report %+v", res)
 	}
 }

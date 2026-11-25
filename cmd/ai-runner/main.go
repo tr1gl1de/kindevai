@@ -398,10 +398,11 @@ func daemon(ctx context.Context, args []string, e *env) error {
 // execution.assign takes to a CLI. A strict attempt runs only as the command of a verified sandbox (Confine fails
 // closed, the CLI never starts on the host), and the permission bypass is chosen only for a confined attempt
 // (Executor.prepareAgent). A sandboxed CLI attempt gets its task's session store, so the next attempt can resume
-// (KIN-86).
+// (KIN-86), and is stopped if it fills the store over its quota (KIN-115).
 func wireAgents(x *sessionapp.Executor, d *datadir.Dir, agents *cliagent.Agents, strict *egress.Sandboxes) {
 	x.Agents = agents
-	x.Egress = confiner{s: strict, sessions: sessionBinds(&cliagent.SessionStore{Root: filepath.Join(resolved(d.Path()), "cli-sessions")})}
+	store := &cliagent.SessionStore{Root: filepath.Join(resolved(d.Path()), "cli-sessions")}
+	x.Egress = confiner{s: strict, sessions: sessionBinds(store), quota: store.OverQuota}
 }
 
 // newExecutor wires the session context (KIN-23) onto the channel: commands start and cancel attempts (the mock

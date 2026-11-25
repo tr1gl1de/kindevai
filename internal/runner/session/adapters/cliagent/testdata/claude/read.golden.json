@@ -1,0 +1,33 @@
+[
+  {
+    "kind": "session",
+    "session": "8bc06756-ac80-4061-889c-c0ee7d40571c",
+    "model": "claude-haiku-5-5",
+    "version": "2.1.331"
+  },
+  {
+    "kind": "tool_use",
+    "session": "8bc06756-ac80-4061-889c-c0ee7d40571c",
+    "tool": "Read",
+    "input": "{\"file_path\":\"/work/hello.txt\"}"
+  },
+  {
+    "kind": "text",
+    "session": "8bc06756-ac80-4061-889c-c0ee7d40571c",
+    "text": "kindevai fixture"
+  },
+  {
+    "kind": "result",
+    "session": "8bc06756-ac80-4061-889c-c0ee7d40571c",
+    "text": "kindevai fixture",
+    "usage": {
+      "inputTokens": 4,
+      "outputTokens": 131,
+      "cacheReadTokens": 32918,
+      "cacheWriteTokens": 14183,
+      "costUsd": 0.0032316800000000002,
+      "turns": 2,
+      "durationMs": 3432
+    }
+  }
+]

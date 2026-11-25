@@ -401,6 +401,17 @@ textarea[aria-invalid="true"] {
   max-width: 420px;
   width: 100%;
 }
+.dialog-wide {
+  max-width: 640px;
+  max-height: calc(100vh - 2 * var(--space));
+  overflow-y: auto;
+}
+.dialog .draft {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 40vh;
+  overflow-y: auto;
+}
 .dialog h2 {
   margin-top: 0;
   font-size: 1.2rem;

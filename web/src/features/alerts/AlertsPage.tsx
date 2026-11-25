@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Alert, AlertAction } from "../../api/types";
 import { EmptyState, ErrorState, FormAlert, Loading, PageHeading } from "../../ui/feedback";
 import { errorMessage } from "../../ui/errors";
 import { formatDateTime } from "../../ui/format";
 import { useNotify } from "../../ui/notify";
+import { AnalysisDialog, AnalysisStatus } from "./AnalysisDialog";
 import { useAlertAction, useAlerts, type AlertFilter } from "./api";
 
 const filters: AlertFilter[] = ["active", "all"];
@@ -83,6 +84,8 @@ function AlertTable({ items }: { items: Alert[] }) {
   const act = useAlertAction();
   const notify = useNotify();
   const [error, setError] = useState<string>();
+  const [analysis, setAnalysis] = useState<Alert>();
+  const closeAnalysis = useCallback(() => setAnalysis(undefined), []);
 
   async function run(a: Alert, action: AlertAction) {
     setError(undefined);
@@ -125,22 +128,35 @@ function AlertTable({ items }: { items: Alert[] }) {
                   <span className="badge">{t(`alerts.state_${a.state}`)}</span>
                 </td>
                 <td>
-                  {a.canManage ? (
+                  {a.canManage || a.canSuggestAnalysis || a.analysisTask ? (
                     <div className="actions">
-                      {actions
-                        .filter((x) => x !== "acknowledge" || a.state === "OPEN")
-                        .map((x) => (
+                      {a.canManage &&
+                        actions
+                          .filter((x) => x !== "acknowledge" || a.state === "OPEN")
+                          .map((x) => (
+                            <button
+                              key={x}
+                              type="button"
+                              className="button subtle"
+                              disabled={act.isPending}
+                              aria-label={t(`alerts.action_${x}_label`, { alert: text(a) })}
+                              onClick={() => void run(a, x)}
+                            >
+                              {t(`alerts.action_${x}`)}
+                            </button>
+                          ))}
+                      {a.analysisTask && <AnalysisStatus task={a.analysisTask} />}
+                      {(!a.analysisTask || a.analysisTask.failure) &&
+                        a.canSuggestAnalysis && (
                           <button
-                            key={x}
                             type="button"
                             className="button subtle"
-                            disabled={act.isPending}
-                            aria-label={t(`alerts.action_${x}_label`, { alert: text(a) })}
-                            onClick={() => void run(a, x)}
+                            aria-label={t("alerts.action_analysis_label", { alert: text(a) })}
+                            onClick={() => setAnalysis(a)}
                           >
-                            {t(`alerts.action_${x}`)}
+                            {t("alerts.action_analysis")}
                           </button>
-                        ))}
+                        )}
                     </div>
                   ) : (
                     <span className="muted">—</span>
@@ -151,6 +167,7 @@ function AlertTable({ items }: { items: Alert[] }) {
           </tbody>
         </table>
       </div>
+      {analysis && <AnalysisDialog alert={analysis} onClose={closeAnalysis} />}
     </>
   );
 }

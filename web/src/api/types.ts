@@ -667,6 +667,34 @@ export interface Alert {
   ackedAt: string | null;
   closedAt: string | null;
   canManage: boolean;
+  // KIN-61: analysis task in YouTrack.
+  canSuggestAnalysis?: boolean;
+  analysisTask?: AlertAnalysisTask | null;
+}
+
+export interface AlertAnalysisTask {
+  projectId: string;
+  youtrackProject: string;
+  requestedAt: string;
+  issueId?: string;
+  issueUrl?: string;
+  createdAt: string | null;
+  attempt?: number;
+  /** Code of a permanent failure; confirming again retries. */
+  failure?: string;
+  failedAt?: string | null;
+}
+
+export interface AlertAnalysisPreview {
+  summary: string;
+  description: string;
+  configured: boolean;
+  targets: {
+    projectId: string;
+    projectName: string;
+    youtrackProject: string;
+  }[];
+  task: AlertAnalysisTask | null;
 }
 
 export type NotificationType = "approval_requested" | "alert_raised" | "task_finished";

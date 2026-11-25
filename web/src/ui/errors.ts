@@ -110,6 +110,8 @@ const validationKeys = new Set([
   "webhook_secret_short",
   "webhook_secret_format",
   "key_required_for_app",
+  "youtrack_not_configured",
+  "youtrack_unbound",
 ]);
 
 /** Message for a server validation code, or undefined if unknown. */

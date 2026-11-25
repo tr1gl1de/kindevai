@@ -12,7 +12,7 @@
   --danger: #b3261e; /* 6.4:1 on white */
   --danger-text: #ffffff;
   --warn-bg: #fff6e0;
-  --warn-border: #c98a00;
+  --warn-border: #a87300; /* 4.1:1 on --bg, 3.8:1 on --surface and --warn-bg (KIN-110) */
   --focus: #1f5fd6;
   --radius: 10px;
   --space: 16px;
@@ -35,7 +35,7 @@
     --danger: #ff8a80;
     --danger-text: #1a0503;
     --warn-bg: #2b2412;
-    --warn-border: #d9a520;
+    --warn-border: #d9a520; /* 6.9:1 on --warn-bg, 7.2:1 on --surface */
     --focus: #8ab4ff;
   }
 }

@@ -33,6 +33,7 @@ const DefaultSchedulerInterval = time.Second
 func wireExecution(wf *workflowapp.Service, ch *runnersapp.Channel, gw *runnersgw.Handler, tel *runnersapp.Telemetry,
 	hub *runnersapp.Hub, logger *slog.Logger) {
 	wf.Runners = workflowRunners{tel: tel, hub: hub}
+	wf.Presence = workflowPresence{tel: tel, online: hub.Online, started: wf.Now()} // KIN-118
 	wf.Dispatcher = runnerDispatcher{ch: ch}
 	ch.Reconciler = workflowReconciler{wf: wf}
 	if hb := gw.Messages[protocol.TypeHeartbeat]; hb != nil {
@@ -77,6 +78,42 @@ func startScheduler(ctx context.Context, wf *workflowapp.Service, every time.Dur
 		}
 	})
 	return func() { cancel(); wg.Wait() }
+}
+
+// workflowPresence tells the scheduler which runners are offline and since when (KIN-118).
+type workflowPresence struct {
+	tel     *runnersapp.Telemetry
+	online  func(runnerID string) bool // a live session
+	started time.Time                  // the control plane's start
+}
+
+func (w workflowPresence) Offline(ctx context.Context, runnerIDs []string) (map[string]time.Time, error) {
+	pres, err := w.tel.Presence(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return offlineSince(runnerIDs, pres, w.online, w.started), nil
+}
+
+// offlineSince returns, for each runner without a live session, the time it counts as offline from: its last heartbeat, but never before started — the control plane's own downtime is not the runner's (it
+// had no way to reconnect), so a restart never moves work at once.
+func offlineSince(ids []string, pres map[string]runnersapp.Presence, online func(string) bool,
+	started time.Time) map[string]time.Time {
+	out := make(map[string]time.Time, len(ids))
+	for _, id := range ids {
+		if online(id) {
+			// A live session is online even before its first heartbeat (a runner that just reconnected after a long
+			// outage still shows its old heartbeat): its reconciliation decides about its attempts.
+			continue
+		}
+		p, ok := pres[id]
+		since := started
+		if ok && p.LastHeartbeatAt != nil && p.LastHeartbeatAt.After(started) {
+			since = *p.LastHeartbeatAt
+		}
+		out[id] = since
+	}
+	return out
 }
 
 // workflowRunners gives the scheduler the runners context's candidates.

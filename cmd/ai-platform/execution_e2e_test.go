@@ -628,6 +628,43 @@ func TestDeadProcessIsRetriedAfterReconcile(t *testing.T) {
 	}
 }
 
+// Acceptance (KIN-118): a runner that stays offline past the grace period loses its attempt without any Owner
+// action. When it comes back with the old process still alive, that process is cancelled (stale token) and the step
+// runs again under a new token: never two processes of the step at once.
+func TestOfflineRunnerLosesItsAttemptAfterTheGracePeriod(t *testing.T) {
+	t.Parallel()
+	e2eSlot(t)
+	cp := startCP(t, t.TempDir(), "127.0.0.1:0")
+	id, key := cp.seed(t, "p1")
+	r := startRunner(t, t.TempDir(), cp.addr, id, key, nil, nil)
+	task := cp.mockTask(t, "p1", "hang")
+	first := cp.waitTask(t, task, stepRunning).Execution.Steps[0]
+	pgid := runningPGID(t, r)
+
+	r.disconnect()
+	cp.clock.advance(2 * e2eLeaseTTL) // the lease is lost: UNKNOWN, kept for the grace period
+	cp.waitTask(t, task, func(d workflowapp.TaskDetail) bool { return d.Execution.Steps[0].AttemptUnknown() })
+	cp.clock.advance(workflowapp.DefaultOfflineRunnerGrace)
+	d := cp.waitTask(t, task, func(d workflowapp.TaskDetail) bool {
+		return d.Execution.Steps[0].Attempts[0].State == workflow.AttemptFailed
+	})
+	if a := d.Execution.Steps[0].Attempts[0]; !strings.Contains(a.Error, "offline") {
+		t.Fatalf("released attempt %+v", a)
+	}
+
+	r = r.restart(t, cp.addr) // back with the old process alive (adopted from its journal)
+	waitFor(t, "old process group gone", func() (bool, string) { return !process.Alive(pgid, pgid), "" })
+	d = cp.waitTask(t, task, func(d workflowapp.TaskDetail) bool {
+		return stepRunning(d) && d.Execution.Steps[0].Fence > first.Fence
+	})
+	if n := r.launches.n.Load(); n != 2 {
+		t.Fatalf("launches = %d, want 2 (%s)", n, describe(d))
+	}
+	if _, err := cp.wf.CancelTaskAs(t.Context(), ownerP, task, "done"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A Control Plane restart while the step runs: everything is in SQLite, the runner reconnects, reconciles and the
 // execution continues to the end.
 func TestControlPlaneRestartContinuesTheExecution(t *testing.T) {

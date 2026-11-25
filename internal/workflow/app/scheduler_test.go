@@ -701,3 +701,155 @@ func TestCLILimitHoldIsSchedulableAtOnceWhenRouted(t *testing.T) {
 		t.Fatal("cli_limit hold scheduling wrong")
 	}
 }
+
+// fakePresence says which runners are offline and since when (KIN-118).
+type fakePresence struct {
+	mu      sync.Mutex
+	offline map[string]time.Time
+	err     error
+	calls   int
+	onCall  func(n int) // runs after the n-th call's answer is taken (a reconnect between two looks)
+}
+
+func (p *fakePresence) Offline(_ context.Context, ids []string) (map[string]time.Time, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	if p.onCall != nil {
+		defer func(n int) { p.onCall(n) }(p.calls)
+	}
+	if p.err != nil {
+		return nil, p.err
+	}
+	out := map[string]time.Time{}
+	for _, id := range ids {
+		if since, ok := p.offline[id]; ok {
+			out[id] = since
+		}
+	}
+	return out, nil
+}
+
+func (p *fakePresence) set(id string, since time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.offline == nil {
+		p.offline = map[string]time.Time{}
+	}
+	p.offline[id] = since
+}
+
+func (p *fakePresence) back(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.offline, id)
+}
+
+// Acceptance (KIN-118): a runner that simply goes offline keeps its step only for the grace period: within it the
+// attempt is UNKNOWN and nothing moves (a reconnect would continue it); past it the attempt fails, the step runs on
+// another runner and the old runner is told to cancel the process (delivered when it reconnects). When it comes
+// back, its late report is stale and its process is cancelled again by reconciliation: never two live attempts.
+func TestAnOfflineRunnerLosesItsStepAfterTheGracePeriod(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	pres := &fakePresence{}
+	e.svc.Presence = pres
+	task := e.task(t, onlyStep())
+	e.pool.set("p1", Candidate{ID: "r1", DiskHeavyAllowed: true})
+	e.schedule(t)
+	_, ex := e.state(t, task.ID)
+	st := run(t, e, ex)
+	e.disp.take()
+
+	gone := e.clock.Now()
+	pres.set("r1", gone)
+	e.pool.set("p1", Candidate{ID: "r2", DiskHeavyAllowed: true})
+	e.clock.Add(DefaultLeaseTTL) // the lease is lost: UNKNOWN, no second process
+	e.schedule(t)
+	e.clock.Add(DefaultOfflineRunnerGrace - DefaultLeaseTTL - time.Second)
+	e.schedule(t)
+	if c := e.disp.take(); len(c) != 0 {
+		t.Fatalf("within the grace period: %v", c)
+	}
+	if _, ex := e.state(t, task.ID); ex.Steps[0].RunnerID != "r1" || ex.Steps[0].Attempts[0].State != domain.AttemptUnknown {
+		t.Fatalf("within the grace period: %+v", ex.Steps[0])
+	}
+
+	e.clock.Add(time.Second)
+	e.schedule(t)
+	want := []string{fmt.Sprintf("cancel r1 %s/%d stale_fence", st.ID, st.Fence), fmt.Sprintf("assign r2 only/%d p1 api", st.Fence+1)}
+	if c := e.disp.take(); !slices.Equal(c, want) {
+		t.Fatalf("past the grace period: %v, want %v", c, want)
+	}
+	_, ex = e.state(t, task.ID)
+	if a := ex.Steps[0].Attempts[0]; a.State != domain.AttemptFailed || !strings.Contains(a.Error, "offline") {
+		t.Fatalf("released attempt %+v", a)
+	}
+
+	pres.back("r1")
+	if err := e.svc.CompleteStep(t.Context(), st.ID, "r1", st.Fence); !errors.Is(err, domain.ErrStaleFence) {
+		t.Fatalf("late report of the returning runner = %v", err)
+	}
+	if err := e.svc.ReconcileRunner(t.Context(), "r1", []AttemptReport{{StepID: st.ID, Fence: st.Fence, Running: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if c := e.disp.take(); !slices.Equal(c, []string{fmt.Sprintf("cancel r1 %s/%d stale_fence", st.ID, st.Fence)}) {
+		t.Fatalf("reconciliation of the returning runner: %v", c)
+	}
+	if _, ex := e.state(t, task.ID); ex.Steps[0].RunnerID != "r2" || ex.Steps[0].Fence != st.Fence+1 {
+		t.Fatalf("the step left its new runner: %+v", ex.Steps[0])
+	}
+	e.schedule(t)
+	if c := e.disp.take(); len(c) != 0 {
+		t.Fatalf("released again: %v", c)
+	}
+}
+
+// Review finding (KIN-118): a runner that reconnects between the pass's look at presence and the release keeps its
+// work — presence is looked at again inside the release's transaction.
+func TestARunnerThatReconnectsBeforeTheReleaseKeepsItsWork(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	pres := &fakePresence{}
+	e.svc.Presence = pres
+	task := e.task(t, onlyStep())
+	e.pool.set("p1", Candidate{ID: "r1", DiskHeavyAllowed: true})
+	e.schedule(t)
+	_, ex := e.state(t, task.ID)
+	run(t, e, ex)
+	e.disp.take()
+	pres.set("r1", e.clock.Now())
+	e.pool.set("p1")
+	e.clock.Add(DefaultOfflineRunnerGrace)
+	pres.onCall = func(n int) {
+		if n == 1 {
+			delete(pres.offline, "r1") // back right after the first look (the lock is held)
+		}
+	}
+	e.schedule(t)
+	if c := e.disp.take(); len(c) != 0 {
+		t.Fatalf("released a runner that came back: %v", c)
+	}
+	if _, ex := e.state(t, task.ID); ex.Steps[0].RunnerID != "r1" || ex.Steps[0].Attempts[0].State != domain.AttemptUnknown {
+		t.Fatalf("step %+v", ex.Steps[0])
+	}
+}
+
+// Review finding (KIN-118): a failing offline release (presence unreadable) is reported but never stops the pass.
+func TestAFailedOfflineReleaseDoesNotStopScheduling(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	pres := &fakePresence{}
+	e.svc.Presence = pres
+	first := e.task(t, onlyStep())
+	e.pool.set("p1", Candidate{ID: "r1", DiskHeavyAllowed: true})
+	e.schedule(t) // r1 now holds a step: the next pass asks for presence
+	pres.err = errors.New("telemetry unavailable")
+	second := e.task(t, onlyStep())
+	if err := e.svc.Schedule(t.Context()); err == nil || !strings.Contains(err.Error(), "telemetry unavailable") {
+		t.Fatalf("schedule = %v", err)
+	}
+	if _, ex := e.state(t, second.ID); ex.Steps[0].RunnerID != "r1" {
+		t.Fatalf("the pass stopped: %+v (first %s)", ex.Steps[0], first.ID)
+	}
+}

@@ -261,6 +261,27 @@ func (r *memRepo) ExecutionsPinnedTo(_ context.Context, runnerID string) ([]stri
 	return ids, nil
 }
 
+func (r *memRepo) RunnersWithWork(context.Context) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var ids []string
+	for _, e := range r.execs {
+		if e.State != domain.ExecutionRunning {
+			continue
+		}
+		for _, s := range e.Steps {
+			if s.Holding() {
+				ids = append(ids, s.RunnerID)
+			}
+			if s.PinnedRunner != "" && s.State != domain.StepSucceeded && s.State != domain.StepFailed && s.State != domain.StepCancelled {
+				ids = append(ids, s.PinnedRunner)
+			}
+		}
+	}
+	slices.Sort(ids)
+	return slices.Compact(ids), nil
+}
+
 func (r *memRepo) HeldSteps(context.Context) (map[string]int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

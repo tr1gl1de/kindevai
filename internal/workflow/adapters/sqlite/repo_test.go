@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -503,6 +504,9 @@ func TestSchedulingAndListingQueries(t *testing.T) {
 	if ids, _ := repo.ExecutionsHeldBy(ctx, "r1"); len(ids) != 0 {
 		t.Fatalf("held before claim %v", ids)
 	}
+	if ids, err := repo.RunnersWithWork(ctx); err != nil || len(ids) != 0 { // KIN-118
+		t.Fatalf("runners with work before claim %v %v", ids, err)
+	}
 	if _, err := svc.Claim(ctx, e.StepByKey("backend").ID, "r1"); err != nil {
 		t.Fatal(err)
 	}
@@ -526,6 +530,10 @@ func TestSchedulingAndListingQueries(t *testing.T) {
 	}
 	if ids, _ := repo.ExecutionsHeldBy(ctx, "r9"); len(ids) != 0 {
 		t.Fatalf("a pin is no hold %v", ids)
+	}
+	// KIN-118: the runners an offline release may concern — holding a step, or pinned by an unfinished one.
+	if ids, err := repo.RunnersWithWork(ctx); err != nil || !slices.Equal(ids, []string{"r1", "r9"}) {
+		t.Fatalf("runners with work %v %v", ids, err)
 	}
 	list, err := repo.ListTasks(ctx, app.TaskFilter{ProjectIDs: []string{"p1", "nope"}}, 10)
 	if err != nil || len(list) != 2 {

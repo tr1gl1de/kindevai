@@ -18,6 +18,13 @@ type RunnerPool interface {
 	Candidates(ctx context.Context, projectID string) ([]Candidate, error)
 }
 
+// RunnerPresence is the runners context's liveness as the offline release needs it (KIN-118).
+type RunnerPresence interface {
+	// Offline returns, for each of runnerIDs that is offline now (no live session, or its heartbeats stopped), the
+	// time it counts as offline from; online runners are left out.
+	Offline(ctx context.Context, runnerIDs []string) (map[string]time.Time, error)
+}
+
 // AgentRouter is the routing context (KIN-33) as the scheduler needs it.
 type AgentRouter interface {
 	// Route returns the permitted CLI chain for a step of role in the project (System → Project → Role binding),
@@ -118,16 +125,18 @@ func (s *Service) Schedule(ctx context.Context) error {
 	if _, err := s.ExpireLeases(ctx); err != nil {
 		return err
 	}
+	// A failed offline release is retried by the next pass; it never stops this one.
+	releaseErr := s.releaseOfflineRunners(ctx)
 	if s.Pause != nil {
 		paused, err := s.Pause.SchedulingPaused(ctx)
 		if err != nil {
 			return err
 		}
 		if paused {
-			return nil // maintenance mode: no new executions or step claims (KIN-41)
+			return releaseErr // maintenance mode: no new executions or step claims (KIN-41)
 		}
 	}
-	var errs []error
+	errs := []error{releaseErr}
 	if err := s.schedulePlanning(ctx); err != nil {
 		errs = append(errs, err)
 	}
@@ -637,6 +646,72 @@ func (s *Service) ReleaseRunner(ctx context.Context, runnerID, reason string) er
 	if reason != ReleaseDisabled && reason != ReleaseRevoked {
 		return fmt.Errorf("unknown runner release reason %q", reason)
 	}
+	cancel := CancelReasonRunnerDisabled
+	if reason == ReleaseRevoked {
+		cancel = "" // it never connects again
+	}
+	msg := "runner " + reason + " by the Owner"
+	return s.releaseRunner(ctx, runnerID, cancel, func(e *domain.Execution, now time.Time) []domain.Released {
+		return e.ReleaseRunner(runnerID, msg, now, s.maxAttempts())
+	})
+}
+
+// releaseOfflineRunners moves the work of runners offline for longer than the grace period (KIN-118): the steps
+// whose lease they lost fail and are retried elsewhere, the review loops pinned to them start over on another runner
+// (continuing from the published branch head, KIN-106). Each released attempt gets an execution.cancel(stale_fence),
+// delivered from the command log if the runner reconnects; its old token is stale, so it never runs twice.
+func (s *Service) releaseOfflineRunners(ctx context.Context) error {
+	if s.Presence == nil {
+		return nil
+	}
+	ids, err := s.Repo.RunnersWithWork(ctx)
+	if err != nil || len(ids) == 0 {
+		return err
+	}
+	offline, err := s.Presence.Offline(ctx, ids)
+	if err != nil {
+		return fmt.Errorf("runner presence: %w", err)
+	}
+	grace := s.offlineRunnerGrace()
+	msg := fmt.Sprintf("runner offline for more than %s: the step moves to another runner", graceText(grace))
+	var errs []error
+	for _, id := range ids {
+		since, ok := offline[id]
+		if !ok || s.now().Sub(since) < grace {
+			continue
+		}
+		err := s.Tx.InTx(ctx, func(ctx context.Context) error {
+			// Look again inside the transaction: a runner that reconnected meanwhile keeps its work.
+			again, err := s.Presence.Offline(ctx, []string{id})
+			if err != nil {
+				return fmt.Errorf("runner presence: %w", err)
+			}
+			if since, ok := again[id]; !ok || s.now().Sub(since) < grace {
+				return nil
+			}
+			return s.releaseRunner(ctx, id, CancelReasonStale, func(e *domain.Execution, now time.Time) []domain.Released {
+				return e.ReleaseOfflineRunner(id, msg, now, s.maxAttempts())
+			})
+		})
+		if err != nil && !errors.Is(err, domain.ErrConflict) {
+			errs = append(errs, fmt.Errorf("releasing offline runner %s: %w", id, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// graceText is the grace period in the attempt's error: whole minutes as "10 min", anything else as a duration.
+func graceText(d time.Duration) string {
+	if d >= time.Minute && d%time.Minute == 0 {
+		return fmt.Sprintf("%d min", int(d/time.Minute))
+	}
+	return d.String()
+}
+
+// releaseRunner applies release to every running execution the runner holds a step of or is pinned in, and queues
+// an execution.cancel with cancelReason ("" none) for each released attempt, all in one transaction.
+func (s *Service) releaseRunner(ctx context.Context, runnerID, cancelReason string,
+	release func(e *domain.Execution, now time.Time) []domain.Released) error {
 	return s.Tx.InTx(ctx, func(ctx context.Context) error {
 		ids, err := s.Repo.ExecutionsHeldBy(ctx, runnerID)
 		if err != nil {
@@ -654,17 +729,17 @@ func (s *Service) ReleaseRunner(ctx context.Context, runnerID, reason string) er
 		for _, id := range ids {
 			var released []domain.Released
 			err := s.updateExecutionByID(ctx, id, func(_ context.Context, e *domain.Execution, now time.Time) error {
-				released = e.ReleaseRunner(runnerID, "runner "+reason+" by the Owner", now, s.maxAttempts())
+				released = release(e, now)
 				return nil
 			})
 			if err != nil {
 				return fmt.Errorf("releasing execution %s: %w", id, err)
 			}
-			if s.Dispatcher == nil || reason == ReleaseRevoked {
+			if s.Dispatcher == nil || cancelReason == "" {
 				continue
 			}
 			for _, r := range released {
-				if err := s.Dispatcher.Cancel(ctx, runnerID, r.StepID, r.Fence, CancelReasonRunnerDisabled); err != nil {
+				if err := s.Dispatcher.Cancel(ctx, runnerID, r.StepID, r.Fence, cancelReason); err != nil {
 					return fmt.Errorf("queueing the cancel of step %s: %w", r.StepID, err)
 				}
 			}

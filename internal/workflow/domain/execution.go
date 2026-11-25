@@ -599,6 +599,18 @@ type Released struct {
 // maxAttempts; a CLAIMED step never started, so it returns to READY without using the budget. The tokens are
 // released, so any later report of these attempts is stale. It returns the released attempts in step order.
 func (e *Execution) ReleaseRunner(runnerID, msg string, now time.Time, maxAttempts int) []Released {
+	return e.releaseRunner(runnerID, msg, now, maxAttempts, false)
+}
+
+// ReleaseOfflineRunner is ReleaseRunner for a runner that stayed offline past its grace period without the Owner
+// disabling it (KIN-118). Only attempts whose lease it lost are taken: a CLAIMED or RUNNING step with a live lease
+// is still kept by its heartbeats and stays (ExpireLeases turns a lost one into READY or an UNKNOWN attempt first).
+// A review loop pinned to it and not held starts over elsewhere, continuing from the published branch head.
+func (e *Execution) ReleaseOfflineRunner(runnerID, msg string, now time.Time, maxAttempts int) []Released {
+	return e.releaseRunner(runnerID, msg, now, maxAttempts, true)
+}
+
+func (e *Execution) releaseRunner(runnerID, msg string, now time.Time, maxAttempts int, lostOnly bool) []Released {
 	if e.State != ExecutionRunning || runnerID == "" {
 		return nil
 	}
@@ -607,6 +619,10 @@ func (e *Execution) ReleaseRunner(runnerID, msg string, now time.Time, maxAttemp
 	for i := range e.Steps {
 		s := &e.Steps[i]
 		if s.RunnerID != runnerID || !s.Holding() {
+			continue
+		}
+		if lostOnly && (s.State == StepClaimed || s.State == StepRunning) && s.LeaseExpiresAt != nil &&
+			now.Before(*s.LeaseExpiresAt) {
 			continue
 		}
 		out = append(out, Released{StepID: s.ID, Fence: s.Fence})

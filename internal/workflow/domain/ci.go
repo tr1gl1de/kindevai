@@ -109,10 +109,14 @@ func (a *GitArtifact) recordCI(head string, st CIState, detail string, noChecks 
 			since = now
 		}
 	}
-	if a.CI == st && a.CIHeadSHA == head && a.CIDetail == detail && a.NoChecksSince.Equal(since) {
+	waived := a.CIWaivedHead
+	if !noChecks || head != waived {
+		waived = "" // a check run or another head ends a waiver for good (KIN-113): never revived without the Owner
+	}
+	if a.CI == st && a.CIHeadSHA == head && a.CIDetail == detail && a.NoChecksSince.Equal(since) && a.CIWaivedHead == waived {
 		return false
 	}
-	a.CI, a.CIHeadSHA, a.CIDetail, a.NoChecksSince, a.UpdatedAt = st, head, detail, since, now
+	a.CI, a.CIHeadSHA, a.CIDetail, a.NoChecksSince, a.CIWaivedHead, a.UpdatedAt = st, head, detail, since, waived, now
 	return true
 }
 

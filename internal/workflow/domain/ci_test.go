@@ -299,6 +299,10 @@ func TestACIWaiverEndsWithChecksOrANewHead(t *testing.T) {
 	if a.CheckMergeable() == nil {
 		t.Fatal("red CI mergeable after a waiver")
 	}
+	a.RecordNoChecks("h1", t0.Add(3*time.Minute)) // the check runs are gone again: the ended waiver stays ended
+	if a.CIWaivedOnHead() || a.CIWaivedHead != "" {
+		t.Fatalf("an ended waiver came back: %+v", a)
+	}
 	b := openArtifact(t, "h1")
 	b.RecordNoChecks("h1", t0)
 	if err := b.WaiveCI(t0); err != nil {
@@ -308,6 +312,11 @@ func TestACIWaiverEndsWithChecksOrANewHead(t *testing.T) {
 	b.RecordNoChecks("h2", t0)
 	if b.CIWaivedOnHead() || b.CheckMergeable() == nil {
 		t.Fatal("a waiver of an older head counted")
+	}
+	b.HeadSHA = "h1" // the branch was reset to the waived commit: a new confirmation is needed
+	b.RecordNoChecks("h1", t0)
+	if b.CIWaivedOnHead() {
+		t.Fatal("a waiver came back with its head")
 	}
 	c := openArtifact(t, "h1")
 	c.RecordNoChecks("h1", t0)

@@ -123,3 +123,25 @@ func TestMergeWithoutCIFollowsCIThatAppearsBeforeTheMerge(t *testing.T) {
 		t.Fatalf("red CI after the waiver: task %s", tk.State)
 	}
 }
+
+// Review (KIN-113): a refused merge is retried, not merged without CI; a refused project admin waives nothing and
+// leaves no audit entry.
+func TestMergeWithoutCIRefusesARefusedMergeAndAProjectAdmin(t *testing.T) {
+	t.Parallel()
+	e := ownedCIEnv()
+	task, _ := e.refused(t)
+	if _, err := e.svc.MergeWithoutCIAs(t.Context(), owner, task.ID); !errors.Is(err, domain.ErrInvalidTransition) {
+		t.Fatalf("refused merge: %v", err)
+	}
+	f := ownedCIEnv()
+	blocked := f.noCIBlocked(t)
+	if _, err := f.svc.MergeWithoutCIAs(t.Context(), admin, blocked.ID); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("admin: %v", err)
+	}
+	if a := f.artifact(t, blocked.ID); a.CIWaivedHead != "" {
+		t.Fatalf("admin waived: %+v", a)
+	}
+	if _, ok := f.auditEntry(KindMergedWithoutCI); ok {
+		t.Fatal("admin's refused action audited as done")
+	}
+}

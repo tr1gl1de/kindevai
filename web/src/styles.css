@@ -8,7 +8,8 @@
   --accent: var(--tg-theme-button-color, #1f5fd6); /* 5.6:1 on white */
   --accent-text: var(--tg-theme-button-text-color, #ffffff);
   --link: var(--tg-theme-link-color, #1a56c4);
-  --border: #d5d9e0;
+  --border: #d5d9e0; /* decorative dividers and outlines only */
+  --border-strong: #767d8a; /* control boundaries, chart axes: 3.8:1 on --surface and --warn-bg (KIN-111) */
   --danger: #b3261e; /* 6.4:1 on white */
   --danger-text: #ffffff;
   --warn-bg: #fff6e0;
@@ -32,6 +33,7 @@
     --accent-text: var(--tg-theme-button-text-color, #0b1220);
     --link: var(--tg-theme-link-color, #8ab4ff);
     --border: #343944;
+    --border-strong: #7c8494; /* 3.5:1 on --surface and --warn-bg */
     --danger: #ff8a80;
     --danger-text: #1a0503;
     --warn-bg: #2b2412;
@@ -260,7 +262,7 @@ textarea {
   background: var(--bg);
   min-height: var(--tap);
   padding: 8px 12px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   width: 100%;
 }
@@ -301,7 +303,7 @@ textarea[aria-invalid="true"] {
   min-width: var(--tap);
   padding: 8px 16px;
   border-radius: var(--radius);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   background: var(--bg);
   color: var(--text);
   cursor: pointer;

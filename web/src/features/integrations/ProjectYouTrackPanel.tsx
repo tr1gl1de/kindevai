@@ -48,7 +48,8 @@ export function ProjectYouTrackPanel({ project, isOwner }: { project: Project; i
           </p>
           {isOwner && <TriggerTag key={data.data.binding.triggerTag} project={project} current={data.data.binding.triggerTag} />}
           <AutoPlan project={project} on={data.data.binding.autoPlan} />
-          <StateMap key={JSON.stringify(data.data.binding.states ?? {})} project={project} states={data.data.binding.states ?? {}} />
+          {/* Not keyed by the map: a background refetch must not wipe unsaved edits (the form keeps its own values). */}
+          <StateMap project={project} states={data.data.binding.states ?? {}} />
           <RunIssue project={project} shortName={data.data.binding.shortName} />
           <Recent data={data.data} />
         </>
@@ -197,7 +198,7 @@ function StateMap({ project, states }: { project: Project; states: Record<string
   }
 
   return (
-    <form noValidate onSubmit={onSubmit} aria-labelledby="youtrack-states" className="card form-card">
+    <form noValidate onSubmit={onSubmit} aria-labelledby="youtrack-states" aria-describedby="youtrack-states-hint" className="card form-card">
       <h3 id="youtrack-states">{t("intake.statesTitle")}</h3>
       <p className="muted" id="youtrack-states-hint">
         {t("intake.statesHint")}

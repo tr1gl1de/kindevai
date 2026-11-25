@@ -103,6 +103,26 @@ type writeStore struct {
 	mu     sync.Mutex
 	states map[string]domain.StateMap
 	writes map[string]domain.IssueWrite
+	order  []string // keys in enqueue order
+}
+
+func (s *writeStore) FollowsFailure(_ context.Context, key string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	taskID, failed, between := s.writes[key].TaskID, -1, false
+	for i, k := range s.order {
+		w := s.writes[k]
+		switch {
+		case k == key:
+			return failed >= 0 && !between && failed < i, nil
+		case w.TaskID != taskID:
+		case w.Status == domain.WriteFailed:
+			failed, between = i, false
+		case w.Status == domain.WritePublished:
+			between = true
+		}
+	}
+	return false, nil
 }
 
 func (s *writeStore) StateMap(_ context.Context, projectID string) (domain.StateMap, error) {
@@ -119,6 +139,7 @@ func (s *writeStore) SaveIssueWrite(_ context.Context, w domain.IssueWrite) erro
 	if _, ok := s.writes[w.Key]; !ok {
 		w.Status = domain.WritePending
 		s.writes[w.Key] = w
+		s.order = append(s.order, w.Key)
 	}
 	return nil
 }
@@ -487,5 +508,54 @@ func TestIssueSyncFailedWriteRaisesAnAlertTheNextPublicationClosesIt(t *testing.
 	}
 	if strings.Join(codes, ",") != "invalid_issue,http_503" {
 		t.Fatalf("failure alert codes = %v", codes)
+	}
+}
+
+// Review finding: only the first write published after the task's latest failure closes the alert. A write enqueued
+// before a failure (published later) does not close it, nor does every later publication enqueue a close again.
+func TestIssueSyncOnlyAPublicationAfterTheFailureClosesTheAlert(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, _, _, q := issueSync(ytConn{})
+	if err := s.Comment(ctx, "task/t1/v4/plan", "t1", "p1", "KIN-7", "Plan"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Comment(ctx, "task/t1/v5/final", "t1", "p1", "KIN-7", " "); err != nil { // rejected: invalid_text
+		t.Fatal(err)
+	}
+	if err := s.HandleWrite(ctx, writeDelivery(q, "task/t1/v4/plan", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(messagesOf(q, app.TopicYouTrackWritePublished)); n != 0 {
+		t.Fatalf("a write enqueued before the failure closed its alert (%d closes)", n)
+	}
+	for _, k := range []string{"task/t1/v6/a", "task/t1/v7/b"} {
+		if err := s.Comment(ctx, k, "t1", "p1", "KIN-7", "x"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.HandleWrite(ctx, writeDelivery(q, k, 1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if closes := messagesOf(q, app.TopicYouTrackWritePublished); len(closes) != 1 || closes[0].Key != "youtrack/task/t1/v6/a/published" {
+		t.Fatalf("closes = %+v, want one for the first write after the failure", closes)
+	}
+}
+
+// Review finding: an undecodable delivery fails its write (shown on the task) instead of leaving it pending.
+func TestIssueSyncMalformedPayloadFailsTheWrite(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, _, st, q := issueSync(ytConn{})
+	if err := s.Comment(ctx, "task/t1/v4/plan", "t1", "p1", "KIN-7", "Plan"); err != nil {
+		t.Fatal(err)
+	}
+	d := writeDelivery(q, "task/t1/v4/plan", 1)
+	d.Payload = []byte("{")
+	if err := s.HandleWrite(ctx, d); !messaging.IsPermanent(err) {
+		t.Fatalf("malformed = %v", err)
+	}
+	if status, code := st.status("task/t1/v4/plan"); status != domain.WriteFailed || code != "malformed" {
+		t.Fatalf("write = %s %s", status, code)
 	}
 }

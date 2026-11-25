@@ -60,6 +60,9 @@ type WriteStore interface {
 	SaveIssueWrite(ctx context.Context, w domain.IssueWrite) error
 	MarkIssueWrite(ctx context.Context, key string, s domain.WriteStatus, code string, attempts int, at time.Time) error
 	TaskPublication(ctx context.Context, taskID string) (domain.Publication, error)
+	// FollowsFailure reports whether the write key is the first of its task published after the task's latest
+	// failed write (in enqueue order): the publication that closes the task's write-back alert (KIN-107).
+	FollowsFailure(ctx context.Context, key string) (bool, error)
 }
 
 // IssueSync is the write-back: the request methods run in the caller's transaction (the workflow's task change)
@@ -212,7 +215,7 @@ var errConflict = errors.New("youtrack article changed while writing")
 func (s *IssueSync) HandleWrite(ctx context.Context, d messaging.Delivery) error {
 	var p writePayload
 	if err := json.Unmarshal(d.Payload, &p); err != nil {
-		return messaging.Permanent(errors.New("malformed youtrack write payload"))
+		return s.fail(ctx, d, writePayload{}, "malformed", errors.New("malformed youtrack write payload"))
 	}
 	set, err := s.Connection.YouTrackSettings(ctx)
 	switch {
@@ -259,13 +262,14 @@ func (s *IssueSync) alertFailed(ctx context.Context, key string, p writePayload,
 		"projectId": p.ProjectID, "taskId": p.TaskID, "issue": clip(p.Issue, 64), "kind": string(p.Kind), "code": code})
 }
 
-// alertPublished closes the task's write-back alert when a write is published after one of its writes failed.
+// alertPublished closes the task's write-back alert when this is the first write published after its latest
+// failure; a write enqueued before that failure does not close it.
 func (s *IssueSync) alertPublished(ctx context.Context, key string, p writePayload) error {
 	if p.ProjectID == "" {
 		return nil
 	}
-	pub, err := s.Store.TaskPublication(ctx, p.TaskID)
-	if err != nil || pub.Failed == 0 {
+	closes, err := s.Store.FollowsFailure(ctx, key)
+	if err != nil || !closes {
 		return err
 	}
 	return s.alert(ctx, TopicYouTrackWritePublished, "youtrack/"+key+"/published", p.TaskID,

@@ -32,12 +32,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
+	"github.com/tr1gl1de/kindevai/internal/runner/egress/adapters/httpprobe"
 	"github.com/tr1gl1de/kindevai/internal/runner/egress/adapters/proxyadapter"
 	egress "github.com/tr1gl1de/kindevai/internal/runner/egress/app"
 	"github.com/tr1gl1de/kindevai/internal/runner/egress/domain"
@@ -62,8 +64,10 @@ type Spec struct {
 	Argv []string `json:"argv,omitempty"`
 	Env  []string `json:"env,omitempty"`
 	Dir  string   `json:"dir,omitempty"`
-	UID  int      `json:"uid"` // the runner's uid and gid, which the agent keeps (without capabilities)
-	GID  int      `json:"gid"`
+	// HomeBinds are bound read-write below the agent's HOME (the task's CLI session store, KIN-86).
+	HomeBinds []egress.HomeBind `json:"homeBinds,omitempty"`
+	UID       int               `json:"uid"` // the runner's uid and gid, which the agent keeps (without capabilities)
+	GID       int               `json:"gid"`
 }
 
 // ProbeSpec is the proxy and egress IP check of the preflight.
@@ -98,6 +102,32 @@ type Manager struct {
 	VerifyTimeout time.Duration
 	// LookPath finds nft (exec.LookPath, plus /usr/sbin and /sbin, when nil).
 	LookPath func(string) (string, error)
+	// MonitorEvery is how often a running sandbox's egress is checked again (KIN-81; DefaultMonitorEvery when
+	// zero, never when negative); Prober runs the check (httpprobe when nil).
+	MonitorEvery time.Duration
+	Prober       Prober
+}
+
+// Prober checks a profile's proxy path and egress IP (httpprobe.Prober, as Test Network does).
+type Prober interface {
+	Probe(ctx context.Context, np protocol.NetworkProfile, eps []protocol.NetworkEndpoint) protocol.NetworkTestResult
+}
+
+// DefaultMonitorEvery is how often a running strict attempt's egress is checked again.
+const DefaultMonitorEvery = 5 * time.Minute
+
+func (m *Manager) monitorEvery() time.Duration {
+	if m.MonitorEvery == 0 {
+		return DefaultMonitorEvery
+	}
+	return m.MonitorEvery
+}
+
+func (m *Manager) prober() Prober {
+	if m.Prober == nil {
+		return &httpprobe.Prober{}
+	}
+	return m.Prober
 }
 
 var _ egress.Boxes = (*Manager)(nil)
@@ -189,13 +219,19 @@ func sweepStale(base string, now time.Time) []string {
 	return removed
 }
 
-// Box is one attempt's sandbox: its proxy adapter and the helper's verdict pipe.
+// Box is one attempt's sandbox: its proxy adapter, the runtime monitor of its egress and the helper's verdict pipe.
 type Box struct {
-	m      *Manager
-	spec   Spec
-	stop   context.CancelFunc
-	served chan struct{}
-	once   sync.Once
+	m        *Manager
+	spec     Spec
+	srv      *proxyadapter.Server
+	stop     context.CancelFunc
+	served   chan struct{}
+	watching sync.WaitGroup
+	fault    chan string
+	once     sync.Once
+	// reattached: served again after a runner restart (KIN-81); it runs no new command.
+	reattached bool
+	profile    string // the fingerprint of the profile it serves
 
 	mu       sync.Mutex
 	verdictR *os.File
@@ -221,10 +257,6 @@ func (m *Manager) open(r egress.BoxRequest) (*Box, error) {
 	if err != nil {
 		return nil, err
 	}
-	allow := domain.Allowlist{Restricted: p.Restricted}
-	for _, a := range p.Allow {
-		allow.Rules = append(allow.Rules, domain.Rule{Host: a.Host, CIDR: a.CIDR, Ports: a.Ports})
-	}
 	// A short private directory: Unix socket paths are limited to 107 bytes, which a data directory path can
 	// exceed. Inside the sandbox only this attempt's socket directory is visible.
 	sweepStale(socketBase(), time.Now())
@@ -239,18 +271,183 @@ func (m *Manager) open(r egress.BoxRequest) (*Box, error) {
 		_ = os.RemoveAll(sockDir)
 		return nil, fmt.Errorf("listening for the sandbox: %w", err)
 	}
-	ctx, stop := context.WithCancel(context.Background()) // lives as long as the attempt, not the command
-	b := &Box{m: m, stop: stop, served: make(chan struct{})}
-	srv := &proxyadapter.Server{Upstream: *p.Proxy, Allow: allow, Logger: m.Logger}
-	go func() { defer close(b.served); _ = srv.Serve(ctx, l) }()
+	b := m.serve(l, sock, p, false)
 	keep := []string{r.Dir}
 	if r.Workdir != "" {
 		keep = append(keep, r.Workdir)
 	}
 	b.spec = Spec{Socket: sock, Ruleset: rules, NFT: nft, Keep: keep, Home: m.home(), DataDir: m.DataDir, Sockets: m.Sockets,
-		Probe: &ProbeSpec{DiagnosticURL: p.DiagnosticURL, ExpectedIPv4: p.ExpectedIPv4, ExpectedIPv6: p.ExpectedIPv6},
-		UID:   os.Getuid(), GID: os.Getgid()}
+		HomeBinds: r.HomeBinds,
+		Probe:     &ProbeSpec{DiagnosticURL: p.DiagnosticURL, ExpectedIPv4: p.ExpectedIPv4, ExpectedIPv6: p.ExpectedIPv6},
+		UID:       os.Getuid(), GID: os.Getgid()}
 	return b, nil
+}
+
+// serve starts the proxy adapter of profile p on l and, when the profile names a diagnostic endpoint, the runtime
+// monitor of its egress (checkNow: the first check at once, as after a reattach).
+func (m *Manager) serve(l net.Listener, sock string, p protocol.NetworkProfile, checkNow bool) *Box {
+	allow := domain.Allowlist{Restricted: p.Restricted}
+	for _, a := range p.Allow {
+		allow.Rules = append(allow.Rules, domain.Rule{Host: a.Host, CIDR: a.CIDR, Ports: a.Ports})
+	}
+	ctx, stop := context.WithCancel(context.Background()) // lives as long as the attempt, not the command
+	b := &Box{m: m, stop: stop, served: make(chan struct{}), fault: make(chan string, 1), profile: egress.Fingerprint(p),
+		srv: &proxyadapter.Server{Upstream: *p.Proxy, Allow: allow, Logger: m.Logger}}
+	go func() { defer close(b.served); _ = b.srv.Serve(ctx, l) }()
+	switch every := m.monitorEvery(); {
+	case every > 0 && p.DiagnosticURL != "":
+		b.watching.Go(func() { b.monitor(ctx, sock, p, every, checkNow) })
+	case every > 0:
+		m.logger().Warn("strict egress: the profile names no diagnostic endpoint; the egress is not checked while the attempt runs",
+			"socket", sock)
+	}
+	return b
+}
+
+// monitor checks the sandbox's egress every interval while the attempt runs (KIN-81, KB KIN-A-22 «Во время
+// работы»): from the runner through the upstream proxy, like the preflight and Test Network. Once domain.Watch
+// says the egress is lost the adapter refuses new connections and cuts the open ones, and Fault reports why.
+func (b *Box) monitor(ctx context.Context, sock string, p protocol.NetworkProfile, every time.Duration, checkNow bool) {
+	var w domain.Watch
+	next := every
+	if checkNow {
+		next = 0
+	}
+	t := time.NewTimer(next)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		cctx, cancel := context.WithTimeout(ctx, b.m.verifyTimeout())
+		r := b.m.prober().Probe(cctx, p, nil)
+		cancel()
+		if ctx.Err() != nil {
+			return
+		}
+		code := ""
+		if !r.OK {
+			if code = r.Code; code == "" {
+				code = "check_failed"
+			}
+		}
+		if w.Observe(code) {
+			b.srv.Cut()
+			b.m.logger().Warn("strict egress lost: the proxy adapter cut every connection", "socket", sock,
+				"check", code)
+			b.fault <- code
+			return
+		}
+		if code != "" {
+			b.m.logger().Warn("strict egress runtime check failed", "socket", sock, "check", code)
+		}
+		t.Reset(every)
+	}
+}
+
+// Endpoint is the adapter's socket: the journal keeps it, so a restarted runner serves it again (KIN-81).
+func (b *Box) Endpoint() string { return b.spec.Socket }
+
+// Profile is the fingerprint of the network profile the adapter serves (kept in the journal with Endpoint).
+func (b *Box) Profile() string { return b.profile }
+
+// Fault delivers why the runtime monitor cut the sandbox off (once; never when it is not monitored).
+func (b *Box) Fault() <-chan string { return b.fault }
+
+// maxSummaryHost bounds the denied destination quoted in Summary, in runes (it comes from the sandbox).
+const maxSummaryHost = 100
+
+// Summary reports the connections the allowlist denied, for the attempt's output ("" when none).
+func (b *Box) Summary() string {
+	n, last := b.srv.Denied()
+	if n == 0 {
+		return ""
+	}
+	// The destination comes from the sandbox: quoted (no control characters or escapes reach the output) and
+	// cut on a rune boundary.
+	if r := []rune(last); len(r) > maxSummaryHost {
+		last = string(r[:maxSummaryHost])
+	}
+	return fmt.Sprintf("kindev: strict egress denied %d connection(s) outside the allowlist (last: %s)", n,
+		strconv.QuoteToASCII(last))
+}
+
+// Reattach serves the proxy adapter of a sandbox built by an earlier runner process again (KIN-81): the sandbox's
+// forwarder holds the adapter's socket directory and dials the socket by name for every connection, so a new
+// listener on the same path is its way out again. The endpoint must be this user's private adapter directory and
+// its socket dead (one still served belongs to a live adapter). The first runtime check runs at once.
+func (m *Manager) Reattach(_ context.Context, r egress.BoxRequest, endpoint string) (egress.Box, error) {
+	if runtime.GOOS != "linux" {
+		return nil, egress.ErrUnsupported
+	}
+	p := r.Profile
+	if _, err := domain.Ruleset(domain.Policy{Enforcement: p.Enforcement, DNS: p.DNS, HasProxy: p.Proxy != nil}); err != nil {
+		return nil, err
+	}
+	if err := adapterSocket(endpoint); err != nil {
+		return nil, err
+	}
+	l, err := relisten(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	b := m.serve(l, endpoint, p, true)
+	b.spec, b.reattached = Spec{Socket: endpoint}, true
+	return b, nil
+}
+
+// adapterSocket checks that endpoint is the socket of an adapter directory this user created: <base>/kindev-egress-*/s
+// with base the socket base or /tmp, the directory a real one (no symlink) owned by this user and private.
+func adapterSocket(endpoint string) error {
+	bad := fmt.Errorf("not a strict egress adapter socket: %q", endpoint)
+	if !filepath.IsAbs(endpoint) || filepath.Clean(endpoint) != endpoint || filepath.Base(endpoint) != "s" {
+		return bad
+	}
+	dir := filepath.Dir(endpoint)
+	if !strings.HasPrefix(filepath.Base(dir), "kindev-egress-") {
+		return bad
+	}
+	if base := filepath.Dir(dir); base != socketBase() && base != "/tmp" {
+		return bad
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("adapter socket directory: %w", err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !fi.IsDir() || !ok || int(st.Uid) != os.Getuid() || fi.Mode().Perm() != 0o700 {
+		return bad
+	}
+	return nil
+}
+
+// relisten listens on sock again, removing the dead socket a killed runner left there.
+func relisten(sock string) (net.Listener, error) {
+	if fi, err := os.Lstat(sock); err == nil {
+		if fi.Mode().Type() != os.ModeSocket {
+			return nil, fmt.Errorf("not a socket: %q", sock)
+		}
+		dl := net.Dialer{Timeout: time.Second}
+		c, err := dl.DialContext(context.Background(), "unix", sock)
+		if err == nil {
+			_ = c.Close()
+			return nil, errors.New("the adapter socket is still served")
+		}
+		if !errors.Is(err, syscall.ECONNREFUSED) {
+			return nil, fmt.Errorf("adapter socket: %w", err)
+		}
+		if err := os.Remove(sock); err != nil {
+			return nil, fmt.Errorf("removing the dead adapter socket: %w", err)
+		}
+	}
+	var lc net.ListenConfig
+	l, err := lc.Listen(context.Background(), "unix", sock)
+	if err != nil {
+		return nil, fmt.Errorf("listening for the sandbox again: %w", err)
+	}
+	return l, nil
 }
 
 // Command returns the helper command that runs argv (with env, in dir) inside the sandbox. The caller sets its
@@ -258,6 +455,9 @@ func (m *Manager) open(r egress.BoxRequest) (*Box, error) {
 func (b *Box) Command(argv, env []string, dir string) (*exec.Cmd, error) {
 	if len(argv) == 0 {
 		return nil, errors.New("no command")
+	}
+	if b.reattached {
+		return nil, errors.New("a sandbox served again after a restart runs no new command")
 	}
 	s := b.spec
 	s.Argv, s.Env, s.Dir = argv, env, dir
@@ -355,6 +555,7 @@ func (b *Box) Release() {
 	b.once.Do(func() {
 		b.stop()
 		<-b.served
+		b.watching.Wait()
 		b.mu.Lock()
 		for _, f := range []*os.File{b.verdictR, b.verdictW, b.specR} {
 			if f != nil {

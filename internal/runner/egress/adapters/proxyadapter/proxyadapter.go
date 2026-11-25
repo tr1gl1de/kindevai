@@ -39,6 +39,66 @@ type Server struct {
 	Timeout  time.Duration  // connecting through the upstream proxy; default 30s
 	MaxConns int            // DefaultMaxConns when zero
 	Logger   *slog.Logger
+
+	mu     sync.Mutex
+	conns  map[net.Conn]struct{} // open client and upstream connections
+	cut    bool
+	denied int64
+	last   string // the last destination the allowlist refused
+}
+
+// Cut refuses every new connection from now on and closes the open ones (KIN-81: the egress is no longer the
+// verified one). It cannot be undone: the attempt ends and a new one gets a new adapter.
+func (s *Server) Cut() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cut = true
+	for c := range s.conns {
+		_ = c.Close()
+	}
+}
+
+// IsCut reports whether Cut was called.
+func (s *Server) IsCut() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cut
+}
+
+// Denied returns how many connections the allowlist (or the reserved destinations) refused and the last one's
+// host:port.
+func (s *Server) Denied() (int64, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.denied, s.last
+}
+
+// track registers an open connection; false (and the connection closed) once the adapter is cut.
+func (s *Server) track(c net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cut {
+		_ = c.Close()
+		return false
+	}
+	if s.conns == nil {
+		s.conns = map[net.Conn]struct{}{}
+	}
+	s.conns[c] = struct{}{}
+	return true
+}
+
+func (s *Server) untrack(c net.Conn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.conns, c)
+}
+
+func (s *Server) deny(host string, port int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.denied++
+	s.last = net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 // Errors of an upstream connection.
@@ -69,20 +129,16 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 		max = DefaultMaxConns
 	}
 	sem := make(chan struct{}, max)
-	var (
-		mu    sync.Mutex
-		conns = map[net.Conn]struct{}{}
-		wg    sync.WaitGroup
-	)
+	var wg sync.WaitGroup
 	stop := context.AfterFunc(ctx, func() { _ = l.Close() })
 	defer stop()
 	defer func() {
 		_ = l.Close()
-		mu.Lock()
-		for c := range conns {
+		s.mu.Lock()
+		for c := range s.conns {
 			_ = c.Close()
 		}
-		mu.Unlock()
+		s.mu.Unlock()
 		wg.Wait()
 	}()
 	for {
@@ -93,6 +149,11 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 			}
 			return fmt.Errorf("accepting: %w", err)
 		}
+		if s.IsCut() {
+			_, _ = io.WriteString(c, "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
+			_ = c.Close()
+			continue
+		}
 		select {
 		case sem <- struct{}{}:
 		default:
@@ -100,26 +161,17 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 			_ = c.Close()
 			continue
 		}
-		mu.Lock()
-		conns[c] = struct{}{}
-		mu.Unlock()
+		if !s.track(c) {
+			<-sem
+			continue
+		}
 		wg.Go(func() {
 			defer func() {
-				mu.Lock()
-				delete(conns, c)
-				mu.Unlock()
+				s.untrack(c)
 				_ = c.Close()
 				<-sem
 			}()
-			s.handle(ctx, c, func(up net.Conn) {
-				mu.Lock()
-				conns[up] = struct{}{}
-				mu.Unlock()
-			}, func(up net.Conn) {
-				mu.Lock()
-				delete(conns, up)
-				mu.Unlock()
-			})
+			s.handle(ctx, c)
 		})
 	}
 }
@@ -131,7 +183,7 @@ func reply(c net.Conn, status int) {
 // maxHeader bounds a request head from the sandbox.
 const maxHeader = 64 << 10
 
-func (s *Server) handle(ctx context.Context, c net.Conn, track, untrack func(net.Conn)) {
+func (s *Server) handle(ctx context.Context, c net.Conn) {
 	_ = c.SetReadDeadline(time.Now().Add(s.timeout()))
 	head := &io.LimitedReader{R: c, N: maxHeader} // bounds the head only: lifted once it is read
 	br := bufio.NewReaderSize(head, 4096)
@@ -165,6 +217,7 @@ func (s *Server) handle(ctx context.Context, c net.Conn, track, untrack func(net
 	}
 	if domain.Reserved(host) || !s.Allow.Allows(host, port) {
 		s.logger().Warn("strict egress: destination not in the allowlist", "host", host, "port", port)
+		s.deny(host, port)
 		reply(c, http.StatusForbidden)
 		return
 	}
@@ -176,8 +229,11 @@ func (s *Server) handle(ctx context.Context, c net.Conn, track, untrack func(net
 		reply(c, http.StatusBadGateway)
 		return
 	}
-	track(up)
-	defer func() { untrack(up); _ = up.Close() }()
+	if !s.track(up) { // cut while it was being opened
+		reply(c, http.StatusServiceUnavailable)
+		return
+	}
+	defer func() { s.untrack(up); _ = up.Close() }()
 	if connect {
 		if _, err := io.WriteString(c, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
 			return

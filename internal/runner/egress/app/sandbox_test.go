@@ -53,6 +53,19 @@ type fakeBoxes struct {
 	support int
 	opened  []BoxRequest
 	err     error
+	// reattached: the requests and endpoints Reattach got
+	reattached []BoxRequest
+	endpoints  []string
+}
+
+func (f *fakeBoxes) Reattach(_ context.Context, r BoxRequest, endpoint string) (Box, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.reattached, f.endpoints = append(f.reattached, r), append(f.endpoints, endpoint)
+	return &fakeBox{}, nil
 }
 
 func (f *fakeBoxes) Open(_ context.Context, r BoxRequest) (Box, error) {
@@ -85,7 +98,7 @@ func TestConfine(t *testing.T) {
 		t.Parallel()
 		for _, enf := range []string{"off", "monitor"} {
 			b := &fakeBoxes{ok: true}
-			box, err := (&Sandboxes{Config: config(enf), Boxes: b}).Confine(ctx, "p", "", "/d", "/w")
+			box, err := (&Sandboxes{Config: config(enf), Boxes: b}).Confine(ctx, "p", "", BoxRequest{Dir: "/d", Workdir: "/w"})
 			if box != nil || err != nil || len(b.opened) != 0 {
 				t.Fatalf("%s: box %v, err %v, opened %v", enf, box, err, b.opened)
 			}
@@ -94,14 +107,14 @@ func TestConfine(t *testing.T) {
 	t.Run("no configuration yet fails closed", func(t *testing.T) {
 		t.Parallel()
 		none := func() (protocol.ConfigUpdate, bool, error) { return protocol.ConfigUpdate{}, false, nil }
-		if box, err := (&Sandboxes{Config: none, Boxes: &fakeBoxes{}}).Confine(ctx, "p", "", "/d", ""); box != nil || err == nil {
+		if box, err := (&Sandboxes{Config: none, Boxes: &fakeBoxes{}}).Confine(ctx, "p", "", BoxRequest{Dir: "/d", Workdir: ""}); box != nil || err == nil {
 			t.Fatalf("box %v, err %v", box, err)
 		}
 	})
 	t.Run("strict on a verified runner: a sandbox for the profile", func(t *testing.T) {
 		t.Parallel()
 		b := &fakeBoxes{ok: true}
-		box, err := (&Sandboxes{Config: config("strict"), Boxes: b}).Confine(ctx, "p", "claude", "/d", "/w")
+		box, err := (&Sandboxes{Config: config("strict"), Boxes: b}).Confine(ctx, "p", "claude", BoxRequest{Dir: "/d", Workdir: "/w"})
 		if err != nil || box == nil {
 			t.Fatalf("box %v, err %v", box, err)
 		}
@@ -112,7 +125,7 @@ func TestConfine(t *testing.T) {
 	t.Run("strict on an unsupported runner fails closed", func(t *testing.T) {
 		t.Parallel()
 		b := &fakeBoxes{why: "unsupported on darwin"}
-		box, err := (&Sandboxes{Config: config("strict"), Boxes: b}).Confine(ctx, "p", "", "/d", "")
+		box, err := (&Sandboxes{Config: config("strict"), Boxes: b}).Confine(ctx, "p", "", BoxRequest{Dir: "/d", Workdir: ""})
 		if box != nil || !errors.Is(err, ErrUnsupported) || len(b.opened) != 0 {
 			t.Fatalf("box %v, err %v, opened %v", box, err, b.opened)
 		}
@@ -120,7 +133,7 @@ func TestConfine(t *testing.T) {
 	t.Run("a sandbox that cannot be built fails closed", func(t *testing.T) {
 		t.Parallel()
 		b := &fakeBoxes{ok: true, err: errors.New("nft failed")}
-		if box, err := (&Sandboxes{Config: config("strict"), Boxes: b}).Confine(ctx, "p", "", "/d", ""); box != nil || err == nil {
+		if box, err := (&Sandboxes{Config: config("strict"), Boxes: b}).Confine(ctx, "p", "", BoxRequest{Dir: "/d", Workdir: ""}); box != nil || err == nil {
 			t.Fatalf("box %v, err %v", box, err)
 		}
 	})
@@ -129,7 +142,7 @@ func TestConfine(t *testing.T) {
 		bad := func() (protocol.ConfigUpdate, bool, error) {
 			return protocol.ConfigUpdate{}, false, errors.New("corrupt")
 		}
-		if box, err := (&Sandboxes{Config: bad, Boxes: &fakeBoxes{ok: true}}).Confine(ctx, "p", "", "/d", ""); box != nil || err == nil {
+		if box, err := (&Sandboxes{Config: bad, Boxes: &fakeBoxes{ok: true}}).Confine(ctx, "p", "", BoxRequest{Dir: "/d", Workdir: ""}); box != nil || err == nil {
 			t.Fatalf("box %v, err %v", box, err)
 		}
 	})
@@ -152,5 +165,50 @@ func TestSupportedIsCached(t *testing.T) {
 	b.ok, b.why = false, "self-test failed"
 	if ok, why := s.Supported(t.Context()); ok || why != "self-test failed" || b.support != 2 {
 		t.Fatalf("after MaxAge: %v %q (runs %d)", ok, why, b.support)
+	}
+}
+
+// KIN-81: a restarted runner serves an adopted strict attempt's adapter again, with the attempt's current profile
+// from the stored configuration (no self-test: the sandbox already verified); anything else fails closed.
+func TestReattach(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	t.Run("strict: the adapter is served again at the endpoint", func(t *testing.T) {
+		t.Parallel()
+		b := &fakeBoxes{}
+		cu, _, _ := config("strict")()
+		fp := Fingerprint(ProfileFor(cu.Network, "p", "claude"))
+		box, err := (&Sandboxes{Config: config("strict"), Boxes: b}).Reattach(ctx, "p", "claude", "/d", "/run/x/s", fp)
+		if err != nil || box == nil {
+			t.Fatalf("box %v, err %v", box, err)
+		}
+		if len(b.endpoints) != 1 || b.endpoints[0] != "/run/x/s" || b.reattached[0].Profile.Enforcement != "strict" ||
+			b.reattached[0].Dir != "/d" {
+			t.Fatalf("reattached %+v at %v", b.reattached, b.endpoints)
+		}
+		if b.support != 0 {
+			t.Fatal("a self-test sandbox ran before the adapter was back")
+		}
+	})
+	cu, _, _ := config("strict")()
+	strictFP := Fingerprint(cu.Network.Default)
+	for _, tc := range []struct {
+		name string
+		cfg  func() (protocol.ConfigUpdate, bool, error)
+		err  error
+		fp   string
+	}{
+		{"no longer strict", config("monitor"), nil, strictFP},
+		{"the profile changed since the attempt started", config("strict"), nil, "another-profile"},
+		{"no configuration", func() (protocol.ConfigUpdate, bool, error) { return protocol.ConfigUpdate{}, false, nil }, nil, strictFP},
+		{"the adapter cannot be served", config("strict"), errors.New("socket directory gone"), strictFP},
+	} {
+		t.Run(tc.name+" fails closed", func(t *testing.T) {
+			t.Parallel()
+			b := &fakeBoxes{err: tc.err}
+			if box, err := (&Sandboxes{Config: tc.cfg, Boxes: b}).Reattach(ctx, "p", "", "/d", "/run/x/s", tc.fp); box != nil || err == nil {
+				t.Fatalf("box %v, err %v", box, err)
+			}
+		})
 	}
 }

@@ -120,13 +120,28 @@ func strictEgress(d *datadir.Dir, exe string, logger *slog.Logger) *egress.Sandb
 	}
 }
 
-// confiner gives the session context the egress context's sandboxes.
-type confiner struct{ s *egress.Sandboxes }
+// confiner gives the session context the egress context's sandboxes. sessions, when set, returns the CLI session
+// store of an AI CLI attempt's task, bound into the agent's HOME so a later attempt can resume (KIN-86).
+type confiner struct {
+	s        *egress.Sandboxes
+	sessions func(sessiondomain.Assignment) ([]egress.HomeBind, error)
+}
 
 var _ sessionapp.Confiner = confiner{}
 
 func (c confiner) Confine(ctx context.Context, a sessiondomain.Assignment, dir, workdir string) (sessionapp.Sandbox, error) {
-	b, err := c.s.Confine(ctx, a.Project, a.Adapter, dir, workdir)
+	r := egress.BoxRequest{Dir: dir, Workdir: workdir}
+	if c.sessions != nil && a.CLI() {
+		// Only a sandboxed run uses the store (on the host the CLI keeps its sessions in its own home).
+		if _, strict, err := c.s.StrictProfile(ctx, a.Project, a.Adapter); err == nil && strict {
+			binds, err := c.sessions(a)
+			if err != nil {
+				return nil, err
+			}
+			r.HomeBinds = binds
+		}
+	}
+	b, err := c.s.Confine(ctx, a.Project, a.Adapter, r)
 	if err != nil || b == nil {
 		return nil, err
 	}
@@ -134,6 +149,24 @@ func (c confiner) Confine(ctx context.Context, a sessiondomain.Assignment, dir, 
 	if !ok {
 		b.Release()
 		return nil, errors.New("the sandbox cannot launch processes")
+	}
+	return sb, nil
+}
+
+// Reattach serves the sandbox of an attempt adopted after a restart again (KIN-81), with the profile of its project
+// and CLI role.
+func (c confiner) Reattach(ctx context.Context, rec sessiondomain.Record, dir string) (sessionapp.Sandbox, error) {
+	if rec.Sandbox == nil {
+		return nil, errors.New("the attempt has no sandbox")
+	}
+	b, err := c.s.Reattach(ctx, rec.Project, rec.Sandbox.Role, dir, rec.Sandbox.Endpoint, rec.Sandbox.Profile)
+	if err != nil {
+		return nil, err
+	}
+	sb, ok := b.(sessionapp.Sandbox)
+	if !ok {
+		b.Release()
+		return nil, errors.New("the sandbox cannot be monitored")
 	}
 	return sb, nil
 }

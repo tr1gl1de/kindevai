@@ -263,7 +263,8 @@ func (r *Repository) loadExecution(ctx context.Context, q string, arg string) (d
 
 func (r *Repository) steps(ctx context.Context, c db.Executor, execID string) ([]domain.Step, error) {
 	rows, err := c.QueryContext(ctx, `SELECT id, step_key, title, repository, depends_on, state, wait_reason, reason,
-		fence, runner_id, lease_expires_at, agent, model, wait_until FROM workflow_steps WHERE execution_id = ? ORDER BY position`, execID)
+		fence, runner_id, lease_expires_at, agent, model, wait_until, network_holds FROM workflow_steps WHERE execution_id = ?
+		ORDER BY position`, execID)
 	if err != nil {
 		return nil, fmt.Errorf("reading steps: %w", err)
 	}
@@ -275,7 +276,7 @@ func (r *Repository) steps(ctx context.Context, c db.Executor, execID string) ([
 		var deps string
 		var wait, runner, lease, until sql.NullString
 		if err := rows.Scan(&s.ID, &s.Key, &s.Title, &s.Repository, &deps, &s.State, &wait, &s.Reason, &s.Fence,
-			&runner, &lease, &s.Agent, &s.Model, &until); err != nil {
+			&runner, &lease, &s.Agent, &s.Model, &until, &s.NetworkHolds); err != nil {
 			return nil, fmt.Errorf("reading step: %w", err)
 		}
 		if err := json.Unmarshal([]byte(deps), &s.DependsOn); err != nil {
@@ -326,9 +327,10 @@ func (r *Repository) SaveExecution(ctx context.Context, e *domain.Execution) err
 	}
 	for _, s := range e.Steps {
 		res, err := c.ExecContext(ctx, `UPDATE workflow_steps SET state = ?, wait_reason = ?, reason = ?, fence = ?,
-			runner_id = ?, lease_expires_at = ?, agent = ?, model = ?, wait_until = ? WHERE id = ? AND execution_id = ?`,
+			runner_id = ?, lease_expires_at = ?, agent = ?, model = ?, wait_until = ?, network_holds = ?
+			WHERE id = ? AND execution_id = ?`,
 			s.State, nullStr(s.WaitReason), s.Reason, s.Fence, nullStr(s.RunnerID), nullTS(s.LeaseExpiresAt), s.Agent,
-			s.Model, nullTS(s.WaitUntil), s.ID, e.ID)
+			s.Model, nullTS(s.WaitUntil), s.NetworkHolds, s.ID, e.ID)
 		if err := oneRow(res, err, "saving step "+s.Key); err != nil {
 			return err
 		}

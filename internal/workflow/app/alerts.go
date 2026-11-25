@@ -10,12 +10,36 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/workflow/domain"
 )
 
-// Alert hooks (KIN-60): a task entering or leaving BLOCKED, for the Alert Center.
+// Alert hooks (KIN-60): a task entering or leaving BLOCKED, for the Alert Center; a runner whose strict egress
+// keeps failing (KIN-81: network holds in a row, raised as a failed egress check of that runner).
 const (
-	AdapterAlerts      = "alerts"
-	TopicTaskBlocked   = "alerts.task_blocked"
-	TopicTaskUnblocked = "alerts.task_unblocked"
+	AdapterAlerts          = "alerts"
+	TopicTaskBlocked       = "alerts.task_blocked"
+	TopicTaskUnblocked     = "alerts.task_unblocked"
+	TopicEgressCheckFailed = "alerts.egress_check_failed"
 )
+
+// CodeNetworkHoldRepeated is the egress alert's code for a step held for the network domain.NetworkAlertAfter
+// times or more in a row on one runner.
+const CodeNetworkHoldRepeated = "network_hold_repeated"
+
+// alertNetworkHolds raises the runner's egress alert once a step's network holds in a row on it reached
+// domain.NetworkAlertAfter (each further hold raises it again: the Alert Center groups them per runner).
+func (s *Service) alertNetworkHolds(ctx context.Context, st *domain.Step, runnerID string) error {
+	if s.Outbox == nil || st == nil || st.NetworkHolds < domain.NetworkAlertAfter {
+		return nil
+	}
+	b, err := json.Marshal(map[string]string{"runnerId": runnerID, "code": CodeNetworkHoldRepeated})
+	if err != nil {
+		return err
+	}
+	key := "step/" + st.ID + "/network_hold/" + strconv.FormatInt(st.Fence, 10)
+	if err := s.Outbox.Enqueue(ctx, messaging.Message{Adapter: AdapterAlerts, Topic: TopicEgressCheckFailed, Key: key,
+		Payload: b}); err != nil {
+		return fmt.Errorf("enqueueing %s: %w", TopicEgressCheckFailed, err)
+	}
+	return nil
+}
 
 // Outbox stores outgoing messages in the caller's transaction.
 type Outbox interface {

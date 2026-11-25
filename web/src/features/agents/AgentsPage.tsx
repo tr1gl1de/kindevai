@@ -20,6 +20,7 @@ import {
   useMarkCLIReady,
   useSetAgentSwitch,
 } from "./api";
+import { LimitsSection } from "../planDiscussion/LimitsSection";
 import { BindingsEditor } from "./BindingsEditor";
 
 /** Agent Management (Owner): global CLI switches, emergency stop, global role bindings and CLI cool-downs. */
@@ -46,6 +47,7 @@ export function AgentsPage() {
             <BindingsEditor scope={{}} bindings={settings.data.bindings} />
           </section>
           <Cooldowns settings={settings.data} />
+          <LimitsSection />
         </>
       )}
     </>

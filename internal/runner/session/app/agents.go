@@ -56,5 +56,10 @@ type Agents interface {
 	Follow(agent, dir string, h AgentFollow) (AgentFollower, error)
 }
 
+// ErrAgentLoggedOut: the CLI has no usable login for a sandboxed run (none configured, or the long-lived token
+// expired); the attempt fails like a logged-out CLI (cli_limit, cause auth): the step is held and the owner alerted
+// (KIN-83, KIN-86) until the operator runs `ai-runner cli-login`.
+var ErrAgentLoggedOut = errors.New("the AI CLI is not logged in on this runner")
+
 // ErrNoAgent: the runner has no CLI of the assigned agent.
 var ErrNoAgent = errors.New("this runner has no such AI CLI")

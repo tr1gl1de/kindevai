@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -42,8 +43,35 @@ func TestMain(m *testing.M) {
 		select {}
 	case os.Getenv("KINDEV_NSBOX_AGENT") == "1":
 		os.Exit(agentMain())
+	case os.Getenv("KINDEV_NSBOX_AGENT") == "sessions":
+		os.Exit(sessionsAgent())
+	case os.Getenv("KINDEV_NSBOX_AGENT") == "poll":
+		pollMain()
 	}
 	os.Exit(m.Run())
+}
+
+// pollMain runs inside the sandbox until a signal ends it, fetching DIAG_URL through the proxy over and over and
+// printing "net up" / "net down" whenever the outcome changes.
+func pollMain() {
+	c := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{Proxy: http.ProxyFromEnvironment,
+		DisableKeepAlives: true}}
+	state := ""
+	for {
+		now := "net down"
+		if resp, err := c.Get(os.Getenv("DIAG_URL")); err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				now = "net up"
+			}
+		}
+		if now != state {
+			fmt.Println(now)
+			state = now
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // agentMain runs inside the sandbox and prints one line per check.
@@ -182,7 +210,11 @@ func upstream(t *testing.T) protocol.NetworkProxy {
 				defer c.Close()
 				br := bufio.NewReader(c)
 				req, err := http.ReadRequest(br)
-				if err != nil || req.Method != http.MethodConnect {
+				if err != nil {
+					return
+				}
+				if req.Method != http.MethodConnect { // absolute-form plain HTTP (the runner's runtime check, KIN-81)
+					forwardPlain(c, req)
 					return
 				}
 				// diag.test is the diagnostic server (a name: loopback targets would bypass HTTP_PROXY).
@@ -203,6 +235,23 @@ func upstream(t *testing.T) protocol.NetworkProxy {
 	return protocol.NetworkProxy{Scheme: "http", Host: "127.0.0.1", Port: l.Addr().(*net.TCPAddr).Port}
 }
 
+// forwardPlain relays an absolute-form plain-HTTP request to diag.test (127.0.0.1) and writes the answer back.
+func forwardPlain(c net.Conn, req *http.Request) {
+	out, err := http.NewRequestWithContext(req.Context(), req.Method,
+		strings.Replace(req.URL.String(), "diag.test", "127.0.0.1", 1), nil)
+	if err != nil {
+		return
+	}
+	resp, err := (&http.Transport{Proxy: nil}).RoundTrip(out)
+	if err != nil {
+		_, _ = io.WriteString(c, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+		return
+	}
+	defer resp.Body.Close()
+	resp.Close = true
+	_ = resp.Write(c)
+}
+
 type fixture struct {
 	m       *Manager
 	dir     string
@@ -218,6 +267,7 @@ type fixture struct {
 	mirror  string // the worktree's repository mirror
 	admin   string // the worktree's administrative directory in the mirror
 	other   string // another project's mirror
+	ip      *atomic.Value
 }
 
 const (
@@ -231,12 +281,14 @@ func newFixture(t *testing.T) *fixture {
 	m := &Manager{Program: os.Args[0], Env: []string{"KINDEV_NSBOX_HELPER=1"}, DataDir: data,
 		VerifyTimeout: 60 * time.Second}
 	requireSandbox(t, m)
+	ip := &atomic.Value{} // the egress IP the diagnostic endpoint reports
+	ip.Store("203.0.113.7")
 	diag := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, "203.0.113.7")
+		_, _ = io.WriteString(w, ip.Load().(string))
 	}))
 	t.Cleanup(diag.Close)
 	f := &fixture{m: m, dir: filepath.Join(data, "attempts", "s-1"), workdir: filepath.Join(data, "workspaces", "w"),
-		diag: strings.Replace(diag.URL, "127.0.0.1", "diag.test", 1) + "/ip", proxy: upstream(t)}
+		diag: strings.Replace(diag.URL, "127.0.0.1", "diag.test", 1) + "/ip", proxy: upstream(t), ip: ip}
 	for _, d := range []string{f.dir, f.workdir} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)
@@ -507,6 +559,10 @@ func TestWrappedRun(t *testing.T) {
 			if left, _ := filepath.Glob(filepath.Join(f.dir, "sandbox-run-*.json")); len(left) != 0 {
 				t.Fatalf("run description left behind: %v", left)
 			}
+			// KIN-88: the refusal is recorded outside the sandbox, only for the unverified run.
+			if got := f.m.Refused(env); got != (tc.exit == ExitUnverified) {
+				t.Fatalf("Refused = %v for exit %d", got, tc.exit)
+			}
 		})
 	}
 }
@@ -658,4 +714,177 @@ func TestGitInSandbox(t *testing.T) {
 		t.Fatalf("git in the sandbox:\n%s", got)
 	}
 	t.Logf("git in the sandbox:\n%s", got)
+}
+
+// startPolling starts the polling agent in box's sandbox and waits until it reached the network through the proxy.
+func (f *fixture) startPolling(t *testing.T, b *Box) *syncBuf {
+	t.Helper()
+	cmd, err := b.Command([]string{f.agentCopy(t)}, []string{"KINDEV_NSBOX_AGENT=poll", "DIAG_URL=" + f.diag}, f.workdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := &syncBuf{}
+	cmd.Stdout, cmd.Stderr = out, out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); _ = cmd.Wait() })
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	if err := b.Await(ctx); err != nil {
+		t.Fatalf("verdict: %v\n%s", err, out)
+	}
+	waitOutput(t, out, "net up", 1)
+	return out
+}
+
+// waitOutput waits until want appears at least n times in out.
+func waitOutput(t *testing.T, out *syncBuf, want string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for strings.Count(out.String(), want) < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %q x%d in\n%s", want, n, out)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// KIN-81: the runner that served a sandbox's adapter stops (the sandbox and its agent keep running, cut off); a
+// new runner process serves the adapter again on the same socket and the agent is back on the network, through
+// the proxy only.
+func TestReattachAfterARunnerRestart(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.m.MonitorEvery = -1
+	p := f.profile("203.0.113.7")
+	box, err := f.m.Open(t.Context(), egress.BoxRequest{Dir: f.dir, Workdir: f.workdir, Profile: p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := box.(*Box)
+	out := f.startPolling(t, b)
+	// The runner dies: its adapter stops serving; the socket directory stays (it never ran Release).
+	b.stop()
+	<-b.served
+	waitOutput(t, out, "net down", 1)
+	m2 := &Manager{Program: f.m.Program, Env: f.m.Env, DataDir: f.m.DataDir, MonitorEvery: -1}
+	box2, err := m2.Reattach(t.Context(), egress.BoxRequest{Dir: f.dir, Profile: p}, b.Endpoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(box2.Release)
+	waitOutput(t, out, "net up", 2)
+	box2.Release()
+	if _, err := os.Stat(filepath.Dir(b.Endpoint())); !os.IsNotExist(err) {
+		t.Fatalf("Release left the socket directory: %v", err)
+	}
+}
+
+// KIN-81: while the agent runs the egress IP changes; the runtime check cuts the adapter (the agent is off the
+// network) and the sandbox reports the fault (the executor then stops the attempt with code network).
+func TestRuntimeCheckCutsTheSandboxOff(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.m.MonitorEvery = 100 * time.Millisecond
+	box, err := f.m.Open(t.Context(), egress.BoxRequest{Dir: f.dir, Workdir: f.workdir, Profile: f.profile("203.0.113.7")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := box.(*Box)
+	t.Cleanup(b.Release)
+	out := f.startPolling(t, b)
+	select {
+	case why := <-b.Fault():
+		t.Fatalf("fault %q while the egress IP matched", why)
+	case <-time.After(500 * time.Millisecond):
+	}
+	f.ip.Store("198.51.100.9")
+	select {
+	case why := <-b.Fault():
+		if why != "egress_ip_mismatch" {
+			t.Fatalf("fault %q", why)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatalf("no fault after the egress IP changed\n%s", out)
+	}
+	waitOutput(t, out, "net down", 1)
+}
+
+// sessionsAgent runs inside the sandbox with the task's session store bound at ~/.claude/projects (KIN-86): it
+// finds the earlier attempt's transcript, adds its own, and cannot reach the host's sessions or change the login.
+func sessionsAgent() int {
+	home, fail := os.Getenv("HOME"), 0
+	check := func(name string, ok bool, detail string) {
+		state := "ok"
+		if !ok {
+			state, fail = "FAIL", 1
+		}
+		fmt.Printf("%s %s %s\n", state, name, detail)
+	}
+	projects := filepath.Join(home, ".claude", "projects")
+	b, err := os.ReadFile(filepath.Join(projects, "w", "prev.jsonl"))
+	check("earlier-session-visible", err == nil && string(b) == "earlier attempt", fmt.Sprint(string(b), err))
+	_, err = os.Stat(filepath.Join(projects, "host-project"))
+	check("host-sessions-hidden", err != nil, "")
+	check("session-writable", os.WriteFile(filepath.Join(projects, "w", "next.jsonl"), []byte("this attempt"), 0o600) == nil, "")
+	b, err = os.ReadFile(filepath.Join(home, ".claude", ".credentials.json"))
+	check("cli-login-copied", err == nil && string(b) == os.Getenv("CRED_WANT"), string(b))
+	_ = os.WriteFile(filepath.Join(home, ".claude", ".credentials.json"), []byte("swapped"), 0o600)
+	return fail
+}
+
+// TestSessionStoreSurvivesAttempts: the task's session store, bound below the agent's private HOME, carries the
+// CLI's transcripts from one attempt to the next (resume, KIN-86), while the host's own sessions stay hidden and
+// the host's CLI login is never written.
+func TestSessionStoreSurvivesAttempts(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	store := filepath.Join(f.m.DataDir, "cli-sessions", "p", "t", "claude")
+	for p, c := range map[string]string{
+		filepath.Join(store, "w", "prev.jsonl"):                                 "earlier attempt",
+		filepath.Join(f.home, ".claude", "projects", "host-project", "s.jsonl"): "another task's session",
+	} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(c), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	box, err := f.m.Open(t.Context(), egress.BoxRequest{Dir: f.dir, Workdir: f.workdir, Profile: f.profile("203.0.113.7"),
+		HomeBinds: []egress.HomeBind{{Source: store, Rel: ".claude/projects"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := box.(*Box)
+	t.Cleanup(b.Release)
+	cmd, err := b.Command([]string{f.agentCopy(t)}, []string{"KINDEV_NSBOX_AGENT=sessions", "HOME=" + f.home,
+		"CRED_WANT=" + credOrig}, f.workdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	if err := b.Await(ctx); err != nil {
+		t.Fatalf("verdict: %v\n%s", err, out.String())
+	}
+	if err := cmd.Wait(); err != nil || strings.Contains(out.String(), "FAIL") {
+		t.Fatalf("agent: %v\n%s", err, out.String())
+	}
+	if b, err := os.ReadFile(filepath.Join(store, "w", "next.jsonl")); err != nil || string(b) != "this attempt" {
+		t.Fatalf("the attempt's session did not reach the store: %q %v", b, err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(f.home, ".claude", ".credentials.json")); string(b) != credOrig {
+		t.Fatalf("the agent changed the host's CLI login: %s", b)
+	}
+	if _, err := os.Stat(filepath.Join(f.home, ".claude", "projects", "w")); !os.IsNotExist(err) {
+		t.Fatalf("the attempt's session reached the host's own sessions: %v", err)
+	}
 }

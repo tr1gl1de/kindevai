@@ -172,3 +172,43 @@ td.ws-path {
   border-color: var(--warn-border);
   background: var(--warn-bg);
 }
+/* Plan revision diff (KIN-97) */
+.revision-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space);
+  margin: var(--space) 0;
+}
+.revision-compare {
+  max-width: 320px;
+}
+.diff-group {
+  margin-top: var(--space);
+}
+.diff-items,
+.diff-steps {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 4px;
+}
+.diff-steps {
+  gap: var(--space);
+}
+.diff-step {
+  overflow-wrap: anywhere;
+}
+.diff-field {
+  display: contents;
+}
+.diff-sign {
+  display: inline-block;
+  min-width: 5.5em;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+.diff-items del,
+.diff-items ins {
+  overflow-wrap: anywhere;
+}

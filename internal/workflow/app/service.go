@@ -496,14 +496,15 @@ func (s *Service) FailStepAt(ctx context.Context, stepID, runnerID string, fence
 
 // HoldStepForNetwork parks a step whose runner could not build or verify the strict egress sandbox (KIN-31): the
 // attempt never ran unconfined; the step WAITs with reason network (no retry budget used) and the scheduler
-// assigns it again after domain.NetworkRetryDelay. at ends the attempt's agent time.
+// assigns it again after domain.NetworkRetryDelayAfter its holds in a row; from domain.NetworkAlertAfter holds in a
+// row on the runner the Owner gets an egress alert (KIN-81). at ends the attempt's agent time.
 func (s *Service) HoldStepForNetwork(ctx context.Context, stepID, runnerID string, fence int64, msg string, at time.Time) error {
-	err := s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
+	err := s.updateExecution(ctx, stepID, func(ctx context.Context, e *domain.Execution, now time.Time) error {
 		if err := e.HoldForNetwork(stepID, runnerID, fence, msg, now); err != nil {
 			return refusedReport{err}
 		}
 		e.MarkWorkEnd(stepID, runnerID, fence, at, now)
-		return nil
+		return s.alertNetworkHolds(ctx, e.Step(stepID), runnerID) // KIN-81
 	})
 	return s.lateWorkEnd(ctx, err, stepID, runnerID, fence, at)
 }

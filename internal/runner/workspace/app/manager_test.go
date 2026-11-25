@@ -372,9 +372,19 @@ func TestPreparationsAreBounded(t *testing.T) {
 	first := prepareAsync(m, t.Context(), req())
 	<-g.started
 	var p phases
+	queued := make(chan struct{})
 	r := req()
-	r.Step, r.Repository, r.Progress = "st2", "acme/web", p.report
+	r.Step, r.Repository = "st2", "acme/web"
+	r.Progress = func(phase string) {
+		p.report(phase)
+		if phase == PhaseQueued {
+			close(queued)
+		}
+	}
 	second := prepareAsync(m, t.Context(), r)
+	// KIN-91: wait for the second preparation to report itself queued instead of assuming it got there within
+	// noFetch's window (a loaded machine may not schedule its goroutine at all in that time).
+	<-queued
 	noFetch(t, g)
 	if got := p.get(); !slices.Equal(got, []string{PhaseQueued}) {
 		t.Fatalf("phases %v", got)

@@ -11,6 +11,7 @@ package cliagent
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/runner/session/domain"
 )
@@ -24,6 +25,13 @@ type Dialect interface {
 	Env() []string
 	// Parser parses one run's output.
 	Parser() Parser
+	// SessionDir is where, relative to HOME, the CLI keeps the sessions it resumes (KIN-86).
+	SessionDir() string
+	// LoggedIn reports a login the CLI can use from home and the operator's env alone: what a sandboxed run has.
+	LoggedIn(home string, env []string, now time.Time) bool
+	// LoginEnv is the environment that logs the CLI in from the runner's own store in home (none when nothing is
+	// stored); secrets are the values to mask in the output.
+	LoginEnv(home string) (env, secrets []string, err error)
 }
 
 // Parser turns one line of a CLI's JSONL output into events (none for lines that are not events).

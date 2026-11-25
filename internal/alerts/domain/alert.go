@@ -6,6 +6,7 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 	"unicode"
@@ -86,6 +87,28 @@ type Occurrence struct {
 	DedupKey  string // one active alert per key: repeats are grouped into it
 	Subject   string // what the alert is about, for display (runner id, machine/volume)
 	Details   map[string]string
+	// ObservedAt is when the monitor observed it (the event's time; zero: unknown). The alert keeps the latest one
+	// (DetailObservedAt), so an older occurrence or "anomaly ended" event delivered late does not override it (KIN-88).
+	ObservedAt time.Time
+	// Notify asks to notify again (and re-open an acknowledged alert) though the severity did not rise: the anomaly
+	// took a turn people must act on (KIN-88: a CLI hold was parked).
+	Notify bool
+}
+
+// DetailObservedAt is the detail holding the alert's latest observation time (RFC 3339, UTC).
+const DetailObservedAt = "observedAt"
+
+// details returns the occurrence's details with its observation time.
+func (o Occurrence) details() map[string]string {
+	if o.ObservedAt.IsZero() {
+		return o.Details
+	}
+	d := maps.Clone(o.Details)
+	if d == nil {
+		d = map[string]string{}
+	}
+	d[DetailObservedAt] = o.ObservedAt.UTC().Format(time.RFC3339Nano)
+	return d
 }
 
 func (o Occurrence) validate() error {
@@ -98,7 +121,7 @@ func (o Occurrence) validate() error {
 		return &ValidationError{Field: "dedupKey", Code: "invalid"}
 	case !printable(o.Subject, maxDetailBytes):
 		return &ValidationError{Field: "subject", Code: "invalid"}
-	case len(o.Details) > MaxDetails:
+	case len(o.details()) > MaxDetails:
 		return &ValidationError{Field: "details", Code: "too_many"}
 	}
 	for k, v := range o.Details {
@@ -141,28 +164,57 @@ func NewAlert(id string, o Occurrence, now time.Time) (Alert, error) {
 		return Alert{}, err
 	}
 	return Alert{ID: id, ProjectID: o.ProjectID, Kind: o.Kind, Severity: o.Severity, DedupKey: o.DedupKey,
-		Subject: o.Subject, Details: o.Details, State: StateOpen, Occurrences: 1, FirstSeenAt: now, LastSeenAt: now}, nil
+		Subject: o.Subject, Details: o.details(), State: StateOpen, Occurrences: 1, FirstSeenAt: now, LastSeenAt: now}, nil
 }
 
 // Active reports whether the alert still groups repeats (OPEN or ACKNOWLEDGED).
 func (a Alert) Active() bool { return a.State == StateOpen || a.State == StateAcknowledged }
 
-// Recur records a repeat of an active alert: the latest subject and details replace the old ones. A higher
-// severity escalates it: the alert takes the new severity and an acknowledged alert opens again. It reports whether
-// it escalated (people are notified again).
+// Recur records a repeat of an active alert: the latest subject and details replace the old ones, unless the
+// occurrence was observed before the alert's latest observation (a late delivery: only counted). A higher severity
+// escalates it: the alert takes the new severity and an acknowledged alert opens again; so does an occurrence that
+// asks to notify again. It reports whether people are notified again.
 func (a *Alert) Recur(o Occurrence, now time.Time) (bool, error) {
 	if err := o.validate(); err != nil {
 		return false, err
 	}
 	a.Occurrences++
 	a.LastSeenAt = now
-	a.Subject, a.Details = o.Subject, o.Details
-	if o.Severity.rank() <= a.Severity.rank() {
+	if !o.ObservedAt.IsZero() && a.ObservedAfter(o.ObservedAt) {
+		return false, nil // older than what the alert shows already
+	}
+	d := o.details()
+	if prev, ok := a.Details[DetailObservedAt]; ok && o.ObservedAt.IsZero() {
+		d = maps.Clone(d) // an untimed occurrence keeps the latest observation time
+		if d == nil {
+			d = map[string]string{}
+		}
+		d[DetailObservedAt] = prev
+	}
+	a.Subject, a.Details = o.Subject, d
+	if o.Severity.rank() <= a.Severity.rank() && !o.Notify {
 		return false, nil
 	}
-	a.Severity = o.Severity
+	a.Severity = maxSeverity(a.Severity, o.Severity)
 	a.State, a.AckedBy, a.AckedAt = StateOpen, "", nil
 	return true, nil
+}
+
+func maxSeverity(a, b Severity) Severity {
+	if b.rank() > a.rank() {
+		return b
+	}
+	return a
+}
+
+// ObservedAfter reports whether the alert's latest observation (DetailObservedAt) is later than t. With no recorded
+// observation, or a zero t (an event that carries no time), it is false.
+func (a Alert) ObservedAfter(t time.Time) bool {
+	if t.IsZero() {
+		return false
+	}
+	at, err := time.Parse(time.RFC3339Nano, a.Details[DetailObservedAt])
+	return err == nil && at.After(t)
 }
 
 // Acknowledge marks an open alert as seen by userID; it stays active.

@@ -1,8 +1,11 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router";
 import type { PlanningRun, TaskDetail, TaskRevision } from "../../api/types";
 import { formatDateTime } from "../../ui/format";
 import { RiskBadge } from "../approvals/badges";
+import { DiscussionPanel } from "../planDiscussion/DiscussionPanel";
+import { revisionPath, useTaskApprovals } from "./api";
 import { AttemptLog } from "./AttemptLog";
 import { AttemptWorkspace } from "./AttemptWorkspace";
 
@@ -11,17 +14,21 @@ const shortHash = (h: string) => h.slice(0, 12);
 /** The task's plan: the current revision with its steps and declared impact, and the AI planner's latest run. */
 export function PlanSection({ d }: { d: TaskDetail }) {
   const { t } = useTranslation();
+  const approvals = useTaskApprovals(d.task.id, d.canManage);
   return (
     <section aria-labelledby="task-plan" className="section">
       <h2 id="task-plan">{t("tasks.planTitle")}</h2>
       {d.planning && <PlannerRun taskId={d.task.id} run={d.planning} />}
-      {d.revision ? <Revision rev={d.revision} /> : !d.planning && <p className="muted">{t("tasks.noPlan")}</p>}
-      {/* KIN-44: the plan discussion chat (Owner / project admin) mounts here, under the revision it discusses. */}
+      {d.revision ? <Revision taskId={d.task.id} rev={d.revision} /> : !d.planning && <p className="muted">{t("tasks.noPlan")}</p>}
+      {d.revision && (
+        <DiscussionPanel taskId={d.task.id} currentRevision={d.task.planRevision} canManage={d.canManage}
+          approvals={approvals.data} />
+      )}
     </section>
   );
 }
 
-function Revision({ rev }: { rev: TaskRevision }) {
+function Revision({ taskId, rev }: { taskId: string; rev: TaskRevision }) {
   const { t, i18n } = useTranslation();
   const impact = (["contracts", "migrations", "tests", "docs"] as const).filter((k) => rev[k].length > 0);
   return (
@@ -29,7 +36,10 @@ function Revision({ rev }: { rev: TaskRevision }) {
       <dl className="details">
         <dt>{t("tasks.revision")}</dt>
         <dd>
-          <code>{t("tasks.revisionValue", { number: rev.number, hash: shortHash(rev.hash) })}</code>
+          <code>{t("tasks.revisionValue", { number: rev.number, hash: shortHash(rev.hash) })}</code>{" "}
+          <Link to={revisionPath(taskId, rev.number)}>
+            {rev.number > 1 ? t("planDiscussion.diffLink", { n: rev.number - 1 }) : t("tasks.revisionDetails")}
+          </Link>
         </dd>
         <dt>{t("tasks.risk")}</dt>
         <dd>

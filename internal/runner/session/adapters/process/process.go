@@ -206,6 +206,9 @@ func (p *adopted) running() bool {
 	return !p.reused() && (Alive(p.pid, p.pgid) || groupAlive(p.pgid))
 }
 
+// Running reports whether the adopted attempt still runs (KIN-81: only then does it get its sandbox back).
+func (p *adopted) Running() bool { return p.running() }
+
 func (p *adopted) PID() int          { return p.pid }
 func (p *adopted) PGID() int         { return p.pgid }
 func (p *adopted) StartTime() string { return p.start }

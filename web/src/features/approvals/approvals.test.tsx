@@ -42,6 +42,10 @@ const rev = (n: number, hash: string, summary: string, scope: string[]): PlanRev
     risk: "L1",
     maxParallel: 1,
     steps: [{ key: "backend", title: "Billing API", repository: "acme/api", scope, dependsOn: [], capabilities: ["go"] }],
+    tests: [],
+    contracts: [],
+    migrations: [],
+    docs: [],
   },
 });
 
@@ -51,8 +55,9 @@ const detail = (a: Approval, canDecide: boolean, taskState = "AWAITING_APPROVAL"
   revision: rev(2, H2, "Billing tables and API", ["db/migrations", "internal/billing"]),
   previous: rev(1, H1, "Billing tables", ["db/migrations"]),
   changes: [
-    { kind: "modified", field: "summary", before: "Billing tables", after: "Billing tables and API" },
-    { kind: "modified", stepKey: "backend", field: "scope", before: "db/migrations", after: "db/migrations, internal/billing" },
+    { kind: "modified", field: "summary", before: "Billing tables", after: "Billing tables and API", added: [], removed: [] },
+    { kind: "modified", stepKey: "backend", field: "scope", before: "db/migrations", after: "db/migrations, internal/billing",
+      added: ["internal/billing"], removed: [] },
   ],
   related: [old, a.id === exec.id ? exec : a, integ],
   canDecide,
@@ -121,7 +126,7 @@ describe("approval center (owner)", () => {
     await renderApp("/approvals/a2");
     const user = userEvent.setup();
     await screen.findByRole("heading", { level: 1, name: "Add billing tables" });
-    await user.click(screen.getByRole("button", { name: "Reject" }));
+    await user.click(screen.getByRole("button", { name: "Reject revision 2" }));
     const comment = screen.getByLabelText("Comment");
     expect(comment).toHaveAttribute("aria-invalid", "true");
     expect(comment).toHaveAccessibleDescription(/explain why/i);
@@ -129,8 +134,8 @@ describe("approval center (owner)", () => {
     expect(calls).toBe(0);
 
     await fill(user, comment, "split the migration");
-    await user.click(screen.getByRole("button", { name: "Reject" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(/newer plan revision/i);
+    await user.click(screen.getByRole("button", { name: "Reject revision 2" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Revision 2 is no longer current/i);
     expect(calls).toBe(1);
     expect(comment).toHaveValue("split the migration");
   });

@@ -613,10 +613,14 @@ func TestHoldForNetworkWaitsWithoutUsingTheRetryBudget(t *testing.T) {
 		if !s.WaitingForNetwork() || s.RunnerID != "" || s.Attempts[len(s.Attempts)-1].State != AttemptCancelled {
 			t.Fatalf("held step = %+v", s)
 		}
-		if s.NetworkRetryDue(t0.Add(NetworkRetryDelay - time.Second)) {
+		delay := NetworkRetryDelay << i // KIN-81: doubles with every hold in a row
+		if s.NetworkHolds != i+1 {
+			t.Fatalf("hold %d: NetworkHolds = %d", i, s.NetworkHolds)
+		}
+		if s.NetworkRetryDue(t0.Add(delay - time.Second)) {
 			t.Fatal("retry due before the delay")
 		}
-		if !s.NetworkRetryDue(t0.Add(NetworkRetryDelay)) {
+		if !s.NetworkRetryDue(t0.Add(delay)) {
 			t.Fatal("retry not due after the delay")
 		}
 		if err := e.ResumeStep(id, t0); err != nil {
@@ -701,5 +705,56 @@ func TestRecordAgentReportKeepsTheUsageOfTheAttempt(t *testing.T) {
 	}
 	if e.RecordAgentReport(id, "r1", l.Fence, r) {
 		t.Fatal("the same report changed the attempt again")
+	}
+}
+
+// KIN-81: repeated network holds back off exponentially up to MaxNetworkRetryDelay.
+func TestNetworkRetryDelayBacksOff(t *testing.T) {
+	t.Parallel()
+	for holds, want := range map[int]time.Duration{0: 2 * time.Minute, 1: 2 * time.Minute, 2: 4 * time.Minute,
+		3: 8 * time.Minute, 4: 16 * time.Minute, 5: 30 * time.Minute, 40: 30 * time.Minute} {
+		if got := NetworkRetryDelayAfter(holds); got != want {
+			t.Errorf("NetworkRetryDelayAfter(%d) = %v, want %v", holds, got, want)
+		}
+	}
+}
+
+// The streak counts holds in a row on the same runner: another runner's hold starts it again, and an attempt that
+// ends otherwise (completed, failed) ends it.
+func TestNetworkHoldStreak(t *testing.T) {
+	t.Parallel()
+	e := newExecution(t, 3)
+	id := e.StepByKey("backend").ID
+	hold := func(runner string) int {
+		t.Helper()
+		l, err := e.Claim(id, runner, t0, ttl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := e.HoldForNetwork(id, runner, l.Fence, "strict egress sandbox not verified", t0); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.ResumeStep(id, t0); err != nil {
+			t.Fatal(err)
+		}
+		return e.StepByKey("backend").NetworkHolds
+	}
+	for i, tc := range []struct {
+		runner string
+		want   int
+	}{{"r1", 1}, {"r1", 2}, {"r2", 1}, {"r2", 2}, {"r2", 3}} {
+		if got := hold(tc.runner); got != tc.want {
+			t.Fatalf("hold %d on %s: NetworkHolds = %d, want %d", i, tc.runner, got, tc.want)
+		}
+	}
+	l, err := e.Claim(id, "r2", t0, ttl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Fail(id, "r2", l.Fence, "boom", t0, 3); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.StepByKey("backend").NetworkHolds; n != 0 {
+		t.Fatalf("NetworkHolds after a failed attempt = %d", n)
 	}
 }

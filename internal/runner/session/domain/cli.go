@@ -50,6 +50,9 @@ type AgentRequest struct {
 	// (0: the default).
 	TestCommand  string
 	TestsTimeout time.Duration
+	// Confined: the run happens in the strict egress sandbox, where the CLI sees only copies of its login files and
+	// the runner's token (KIN-86); without one it cannot log in, so the run is refused before it starts.
+	Confined bool
 }
 
 var (
@@ -249,7 +252,7 @@ type End struct {
 	TimedOut   bool
 	Cancelled  string // the cancel reason; empty when not cancelled
 	// SandboxRefused: the strict egress sandbox did not verify and the CLI never started (the launcher's sandbox
-	// recognised its own exit, KIN-31).
+	// recognised its own refusal, KIN-31, on a signal the CLI cannot forge, KIN-88).
 	SandboxRefused bool
 }
 

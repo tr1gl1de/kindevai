@@ -46,6 +46,10 @@ func (g *Agents) Prepare(dir string, req domain.AgentRequest, prompt string, p d
 			return app.AgentCommand{}, fmt.Errorf("creating the working directory: %w", err)
 		}
 	}
+	if req.Confined && !a.Dialect.LoggedIn(a.Config.Home, a.Config.Env, time.Now()) {
+		return app.AgentCommand{}, fmt.Errorf("%w: %s has no login (or its token expired) for the sandbox; run "+
+			"`ai-runner cli-login %s` on the runner", app.ErrAgentLoggedOut, req.Agent, req.Agent)
+	}
 	req.PromptFile = filepath.Join(dir, PromptFile)
 	if err := writePrompt(req.PromptFile, prompt); err != nil {
 		return app.AgentCommand{}, err
@@ -64,6 +68,17 @@ func (g *Agents) Prepare(dir string, req domain.AgentRequest, prompt string, p d
 		}
 	}
 	return cmd, nil
+}
+
+// Secrets are the CLI login values the runner passes to its CLIs (the stored tokens): masked in attempt output.
+func (g *Agents) Secrets() []string {
+	var out []string
+	for _, a := range g.Adapters {
+		if _, s, err := a.Dialect.LoginEnv(a.Config.Home); err == nil {
+			out = append(out, s...)
+		}
+	}
+	return out
 }
 
 func writePrompt(name, prompt string) error {

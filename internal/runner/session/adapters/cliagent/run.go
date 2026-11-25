@@ -37,11 +37,12 @@ type Sandbox interface {
 	Wrap(ctx context.Context, c Command) (Command, error)
 }
 
-// Refuser is implemented by a Sandbox that tells from how the wrapped command ended that the sandbox did not verify
-// and the CLI never started (KIN-31: `ai-runner sandbox-run` exits with nsbox.ExitUnverified after writing
-// nsbox.UnverifiedMarker). Such a run fails with code network: the step waits for the network.
+// Refuser is implemented by a Sandbox that tells, from the wrapped command and how it ended, that the sandbox did
+// not verify and the CLI never started (KIN-31: `ai-runner sandbox-run` exits with nsbox.ExitUnverified; KIN-88: on
+// a signal of its own the CLI cannot forge, never on the exit code or stderr alone). Such a run fails with code
+// network: the step waits for the network.
 type Refuser interface {
-	Refused(exit domain.Exit, stderrTail string) bool
+	Refused(wrapped Command, exit domain.Exit) bool
 }
 
 // Defaults of Config.
@@ -124,7 +125,10 @@ func (a *Adapter) Start(ctx context.Context, req domain.AgentRequest, h Hooks) (
 		return nil, err
 	}
 	defer prompt.Close()
-	cmd := a.command(req, perms)
+	cmd, err := a.command(req, perms)
+	if err != nil {
+		return nil, err
+	}
 	if c.Sandbox != nil {
 		if cmd, err = c.Sandbox.Wrap(ctx, cmd); err != nil {
 			return nil, fmt.Errorf("wrapping the CLI in the sandbox: %w", err)
@@ -139,11 +143,15 @@ func (a *Adapter) Command(req domain.AgentRequest, p domain.Permissions) (Comman
 	if err := a.check(req); err != nil {
 		return Command{}, err
 	}
-	return a.command(req, p), nil
+	return a.command(req, p)
 }
 
-func (a *Adapter) command(req domain.AgentRequest, p domain.Permissions) Command {
-	return Command{Path: a.Config.Binary, Args: a.Dialect.Args(req, p), Env: a.env(), Dir: req.Workdir}
+func (a *Adapter) command(req domain.AgentRequest, p domain.Permissions) (Command, error) {
+	env, err := a.env()
+	if err != nil {
+		return Command{}, err
+	}
+	return Command{Path: a.Config.Binary, Args: a.Dialect.Args(req, p), Env: env, Dir: req.Workdir}, nil
 }
 
 // check validates the request against the adapter's configuration.
@@ -199,14 +207,19 @@ func openPrompt(name string) (*os.File, error) {
 }
 
 // env is the CLI's whole environment: operator variables, the dialect's, then the fixed base (which wins).
-func (a *Adapter) env() []string {
+func (a *Adapter) env() ([]string, error) {
 	path := a.Config.Path
 	if path == "" {
 		path = DefaultPath + ":" + filepath.Dir(a.Config.Binary)
 	}
+	login, _, err := a.Dialect.LoginEnv(a.Config.Home)
+	if err != nil {
+		return nil, err
+	}
 	env := append([]string{}, a.Config.Env...)
+	env = append(env, login...)
 	env = append(env, a.Dialect.Env()...)
-	return append(env, "HOME="+a.Config.Home, "PATH="+path, "LANG=C.UTF-8", "TERM=dumb", "NO_COLOR=1")
+	return append(env, "HOME="+a.Config.Home, "PATH="+path, "LANG=C.UTF-8", "TERM=dumb", "NO_COLOR=1"), nil
 }
 
 func (a *Adapter) start(ctx context.Context, req domain.AgentRequest, c Command, stdin *os.File, h Hooks) (*Run, error) {
@@ -303,7 +316,7 @@ func (a *Adapter) start(ctx context.Context, req domain.AgentRequest, c Command,
 		r.mu.Lock()
 		end := domain.End{Exit: exitOf(state, werr), StderrTail: tail.String(), TimedOut: r.timedOut, Cancelled: r.cancelled}
 		if rf, ok := a.Config.Sandbox.(Refuser); ok {
-			end.SandboxRefused = rf.Refused(end.Exit, end.StderrTail)
+			end.SandboxRefused = rf.Refused(c, end.Exit)
 		}
 		trMu.Lock()
 		r.result = tr.Result(end)

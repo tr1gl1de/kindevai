@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"strings"
@@ -263,6 +264,39 @@ func TestCLIAssignmentWithoutTheCLIFails(t *testing.T) {
 	}
 	if ev3.last().kind != protocol.EventFailed {
 		t.Fatal(ev3.kinds())
+	}
+}
+
+// A sandboxed CLI without a login (KIN-86) fails before it starts like a logged-out CLI: cli_limit with cause auth,
+// so the Control Plane holds the step and alerts the owner (KIN-83) instead of spending the retry budget.
+func TestSandboxedCLIWithoutALoginIsHeldForAuth(t *testing.T) {
+	t.Parallel()
+	x, l, _, ev, ag := newCLIExecutor()
+	x.Egress = &fakeConfiner{box: &fakeSandbox{}}
+	ag.err = fmt.Errorf("%w: claude has no login", ErrAgentLoggedOut)
+	if err := x.Assign(t.Context(), cliAssignment(domain.AgentClaude)); err != nil {
+		t.Fatal(err)
+	}
+	last := ev.last()
+	if l.count() != 0 || last.kind != protocol.EventFailed {
+		t.Fatalf("launched %d, events %v", l.count(), ev.kinds())
+	}
+	var f protocol.Failure
+	if err := json.Unmarshal([]byte(last.body), &f); err != nil {
+		t.Fatal(err)
+	}
+	if f.Code != protocol.FailureCLILimit || f.Cause != domain.CauseAuth {
+		t.Fatalf("failure %+v", f)
+	}
+	// The executor told the adapter the run is confined (only then is a missing login certain).
+	x2, _, _, _, ag2 := newCLIExecutor()
+	x2.Egress = &fakeConfiner{box: &fakeSandbox{}}
+	a := cliAssignment(domain.AgentClaude)
+	if err := x2.Assign(t.Context(), a); err != nil {
+		t.Fatal(err)
+	}
+	if len(ag2.prepared) != 1 || !ag2.prepared[0].Confined {
+		t.Fatalf("prepared %+v", ag2.prepared)
 	}
 }
 

@@ -512,6 +512,8 @@ export interface PlanStep {
   key: string;
   title: string;
   repository: string;
+  /** "reviewer" for a review step; absent for an implementer. */
+  role?: string;
   scope: string[];
   dependsOn: string[];
   capabilities: string[];
@@ -524,7 +526,16 @@ export interface PlanRevision {
   risk: RiskLevel;
   createdBy: string;
   createdAt: string;
-  plan: { summary: string; risk: RiskLevel; maxParallel: number; steps: PlanStep[] };
+  plan: {
+    summary: string;
+    risk: RiskLevel;
+    maxParallel: number;
+    steps: PlanStep[];
+    tests: string[];
+    contracts: string[];
+    migrations: string[];
+    docs: string[];
+  };
 }
 
 export interface PlanChange {
@@ -533,6 +544,18 @@ export interface PlanChange {
   field: string;
   before: string;
   after: string;
+  /** For a list field (scope, tests, …): the items the newer revision gained and lost. */
+  added: string[];
+  removed: string[];
+}
+
+/** GET /api/tasks/{id}/revisions/{n}[?base=m] (KIN-97): a revision, the one it is compared with and what changed. */
+export interface RevisionDiff {
+  task: { id: string; title: string; state: string; planRevision: number };
+  revision: PlanRevision;
+  /** null for revision 1 (nothing to compare with). */
+  previous: PlanRevision | null;
+  changes: PlanChange[];
 }
 
 /** GET /api/approvals/{id} */
@@ -1090,4 +1113,56 @@ export interface ProjectAgentSettings {
   projectId: string;
   agents: ProjectAgentState[];
   bindings: AgentBinding[];
+}
+
+/* Plan discussion with the AI (KIN-43 API, KIN-44 UI). Message texts are untrusted: render them as text. */
+export type DiscussionRole = "user" | "assistant" | "system";
+export type DiscussionStatus = "PENDING" | "DELIVERED" | "ANSWERED" | "FAILED";
+export type DiscussionNotice = "revision_created" | "plan_rejected" | "plan_outdated" | "plan_not_applied";
+export type DiscussionLimitCode = "message_too_long" | "answer_in_flight" | "plan_message_limit" | "hourly_message_limit";
+
+export interface DiscussionMessage {
+  id: string;
+  role: DiscussionRole;
+  /** A user id, planner/<cli> for an answer, or system. */
+  author: string;
+  /** The plan revision the message was written about. */
+  planRevision: number;
+  text: string;
+  status: DiscussionStatus;
+  reason?: string;
+  notice?: DiscussionNotice;
+  /** revision_created: the revision the answer created. */
+  revision?: number;
+  replyTo?: string;
+  agent?: string;
+  model?: string;
+  usage?: AgentUsage;
+  workMs?: number;
+  deliveredAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DiscussionLimits {
+  maxMessageChars: number;
+  maxMessagesPerPlan: number;
+  maxMessagesPerHour: number;
+  answerTimeoutSec: number;
+}
+
+export interface DiscussionThread {
+  messages: DiscussionMessage[];
+  limits: DiscussionLimits;
+  canWrite: boolean;
+  inFlight: boolean;
+  used: number;
+  hasSession: boolean;
+}
+
+/** A 429 from the discussion: which limit refused the message and when the next one is allowed. */
+export interface DiscussionLimitError extends ApiErrorBody {
+  code: DiscussionLimitCode;
+  limit?: number;
+  retryAfterSec?: number;
 }

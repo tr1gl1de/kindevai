@@ -231,16 +231,29 @@ func (e *fakeEvents) last() event {
 	return e.evs[len(e.evs)-1]
 }
 
+// waitFor polls cond until it holds. It is bounded by the test binary's deadline (go test -timeout) less a
+// reporting margin, not by a fixed time: a race-built executor on a loaded machine is slow, not broken (KIN-93).
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	ctx := t.Context()
+	if dl, ok := t.Deadline(); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, dl.Add(-waitMargin))
+		defer cancel()
+	}
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
 	for !cond() {
-		if time.Now().After(deadline) {
+		select {
+		case <-ctx.Done():
 			t.Fatalf("timed out waiting for %s", what)
+		case <-tick.C:
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// waitMargin leaves time to report which wait failed before the test binary's own timeout panics.
+const waitMargin = 10 * time.Second
 
 func assignment(project string) domain.Assignment {
 	return domain.Assignment{Step: "S1", Fence: 1, Execution: "E1", Task: "T1", Project: project, Repository: "acme/app",

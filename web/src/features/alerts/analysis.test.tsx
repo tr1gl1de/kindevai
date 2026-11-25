@@ -27,8 +27,7 @@ const ci: Alert = {
 
 const preview: AlertAnalysisPreview = {
   summary: "Analyze alert: CI failed on acme/app dev (failure).",
-  description:
-    "Analysis task suggested from a kindevai alert.\n\n- Project: Alpha\n\nkindevai-alert-C1",
+  description: "Analysis task suggested from a kindevai alert.\n\n- Project: Alpha\n\nkindevai-alert-C1",
   configured: true,
   targets: [{ projectId: "p1", projectName: "Alpha", youtrackProject: "SHOP" }],
   task: null,
@@ -64,9 +63,7 @@ describe("analysis task from an alert (KIN-61)", () => {
     );
     await renderApp("/alerts");
     const user = userEvent.setup();
-    const row = (
-      await screen.findByText("CI failed on acme/app dev (failure)")
-    ).closest("tr")!;
+    const row = (await screen.findByText("CI failed on acme/app dev (failure)")).closest("tr")!;
     await user.click(
       within(row).getByRole("button", {
         name: "Suggest an analysis task in YouTrack: CI failed on acme/app dev (failure)",
@@ -75,9 +72,7 @@ describe("analysis task from an alert (KIN-61)", () => {
     const dialog = await screen.findByRole("alertdialog", {
       name: "Create an analysis task in YouTrack?",
     });
-    expect(
-      await within(dialog).findByText(preview.summary),
-    ).toBeInTheDocument();
+    expect(await within(dialog).findByText(preview.summary)).toBeInTheDocument();
     expect(within(dialog).getByText(/kindevai-alert-C1/)).toBeInTheDocument();
     expect(within(dialog).getByText("Alpha → SHOP")).toBeInTheDocument();
     await expectAccessible(dialog);
@@ -87,25 +82,13 @@ describe("analysis task from an alert (KIN-61)", () => {
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(posted).toBeUndefined();
 
-    await user.click(
-      within(row).getByRole("button", { name: /^Suggest an analysis task/ }),
-    );
+    await user.click(within(row).getByRole("button", { name: /^Suggest an analysis task/ }));
     const again = await screen.findByRole("alertdialog");
-    await user.click(
-      await within(again).findByRole("button", { name: "Create task" }),
-    );
-    await expectStatus(
-      "Analysis task requested. It appears in YouTrack in a moment.",
-    );
+    await user.click(await within(again).findByRole("button", { name: "Create task" }));
+    await expectStatus("Analysis task requested. It appears in YouTrack in a moment.");
     expect(posted).toEqual({ language: "en", projectId: "p1" });
-    await waitFor(() =>
-      expect(
-        within(row).getByText("Analysis task requested (SHOP)"),
-      ).toBeInTheDocument(),
-    );
-    expect(
-      within(row).queryByRole("button", { name: /^Suggest an analysis task/ }),
-    ).not.toBeInTheDocument();
+    await waitFor(() => expect(within(row).getByText("Analysis task requested (SHOP)")).toBeInTheDocument());
+    expect(within(row).queryByRole("button", { name: /^Suggest an analysis task/ })).not.toBeInTheDocument();
   });
 
   it("links the created issue and explains a missing YouTrack connection in Russian", async () => {
@@ -124,9 +107,7 @@ describe("analysis task from an alert (KIN-61)", () => {
     server.use(
       http.get("/api/auth/me", () => json(owner)),
       http.get("/api/alerts", () => json([ci, created])),
-      http.get("/api/alerts/C1/analysis-task", () =>
-        json({ ...preview, configured: false, targets: [] }),
-      ),
+      http.get("/api/alerts/C1/analysis-task", () => json({ ...preview, configured: false, targets: [] })),
     );
     await renderApp("/alerts", "ru");
     const link = await screen.findByRole("link", {
@@ -134,20 +115,14 @@ describe("analysis task from an alert (KIN-61)", () => {
     });
     expect(link).toHaveAttribute("href", "https://yt.example/issue/SHOP-12");
     const user = userEvent.setup();
-    await user.click(
-      screen.getByRole("button", { name: /^Предложить задачу анализа/ }),
-    );
+    await user.click(screen.getByRole("button", { name: /^Предложить задачу анализа/ }));
     const dialog = await screen.findByRole("alertdialog", {
       name: "Создать задачу анализа в YouTrack?",
     });
     expect(
-      await within(dialog).findByText(
-        "YouTrack не подключён. Owner подключает его на странице «Интеграции».",
-      ),
+      await within(dialog).findByText("YouTrack не подключён. Owner подключает его на странице «Интеграции»."),
     ).toBeInTheDocument();
-    expect(
-      within(dialog).getByRole("button", { name: "Создать задачу" }),
-    ).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "Создать задачу" })).toBeDisabled();
   });
 
   it("lets the Owner pick the YouTrack project of a platform alert", async () => {
@@ -179,19 +154,10 @@ describe("analysis task from an alert (KIN-61)", () => {
     );
     await renderApp("/alerts");
     const user = userEvent.setup();
-    await user.click(
-      await screen.findByRole("button", { name: /^Suggest an analysis task/ }),
-    );
+    await user.click(await screen.findByRole("button", { name: /^Suggest an analysis task/ }));
     const dialog = await screen.findByRole("alertdialog");
-    await user.selectOptions(
-      await within(dialog).findByRole("combobox", { name: "YouTrack project" }),
-      "p2",
-    );
-    await user.click(
-      within(dialog).getByRole("button", { name: "Create task" }),
-    );
-    await waitFor(() =>
-      expect(posted).toEqual({ language: "en", projectId: "p2" }),
-    );
+    await user.selectOptions(await within(dialog).findByRole("combobox", { name: "YouTrack project" }), "p2");
+    await user.click(within(dialog).getByRole("button", { name: "Create task" }));
+    await waitFor(() => expect(posted).toEqual({ language: "en", projectId: "p2" }));
   });
 });

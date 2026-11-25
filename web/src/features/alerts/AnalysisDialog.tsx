@@ -17,28 +17,16 @@ export function AnalysisStatus({ task }: { task: AlertAnalysisTask }) {
       </a>
     );
   }
-  return (
-    <span className="muted">
-      {t("alerts.analysisPending", { project: task.youtrackProject })}
-    </span>
-  );
+  return <span className="muted">{t("alerts.analysisPending", { project: task.youtrackProject })}</span>;
 }
 
 /**
  * Alert First (KIN-61): shows the issue drafted from the alert (secrets masked by the server) and creates it in
  * YouTrack only when the user confirms. A platform alert needs a target project bound to YouTrack.
  */
-export function AnalysisDialog({
-  alert,
-  onClose,
-}: {
-  alert: Alert;
-  onClose: () => void;
-}) {
+export function AnalysisDialog({ alert, onClose }: { alert: Alert; onClose: () => void }) {
   const { t, i18n } = useTranslation();
-  const lang = (i18n.resolvedLanguage ?? i18n.language).startsWith("ru")
-    ? "ru"
-    : "en";
+  const lang = (i18n.resolvedLanguage ?? i18n.language).startsWith("ru") ? "ru" : "en";
   const preview = useAnalysisPreview(alert.id, lang);
   const suggest = useSuggestAnalysis();
   const notify = useNotify();
@@ -50,11 +38,7 @@ export function AnalysisDialog({
   // The first target is preselected until the user picks one.
   const target = targets.some((x) => x.projectId === picked) ? picked : targets[0]?.projectId;
 
-  const ready =
-    preview.isSuccess &&
-    preview.data.configured &&
-    targets.length > 0 &&
-    target !== undefined;
+  const ready = preview.isSuccess && preview.data.configured && targets.length > 0 && target !== undefined;
 
   async function confirm() {
     setError(undefined);
@@ -87,11 +71,7 @@ export function AnalysisDialog({
         ) : (
           <p>
             <label htmlFor={selectId}>{t("alerts.analysisTarget")}</label>{" "}
-            <select
-              id={selectId}
-              value={target ?? ""}
-              onChange={(e) => setTarget(e.target.value)}
-            >
+            <select id={selectId} value={target ?? ""} onChange={(e) => setTarget(e.target.value)}>
               {targets.map((x) => (
                 <option key={x.projectId} value={x.projectId}>
                   {t("alerts.analysisTargetOption", {

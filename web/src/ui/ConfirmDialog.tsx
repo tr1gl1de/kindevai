@@ -40,19 +40,13 @@ export function ConfirmDialog({
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null;
     const host = ref.current?.closest(".dialog-backdrop");
-    const others = [...document.body.children].filter(
-      (el) => el !== host && !el.hasAttribute("inert"),
-    );
+    const others = [...document.body.children].filter((el) => el !== host && !el.hasAttribute("inert"));
     others.forEach((el) => el.setAttribute("inert", ""));
     cancelRef.current?.focus();
     // Keeps Tab / Shift+Tab cycling between the dialog's buttons.
     const trap = (e: KeyboardEvent) => {
       const items = ref.current
-        ? [
-            ...ref.current.querySelectorAll<HTMLElement>(
-              "button:not([disabled]), select:not([disabled])",
-            ),
-          ]
+        ? [...ref.current.querySelectorAll<HTMLElement>("button:not([disabled]), select:not([disabled])")]
         : [];
       const first = items[0];
       const last = items[items.length - 1];
@@ -91,20 +85,10 @@ export function ConfirmDialog({
         <p id={`${id}-text`}>{text}</p>
         {children}
         <div className="dialog-actions">
-          <button
-            ref={cancelRef}
-            type="button"
-            className="button"
-            onClick={onCancel}
-          >
+          <button ref={cancelRef} type="button" className="button" onClick={onCancel}>
             {cancelLabel}
           </button>
-          <button
-            type="button"
-            className={`button ${tone}`}
-            disabled={busy || confirmDisabled}
-            onClick={onConfirm}
-          >
+          <button type="button" className={`button ${tone}`} disabled={busy || confirmDisabled} onClick={onConfirm}>
             {confirmLabel}
           </button>
         </div>

@@ -42,6 +42,8 @@ func TestMain(m *testing.M) {
 		select {}
 	case os.Getenv("KINDEV_NSBOX_AGENT") == "1":
 		os.Exit(agentMain())
+	case os.Getenv("KINDEV_NSBOX_AGENT") == "sessions":
+		os.Exit(sessionsAgent())
 	}
 	os.Exit(m.Run())
 }
@@ -658,4 +660,82 @@ func TestGitInSandbox(t *testing.T) {
 		t.Fatalf("git in the sandbox:\n%s", got)
 	}
 	t.Logf("git in the sandbox:\n%s", got)
+}
+
+// sessionsAgent runs inside the sandbox with the task's session store bound at ~/.claude/projects (KIN-86): it
+// finds the earlier attempt's transcript, adds its own, and cannot reach the host's sessions or change the login.
+func sessionsAgent() int {
+	home, fail := os.Getenv("HOME"), 0
+	check := func(name string, ok bool, detail string) {
+		state := "ok"
+		if !ok {
+			state, fail = "FAIL", 1
+		}
+		fmt.Printf("%s %s %s\n", state, name, detail)
+	}
+	projects := filepath.Join(home, ".claude", "projects")
+	b, err := os.ReadFile(filepath.Join(projects, "w", "prev.jsonl"))
+	check("earlier-session-visible", err == nil && string(b) == "earlier attempt", fmt.Sprint(string(b), err))
+	_, err = os.Stat(filepath.Join(projects, "host-project"))
+	check("host-sessions-hidden", err != nil, "")
+	check("session-writable", os.WriteFile(filepath.Join(projects, "w", "next.jsonl"), []byte("this attempt"), 0o600) == nil, "")
+	b, err = os.ReadFile(filepath.Join(home, ".claude", ".credentials.json"))
+	check("cli-login-copied", err == nil && string(b) == os.Getenv("CRED_WANT"), string(b))
+	_ = os.WriteFile(filepath.Join(home, ".claude", ".credentials.json"), []byte("swapped"), 0o600)
+	return fail
+}
+
+// TestSessionStoreSurvivesAttempts: the task's session store, bound below the agent's private HOME, carries the
+// CLI's transcripts from one attempt to the next (resume, KIN-86), while the host's own sessions stay hidden and
+// the host's CLI login is never written.
+func TestSessionStoreSurvivesAttempts(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	store := filepath.Join(f.m.DataDir, "cli-sessions", "p", "t", "claude")
+	for p, c := range map[string]string{
+		filepath.Join(store, "w", "prev.jsonl"):                                 "earlier attempt",
+		filepath.Join(f.home, ".claude", "projects", "host-project", "s.jsonl"): "another task's session",
+	} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(c), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	box, err := f.m.Open(t.Context(), egress.BoxRequest{Dir: f.dir, Workdir: f.workdir, Profile: f.profile("203.0.113.7"),
+		HomeBinds: []egress.HomeBind{{Source: store, Rel: ".claude/projects"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := box.(*Box)
+	t.Cleanup(b.Release)
+	cmd, err := b.Command([]string{f.agentCopy(t)}, []string{"KINDEV_NSBOX_AGENT=sessions", "HOME=" + f.home,
+		"CRED_WANT=" + credOrig}, f.workdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	if err := b.Await(ctx); err != nil {
+		t.Fatalf("verdict: %v\n%s", err, out.String())
+	}
+	if err := cmd.Wait(); err != nil || strings.Contains(out.String(), "FAIL") {
+		t.Fatalf("agent: %v\n%s", err, out.String())
+	}
+	if b, err := os.ReadFile(filepath.Join(store, "w", "next.jsonl")); err != nil || string(b) != "this attempt" {
+		t.Fatalf("the attempt's session did not reach the store: %q %v", b, err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(f.home, ".claude", ".credentials.json")); string(b) != credOrig {
+		t.Fatalf("the agent changed the host's CLI login: %s", b)
+	}
+	if _, err := os.Stat(filepath.Join(f.home, ".claude", "projects", "w")); !os.IsNotExist(err) {
+		t.Fatalf("the attempt's session reached the host's own sessions: %v", err)
+	}
 }

@@ -334,12 +334,34 @@ and the system directories unwritable. Otherwise the CLI never starts and the st
 sandbox. Requirements: `nft` installed and unprivileged user namespaces enabled (Ubuntu 24.04:
 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`). Known limits: an attempt adopted after a runner
 restart has no network (its proxy adapter is gone); inside the sandbox `git add`/`git commit` by the agent fail (the mirror's
-objects are read-only; the runner commits after the run); `--resume` across sandboxed attempts does not find the
-earlier session (each attempt has a fresh `HOME`); a CLI login refreshed inside the sandbox is not kept (prefer a
-long-lived token such as `claude setup-token` for runners); Linux 5.12+ is required. **Without the sandbox** (macOS, no user namespaces, or a profile
+objects are read-only; the runner commits after the run); a CLI login refreshed inside the sandbox is not kept;
+Linux 5.12+ is required. **Without the sandbox** (macOS, no user namespaces, or a profile
 that is not `strict`) the CLI runs on the host with the runner's uid and its real `HOME`: it can read everything the
 runner user can (SSH keys, the runner's key and data directory, other repositories). That is why the permission bypass
 stays off there and the CLI keeps asking before acting; use strict egress for untrusted tasks.
+
+**CLI logins and sessions on a runner** (KIN-86). The CLIs run with a CLI home: the runner user's `HOME` by default,
+or a dedicated directory with `ai-runner run --cli-home <dir>` (or `KINDEV_RUNNER_CLI_HOME`; outside the data
+directory, created 0700), so the runner's logins stay apart from yours. Log the CLIs in there explicitly:
+
+```bash
+claude setup-token                          # on any machine with a browser: prints a token valid for one year
+ai-runner cli-login claude --cli-home <dir> # paste it (hidden prompt; or stdin, or --token-file <0600 file>)
+ai-runner cli-login codex --cli-home <dir> -- --with-api-key   # runs `codex login` with HOME=<dir>
+ai-runner cli-login status --cli-home <dir>                    # what each CLI is logged in with, token expiry
+```
+
+The Claude token stays on the host (`<dir>/.kindev/claude-oauth-token`, 0600) and reaches Claude Code as
+`CLAUDE_CODE_OAUTH_TOKEN`; it needs no refresh, so nothing is lost in the sandbox, and it is masked in attempt
+output. Inside the sandbox an agent can read the login it runs with but never write the host's: login files remain
+copies. A short-lived interactive login (`claude` → `/login`, Codex's ChatGPT login) also works but its refresh inside
+the sandbox is lost — prefer the token (Codex: an API key). A sandboxed attempt whose CLI has no login (or an expired
+token) fails before the CLI starts as a logged-out CLI: the step is held and the Owner alerted (`cli_limit`, cause
+`auth`); the runner also warns at start-up and a month before the token expires. For `--resume` between attempts,
+each task gets its own session store in the data directory (`cli-sessions/<project>/<task>/<cli>`), bound at
+`~/.claude/projects` / `~/.codex/sessions` in the sandbox: an attempt sees its own task's sessions only, never another
+task's or yours; stores unused for 30 days are removed. A strict profile needs `api.anthropic.com` in its allowlist
+for Claude Code (telemetry to `*.datadoghq.com` is optional).
 
 ### Approvals and risk policy
 

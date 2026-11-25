@@ -85,7 +85,7 @@ func TestConfine(t *testing.T) {
 		t.Parallel()
 		for _, enf := range []string{"off", "monitor"} {
 			b := &fakeBoxes{ok: true}
-			box, err := (&Sandboxes{Config: config(enf), Boxes: b}).Confine(ctx, "p", "", "/d", "/w")
+			box, err := (&Sandboxes{Config: config(enf), Boxes: b}).Confine(ctx, "p", "", BoxRequest{Dir: "/d", Workdir: "/w"})
 			if box != nil || err != nil || len(b.opened) != 0 {
 				t.Fatalf("%s: box %v, err %v, opened %v", enf, box, err, b.opened)
 			}
@@ -94,14 +94,14 @@ func TestConfine(t *testing.T) {
 	t.Run("no configuration yet fails closed", func(t *testing.T) {
 		t.Parallel()
 		none := func() (protocol.ConfigUpdate, bool, error) { return protocol.ConfigUpdate{}, false, nil }
-		if box, err := (&Sandboxes{Config: none, Boxes: &fakeBoxes{}}).Confine(ctx, "p", "", "/d", ""); box != nil || err == nil {
+		if box, err := (&Sandboxes{Config: none, Boxes: &fakeBoxes{}}).Confine(ctx, "p", "", BoxRequest{Dir: "/d", Workdir: ""}); box != nil || err == nil {
 			t.Fatalf("box %v, err %v", box, err)
 		}
 	})
 	t.Run("strict on a verified runner: a sandbox for the profile", func(t *testing.T) {
 		t.Parallel()
 		b := &fakeBoxes{ok: true}
-		box, err := (&Sandboxes{Config: config("strict"), Boxes: b}).Confine(ctx, "p", "claude", "/d", "/w")
+		box, err := (&Sandboxes{Config: config("strict"), Boxes: b}).Confine(ctx, "p", "claude", BoxRequest{Dir: "/d", Workdir: "/w"})
 		if err != nil || box == nil {
 			t.Fatalf("box %v, err %v", box, err)
 		}
@@ -112,7 +112,7 @@ func TestConfine(t *testing.T) {
 	t.Run("strict on an unsupported runner fails closed", func(t *testing.T) {
 		t.Parallel()
 		b := &fakeBoxes{why: "unsupported on darwin"}
-		box, err := (&Sandboxes{Config: config("strict"), Boxes: b}).Confine(ctx, "p", "", "/d", "")
+		box, err := (&Sandboxes{Config: config("strict"), Boxes: b}).Confine(ctx, "p", "", BoxRequest{Dir: "/d", Workdir: ""})
 		if box != nil || !errors.Is(err, ErrUnsupported) || len(b.opened) != 0 {
 			t.Fatalf("box %v, err %v, opened %v", box, err, b.opened)
 		}
@@ -120,7 +120,7 @@ func TestConfine(t *testing.T) {
 	t.Run("a sandbox that cannot be built fails closed", func(t *testing.T) {
 		t.Parallel()
 		b := &fakeBoxes{ok: true, err: errors.New("nft failed")}
-		if box, err := (&Sandboxes{Config: config("strict"), Boxes: b}).Confine(ctx, "p", "", "/d", ""); box != nil || err == nil {
+		if box, err := (&Sandboxes{Config: config("strict"), Boxes: b}).Confine(ctx, "p", "", BoxRequest{Dir: "/d", Workdir: ""}); box != nil || err == nil {
 			t.Fatalf("box %v, err %v", box, err)
 		}
 	})
@@ -129,7 +129,7 @@ func TestConfine(t *testing.T) {
 		bad := func() (protocol.ConfigUpdate, bool, error) {
 			return protocol.ConfigUpdate{}, false, errors.New("corrupt")
 		}
-		if box, err := (&Sandboxes{Config: bad, Boxes: &fakeBoxes{ok: true}}).Confine(ctx, "p", "", "/d", ""); box != nil || err == nil {
+		if box, err := (&Sandboxes{Config: bad, Boxes: &fakeBoxes{ok: true}}).Confine(ctx, "p", "", BoxRequest{Dir: "/d", Workdir: ""}); box != nil || err == nil {
 			t.Fatalf("box %v, err %v", box, err)
 		}
 	})

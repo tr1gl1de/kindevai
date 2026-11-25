@@ -56,6 +56,15 @@ type BoxRequest struct {
 	Dir     string // the attempt's state directory (owner-only; holds the adapter's socket)
 	Workdir string // the attempt's worktree ("" = Dir)
 	Profile protocol.NetworkProfile
+	// HomeBinds are host directories bound read-write below the agent's private HOME (KIN-86: the CLI's session
+	// store of the task, so a later attempt can resume the session); the host's own CLI login stays a copy.
+	HomeBinds []HomeBind
+}
+
+// HomeBind binds the host directory Source at Rel (a clean relative path) below the agent's HOME.
+type HomeBind struct {
+	Source string
+	Rel    string
 }
 
 // Box is one attempt's sandbox, as the session context launches through it.
@@ -145,14 +154,16 @@ func (s *Sandboxes) StrictProfile(ctx context.Context, project, role string) (pr
 	return p, true, nil
 }
 
-// Confine returns the sandbox for an attempt of project run by role, or nil when its profile is not strict. An
-// error means the attempt must not run (strict, but no verified sandbox): the step waits for the network.
-func (s *Sandboxes) Confine(ctx context.Context, project, role, dir, workdir string) (Box, error) {
+// Confine returns the sandbox for an attempt of project run by role (r without its profile), or nil when its
+// profile is not strict. An error means the attempt must not run (strict, but no verified sandbox): the step waits
+// for the network.
+func (s *Sandboxes) Confine(ctx context.Context, project, role string, r BoxRequest) (Box, error) {
 	p, strict, err := s.StrictProfile(ctx, project, role)
 	if err != nil || !strict {
 		return nil, err
 	}
-	b, err := s.Boxes.Open(ctx, BoxRequest{Dir: dir, Workdir: workdir, Profile: p})
+	r.Profile = p
+	b, err := s.Boxes.Open(ctx, r)
 	if err != nil {
 		return nil, fmt.Errorf("building the strict egress sandbox: %w", err)
 	}

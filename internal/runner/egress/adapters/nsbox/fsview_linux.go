@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	egress "github.com/tr1gl1de/kindevai/internal/runner/egress/app"
 	"github.com/tr1gl1de/kindevai/internal/runner/egress/domain"
 )
 
@@ -31,12 +32,14 @@ type view struct {
 	readonly   []string // paths a write below must fail
 }
 
-// source is a host path to bind into the view, opened before the view covers anything.
+// source is a host path to bind into the view, opened before the view covers anything; at its own path unless
+// target is set.
 type source struct {
-	path string
-	fd   int
-	dir  bool
-	ro   bool
+	path   string
+	target string
+	fd     int
+	dir    bool
+	ro     bool
 }
 
 func envValue(env []string, key string) string {
@@ -60,6 +63,38 @@ func openSource(p string, ro bool) (source, error) {
 		return source{}, fmt.Errorf("opening %s: %w", p, err)
 	}
 	return source{path: p, fd: fd, dir: st.Mode&unix.S_IFMT == unix.S_IFDIR, ro: ro}, nil
+}
+
+// checkHomeBind accepts a session store bind (KIN-86): a clean relative path below HOME that neither holds nor
+// lies inside one of the CLI's login files (which stay copies), and a store inside the runner's data directory
+// that is a directory reached without a symlink.
+func checkHomeBind(hb egress.HomeBind, dataDirs []string) error {
+	rel := hb.Rel
+	if rel == "" || filepath.IsAbs(rel) || filepath.Clean(rel) != rel || rel == "." || rel == ".." ||
+		strings.HasPrefix(rel, "../") {
+		return fmt.Errorf("bind below the agent's HOME: %q is not a clean relative path", rel)
+	}
+	for _, f := range domain.CLIHomeFiles {
+		if within(f, rel) || within(rel, f) {
+			return fmt.Errorf("bind below the agent's HOME: %q covers the CLI's login", rel)
+		}
+	}
+	if !filepath.IsAbs(hb.Source) || filepath.Clean(hb.Source) != hb.Source || !withinAny(hb.Source, dataDirs) {
+		return fmt.Errorf("bind below the agent's HOME: %s is not in the runner's data directory", hb.Source)
+	}
+	if r, err := filepath.EvalSymlinks(hb.Source); err != nil || r != hb.Source {
+		return fmt.Errorf("bind below the agent's HOME: %s is not a plain directory", hb.Source)
+	}
+	return nil
+}
+
+// openDir opens a directory to bind, never through a symlink.
+func openDir(p string) (source, error) {
+	fd, err := unix.Open(p, unix.O_PATH|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return source{}, fmt.Errorf("opening %s: %w", p, err)
+	}
+	return source{path: p, fd: fd, dir: true}, nil
 }
 
 // homeFile is a CLI file read from the CLI's HOME on the host.
@@ -205,6 +240,22 @@ func buildView(s Spec) (*view, error) {
 		if e.link != "" {
 			points = append(points, e.link)
 		}
+	}
+	if len(s.HomeBinds) > 0 && home == "" {
+		return nil, errors.New("directories to bind below the agent's HOME, but no HOME")
+	}
+	for _, hb := range s.HomeBinds {
+		if err := checkHomeBind(hb, datas); err != nil {
+			return nil, err
+		}
+		src, err := openDir(hb.Source)
+		if err != nil {
+			return nil, err
+		}
+		src.target = filepath.Join(home, hb.Rel)
+		srcs = append(srcs, src)
+		// The store is what the view shows there, not the host's own directory at that path.
+		points = append(points, src.target)
 	}
 	var files []homeFile
 	if home != "" {
@@ -428,8 +479,11 @@ func privateHome(r, home string, files []homeFile) error {
 	return nil
 }
 
-// place binds an opened host source at its own path in the view.
+// place binds an opened host source at its own path (or its target) in the view.
 func place(r string, src source) error {
+	if src.target != "" {
+		src.path = src.target
+	}
 	parent := filepath.Dir(src.path)
 	if src.dir {
 		parent = src.path

@@ -5,6 +5,7 @@ import { ErrorState, FormAlert, Loading } from "../../ui/feedback";
 import { errorMessage } from "../../ui/errors";
 import { useNotify } from "../../ui/notify";
 import { useNotificationPreferences, useSaveNotificationPreferences } from "./api";
+import "./alerts.css";
 
 const allTypes: NotificationType[] = ["approval_requested", "alert_raised", "task_finished"];
 

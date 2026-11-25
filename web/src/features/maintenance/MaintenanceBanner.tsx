@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 import { Link } from "react-router";
 import { formatDateTime } from "../../ui/format";
 import { useMaintenance } from "./api";
+import "./maintenance.css";
 
 /** Shown on every page while maintenance mode is on: the platform is read-only and new steps are paused. */
 export function MaintenanceBanner({ owner }: { owner: boolean }) {

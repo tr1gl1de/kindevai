@@ -1,0 +1,8 @@
+/* Alert Center (KIN-40): notification channel choices. */
+.checkbox-list {
+  display: grid;
+  gap: 8px;
+  border: 0;
+  padding: 0;
+  margin: 0 0 var(--space);
+}

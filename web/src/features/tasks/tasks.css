@@ -17,7 +17,6 @@
   margin-left: 8px;
 }
 .time-incomplete {
-  border-color: var(--warn-border);
   background: var(--warn-bg);
 }
 .task-state.task-FAILED,
@@ -59,6 +58,9 @@
   display: flex;
   align-items: center;
   cursor: pointer;
+}
+.log:focus-visible {
+  border-radius: 4px; /* the base focus ring's radius */
 }
 .log {
   max-height: 24rem;
@@ -105,11 +107,7 @@ td.ws-path {
   gap: 4px;
 }
 .ws-note {
-  border-color: var(--warn-border);
   background: var(--warn-bg);
-}
-.ws-status-D {
-  border-color: var(--danger);
 }
 .attempt-workspace .badge + .badge {
   margin-left: 4px;
@@ -163,13 +161,7 @@ td.ws-path {
   align-items: center;
   cursor: pointer;
 }
-.tests-failed,
-.tests-missing,
-.verdict-changes_requested {
-  border-color: var(--danger);
-}
 .tests-not_configured {
-  border-color: var(--warn-border);
   background: var(--warn-bg);
 }
 /* Plan revision diff (KIN-97) */

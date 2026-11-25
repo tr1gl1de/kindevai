@@ -1,0 +1,10 @@
+/* KIN-107: the task state → YouTrack state fields, one column on phones, two from 40rem. */
+.state-map {
+  display: grid;
+  gap: var(--space);
+}
+@media (min-width: 40rem) {
+  .state-map {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

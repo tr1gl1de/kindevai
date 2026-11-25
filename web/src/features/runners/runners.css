@@ -1,0 +1,208 @@
+/* Storage Overview (KIN-20) */
+.details-row {
+  display: contents;
+}
+.storage-card {
+  grid-column: 1 / -1;
+}
+.machine-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: var(--space);
+}
+.machine + .machine {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space);
+}
+.machine-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.machine-head h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+.volume {
+  margin-top: 8px;
+}
+.volume p {
+  margin: 4px 0;
+}
+.volume-role {
+  font-weight: 600;
+}
+.volume meter {
+  width: 100%;
+  height: 12px;
+}
+.volume.stale meter {
+  opacity: 0.5;
+}
+/* A runner that stopped answering (runner list and page). */
+.availability-unreachable {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+}
+/* Infrastructure → Storage (KIN-55) */
+.storage-machine {
+  margin-top: var(--space);
+}
+.storage-machine h2 {
+  margin: 0;
+}
+.volume-detail {
+  margin-top: var(--space);
+  min-width: 0;
+}
+.volume-detail h3 {
+  font-size: 1rem;
+  margin: 0 0 4px;
+}
+.volume-detail meter {
+  width: 100%;
+  height: 12px;
+}
+.volume-detail.stale meter {
+  opacity: 0.5;
+}
+.volume-detail code,
+.consumers code {
+  overflow-wrap: anywhere;
+}
+table.compact {
+  margin: 8px 0;
+}
+table.compact caption {
+  text-align: left;
+  font-weight: 600;
+  padding: 4px 0;
+}
+table.compact caption h3 {
+  font-size: 1rem;
+  margin: 0;
+}
+table.compact caption span {
+  font-weight: normal;
+}
+table.compact th,
+table.compact td {
+  padding: 4px 8px 4px 0;
+}
+.segmented {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 0;
+  padding: 0;
+  margin: var(--space) 0 0;
+}
+.segmented legend {
+  padding: 0;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.segmented label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--tap);
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.segmented label:has(input:checked) {
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.history-chart {
+  margin: 8px 0 0;
+}
+.history-plot {
+  position: relative;
+  height: 160px;
+  margin-right: 40px; /* room for the level labels */
+  border-left: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  touch-action: pan-y;
+}
+.history-plot svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
+}
+.history-plot .grid {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.history-plot .threshold {
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+.history-plot .threshold.warning,
+.history-plot .threshold.high {
+  stroke: var(--warn-border);
+}
+.history-plot .threshold.critical {
+  stroke: var(--danger);
+}
+.history-plot .series {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.history-plot .crosshair {
+  stroke: var(--muted);
+  stroke-width: 1;
+}
+.history-plot .dot {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--surface);
+}
+.history-plot .threshold-label {
+  position: absolute;
+  left: 100%;
+  transform: translateY(-50%);
+  padding-left: 4px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.chart-tooltip {
+  position: absolute;
+  top: 4px;
+  transform: translateX(-50%);
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 0.8rem;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.history-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-right: 40px;
+  font-size: 0.75rem;
+}
+.history-chart details summary {
+  min-height: var(--tap);
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}

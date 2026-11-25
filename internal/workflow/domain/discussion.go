@@ -101,6 +101,7 @@ type DiscussionMessage struct {
 	Usage        AgentUsage    // answers: what the CLI reported spending
 	Work         time.Duration // answers: the CLI's time on the answer (agent time, KIN-25)
 	DeliveredAt  *time.Time    // user messages: when the CLI started on the current turn
+	SentAt       time.Time     // user messages: when last sent (written or sent again; the hourly limit)
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 	Version      int64
@@ -117,7 +118,7 @@ func NewUserMessage(id, taskID, author string, revision int, text string, lim Di
 		return DiscussionMessage{}, &LimitError{Code: LimitMessageTooLong, Limit: lim.MaxMessageChars}
 	}
 	return DiscussionMessage{ID: id, TaskID: taskID, Role: RoleUser, Author: author, PlanRevision: revision, Text: text,
-		Status: MessagePending, CreatedAt: now, UpdatedAt: now}, nil
+		Status: MessagePending, SentAt: now, CreatedAt: now, UpdatedAt: now}, nil
 }
 
 // NewAnswer is the planner's answer to the user message m.
@@ -183,7 +184,7 @@ func (m *DiscussionMessage) Resend(runID string, now time.Time) error {
 	if err := m.need(MessageFailed); err != nil {
 		return err
 	}
-	m.Status, m.Reason, m.RunID, m.DeliveredAt, m.UpdatedAt = MessagePending, "", runID, nil, now
+	m.Status, m.Reason, m.RunID, m.DeliveredAt, m.SentAt, m.UpdatedAt = MessagePending, "", runID, nil, now, now
 	return nil
 }
 

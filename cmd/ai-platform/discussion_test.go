@@ -393,7 +393,15 @@ func TestPlanDiscussionWaitsForARunnerTimesOutAndRetries(t *testing.T) {
 	if err := cp.wf.Schedule(ctx); err != nil {
 		t.Fatal(err)
 	}
-	playTurn(t, cp, clk, runnerID, protocol.AgentReport{Session: "sess-1", Result: "Nothing to add."}, time.Second)
+	// Regression (review): execution.started lost — the fenced answer still delivers and answers the message.
+	b := lastAssign(t, cp, runnerID)
+	ex := runnerExecutions{cp.wf}
+	if err := ex.RecordAgentReport(ctx, runnerID, b.Step, b.Fence, protocol.AgentReport{Session: "sess-1", Result: "Nothing to add."}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.CompleteAttempt(ctx, runnerID, b.Step, b.Fence, clk.Now()); err != nil {
+		t.Fatal(err)
+	}
 	th = cp.thread(t, task.ID)
 	if len(th.Messages) != 2 || th.Messages[0].Status != workflow.MessageAnswered || th.Messages[1].Text != "Nothing to add." ||
 		th.Used != 1 {

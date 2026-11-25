@@ -16,15 +16,15 @@ import (
 var _ app.DiscussionRepository = (*Repository)(nil)
 
 const messageCols = `id, task_id, role, author, plan_revision, text, status, reason, notice, revision, reply_to, run_id,
-	agent, model, usage_json, work_ms, delivered_at, created_at, updated_at, version`
+	agent, model, usage_json, work_ms, delivered_at, sent_at, created_at, updated_at, version`
 
 func scanMessage(row scanner) (domain.DiscussionMessage, error) {
 	var m domain.DiscussionMessage
 	var usage, created, updated string
 	var workMs int64
-	var delivered sql.NullString
+	var delivered, sent sql.NullString
 	err := row.Scan(&m.ID, &m.TaskID, &m.Role, &m.Author, &m.PlanRevision, &m.Text, &m.Status, &m.Reason, &m.Notice,
-		&m.Revision, &m.ReplyTo, &m.RunID, &m.Agent, &m.Model, &usage, &workMs, &delivered, &created, &updated, &m.Version)
+		&m.Revision, &m.ReplyTo, &m.RunID, &m.Agent, &m.Model, &usage, &workMs, &delivered, &sent, &created, &updated, &m.Version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return m, domain.ErrNotFound
 	}
@@ -34,6 +34,10 @@ func scanMessage(row scanner) (domain.DiscussionMessage, error) {
 	m.Work = time.Duration(workMs) * time.Millisecond
 	if err := json.Unmarshal([]byte(usage), &m.Usage); err != nil {
 		return m, fmt.Errorf("discussion message %s usage: %w", m.ID, err)
+	}
+	var sentAt *time.Time
+	if sentAt, err = parseNullTS(sent); err == nil && sentAt != nil {
+		m.SentAt = *sentAt
 	}
 	if m.DeliveredAt, err = parseNullTS(delivered); err == nil {
 		if m.CreatedAt, err = parseTS(created); err == nil {
@@ -53,9 +57,9 @@ func (r *Repository) CreateMessage(ctx context.Context, m *domain.DiscussionMess
 		return fmt.Errorf("encoding the message usage: %w", err)
 	}
 	_, err = db.Conn(ctx, r.db).ExecContext(ctx, `INSERT INTO plan_discussion_messages(`+messageCols+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
 		m.ID, m.TaskID, m.Role, m.Author, m.PlanRevision, m.Text, m.Status, m.Reason, m.Notice, m.Revision, m.ReplyTo,
-		m.RunID, m.Agent, m.Model, string(usage), m.Work.Milliseconds(), nullTS(m.DeliveredAt), ts(m.CreatedAt), ts(m.UpdatedAt))
+		m.RunID, m.Agent, m.Model, string(usage), m.Work.Milliseconds(), nullTS(m.DeliveredAt), sentTS(m), ts(m.CreatedAt), ts(m.UpdatedAt))
 	switch {
 	case db.IsUniqueViolation(err):
 		return domain.ErrConflict
@@ -68,6 +72,14 @@ func (r *Repository) CreateMessage(ctx context.Context, m *domain.DiscussionMess
 	return nil
 }
 
+// sentTS is a user message's last send time (NULL for answers and notices).
+func sentTS(m *domain.DiscussionMessage) any {
+	if m.SentAt.IsZero() {
+		return nil
+	}
+	return ts(m.SentAt)
+}
+
 // Message loads a message.
 func (r *Repository) Message(ctx context.Context, id string) (domain.DiscussionMessage, error) {
 	return scanMessage(db.Conn(ctx, r.db).QueryRowContext(ctx, "SELECT "+messageCols+" FROM plan_discussion_messages WHERE id = ?", id))
@@ -76,8 +88,8 @@ func (r *Repository) Message(ctx context.Context, id string) (domain.DiscussionM
 // SaveMessage writes a message's mutable fields if its version is unchanged and increments the version.
 func (r *Repository) SaveMessage(ctx context.Context, m *domain.DiscussionMessage) error {
 	res, err := db.Conn(ctx, r.db).ExecContext(ctx, `UPDATE plan_discussion_messages SET status = ?, reason = ?, run_id = ?,
-		delivered_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?`,
-		m.Status, m.Reason, m.RunID, nullTS(m.DeliveredAt), ts(m.UpdatedAt), m.ID, m.Version)
+		delivered_at = ?, sent_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?`,
+		m.Status, m.Reason, m.RunID, nullTS(m.DeliveredAt), sentTS(m), ts(m.UpdatedAt), m.ID, m.Version)
 	if err := oneRow(res, err, "saving discussion message"); err != nil {
 		return err
 	}
@@ -118,8 +130,8 @@ func (r *Repository) CountUserMessages(ctx context.Context, taskID string) (int,
 
 // UserMessageTimes returns when the user wrote messages since `since`.
 func (r *Repository) UserMessageTimes(ctx context.Context, userID string, since time.Time) ([]time.Time, error) {
-	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, `SELECT created_at FROM plan_discussion_messages WHERE role = 'user'
-		AND author = ? AND created_at >= ? ORDER BY created_at`, userID, ts(since))
+	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, `SELECT sent_at FROM plan_discussion_messages WHERE role = 'user'
+		AND author = ? AND sent_at >= ? ORDER BY sent_at`, userID, ts(since))
 	if err != nil {
 		return nil, fmt.Errorf("listing the user's discussion messages: %w", err)
 	}

@@ -6,7 +6,7 @@ ALTER TABLE planning_runs ADD COLUMN usage_json TEXT NOT NULL DEFAULT '{}';
 
 -- Messages of a task's plan discussion: user messages (status PENDING -> DELIVERED -> ANSWERED | FAILED, run_id the
 -- current turn), the planner's answers (run_id the turn that answered: one answer per turn) and system notices.
--- text is untrusted. work_ms is the CLI's time on an answer (agent time).
+-- text is untrusted; sent_at is when a user message was last sent (the hourly limit). work_ms is the CLI's time on an answer (agent time).
 CREATE TABLE plan_discussion_messages (
   id            TEXT PRIMARY KEY,
   task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -25,12 +25,13 @@ CREATE TABLE plan_discussion_messages (
   usage_json    TEXT NOT NULL DEFAULT '{}',
   work_ms       INTEGER NOT NULL DEFAULT 0 CHECK (work_ms >= 0),
   delivered_at  TEXT,
+  sent_at       TEXT,
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL,
   version       INTEGER NOT NULL CHECK (version >= 1)
 ) STRICT;
 CREATE INDEX plan_discussion_messages_task ON plan_discussion_messages(task_id, created_at);
-CREATE INDEX plan_discussion_messages_author ON plan_discussion_messages(author, created_at) WHERE role = 'user';
+CREATE INDEX plan_discussion_messages_sent ON plan_discussion_messages(author, sent_at) WHERE role = 'user';
 CREATE UNIQUE INDEX plan_discussion_one_answer ON plan_discussion_messages(run_id) WHERE role = 'assistant';
 
 -- The discussion limits the Owner set (one row; absent: the defaults).

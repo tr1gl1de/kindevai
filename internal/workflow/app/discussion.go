@@ -31,7 +31,7 @@ type DiscussionRepository interface {
 	// Messages returns the task's newest limit messages, oldest first.
 	Messages(ctx context.Context, taskID string, limit int) ([]domain.DiscussionMessage, error)
 	CountUserMessages(ctx context.Context, taskID string) (int, error)
-	// UserMessageTimes returns when the user wrote their messages since `since` (all tasks).
+	// UserMessageTimes returns when the user sent (or sent again) their messages since `since` (all tasks).
 	UserMessageTimes(ctx context.Context, userID string, since time.Time) ([]time.Time, error)
 	DiscussionLimits(ctx context.Context) (domain.DiscussionLimits, error) // the defaults until the Owner sets them
 	SetDiscussionLimits(ctx context.Context, l domain.DiscussionLimits, by string, now time.Time) error
@@ -146,14 +146,16 @@ func (s *Service) PostMessage(ctx context.Context, p auth.Principal, taskID, tex
 	return out, nil
 }
 
-// RetryMessage sends a FAILED message of the task again (a new turn; it does not count as a new message).
+// RetryMessage sends the task's latest user message again when it FAILED (a new turn). It is no new message of
+// the plan, but a send within the user's hourly limit.
 func (s *Service) RetryMessage(ctx context.Context, p auth.Principal, taskID, messageID string) (domain.DiscussionMessage, error) {
 	if err := s.discussionOn(); err != nil {
 		return domain.DiscussionMessage{}, err
 	}
 	var out domain.DiscussionMessage
+	var refused error
 	err := s.Tx.InTx(ctx, func(ctx context.Context) error {
-		t, _, err := s.discussionTask(ctx, p, taskID)
+		t, lim, err := s.discussionTask(ctx, p, taskID)
 		if err != nil {
 			return err
 		}
@@ -168,10 +170,28 @@ func (s *Service) RetryMessage(ctx context.Context, p auth.Principal, taskID, me
 		if err != nil {
 			return err
 		}
-		if inFlight {
-			return &domain.LimitError{Code: domain.LimitAnswerInFlight}
-		}
 		now := s.now()
+		latest, err := s.Discussion.Messages(ctx, t.ID, MaxDiscussionList)
+		if err != nil {
+			return err
+		}
+		for i := len(latest) - 1; i >= 0; i-- {
+			if latest[i].Role == domain.RoleUser {
+				if latest[i].ID != m.ID {
+					return fmt.Errorf("only the latest message may be sent again: %w", domain.ErrInvalidTransition)
+				}
+				break
+			}
+		}
+		recent, err := s.Discussion.UserMessageTimes(ctx, p.UserID, now.Add(-time.Hour))
+		if err != nil {
+			return err
+		}
+		var le *domain.LimitError
+		if err := lim.Check(inFlight, 0, recent, now); errors.As(err, &le) {
+			refused = le
+			return s.limitHit(ctx, p, t, le)
+		}
 		run := domain.NewDiscussionRun(s.NewID(), t.ID, m.ID, p.UserID, prev, now)
 		if err := m.Resend(run.ID, now); err != nil {
 			return err
@@ -189,6 +209,9 @@ func (s *Service) RetryMessage(ctx context.Context, p auth.Principal, taskID, me
 	})
 	if err != nil {
 		return domain.DiscussionMessage{}, err
+	}
+	if refused != nil {
+		return domain.DiscussionMessage{}, refused
 	}
 	return out, nil
 }
@@ -478,6 +501,12 @@ func (s *Service) completeDiscussion(ctx context.Context, run *domain.PlanningRu
 	if err != nil {
 		return err
 	}
+	if m.RunID == run.ID && m.Status == domain.MessagePending {
+		// execution.started was lost (the fence proves the attempt is current): the answer delivers the message.
+		if err := m.Deliver(now); err != nil {
+			return err
+		}
+	}
 	if m.RunID != run.ID || m.Status != domain.MessageDelivered {
 		if err := run.Cancel("the message no longer waits for this answer", now); err != nil {
 			return err
@@ -554,13 +583,16 @@ func (s *Service) applyProposedPlan(ctx context.Context, t domain.Task, m domain
 		return domain.NoticePlanOutdated, planOutcome{text: fmt.Sprintf(
 			"the proposed plan was written for revision %d, but revision %d is current; it was not applied", m.PlanRevision, t.PlanRevision)}
 	}
+	if t.CanAcceptPlan() != nil {
+		return domain.NoticePlanNotApplied, planOutcome{text: "the task's state no longer takes a new plan; it was not applied"}
+	}
+	// SubmitPlan joins this transaction without a savepoint: only its validation (before any write) becomes a
+	// notice; any other error rolls the whole completion back.
 	rev, err := s.SubmitPlan(ctx, t.ID, plan, PlannerAuthorPrefix+run.Agent)
 	var ve *domain.ValidationError
 	switch {
 	case errors.As(err, &ve):
 		return domain.NoticePlanRejected, planOutcome{text: "the proposed plan was not accepted: " + err.Error()}
-	case errors.Is(err, domain.ErrInvalidTransition), errors.Is(err, domain.ErrStaleRevision):
-		return domain.NoticePlanNotApplied, planOutcome{text: "the task's state no longer takes a new plan; it was not applied"}
 	case err != nil:
 		return "", planOutcome{err: err}
 	}

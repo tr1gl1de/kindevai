@@ -129,8 +129,18 @@ func TestDiscussionAPILimits(t *testing.T) {
 		e.RetryAfterSec < 48*60 || e.RetryAfterSec > 50*60 {
 		t.Fatalf("per hour %d %+v", c, e)
 	}
+	retry := base + "/" + th.Messages[0].ID + "/retry"
+	if c := do("owner", "POST", retry, "", &e); c != http.StatusTooManyRequests || e.Code != domain.LimitPerHour {
+		t.Fatalf("sending again counts against the hourly limit %d %+v", c, e)
+	}
+	if c := do("owner", "PUT", "/api/plan-discussion/limits", `{"maxMessageChars":10,"maxMessagesPerPlan":50,"maxMessagesPerHour":2,"answerTimeoutSec":600}`, nil); c != http.StatusOK {
+		t.Fatalf("limits %d", c)
+	}
 	var m MessageView
-	if c := do("owner", "POST", base+"/"+th.Messages[0].ID+"/retry", "", &m); c != http.StatusAccepted || m.Status != "PENDING" {
+	if c := do("owner", "POST", retry, "", &m); c != http.StatusAccepted || m.Status != "PENDING" {
 		t.Fatalf("a failed message may be sent again %d %+v", c, m)
+	}
+	if c := do("owner", "POST", retry, "", &e); c != http.StatusTooManyRequests || e.Code != domain.LimitAnswerInFlight {
+		t.Fatalf("a pending message is not sent twice %d %+v", c, e)
 	}
 }

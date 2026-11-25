@@ -6,7 +6,10 @@
   border-left-width: 4px;
   border-radius: var(--radius);
   background: var(--warn-bg);
-  color: var(--text);
+  color: var(--warn-text);
+  --text: var(--warn-text);
+  --muted: var(--warn-muted);
+  --link: var(--warn-link);
 }
 .maintenance-banner h2 {
   margin: 0 0 4px;

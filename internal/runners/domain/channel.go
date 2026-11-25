@@ -60,6 +60,18 @@ const (
 	OutcomeRejected = "rejected"
 )
 
+// WorkspaceReports is what one attempt (runner, step, fence) reported about its worktree in applied events
+// (KIN-78): Prepared, a workspace.prepared; Final, a final (non-interim, readable) workspace.changes.
+type WorkspaceReports struct {
+	Prepared bool
+	Final    bool
+}
+
+// ChangesMissing reports an attempt that worked in a worktree but sent no final changes report: its completion
+// must not pass the scope check (KIN-51) unchecked. An attempt without a worktree (e.g. a planning step whose
+// assignment had no base) needs no report.
+func (w WorkspaceReports) ChangesMissing() bool { return w.Prepared && !w.Final }
+
 // AttemptEvent is one runner event as recorded: (Step, Fence, AttemptSeq) is unique.
 type AttemptEvent struct {
 	RunnerID   string

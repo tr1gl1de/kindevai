@@ -32,3 +32,10 @@ func (r runnerScope) CheckChanges(ctx context.Context, runnerID, step string, fe
 		Changed: files, Unreported: unreported})
 	return attemptError(err)
 }
+
+// ChangesMissing implements runnersapp.ScopeChecker: an attempt that ended without a final changes report holds
+// the step with a scope_exceeded request for the missing report (KIN-78).
+func (r runnerScope) ChangesMissing(ctx context.Context, runnerID, step string, fence int64) error {
+	_, err := r.apv.CheckChanges(ctx, approvalsapp.StepChanges{StepID: step, RunnerID: runnerID, Fence: fence, Missing: true})
+	return attemptError(err)
+}

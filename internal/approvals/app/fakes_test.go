@@ -129,6 +129,7 @@ type fakeWorkflow struct {
 	revisions map[string][]RevisionRef // by task, index = number-1
 	steps     map[string]StepRef
 	held      []string
+	holdMsgs  []string
 	resumed   []string
 	cancelled []string
 }
@@ -189,10 +190,11 @@ func (w *fakeWorkflow) Step(_ context.Context, stepID string) (StepRef, error) {
 	return s, nil
 }
 
-func (w *fakeWorkflow) HoldStep(_ context.Context, stepID, _ string, _ int64, _ string) error {
+func (w *fakeWorkflow) HoldStep(_ context.Context, stepID, _ string, _ int64, msg string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.held = append(w.held, stepID)
+	w.holdMsgs = append(w.holdMsgs, msg)
 	return nil
 }
 

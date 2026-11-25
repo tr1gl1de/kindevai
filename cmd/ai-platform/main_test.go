@@ -22,6 +22,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
+	"github.com/tr1gl1de/kindevai/internal/platform/datadir"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 )
 
@@ -42,7 +43,7 @@ func TestServeHealthAndShutdown(t *testing.T) {
 	case addr = <-ready:
 	case err := <-done:
 		t.Fatalf("serve exited early: %v", err)
-	case <-time.After(10 * time.Second):
+	case <-time.After(e2eWait):
 		t.Fatal("server did not start")
 	}
 
@@ -69,7 +70,7 @@ func TestServeHealthAndShutdown(t *testing.T) {
 		if err != nil {
 			t.Fatalf("serve returned %v", err)
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(e2eWait):
 		t.Fatal("server did not shut down")
 	}
 }
@@ -128,8 +129,24 @@ func TestServeFailsWhenKeyMissingForExistingDB(t *testing.T) {
 	}
 }
 
-// startServe runs `serve` on a random port and returns its base URL and a stop function.
+// startServe runs `serve` on a random port and returns its base URL and a stop function. A data directory lock
+// still held by the previous `serve` is waited for (see bootstrapWhenUnlocked).
 func startServe(t *testing.T, dataDir string) (string, func()) {
+	t.Helper()
+	deadline := time.Now().Add(e2eWait)
+	for {
+		base, stop, err := tryServe(t, dataDir)
+		if err == nil {
+			return base, stop
+		}
+		if !errors.Is(err, datadir.ErrLocked) || time.Now().After(deadline) {
+			t.Fatalf("serve exited: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond) // a concurrently forked child still shares the previous lock
+	}
+}
+
+func tryServe(t *testing.T, dataDir string) (string, func(), error) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	ready := make(chan net.Addr, 1)
@@ -145,15 +162,15 @@ func startServe(t *testing.T, dataDir string) (string, func()) {
 				t.Errorf("serve: %v", err)
 			}
 		}
-		return "http://" + addr.String(), stop
+		return "http://" + addr.String(), stop, nil
 	case err := <-done:
 		cancel()
-		t.Fatalf("serve exited: %v", err)
-	case <-time.After(10 * time.Second):
+		return "", nil, err
+	case <-time.After(e2eWait):
 		cancel()
 		t.Fatal("serve did not start")
 	}
-	return "", nil
+	return "", nil, nil
 }
 
 func call(t *testing.T, method, url, body string) (int, string) {

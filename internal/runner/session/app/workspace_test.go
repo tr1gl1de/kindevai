@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/domain"
@@ -17,6 +18,36 @@ type fakeWorkspaces struct {
 	reqs     []WorkspaceRequest
 	finished []string
 	err      error
+	interim  []string // the files Changes reports while the attempt runs
+	checks   int      // Changes calls
+	late     bool     // Changes was called after Finish
+	finErr   error    // Finish fails
+}
+
+func (w *fakeWorkspaces) Changes(_ context.Context, step string, fence int64) (*protocol.WorkspaceChanges, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.checks++
+	if slices.Contains(w.finished, jkey(step, fence)) {
+		w.late = true
+	}
+	ch := &protocol.WorkspaceChanges{BaseSHA: "abc", FilesTotal: len(w.interim), Interim: true}
+	for _, f := range w.interim {
+		ch.Files = append(ch.Files, protocol.ChangedFile{Path: f, Status: "A"})
+	}
+	return ch, nil
+}
+
+func (w *fakeWorkspaces) setInterim(files ...string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.interim = files
+}
+
+func (w *fakeWorkspaces) calls() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.checks
 }
 
 func (w *fakeWorkspaces) Prepare(_ context.Context, r WorkspaceRequest) (string, protocol.WorkspacePrepared, error) {
@@ -34,6 +65,9 @@ func (w *fakeWorkspaces) Finish(_ context.Context, step string, fence int64) (*p
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.finished = append(w.finished, jkey(step, fence))
+	if w.finErr != nil {
+		return nil, w.finErr
+	}
 	return &protocol.WorkspaceChanges{BaseSHA: "abc", HeadSHA: "def", Files: []protocol.ChangedFile{{Path: "a.go", Status: "M"}},
 		FilesTotal: 1}, nil
 }
@@ -196,5 +230,74 @@ func TestLeftoverProcessesAreKilledBeforeTheWorkspaceIsFinished(t *testing.T) {
 	waitFor(t, "completed", func() bool { return slices.Contains(ev.kinds(), protocol.EventCompleted) })
 	if s := l.proc(0).sent(); !slices.Contains(s, true) {
 		t.Fatalf("signals %v", s)
+	}
+}
+
+// KIN-51: while the process runs the executor reports the worktree's changes every ChangesEvery, only when they
+// differ from the last report, and never once the attempt is being finished.
+func TestRunningAttemptReportsItsChangesPeriodically(t *testing.T) {
+	t.Parallel()
+	x, l, _, ev := newExecutor(domain.Policy{})
+	ws := &fakeWorkspaces{}
+	x.Workspaces, x.ChangesEvery = ws, 5*time.Millisecond
+	if err := x.Assign(t.Context(), repoAssignment()); err != nil {
+		t.Fatal(err)
+	}
+	interim := func() []string {
+		ev.mu.Lock()
+		defer ev.mu.Unlock()
+		var out []string
+		for _, e := range ev.evs {
+			if e.kind == protocol.EventWorkspaceChanges && strings.Contains(e.body, `"interim":true`) {
+				out = append(out, e.body)
+			}
+		}
+		return out
+	}
+	waitFor(t, "checks", func() bool { return ws.calls() >= 3 })
+	if n := len(interim()); n != 0 {
+		t.Fatalf("%d interim reports of an unchanged worktree", n)
+	}
+	ws.setInterim("outside.txt")
+	waitFor(t, "interim report", func() bool { return len(interim()) == 1 })
+	c := ws.calls()
+	waitFor(t, "more checks", func() bool { return ws.calls() >= c+3 })
+	if got := interim(); len(got) != 1 || !strings.Contains(got[0], "outside.txt") {
+		t.Fatalf("interim reports %v", got)
+	}
+	ws.setInterim("outside.txt", "more.txt")
+	waitFor(t, "second interim report", func() bool { return len(interim()) == 2 })
+	l.proc(0).end(domain.Exit{Code: 0})
+	waitFor(t, "completed", func() bool { return slices.Contains(ev.kinds(), protocol.EventCompleted) })
+	ev.mu.Lock()
+	final := ev.evs[len(ev.evs)-2]
+	ev.mu.Unlock()
+	if final.kind != protocol.EventWorkspaceChanges || strings.Contains(final.body, "interim") {
+		t.Fatalf("events %v", ev.kinds())
+	}
+	time.Sleep(20 * time.Millisecond)
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	if ws.late {
+		t.Fatal("changes listed after the workspace was finished")
+	}
+}
+
+// KIN-51: when the runner cannot list what the attempt changed, it still reports (as truncated), so the Control
+// Plane holds the step instead of completing it unchecked.
+func TestUnlistableChangesAreReportedAsTruncated(t *testing.T) {
+	t.Parallel()
+	x, l, _, ev := newExecutor(domain.Policy{})
+	x.Workspaces = &fakeWorkspaces{finErr: errors.New("index corrupt")}
+	if err := x.Assign(t.Context(), repoAssignment()); err != nil {
+		t.Fatal(err)
+	}
+	l.proc(0).end(domain.Exit{Code: 0})
+	waitFor(t, "completed", func() bool { return slices.Contains(ev.kinds(), protocol.EventCompleted) })
+	ev.mu.Lock()
+	report := ev.evs[len(ev.evs)-2]
+	ev.mu.Unlock()
+	if report.kind != protocol.EventWorkspaceChanges || !strings.Contains(report.body, `"truncated":true`) {
+		t.Fatalf("report %+v", report)
 	}
 }

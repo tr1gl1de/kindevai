@@ -54,6 +54,9 @@ type InstructionChange struct {
 
 // WorkspaceChanges is the body of workspace.changes: the branch head against the base (uncommitted work is
 // committed to the branch first). Files holds at most what fits a message; FilesTotal counts all of them.
+// An Interim report is sent while the process runs (KIN-51): the worktree against the base, untracked files
+// included, nothing committed and no HeadSHA. The Control Plane checks every report against the step's approved
+// scope (it never trusts a runner-side verdict); a Truncated report stops the step like a violation.
 type WorkspaceChanges struct {
 	Branch              string              `json:"branch"`
 	BaseSHA             string              `json:"baseSha"`
@@ -62,4 +65,5 @@ type WorkspaceChanges struct {
 	FilesTotal          int                 `json:"filesTotal"`
 	Truncated           bool                `json:"truncated,omitempty"`
 	InstructionsChanged []InstructionChange `json:"instructionsChanged,omitempty"`
+	Interim             bool                `json:"interim,omitempty"`
 }

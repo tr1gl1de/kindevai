@@ -49,6 +49,13 @@ type Executions interface {
 	FailAttempt(ctx context.Context, runnerID, step string, fence int64, reason string, at time.Time) error
 }
 
+// ScopeChecker evaluates what an attempt reports it changed (workspace.changes) against the step's approved scope
+// (KIN-51), in the event's transaction. runnerID comes from the authenticated session and the attempt's token was
+// checked first. A violation holds the step for a new approval; errors are those of Executions.
+type ScopeChecker interface {
+	CheckChanges(ctx context.Context, runnerID, step string, fence int64, ch protocol.WorkspaceChanges) error
+}
+
 // Reconciler receives the runner's runner.reconcile.response (KIN-23 resolves UNKNOWN attempts with it).
 type Reconciler interface {
 	Reconciled(ctx context.Context, runnerID string, r protocol.ReconcileResponse) error
@@ -64,6 +71,8 @@ type Channel struct {
 	Repo       ChannelRepo
 	Executions Executions
 	Reconciler Reconciler // optional
+	// Scope, if set, checks every workspace.changes report of a current attempt (KIN-51).
+	Scope ScopeChecker
 	// Prepare, if set, transforms a command's stored body right before it is sent on the runner's authenticated
 	// session (KIN-30 opens sealed proxy passwords there, so they never sit in the log in plaintext). On an error
 	// the stored body is sent: the stream must not stall.
@@ -508,7 +517,16 @@ func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Ev
 		_ = json.Unmarshal(e.Body, &f)
 		return c.Executions.FailAttempt(ctx, runnerID, e.Step, e.Fence, truncate(f.Reason, protocol.MaxReasonLen), at)
 	}
-	return c.Executions.CheckAttempt(ctx, runnerID, e.Step, e.Fence)
+	if err := c.Executions.CheckAttempt(ctx, runnerID, e.Step, e.Fence); err != nil || e.Kind != protocol.EventWorkspaceChanges ||
+		c.Scope == nil {
+		return err
+	}
+	var ch protocol.WorkspaceChanges
+	if err := json.Unmarshal(e.Body, &ch); err != nil {
+		// An unreadable report lists no file the check could clear: checked as truncated, it stops the step.
+		ch = protocol.WorkspaceChanges{Truncated: true}
+	}
+	return c.Scope.CheckChanges(ctx, runnerID, e.Step, e.Fence, ch)
 }
 
 // redactBody masks secrets in what an event may carry from the attempt's process (KIN-77): the output data (line

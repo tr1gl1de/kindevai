@@ -141,7 +141,7 @@ function TimeSection({ d }: { d: TaskDetail }) {
   );
 }
 
-const scenarios: MockScenario[] = ["success", "fail", "flaky", "crash", "hang", "gate"];
+const scenarios: MockScenario[] = ["success", "fail", "flaky", "crash", "hang", "gate", "scope"];
 
 function Actions({ d }: { d: TaskDetail }) {
   const { t } = useTranslation();

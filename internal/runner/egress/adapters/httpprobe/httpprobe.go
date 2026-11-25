@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
@@ -110,9 +111,16 @@ func (p *Prober) Probe(ctx context.Context, np protocol.NetworkProfile, eps []pr
 		r.Code = CodeStrictNeedsProxy
 		return r
 	}
+	var answered atomic.Bool // a byte has come back over a connection the transport dialled (the proxy, if set)
 	tr := &http.Transport{
-		Proxy:                 func(*http.Request) (*url.URL, error) { return pu, nil },
-		DialContext:           dialer.DialContext,
+		Proxy: func(*http.Request) (*url.URL, error) { return pu, nil },
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			c, err := dialer.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			return answerConn{Conn: c, answered: &answered}, nil
+		},
 		TLSClientConfig:       &tls.Config{RootCAs: p.RootCAs, MinVersion: tls.VersionTLS12},
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: p.timeout(),
@@ -122,7 +130,11 @@ func (p *Prober) Probe(ctx context.Context, np protocol.NetworkProfile, eps []pr
 	client := &http.Client{Transport: tr, Timeout: p.timeout(),
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
-	ip, code, detail := p.observe(ctx, client, np.DiagnosticURL)
+	// With a proxy, every connection the transport dials goes to the proxy; if none of them ever answered a byte,
+	// the proxy took the TCP connection and dropped it (a dead proxy behind a port relay such as WSL2 localhost
+	// forwarding, or not a proxy at all), so a connection failure is the proxy's, not the diagnostic endpoint's.
+	silentProxy := func() bool { return pu != nil && !answered.Load() }
+	ip, code, detail := p.observe(ctx, client, np.DiagnosticURL, silentProxy)
 	if code != "" {
 		r.Code, r.Detail = code, detail
 	} else if ip.Is4() {
@@ -147,7 +159,21 @@ func (p *Prober) Probe(ctx context.Context, np protocol.NetworkProfile, eps []pr
 	return r
 }
 
-func (p *Prober) observe(ctx context.Context, client *http.Client, diag string) (netip.Addr, string, string) {
+// answerConn records that the peer has sent at least one byte.
+type answerConn struct {
+	net.Conn
+	answered *atomic.Bool
+}
+
+func (c answerConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		c.answered.Store(true)
+	}
+	return n, err
+}
+
+func (p *Prober) observe(ctx context.Context, client *http.Client, diag string, silentProxy func() bool) (netip.Addr, string, string) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, diag, nil)
 	if err != nil {
 		return netip.Addr{}, CodeDiagnosticFailed, "invalid diagnostic endpoint"
@@ -155,6 +181,9 @@ func (p *Prober) observe(ctx context.Context, client *http.Client, diag string) 
 	resp, err := client.Do(req)
 	if err != nil {
 		c := classify(err)
+		if c == CodeUnreachable && silentProxy() {
+			return netip.Addr{}, CodeProxyUnreachable, "the proxy closed the connection without answering"
+		}
 		if c == CodeUnreachable || c == CodeDNS || c == CodeTLS {
 			return netip.Addr{}, CodeDiagnosticFailed, "diagnostic endpoint: " + c
 		}

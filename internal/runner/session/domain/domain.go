@@ -32,9 +32,10 @@ const (
 	ScenarioCrash   = "crash"
 	ScenarioHang    = "hang"
 	ScenarioGate    = "gate"
+	ScenarioScope   = "scope"
 )
 
-var scenarios = []string{ScenarioSuccess, ScenarioFail, ScenarioFlaky, ScenarioCrash, ScenarioHang, ScenarioGate}
+var scenarios = []string{ScenarioSuccess, ScenarioFail, ScenarioFlaky, ScenarioCrash, ScenarioHang, ScenarioGate, ScenarioScope}
 
 // MaxScopePaths bounds an assignment's scope.
 const MaxScopePaths = 64

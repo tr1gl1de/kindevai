@@ -512,9 +512,10 @@ func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Ev
 }
 
 // redactBody masks secrets in what an event may carry from the attempt's process (KIN-77): the output data (line
-// by line, the lines kept) and a failure reason. The runner masks what it knows first; this is the Control Plane's
-// guarantee whatever runner sent the event. The runner cuts output chunks at line boundaries, so each chunk is
-// redacted on its own. An output body that does not decode is not kept (it could not be redacted or shown).
+// by line, the lines kept) and a failure reason. The runner masks first, with the secret values it holds and a
+// window across writes; this is the Control Plane's own best-effort pass for whatever runner sent the event. It is
+// stateless per chunk: the runner cuts chunks at line boundaries, so only a line longer than a chunk (or a PEM key
+// spread over chunks) is redacted in parts. An output body that does not decode is not kept (it could not be redacted or shown).
 func redactBody(kind string, body json.RawMessage) json.RawMessage {
 	var v any
 	switch kind {

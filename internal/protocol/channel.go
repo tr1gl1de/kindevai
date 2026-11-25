@@ -170,7 +170,9 @@ func CancelCommandID(step string, fence int64) string {
 	return fmt.Sprintf("cancel/%s/%d", step, fence)
 }
 
-// Output is the body of execution.output: a chunk of a process stream at byte Offset of that stream.
+// Output is the body of execution.output: a chunk of a process stream at byte Offset of that stream. Offsets count
+// the redacted stream the runner sends (KIN-77) and are informational: the Control Plane may mask the data again, so
+// a stored chunk's length need not match the next chunk's offset.
 type Output struct {
 	Stream string `json:"stream"` // stdout | stderr
 	Offset int64  `json:"offset"`

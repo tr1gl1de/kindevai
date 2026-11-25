@@ -102,6 +102,21 @@ func TestWorkspaceFailureFailsTheAttemptWithoutLaunching(t *testing.T) {
 	}
 }
 
+// KIN-77: a failure reason quoting a git error carries no known secret (the token, by exact value).
+func TestWorkspaceFailureReasonIsRedacted(t *testing.T) {
+	t.Parallel()
+	x, _, _, ev := newExecutor(domain.Policy{})
+	x.Workspaces = &fakeWorkspaces{err: errors.New("fetch https://git.local/x?t=plainTokenValue failed")}
+	a := repoAssignment()
+	a.Token = domain.NewSecret("plainTokenValue")
+	if err := x.Assign(t.Context(), a); err != nil {
+		t.Fatal(err)
+	}
+	if e := ev.last(); e.kind != protocol.EventFailed || strings.Contains(e.body, "plainToken") || !strings.Contains(e.body, "[redacted]") {
+		t.Fatalf("%+v", e)
+	}
+}
+
 func TestAssignmentWithoutABaseKeepsTheEmptyDirectory(t *testing.T) {
 	t.Parallel()
 	x, l, _, _ := newExecutor(domain.Policy{})

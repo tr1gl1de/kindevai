@@ -183,3 +183,65 @@ func BenchmarkStream(b *testing.B) {
 		_, _ = s.Write(chunk)
 	}
 }
+
+// A line longer than the carry without blanks (minified JSON, a header dump) is cut keeping a tail, so a known
+// value that straddles the cut is still masked whole.
+func TestStreamMasksAKnownValueInALongLineWithoutBlanks(t *testing.T) {
+	t.Parallel()
+	known := "plainKnownValue42"
+	for _, at := range []int{MaxCarry - 5, MaxCarry + 100, 2*MaxCarry - 3} {
+		line := strings.Repeat("x", at) + known + strings.Repeat("y", MaxCarry)
+		var c collect
+		s := NewStream(&c, 0, known)
+		for i := 0; i < len(line); i += 1000 {
+			_, _ = s.Write([]byte(line[i:min(i+1000, len(line))]))
+			if s.buffered() > MaxCarry {
+				t.Fatalf("carry %d bytes", s.buffered())
+			}
+		}
+		_ = s.Flush()
+		if got := c.String(); strings.Contains(got, "KnownValue") || !strings.Contains(got, Placeholder) {
+			t.Errorf("value at %d not masked", at)
+		}
+	}
+}
+
+// An idle flush holds back what may be the start of a secret: a key ("password:"), an auth scheme or a word that
+// is still being written; the rest of the partial line is shown live.
+func TestStreamIdleFlushHoldsBackAPendingSecret(t *testing.T) {
+	t.Parallel()
+	var c collect
+	s := NewStream(&c, 5*time.Millisecond)
+	_, _ = s.Write([]byte("step 1 ok, password: "))
+	waitOutput(t, &c, "step 1 ok, ")
+	_, _ = s.Write([]byte("hunter2 done ghp_Ab1Cd2"))
+	waitOutput(t, &c, "step 1 ok, password: "+Placeholder+" done ")
+	_, _ = s.Write([]byte("Ef3Gh4Ij5Kl6Mn7\n"))
+	waitOutput(t, &c, "step 1 ok, password: "+Placeholder+" done "+Placeholder+"\n")
+	_ = s.Flush()
+}
+
+func waitOutput(t *testing.T, c *collect, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for c.String() != want && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if got := c.String(); got != want {
+		t.Fatalf("output %q, want %q", got, want)
+	}
+}
+
+// A PEM header without its key (a truncated key, an echo in a script) masks the key's lines only, not the rest of
+// the output.
+func TestLinesEndsAPEMBlockWithoutEnd(t *testing.T) {
+	t.Parallel()
+	in := "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n\nbuild ok\n"
+	if got := Lines(in); got != Placeholder+"\n"+Placeholder+"\n\nbuild ok\n" {
+		t.Errorf("got %q", got)
+	}
+	long := "-----BEGIN PRIVATE KEY-----\n" + strings.Repeat("QUJD\n", maxPEMLines+5) + "visible"
+	if got := Lines(long); !strings.HasSuffix(got, "\nvisible") {
+		t.Errorf("a PEM block without end masked the rest: ...%q", got[len(got)-30:])
+	}
+}

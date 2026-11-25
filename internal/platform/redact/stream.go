@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // MinKnownLen is the shortest known secret value masked by exact match: a shorter one ("test", "1234") would mask
@@ -36,9 +37,14 @@ func Lines(s string, known ...string) string {
 
 // liner redacts lines; it carries the "inside a PEM block" state from one line to the next.
 type liner struct {
-	known []string // longest first, so a value containing another is masked whole
-	inPEM bool
+	known    []string // longest first, so a value containing another is masked whole
+	inPEM    bool
+	pemLines int // lines masked in the current PEM block
 }
+
+// maxPEMLines ends a PEM block that has no END line (a truncated key, a header echoed by a script), so it cannot
+// mask the rest of the output; a 4096-bit RSA key has about 50 lines.
+const maxPEMLines = 100
 
 func newLiner(known []string) *liner {
 	l := &liner{}
@@ -70,13 +76,18 @@ func (l *liner) line(s string) string {
 		s, cr = s[:len(s)-1], "\r"
 	}
 	if l.inPEM {
-		if pemEndRe.MatchString(s) {
+		l.pemLines++
+		switch {
+		case strings.TrimSpace(s) == "": // keys have no blank lines: the block ended without END
+			l.inPEM = false
+			return s + cr
+		case pemEndRe.MatchString(s), l.pemLines >= maxPEMLines:
 			l.inPEM = false
 		}
 		return Placeholder + cr
 	}
 	if loc := pemBeginRe.FindStringIndex(s); loc != nil && !pemEndRe.MatchString(s[loc[1]:]) {
-		l.inPEM = true // Text masks this line from BEGIN on; the next lines are the key
+		l.inPEM, l.pemLines = true, 0 // Text masks this line from BEGIN on; the next lines are the key
 	}
 	out := s
 	for _, k := range l.known {
@@ -85,17 +96,20 @@ func (l *liner) line(s string) string {
 		}
 	}
 	if red := Text(out); red != out {
-		// Text joins the words with single spaces; keep the indentation of code and logs.
-		out = s[:len(s)-len(strings.TrimLeft(s, " \t"))] + red
+		// Text joins the words with single spaces; keep the indentation of code and logs and trailing blanks (a
+		// partial line goes on after them).
+		out = s[:len(s)-len(strings.TrimLeft(s, " \t"))] + red + s[len(strings.TrimRight(s, " \t")):]
 	}
 	return out + cr
 }
 
 // Stream is an io.Writer that redacts process output (see Lines) before passing it to the next writer. Secrets
 // split across writes are masked: only complete lines are passed on, the partial last line is held back (a sliding
-// window of at most MaxCarry bytes) until its newline arrives, Flush is called or the stream is idle. A line longer
-// than MaxCarry is passed on in pieces cut between words, holding back its last words, so a "password: value" pair
-// or a token is not cut in two. Memory is bounded by MaxCarry plus one write; the time is linear in the output.
+// window of at most MaxCarry bytes) until its newline arrives or Flush is called. While the stream is idle the
+// partial line is passed on except a word still being written and a trailing key or auth scheme waiting for its
+// value (a "Password: " prompt shows once the process writes more or ends). A line longer than MaxCarry is passed on
+// in pieces cut between words, holding back its last words, or (no blanks) holding back a tail at least as long as
+// the longest known value, so a "password: value" pair or a token is not cut in two. Memory is bounded by MaxCarry plus one write; the time is linear in the output.
 type Stream struct {
 	mu    sync.Mutex
 	w     io.Writer
@@ -121,12 +135,12 @@ func (s *Stream) Write(p []byte) (int, error) {
 	s.carry = append(s.carry, p...)
 	end := bytes.LastIndexByte(s.carry, '\n') + 1
 	if len(s.carry)-end > MaxCarry {
-		end += cutPoint(s.carry[end:])
+		end += cutPoint(s.carry[end:], s.l.tail())
 	}
 	err := s.emit(end)
 	if s.idle > 0 && len(s.carry) > 0 {
 		if s.timer == nil {
-			s.timer = time.AfterFunc(s.idle, func() { _ = s.Flush() })
+			s.timer = time.AfterFunc(s.idle, s.idleFlush)
 		} else {
 			s.timer.Reset(s.idle)
 		}
@@ -145,6 +159,13 @@ func (s *Stream) Flush() error {
 		s.timer.Stop()
 	}
 	return s.emit(len(s.carry))
+}
+
+// idleFlush passes the partial line on while the process is quiet, except what may be the start of a secret.
+func (s *Stream) idleFlush() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.emit(idleCut(s.carry)) // a failing writer fails the next Write too
 }
 
 // emit redacts carry[:n] into the next writer and keeps the rest.
@@ -172,9 +193,44 @@ func (s *Stream) buffered() int { s.mu.Lock(); defer s.mu.Unlock(); return len(s
 // holdWords is how many trailing words a cut line holds back ("Authorization: Bearer <token>").
 const holdWords = 3
 
+// tail is how much of a line without blanks a cut holds back: enough for the longest known value or a token.
+func (l *liner) tail() int {
+	n := minTail
+	if len(l.known) > 0 {
+		n = max(n, len(l.known[0]))
+	}
+	return min(n, MaxCarry/2)
+}
+
+// minTail is the least a cut inside a word holds back.
+const minTail = 512
+
+// idleCut is how much of a quiet partial line an idle flush passes on: all of it but a word still being written
+// (no blank after it) and a trailing key or auth scheme ("password:", "Bearer") whose value has not arrived.
+func idleCut(b []byte) int {
+	i := len(b)
+	for i > 0 && !isBlank(b[i-1]) { // a word still being written
+		i--
+	}
+	j := i
+	for j > 0 && isBlank(b[j-1]) {
+		j--
+	}
+	k := j
+	for k > 0 && !isBlank(b[k-1]) {
+		k--
+	}
+	if w := string(b[k:j]); w != "" && (isScheme(w) || strings.ContainsAny(w[len(w)-1:], ":=") &&
+		SecretKey(strings.Trim(w[:len(w)-1], "\"'{"))) {
+		return k
+	}
+	return i
+}
+
 // cutPoint is where a partial line longer than MaxCarry is cut: before its last holdWords words when they fit in
-// half the carry, else before its last word, else (one word longer than that) at its end.
-func cutPoint(b []byte) int {
+// half the carry, else before its last word, else (one word longer than that) tail bytes before its end, at a
+// character boundary.
+func cutPoint(b []byte, tail int) int {
 	i := len(b)
 	for w := 0; w < holdWords && i > 0; w++ {
 		for i > 0 && !isBlank(b[i-1]) { // the word
@@ -194,7 +250,11 @@ func cutPoint(b []byte) int {
 	if i > 0 && len(b)-i <= MaxCarry/2 {
 		return i
 	}
-	return len(b)
+	i = len(b) - tail
+	for i > 0 && !utf8.RuneStart(b[i]) {
+		i--
+	}
+	return i
 }
 
 func isBlank(c byte) bool { return c == ' ' || c == '\t' }

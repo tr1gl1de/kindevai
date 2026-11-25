@@ -131,7 +131,9 @@ func (s *Sandboxes) Confine(ctx context.Context, project, role, dir, workdir str
 		return nil, fmt.Errorf("reading the network configuration: %w", err)
 	}
 	if !ok {
-		return nil, nil // no configuration yet: the Control Plane sends it before any assignment
+		// The Control Plane sends the configuration when the session opens, before any assignment: without it the
+		// runner cannot prove the profile is not strict (fail-closed).
+		return nil, errors.New("no network configuration received from the Control Plane yet")
 	}
 	p := ProfileFor(cu.Network, project, role)
 	if p.Enforcement != domain.EnforcementStrict {

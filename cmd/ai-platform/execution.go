@@ -113,10 +113,12 @@ func schedulable(cs []runnersapp.Candidate, isStrict func(runnerID string) bool)
 
 // wireStrictEgress makes the scheduler check strict network profiles (KIN-31) once the network service exists.
 func wireStrictEgress(wf *workflowapp.Service, strict func(ctx context.Context, projectID string) (func(string) bool, error)) {
-	if r, ok := wf.Runners.(workflowRunners); ok {
-		r.strict = strict
-		wf.Runners = r
+	r, ok := wf.Runners.(workflowRunners)
+	if !ok { // a wiring error: strict steps would reach runners that cannot enforce them
+		panic("wireStrictEgress: the scheduler's runners are not workflowRunners")
 	}
+	r.strict = strict
+	wf.Runners = r
 }
 
 // runnerDispatcher queues the workflow's commands in the runner's command log (joins the caller's transaction).

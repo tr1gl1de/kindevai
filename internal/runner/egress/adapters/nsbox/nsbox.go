@@ -40,7 +40,8 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/runner/egress/domain"
 )
 
-// Spec is what the helper builds; the runner writes it to the attempt's state directory. It holds no secret.
+// Spec is what the helper builds; the runner sends it on the helper's fd 4 (never written to disk: Env is the
+// agent's environment).
 type Spec struct {
 	Socket  string   `json:"socket"`  // the proxy adapter's Unix socket
 	Ruleset string   `json:"ruleset"` // nftables ruleset of the namespace
@@ -75,8 +76,7 @@ const (
 
 // Manager builds sandboxes.
 type Manager struct {
-	// Program and Args start the helper: `<Program> <Args...> <spec file>` (the runner's own binary with
-	// "sandbox-exec").
+	// Program and Args start the helper: `<Program> <Args...>` (the runner's own binary with "sandbox-exec").
 	Program string
 	Args    []string
 	Env     []string // the helper's environment (empty: none)
@@ -128,33 +128,38 @@ var hidden = []string{"/run", "/var/run", "/tmp", "/var/tmp", "/dev/shm", "/mnt/
 func (m *Manager) hide() []string {
 	out := slices.Clone(hidden)
 	if m.DataDir != "" {
-		out = append(out, m.DataDir)
+		d := m.DataDir
+		if r, err := filepath.EvalSymlinks(d); err == nil {
+			d = r // hide the real directory, not a symlink to it
+		}
+		out = append(out, d)
 	}
 	return out
 }
 
-// socketBase is where adapter sockets live: the user's runtime directory, else the temporary directory.
+// socketBase is where adapter sockets live: the user's runtime directory under /run, else /tmp. Both are hidden in
+// every sandbox, so an agent never sees another attempt's adapter (the helper refuses any other place).
 func socketBase() string {
-	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" && len(d) < 64 {
+	if d := os.Getenv("XDG_RUNTIME_DIR"); strings.HasPrefix(d, "/run/") && len(d) < 64 {
 		if fi, err := os.Stat(d); err == nil && fi.IsDir() { //nolint:gosec // G703: the user's own runtime directory
 			return d
 		}
 	}
-	return os.TempDir()
+	return "/tmp"
 }
 
 // Box is one attempt's sandbox: its proxy adapter and the helper's verdict pipe.
 type Box struct {
-	m        *Manager
-	spec     Spec
-	specPath string
-	stop     context.CancelFunc
-	served   chan struct{}
-	once     sync.Once
+	m      *Manager
+	spec   Spec
+	stop   context.CancelFunc
+	served chan struct{}
+	once   sync.Once
 
 	mu       sync.Mutex
 	verdictR *os.File
 	verdictW *os.File
+	specR    *os.File // the helper's fd 4; the parent's copy is closed once it started
 }
 
 // Open starts the attempt's proxy adapter and prepares the sandbox; the agent starts with Command.
@@ -193,7 +198,7 @@ func (m *Manager) open(r egress.BoxRequest) (*Box, error) {
 		return nil, fmt.Errorf("listening for the sandbox: %w", err)
 	}
 	ctx, stop := context.WithCancel(context.Background()) // lives as long as the attempt, not the command
-	b := &Box{m: m, stop: stop, served: make(chan struct{}), specPath: filepath.Join(r.Dir, "sandbox.json")}
+	b := &Box{m: m, stop: stop, served: make(chan struct{})}
 	srv := &proxyadapter.Server{Upstream: *p.Proxy, Allow: allow, Logger: m.Logger}
 	go func() { defer close(b.served); _ = srv.Serve(ctx, l) }()
 	keep := []string{r.Dir}
@@ -214,32 +219,38 @@ func (b *Box) Command(argv, env []string, dir string) (*exec.Cmd, error) {
 	}
 	s := b.spec
 	s.Argv, s.Env, s.Dir = argv, env, dir
-	return b.m.command(b, s, b.specPath)
+	return b.m.command(b, s)
 }
 
-func (m *Manager) command(b *Box, s Spec, specPath string) (*exec.Cmd, error) {
+func (m *Manager) command(b *Box, s Spec) (*exec.Cmd, error) {
 	data, err := json.Marshal(s)
 	if err != nil {
 		return nil, err
-	}
-	if err := os.WriteFile(specPath, data, 0o600); err != nil {
-		return nil, fmt.Errorf("writing the sandbox spec: %w", err)
 	}
 	r, w, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
+	sr, sw, err := os.Pipe()
+	if err != nil {
+		_, _ = r.Close(), w.Close()
+		return nil, err
+	}
+	go func() { // the helper reads it at once; a helper that never starts closes the pipe (EPIPE)
+		_, _ = sw.Write(data)
+		_ = sw.Close()
+	}()
 	b.mu.Lock()
-	b.verdictR, b.verdictW = r, w
+	b.verdictR, b.verdictW, b.specR = r, w, sr
 	b.mu.Unlock()
 	//nolint:noctx,gosec // must outlive ctx like any attempt process; fixed program
-	cmd := exec.Command(m.Program, append(slices.Clone(m.Args), specPath)...)
+	cmd := exec.Command(m.Program, m.Args...)
 	cmd.Env = m.Env
 	if cmd.Env == nil {
 		cmd.Env = []string{}
 	}
 	cmd.Dir = "/"
-	cmd.ExtraFiles = []*os.File{w} // fd 3: the verdict
+	cmd.ExtraFiles = []*os.File{w, sr} // fd 3: the verdict, fd 4: the spec
 	cmd.SysProcAttr = sysProcAttr()
 	return cmd, nil
 }
@@ -250,16 +261,21 @@ var ErrVerdict = errors.New("strict egress sandbox not verified")
 // Await reads the helper's verdict after the command started: nil once the sandbox verified (the agent then
 // runs), else why not (the helper exits without starting the agent).
 func (b *Box) Await(ctx context.Context) error {
-	b.mu.Lock()
-	r, w := b.verdictR, b.verdictW
-	b.verdictR, b.verdictW = nil, nil
-	b.mu.Unlock()
+	r, w, sr := b.take()
 	if r == nil {
 		return errors.New("the sandbox command was not prepared")
 	}
-	_ = w.Close() // the helper holds the only write end now: EOF when it ends
+	_, _ = w.Close(), sr.Close() // the helper holds the only other ends now: EOF when it ends
 	defer func() { _ = r.Close() }()
 	return readVerdict(ctx, r, b.m.verifyTimeout(), false)
+}
+
+func (b *Box) take() (r, w, sr *os.File) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	r, w, sr = b.verdictR, b.verdictW, b.specR
+	b.verdictR, b.verdictW, b.specR = nil, nil, nil
+	return r, w, sr
 }
 
 func readVerdict(ctx context.Context, r *os.File, timeout time.Duration, selfTest bool) error {
@@ -298,14 +314,13 @@ func (b *Box) Release() {
 		b.stop()
 		<-b.served
 		b.mu.Lock()
-		for _, f := range []*os.File{b.verdictR, b.verdictW} {
+		for _, f := range []*os.File{b.verdictR, b.verdictW, b.specR} {
 			if f != nil {
 				_ = f.Close()
 			}
 		}
 		b.mu.Unlock()
 		_ = os.RemoveAll(filepath.Dir(b.spec.Socket))
-		_ = os.Remove(b.specPath)
 	})
 }
 
@@ -341,7 +356,7 @@ func (m *Manager) selfTest(ctx context.Context) error {
 	defer b.Release()
 	s := b.spec
 	s.Probe = nil
-	cmd, err := m.command(b, s, b.specPath)
+	cmd, err := m.command(b, s)
 	if err != nil {
 		return err
 	}
@@ -349,11 +364,8 @@ func (m *Manager) selfTest(ctx context.Context) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting the self-test sandbox: %w", err)
 	}
-	b.mu.Lock()
-	r, w := b.verdictR, b.verdictW
-	b.verdictR, b.verdictW = nil, nil
-	b.mu.Unlock()
-	_ = w.Close()
+	r, w, sr := b.take()
+	_, _ = w.Close(), sr.Close()
 	verr := readVerdict(ctx, r, m.verifyTimeout(), true)
 	_ = r.Close()
 	if verr != nil {

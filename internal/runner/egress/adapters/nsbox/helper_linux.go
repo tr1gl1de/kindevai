@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,19 +70,23 @@ var (
 	leakSocketDirs = []string{"/run/WSL", "/run/user"}
 )
 
-// Main is `ai-runner sandbox-exec <spec>`: it builds the sandbox in the namespaces it was started in, reports
-// the verdict on fd 3 and, when verified, runs the agent and exits with its status.
+// maxSpec bounds the spec the runner sends.
+const maxSpec = 4 << 20
+
+// Main is `ai-runner sandbox-exec`: it reads the spec from fd 4, builds the sandbox in the namespaces it was
+// started in, reports the verdict on fd 3 and, when verified, runs the agent and exits with its status.
 func Main(args []string, stderr io.Writer) int {
-	if len(args) != 1 {
-		fmt.Fprintln(stderr, "usage: ai-runner sandbox-exec <spec>")
+	if len(args) != 0 {
+		fmt.Fprintln(stderr, "usage: ai-runner sandbox-exec (started by the runner)")
 		return ExitUsage
 	}
-	verdict := os.NewFile(3, "verdict")
-	if verdict == nil {
+	verdict, specIn := os.NewFile(3, "verdict"), os.NewFile(4, "spec")
+	if verdict == nil || specIn == nil {
 		return ExitUsage
 	}
 	unix.CloseOnExec(3)
-	data, err := os.ReadFile(args[0]) //nolint:gosec // G703: the spec path the runner passed
+	data, err := io.ReadAll(io.LimitReader(specIn, maxSpec))
+	_ = specIn.Close()
 	if err != nil {
 		return report(verdict, domain.Verdict{Setup: "spec unreadable"}, stderr)
 	}
@@ -96,6 +101,14 @@ func Main(args []string, stderr io.Writer) int {
 	defer cancel()
 	port, err := setup(ctx, s)
 	if err != nil {
+		return report(verdict, domain.Verdict{Setup: err.Error()}, stderr)
+	}
+	// Not dumpable: the agent (same kuid) can neither ptrace this helper, which holds CAP_NET_ADMIN over the
+	// namespace, nor open its /proc entries.
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		return report(verdict, domain.Verdict{Setup: "not dumpable: " + err.Error()}, stderr)
+	}
+	if err := confineSockets(); err != nil {
 		return report(verdict, domain.Verdict{Setup: err.Error()}, stderr)
 	}
 	v := domain.Verdict{Leaks: leaks(ctx, s)}
@@ -162,8 +175,11 @@ func hideHost(s Spec) error {
 	}()
 	var covered []string
 	for _, h := range s.Hide {
+		if r, err := filepath.EvalSymlinks(h); err == nil {
+			h = r // /var/run -> /run; a data directory reached through a symlink
+		}
 		fi, err := os.Lstat(h)
-		if err != nil || !fi.IsDir() { // missing, a symlink (/var/run -> /run) or already covered
+		if err != nil || !fi.IsDir() || slices.Contains(covered, h) { // missing or already covered
 			continue
 		}
 		opts, flags := "mode=0755,size=16m", uintptr(unix.MS_NOSUID|unix.MS_NODEV)
@@ -174,6 +190,10 @@ func hideHost(s Spec) error {
 			return fmt.Errorf("hiding %s: %w", h, err)
 		}
 		covered = append(covered, h)
+	}
+	// The adapter sockets' directory must be covered: other attempts' sockets live next to this one.
+	if !under(filepath.Dir(filepath.Dir(s.Socket)), covered) {
+		return errors.New("the adapter socket directory is not hidden")
 	}
 	// A /proc of the sandbox's PID namespace only.
 	if err := unix.Mount("proc", "/proc", "proc", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
@@ -305,7 +325,7 @@ func leaks(ctx context.Context, s Spec) []domain.Leak {
 		return domain.Leak{Test: test, Blocked: true}
 	}
 	out := []domain.Leak{tcp(domain.LeakTCP4, leakIPv4), tcp(domain.LeakTCP6, leakIPv6), dnsLeak(ctx, d)}
-	out = append(out, httpLeak(ctx), unixLeak(s))
+	out = append(out, httpLeak(ctx), unixLeak(s), domain.Leak{Test: domain.LeakVsock, Blocked: vsockBlocked(), Target: "AF_VSOCK"})
 	return out
 }
 
@@ -443,8 +463,14 @@ func runAgent(s Spec, port int, stderr io.Writer) int {
 		GidMappings: []syscall.SysProcIDMap{{ContainerID: s.GID, HostID: 0, Size: 1}},
 		Pdeathsig:   syscall.SIGKILL, // the forwarder dies with this helper: so does the agent
 	}
-	// The process group receives cancel signals; the helper outlives the agent to report its status.
-	signal.Ignore(syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	// The process group receives cancel signals; the helper outlives the agent to report its status. Caught, not
+	// ignored: an ignored disposition would be inherited by the agent across exec.
+	sigs := make(chan os.Signal, 8)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	go func() {
+		for range sigs { //nolint:revive // drained: the agent gets the group's signal itself
+		}
+	}()
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintln(stderr, "strict egress sandbox: starting the agent:", err)
 		return ExitAgentStart

@@ -91,10 +91,10 @@ func TestConfine(t *testing.T) {
 			}
 		}
 	})
-	t.Run("no configuration yet: no sandbox", func(t *testing.T) {
+	t.Run("no configuration yet fails closed", func(t *testing.T) {
 		t.Parallel()
 		none := func() (protocol.ConfigUpdate, bool, error) { return protocol.ConfigUpdate{}, false, nil }
-		if box, err := (&Sandboxes{Config: none, Boxes: &fakeBoxes{}}).Confine(ctx, "p", "", "/d", ""); box != nil || err != nil {
+		if box, err := (&Sandboxes{Config: none, Boxes: &fakeBoxes{}}).Confine(ctx, "p", "", "/d", ""); box != nil || err == nil {
 			t.Fatalf("box %v, err %v", box, err)
 		}
 	})

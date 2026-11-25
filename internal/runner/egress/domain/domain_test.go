@@ -102,12 +102,14 @@ func TestAllowlist(t *testing.T) {
 func TestReserved(t *testing.T) {
 	t.Parallel()
 	for _, h := range []string{"localhost", "LOCALHOST.", "db.localhost", "127.0.0.1", "127.8.9.1", "::1",
-		"::ffff:127.0.0.1", "169.254.169.254", "fe80::1", "0.0.0.0", "::", "224.0.0.1", "ff02::1"} {
+		"::ffff:127.0.0.1", "169.254.169.254", "fe80::1", "0.0.0.0", "::", "224.0.0.1", "ff02::1",
+		"127.1", "2130706433", "0x7f.1", "0177.0.0.1", "localhost6", "ip6-localhost", "metadata.google.internal"} {
 		if !Reserved(h) {
 			t.Errorf("Reserved(%q) = false", h)
 		}
 	}
-	for _, h := range []string{"api.github.com", "10.1.2.3", "140.82.112.3", "2001:db8::1", "localhost.example.com"} {
+	for _, h := range []string{"api.github.com", "10.1.2.3", "140.82.112.3", "2001:db8::1", "localhost.example.com", "x0.example.com",
+		"1password.com"} {
 		if Reserved(h) {
 			t.Errorf("Reserved(%q) = true", h)
 		}

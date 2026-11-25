@@ -124,12 +124,19 @@ func (a Allowlist) Allows(host string, port int) bool {
 // they would reach the host itself.
 func Reserved(host string) bool {
 	name := strings.TrimSuffix(strings.ToLower(host), ".")
-	if name == "localhost" || strings.HasSuffix(name, ".localhost") {
+	switch name {
+	case "localhost", "localhost6", "ip6-localhost", "ip6-loopback", "metadata", "metadata.google.internal":
+		return true
+	}
+	if strings.HasSuffix(name, ".localhost") {
 		return true
 	}
 	ip, err := netip.ParseAddr(name)
 	if err != nil {
-		return false
+		// A non-canonical IPv4 form ("127.1", "2130706433", "0x7f.1", "0177.0.0.1") that a resolver would still
+		// turn into an address: never forwarded as a name.
+		last := name[strings.LastIndexByte(name, '.')+1:]
+		return last == "" || strings.Trim(last, "0123456789") == "" || strings.HasPrefix(last, "0x")
 	}
 	ip = ip.Unmap()
 	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() ||
@@ -143,10 +150,11 @@ const (
 	LeakDNS     = "dns"               // a DNS query to the system's resolvers or a public one
 	LeakNoProxy = "http_ignore_proxy" // an HTTP request by a tool that ignores HTTP_PROXY
 	LeakUnix    = "unix_socket"       // a host Unix socket (Docker daemon, D-Bus, WSL interop)
+	LeakVsock   = "vsock"             // an AF_VSOCK socket (the WSL2/Hyper-V host channel, outside any netns)
 )
 
 // LeakTests is every leak test, in report order.
-var LeakTests = []string{LeakTCP4, LeakTCP6, LeakDNS, LeakNoProxy, LeakUnix}
+var LeakTests = []string{LeakTCP4, LeakTCP6, LeakDNS, LeakNoProxy, LeakUnix, LeakVsock}
 
 // Stable failure codes of a sandbox verdict.
 const (

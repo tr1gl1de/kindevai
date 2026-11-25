@@ -133,12 +133,14 @@ const maxHeader = 64 << 10
 
 func (s *Server) handle(ctx context.Context, c net.Conn, track, untrack func(net.Conn)) {
 	_ = c.SetReadDeadline(time.Now().Add(s.timeout()))
-	br := bufio.NewReaderSize(io.LimitReader(c, maxHeader), 4096)
+	head := &io.LimitedReader{R: c, N: maxHeader} // bounds the head only: lifted once it is read
+	br := bufio.NewReaderSize(head, 4096)
 	req, err := http.ReadRequest(br)
 	if err != nil {
 		reply(c, http.StatusBadRequest)
 		return
 	}
+	head.N = 1 << 62
 	_ = c.SetReadDeadline(time.Time{})
 	var (
 		authority string

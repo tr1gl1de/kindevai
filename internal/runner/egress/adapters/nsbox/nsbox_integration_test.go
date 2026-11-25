@@ -71,6 +71,24 @@ func agentMain() int {
 		return nil
 	})
 	check("run-hidden", len(visible) == 0, strings.Join(visible, ","))
+	sigIgn := ""
+	for l := range strings.SplitSeq(string(st), "\n") {
+		if v, ok := strings.CutPrefix(l, "SigIgn:"); ok {
+			sigIgn = strings.TrimSpace(v)
+		}
+	}
+	check("signals-not-ignored", sigIgn == "0000000000000000", sigIgn)
+	fd, err := syscall.Socket(40 /* AF_VSOCK */, syscall.SOCK_STREAM, 0)
+	if err == nil {
+		_ = syscall.Close(fd)
+	}
+	check("vsock-refused", err != nil, fmt.Sprint(err))
+	_, err = net.DialTimeout("unix", os.Getenv("SIBLING_SOCKET"), time.Second)
+	check("sibling-adapter-hidden", err != nil, "")
+	_, err = os.ReadFile(os.Getenv("RUNNER_SECRET"))
+	check("runner-data-hidden", err != nil, "")
+	_, err = os.ReadFile("/proc/1/environ") // the helper: not dumpable
+	check("helper-not-readable", err != nil, "")
 	// Host processes are invisible: their /proc/<pid>/root would lead to the host's /run.
 	_, err = os.Stat("/proc/" + os.Getenv("HOST_PID") + "/root")
 	check("host-processes-hidden", err != nil, "")
@@ -146,6 +164,8 @@ type fixture struct {
 	socket  string
 	proxy   protocol.NetworkProxy
 	last    *Box
+	sibling string // another attempt's adapter socket
+	secret  string // a file in the runner's data directory
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -173,6 +193,21 @@ func newFixture(t *testing.T) *fixture {
 	}
 	t.Cleanup(func() { _ = l.Close() })
 	m.Sockets = []string{f.socket}
+	sd, err := os.MkdirTemp(socketBase(), "kindev-egress-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sd) })
+	f.sibling = filepath.Join(sd, "s")
+	sl, err := net.Listen("unix", f.sibling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sl.Close() })
+	f.secret = filepath.Join(data, "network-config.json")
+	if err := os.WriteFile(f.secret, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return f
 }
 
@@ -202,7 +237,8 @@ func (f *fixture) run(t *testing.T, p protocol.NetworkProfile) (error, string, e
 		t.Fatal(err)
 	}
 	cmd, err := b.Command([]string{agent}, []string{"KINDEV_NSBOX_AGENT=1", "HOST_SOCKET=" + f.socket,
-		"DIAG_URL=" + f.diag, "HOST_PID=" + strconv.Itoa(os.Getpid()), "SSH_AUTH_SOCK=/tmp/agent.sock"}, f.workdir)
+		"DIAG_URL=" + f.diag, "HOST_PID=" + strconv.Itoa(os.Getpid()),
+		"SIBLING_SOCKET=" + f.sibling, "RUNNER_SECRET=" + f.secret, "SSH_AUTH_SOCK=/tmp/agent.sock"}, f.workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +266,9 @@ func TestSandboxVerifiesThenConfinesTheAgent(t *testing.T) {
 		t.Fatalf("agent: %v\n%s", werr, out)
 	}
 	for _, want := range []string{"ok no-capabilities", "ok direct-tcp-blocked", "ok host-socket-hidden", "ok run-hidden",
-		"ok through-proxy", "ok host-processes-hidden", "ok worktree-writable"} {
+		"ok through-proxy", "ok host-processes-hidden",
+		"ok signals-not-ignored", "ok vsock-refused", "ok sibling-adapter-hidden", "ok runner-data-hidden",
+		"ok helper-not-readable", "ok worktree-writable"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in\n%s", want, out)
 		}

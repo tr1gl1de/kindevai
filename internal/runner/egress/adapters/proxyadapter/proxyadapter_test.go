@@ -368,3 +368,28 @@ func TestServeClosesConnectionsOnCancel(t *testing.T) {
 		t.Fatal("the tunnel stayed open after the adapter stopped")
 	}
 }
+
+// Only the request head is bounded: a large plain-HTTP upload passes whole (review finding).
+func TestPlainHTTPLargeBody(t *testing.T) {
+	t.Parallel()
+	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n, _ := io.Copy(io.Discard, r.Body)
+		fmt.Fprint(w, n)
+	}))
+	t.Cleanup(web.Close)
+	wu, _ := url.Parse(web.URL)
+	var s seen
+	dial := start(t, &Server{Upstream: connectProxy(t, &s)})
+	c := dial()
+	body := strings.Repeat("x", 300<<10)
+	fmt.Fprintf(c, "POST http://echo.test:%s/up HTTP/1.1\r\nHost: echo.test:%s\r\nContent-Length: %d\r\n\r\n%s",
+		wu.Port(), wu.Port(), len(body), body)
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(got) != strconv.Itoa(len(body)) {
+		t.Fatalf("response %d %q", resp.StatusCode, got)
+	}
+}

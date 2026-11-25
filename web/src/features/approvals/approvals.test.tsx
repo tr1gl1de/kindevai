@@ -121,7 +121,7 @@ describe("approval center (owner)", () => {
     await renderApp("/approvals/a2");
     const user = userEvent.setup();
     await screen.findByRole("heading", { level: 1, name: "Add billing tables" });
-    await user.click(screen.getByRole("button", { name: "Reject" }));
+    await user.click(screen.getByRole("button", { name: "Reject revision 2" }));
     const comment = screen.getByLabelText("Comment");
     expect(comment).toHaveAttribute("aria-invalid", "true");
     expect(comment).toHaveAccessibleDescription(/explain why/i);
@@ -129,8 +129,8 @@ describe("approval center (owner)", () => {
     expect(calls).toBe(0);
 
     await fill(user, comment, "split the migration");
-    await user.click(screen.getByRole("button", { name: "Reject" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(/newer plan revision/i);
+    await user.click(screen.getByRole("button", { name: "Reject revision 2" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Revision 2 is no longer current/i);
     expect(calls).toBe(1);
     expect(comment).toHaveValue("split the migration");
   });

@@ -3,6 +3,8 @@ import { useTranslation } from "react-i18next";
 import type { PlanningRun, TaskDetail, TaskRevision } from "../../api/types";
 import { formatDateTime } from "../../ui/format";
 import { RiskBadge } from "../approvals/badges";
+import { DiscussionPanel } from "../planDiscussion/DiscussionPanel";
+import { useTaskApprovals } from "./api";
 import { AttemptLog } from "./AttemptLog";
 import { AttemptWorkspace } from "./AttemptWorkspace";
 
@@ -11,12 +13,16 @@ const shortHash = (h: string) => h.slice(0, 12);
 /** The task's plan: the current revision with its steps and declared impact, and the AI planner's latest run. */
 export function PlanSection({ d }: { d: TaskDetail }) {
   const { t } = useTranslation();
+  const approvals = useTaskApprovals(d.task.id, d.canManage);
   return (
     <section aria-labelledby="task-plan" className="section">
       <h2 id="task-plan">{t("tasks.planTitle")}</h2>
       {d.planning && <PlannerRun taskId={d.task.id} run={d.planning} />}
       {d.revision ? <Revision rev={d.revision} /> : !d.planning && <p className="muted">{t("tasks.noPlan")}</p>}
-      {/* KIN-44: the plan discussion chat (Owner / project admin) mounts here, under the revision it discusses. */}
+      {d.revision && (
+        <DiscussionPanel taskId={d.task.id} currentRevision={d.task.planRevision} canManage={d.canManage}
+          approvals={approvals.data} />
+      )}
     </section>
   );
 }

@@ -27,6 +27,14 @@ export const handlers = [
   http.get("/api/notifications/preferences", () =>
     json({ language: "en", disabled: [], types: ["approval_requested", "alert_raised", "task_finished"], telegramLinked: false }),
   ),
+  // KIN-44: the plan discussion panel on task and approval pages; read-only and empty unless a test says otherwise.
+  http.get("/api/tasks/:id/discussion", () =>
+    json({ messages: [], limits: { maxMessageChars: 4000, maxMessagesPerPlan: 20, maxMessagesPerHour: 30, answerTimeoutSec: 600 },
+      canWrite: false, inFlight: false, used: 0, hasSession: false }),
+  ),
+  http.get("/api/plan-discussion/limits", () =>
+    json({ maxMessageChars: 4000, maxMessagesPerPlan: 20, maxMessagesPerHour: 30, answerTimeoutSec: 600 }),
+  ),
   http.get("/api/storage/overview", () =>
     json({ generatedAt: "2026-11-24T12:00:00Z", machines: [],
       thresholds: { warningPercent: 75, highPercent: 85, criticalPercent: 95, minHeadroomBytes: 2147483648 } }),

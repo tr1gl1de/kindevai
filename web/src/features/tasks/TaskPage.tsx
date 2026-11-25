@@ -16,6 +16,7 @@ import { AttemptWorkspace } from "./AttemptWorkspace";
 import { PlanSection } from "./PlanSection";
 import { ReviewSection } from "./ReviewSection";
 import { PullRequestsSection } from "./PullRequestsSection";
+import { DocsSection, PublicationStatus } from "./YouTrackSync";
 import {
   isTerminal,
   useCancelTask,
@@ -83,6 +84,7 @@ function TaskCard({ d, isOwner }: { d: TaskDetail; isOwner: boolean }) {
               </dd>
             </>
           )}
+          {d.publication && <PublicationStatus p={d.publication} />}
           <dt>{t("tasks.createdAt")}</dt>
           <dd>{formatDateTime(task.createdAt, i18n.language)}</dd>
           <dt>{t("tasks.updatedAt")}</dt>
@@ -103,6 +105,8 @@ function TaskCard({ d, isOwner }: { d: TaskDetail; isOwner: boolean }) {
       {d.canManage && <Actions d={d} />}
 
       <PullRequestsSection prs={d.pullRequests ?? []} />
+
+      {d.docs && <DocsSection d={d.docs} />}
 
       <StepsSection d={d} isOwner={isOwner} />
 

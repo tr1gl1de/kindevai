@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"time"
 
@@ -81,11 +82,17 @@ type AutoPlanRequest struct {
 	AutoPlan bool `json:"autoPlan"`
 }
 
+// StatesRequest is the task state → YouTrack state map of a project (KIN-38); an empty value unmaps a state.
+type StatesRequest struct {
+	States map[string]string `json:"states"`
+}
+
 // Binding is a project's YouTrack binding as members see it.
 type Binding struct {
-	ShortName  string `json:"shortName"`
-	TriggerTag string `json:"triggerTag"`
-	AutoPlan   bool   `json:"autoPlan"` // KIN-85: intake tasks go to the AI planner at once
+	ShortName  string            `json:"shortName"`
+	TriggerTag string            `json:"triggerTag"`
+	AutoPlan   bool              `json:"autoPlan"` // KIN-85: intake tasks go to the AI planner at once
+	States     map[string]string `json:"states"`   // KIN-38: task state → YouTrack state (empty: comments only)
 }
 
 func bindingView(b domain.Binding) Binding {
@@ -128,6 +135,7 @@ func (h *IntakeHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/integrations/youtrack/users/{user}", h.unlink)
 	mux.HandleFunc("PUT /api/projects/{id}/integrations/youtrack/trigger", h.trigger)
 	mux.HandleFunc("PUT /api/projects/{id}/integrations/youtrack/autoplan", h.autoPlan)
+	mux.HandleFunc("PUT /api/projects/{id}/integrations/youtrack/states", h.states)
 	mux.HandleFunc("GET /api/projects/{id}/youtrack", h.project)
 	mux.HandleFunc("POST /api/projects/{id}/youtrack/runs", h.run)
 	mux.HandleFunc("POST "+WebhookPath, h.webhook)
@@ -289,6 +297,25 @@ func (h *IntakeHandler) autoPlan(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, bindingView(b))
 }
 
+func (h *IntakeHandler) states(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	var req StatesRequest
+	if !httpx.DecodeJSON(w, r, &req) {
+		return
+	}
+	m, err := h.Intake.SetStateMap(r.Context(), p, r.PathValue("id"), req.States)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	out := StatesRequest{States: map[string]string{}}
+	maps.Copy(out.States, m)
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
 func entryView(e app.IntakeEntry) IntakeEntry {
 	return IntakeEntry{IssueID: e.IssueID, Outcome: string(e.Outcome), Reason: e.Reason, Initiator: e.InitiatorLogin,
 		Reporter: e.Reporter, TaskID: e.TaskID, Channel: e.Channel, ProcessedAt: e.ProcessedAt}
@@ -311,6 +338,15 @@ func (h *IntakeHandler) project(w http.ResponseWriter, r *http.Request) {
 	}
 	if v.Binding != nil {
 		b := bindingView(*v.Binding)
+		if h.Intake.States != nil {
+			m, err := h.Intake.StateMap(r.Context(), v.Binding.ProjectID)
+			if err != nil && !errors.Is(err, domain.ErrNotBound) {
+				h.fail(w, err)
+				return
+			}
+			b.States = map[string]string{}
+			maps.Copy(b.States, m)
+		}
 		out.Binding = &b
 	}
 	for _, e := range v.Recent {

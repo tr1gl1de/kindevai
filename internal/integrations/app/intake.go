@@ -51,6 +51,8 @@ const (
 	KindYouTrackAutoPlanChanged = "integration.youtrack_autoplan_changed"
 	KindYouTrackPlanningStarted = "integration.youtrack_planning_started"
 	KindYouTrackPlanningSkipped = "integration.youtrack_planning_skipped"
+	// KIN-38 write-back: the project's task state → YouTrack state map.
+	KindYouTrackStatesChanged = "integration.youtrack_states_changed"
 )
 
 const (
@@ -170,8 +172,9 @@ type Intake struct {
 	Source       IssueSource
 	Inbox        Inbox
 	Health       Health
-	PageSize     int // issues per poll request (default 50)
-	MaxPages     int // poll requests per binding and cycle (default 10)
+	States       StateStore // KIN-38: the projects' task state → YouTrack state maps
+	PageSize     int        // issues per poll request (default 50)
+	MaxPages     int        // poll requests per binding and cycle (default 10)
 	// FetchAttempts must equal the outbox's MaxAttempts (default: the messaging default).
 	FetchAttempts int
 	Tick          time.Duration // how often Run checks whether a poll is due (default 5s)

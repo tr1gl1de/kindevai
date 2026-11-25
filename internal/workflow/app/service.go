@@ -127,8 +127,13 @@ type Service struct {
 	PullRequests PullRequests
 	// CI reads CI on the change set's heads and merges pull requests; Integrate is the integrate_dev gate (KIN-37;
 	// with ChangeSets and Outbox). Without them CI is not followed and nothing is merged.
-	CI        CIChecks
-	Integrate IntegrateGate
+	// IssueSync writes task changes back to their YouTrack issue, Docs keeps the documentation decisions and
+	// TaskLinkBase (the public URL) makes the links in the comments (KIN-38). nil/"": none.
+	IssueSync    IssueSync
+	Docs         DocsStore
+	TaskLinkBase string
+	CI           CIChecks
+	Integrate    IntegrateGate
 }
 
 // Pause reports whether the scheduler must not hand out new work (maintenance mode, KIN-41). Running attempts

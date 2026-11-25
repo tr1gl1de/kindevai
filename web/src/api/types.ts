@@ -965,6 +965,26 @@ export interface TaskDetail {
   time: TaskTime;
   /** The task's change set (KIN-36): published branches and their pull requests. */
   pullRequests?: PullRequest[];
+  /** The YouTrack write-back (KIN-38); null for a task without an issue. */
+  publication?: Publication | null;
+  /** The documentation decision of the latest completed run (KIN-38). */
+  docs?: DocsDecision | null;
+}
+
+/** A task's YouTrack write-back: pending writes await publication (retried), failed ones were given up. */
+export interface Publication {
+  pending: number;
+  failed: number;
+  published: number;
+  lastError?: string;
+}
+
+/** The documentation step's decision: updated sections, DOCS_NOT_APPLICABLE with its reason, or unstated. */
+export interface DocsDecision {
+  status: "updated" | "not_applicable" | "unstated";
+  reason?: string;
+  articles: { article: string; section: string }[];
+  rejected: string[];
 }
 
 /** A published branch and its pull request into the integration branch (KIN-36); url is https only. */

@@ -131,10 +131,14 @@ const (
 	ScenarioCrash   = "crash"   // kills itself with SIGKILL (no result)
 	ScenarioHang    = "hang"    // runs until it is cancelled
 	ScenarioGate    = "gate"    // waits until the file "release" appears in its working directory, then exits 0
+	// ScenarioScope changes files in its worktree (KIN-51): the first attempt writes mock/scope.txt and outside.txt
+	// (beyond the mock plan's scope "mock") and waits like gate; a later attempt writes mock/scope.txt and exits 0.
+	ScenarioScope = "scope"
 )
 
 // MockScenarios lists every scenario.
-var MockScenarios = []string{ScenarioSuccess, ScenarioFail, ScenarioFlaky, ScenarioCrash, ScenarioHang, ScenarioGate}
+var MockScenarios = []string{ScenarioSuccess, ScenarioFail, ScenarioFlaky, ScenarioCrash, ScenarioHang, ScenarioGate,
+	ScenarioScope}
 
 // Cancel is the body of execution.cancel: the runner stops the attempt's whole process group. Reason
 // "stale_fence": the Control Plane rejected the attempt's events because a newer token exists; "cancelled": the
@@ -158,6 +162,10 @@ const (
 	CancelRunnerDisabled = "runner_disabled"
 	CancelRunnerRevoked  = "runner_revoked"
 )
+
+// CancelScopeExceeded is Cancel.Reason for an attempt that changed files beyond its approved scope (KIN-51): the
+// step waits for a new approval.
+const CancelScopeExceeded = "scope_exceeded"
 
 // AssignCommandID and CancelCommandID are the deterministic command ids of an attempt's assignment and
 // cancellation: a repeated use case appends nothing, and the stale-fence cancel and a task cancel share one.

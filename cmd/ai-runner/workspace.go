@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	sessionapp "github.com/tr1gl1de/kindevai/internal/runner/session/app"
@@ -10,6 +11,10 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/runner/workspace/adapters/scan"
 	workspaceapp "github.com/tr1gl1de/kindevai/internal/runner/workspace/app"
 )
+
+// changesEvery is how often a running attempt reports its changed files (only when they changed): the Control Plane
+// stops a step that leaves its approved scope within about this long instead of at its end (KIN-51).
+const changesEvery = 30 * time.Second
 
 // newWorkspaces wires the workspace context (KIN-29): bare repository caches in repos/, attempt worktrees in
 // workspaces/, git driven with the ai-runner binary as its credential helper (`ai-runner git-credential`).
@@ -46,6 +51,21 @@ func (w sessionWorkspaces) Finish(ctx context.Context, step string, fence int64)
 	if err != nil || res == nil {
 		return nil, err
 	}
+	return changes(res), nil
+}
+
+// Changes reports a running attempt's worktree changes (KIN-51).
+func (w sessionWorkspaces) Changes(ctx context.Context, step string, fence int64) (*protocol.WorkspaceChanges, error) {
+	res, err := w.m.Changes(ctx, step, fence)
+	if err != nil || res == nil {
+		return nil, err
+	}
+	ch := changes(res)
+	ch.Interim = true
+	return ch, nil
+}
+
+func changes(res *workspaceapp.Result) *protocol.WorkspaceChanges {
 	files := make([]protocol.ChangedFile, 0, len(res.Files))
 	for _, f := range res.Files {
 		files = append(files, protocol.ChangedFile{Path: f.Path, Status: f.Status})
@@ -55,5 +75,5 @@ func (w sessionWorkspaces) Finish(ctx context.Context, step string, fence int64)
 		ichanged = append(ichanged, protocol.InstructionChange{Path: c.Path, Before: c.Before, After: c.After})
 	}
 	return &protocol.WorkspaceChanges{Branch: res.Branch, BaseSHA: res.BaseSHA, HeadSHA: res.HeadSHA, Files: files,
-		FilesTotal: res.Total, Truncated: res.Truncated, InstructionsChanged: ichanged}, nil
+		FilesTotal: res.Total, Truncated: res.Truncated, InstructionsChanged: ichanged}
 }

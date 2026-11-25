@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/domain"
 	"github.com/tr1gl1de/kindevai/internal/runner/platform/secfile"
+	"github.com/tr1gl1de/kindevai/internal/runner/workspace/adapters/gitcli"
 	runnersgw "github.com/tr1gl1de/kindevai/internal/runners/adapters/gateway"
 	runnershttp "github.com/tr1gl1de/kindevai/internal/runners/adapters/httpapi"
 	runnersdb "github.com/tr1gl1de/kindevai/internal/runners/adapters/sqlite"
@@ -94,14 +96,46 @@ func (c *controlPlane) token(t *testing.T) string {
 	return plain
 }
 
+// TestMain lets the test binary stand in for ai-runner when the daemon re-executes os.Executable() as one of its
+// helpers (KIN-87): without it, e.g. the strict-egress self-test's `sandbox-exec` ran this whole test suite nested in
+// the sandbox, and the first capabilities report waited for it — long enough under load to fail the telemetry wait.
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && slices.Contains(helperCommands, os.Args[1]) {
+		main()
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// helperCommands are the subcommands the daemon starts from its own binary, never typed by users.
+var helperCommands = []string{"mock-agent", "agent-exec", "sandbox-run", "sandbox-exec", gitcli.HelperCommand}
+
 type result struct {
 	err            error
 	stdout, stderr string
 }
 
+// syncBuffer is a log sink safe for concurrent use: a daemon's detached probe may still log after run returns.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
 // cli runs the command like main does, with the given stdin and data dir defaulting to dataDir.
 func cli(ctx context.Context, dataDir, stdin string, prompt func(string) (string, error), args ...string) result {
-	var out, errOut bytes.Buffer
+	var out, errOut syncBuffer
 	err := run(ctx, args, &env{stdin: strings.NewReader(stdin), stdout: &out, stderr: &errOut, readSecret: prompt,
 		defaultDataDir: dataDir, hostname: func() (string, error) { return "test-box", nil }})
 	return result{err: err, stdout: out.String(), stderr: errOut.String()}
@@ -356,17 +390,25 @@ func TestRunConnectsAfterApprovalAndStopsWhenRevoked(t *testing.T) {
 	done := make(chan result, 1)
 	go func() { done <- cli(t.Context(), dataDir, "", nil, "run") }()
 
+	// Bounded by the test binary's deadline (go test -timeout), not a fixed one: a loaded machine is slow, not
+	// broken. The margin leaves time to report which wait failed, with the daemon's log, before the binary panics.
+	wait := t.Context()
+	if dl, ok := t.Deadline(); ok {
+		var cancel context.CancelFunc
+		wait, cancel = context.WithDeadline(wait, dl.Add(-10*time.Second))
+		defer cancel()
+	}
 	waitUntil := func(what string, cond func() bool) {
 		t.Helper()
-		deadline := time.Now().Add(10 * time.Second)
+		tick := time.NewTicker(10 * time.Millisecond)
+		defer tick.Stop()
 		for !cond() {
 			select {
 			case r := <-done:
 				t.Fatalf("daemon exited while waiting for %s: %v\n%s", what, r.err, r.stderr)
-			case <-time.After(10 * time.Millisecond):
-			}
-			if time.Now().After(deadline) {
+			case <-wait.Done():
 				t.Fatalf("timed out waiting for %s", what)
+			case <-tick.C:
 			}
 		}
 	}
@@ -395,7 +437,7 @@ func TestRunConnectsAfterApprovalAndStopsWhenRevoked(t *testing.T) {
 		if !errors.Is(r.err, domain.ErrRunnerRevoked) || exitCode(r.err) != exitConfig {
 			t.Fatalf("run = %v (exit %d)\n%s", r.err, exitCode(r.err), r.stderr)
 		}
-	case <-time.After(5 * time.Second):
+	case <-wait.Done():
 		t.Fatal("daemon did not stop after revocation")
 	}
 }

@@ -213,7 +213,7 @@ func TestAgentTimeMigrationBackfillsExistingTasks(t *testing.T) {
 	t.Parallel()
 	d, _ := testDB(t)
 	all := agentFixture(t, d, 9)
-	body, err := fs.ReadFile(db.Migrations(), "0038_task_agent_time.sql")
+	body, err := fs.ReadFile(db.Migrations(), "0039_task_agent_time.sql")
 	if err != nil {
 		t.Fatal(err)
 	}

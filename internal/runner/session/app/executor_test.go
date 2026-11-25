@@ -56,7 +56,8 @@ type fakeLauncher struct {
 	procs    []*fakeProc
 	adopted  map[int]*fakeProc
 	termExit bool
-	err      error // Launch fails with it
+	err      error    // Launch fails with it
+	out      []string // what the process writes to stdout, write by write (default "hello\n")
 }
 
 func (l *fakeLauncher) Launch(_ context.Context, s LaunchSpec) (Process, error) {
@@ -69,7 +70,13 @@ func (l *fakeLauncher) Launch(_ context.Context, s LaunchSpec) (Process, error) 
 	p := &fakeProc{pid: 100 + len(l.procs), exit: make(chan struct{}), termExit: l.termExit}
 	l.launched = append(l.launched, s)
 	l.procs = append(l.procs, p)
-	_, _ = io.WriteString(s.Stdout, "hello\n")
+	out := l.out
+	if out == nil {
+		out = []string{"hello\n"}
+	}
+	for _, o := range out {
+		_, _ = io.WriteString(s.Stdout, o)
+	}
 	return p, nil
 }
 
@@ -267,6 +274,45 @@ func TestAssignRunsTheAttemptAndReportsItsEnd(t *testing.T) {
 		t.Fatalf("events %v", k)
 	}
 	waitFor(t, "journal cleared", func() bool { r, _ := j.List(); return len(r) == 0 && len(x.Attempts()) == 0 })
+}
+
+// KIN-77: the runner masks the secrets it holds (the assignment's git token, proxy passwords) and secret shapes in
+// the process output before it is spooled, also when a secret is split across writes; the held-back partial last
+// line is sent before the attempt's terminal event.
+func TestOutputIsRedactedBeforeItIsSpooled(t *testing.T) {
+	t.Parallel()
+	x, l, _, ev := newExecutor(domain.Policy{})
+	x.KnownSecrets = func() []string { return []string{"proxy pass 123"} }
+	l.out = []string{"clone https://u:plainTok", "enValue@git.local/x\nproxy: proxy pa", "ss 123 refused\nexport GH_TOKEN=", "abc123def tail"}
+	a := assignment("P1")
+	a.Token = domain.NewSecret("plainTokenValue")
+	if err := x.Assign(t.Context(), a); err != nil {
+		t.Fatal(err)
+	}
+	l.proc(0).end(domain.Exit{Code: 0})
+	waitFor(t, "completed", func() bool { return slices.Contains(ev.kinds(), protocol.EventCompleted) })
+	var out strings.Builder
+	ev.mu.Lock()
+	for _, e := range ev.evs {
+		if e.kind == protocol.EventOutput {
+			var d string
+			_ = json.Unmarshal([]byte(e.body), &d)
+			out.WriteString(d)
+		}
+	}
+	ev.mu.Unlock()
+	got := out.String()
+	for _, leak := range []string{"plainTok", "enValue", "proxy pa", "ss 123", "abc123def"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("output leaks %q: %q", leak, got)
+		}
+	}
+	if !strings.Contains(got, "proxy: [redacted] refused\n") || !strings.HasSuffix(got, "GH_TOKEN=[redacted] tail") {
+		t.Errorf("output %q", got)
+	}
+	if k := ev.kinds(); k[len(k)-1] != protocol.EventCompleted {
+		t.Errorf("events %v: output after the terminal event", k)
+	}
 }
 
 func TestFailedProcessReportsTheReason(t *testing.T) {

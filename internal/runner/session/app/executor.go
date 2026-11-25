@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tr1gl1de/kindevai/internal/platform/redact"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/domain"
 )
@@ -120,6 +121,9 @@ type Executor struct {
 	// from the last report); zero reports them only at the attempt's end.
 	ChangesEvery time.Duration
 	Logger       *slog.Logger
+	// KnownSecrets returns secret values the runner holds besides the assignment's git token (proxy passwords,
+	// KIN-77); they are masked in the attempt's output and failure reasons by exact match.
+	KnownSecrets func() []string
 
 	mu     sync.Mutex
 	runs   map[key]*run
@@ -137,6 +141,8 @@ type run struct {
 	rec       domain.Record
 	proc      Process
 	stream    Stream
+	output    []*redact.Stream // stdout, stderr: flushed before the terminal event
+	known     []string         // secret values masked in the attempt's output and failure reasons (KIN-77)
 	cancelled string
 	sandbox   Sandbox // released once the process ended
 	done      chan struct{}
@@ -287,6 +293,10 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 	if err := x.Journal.Save(r.rec); err != nil {
 		return fmt.Errorf("recording the attempt: %w", err)
 	}
+	r.known = []string{a.Token.Reveal()}
+	if x.KnownSecrets != nil {
+		r.known = append(r.known, x.KnownSecrets()...)
+	}
 	r.stream = x.Events.Attempt(a.Step, a.Fence, 0, x.reserver(r))
 	if err := r.stream.Emit(protocol.EventAccepted, nil); err != nil {
 		return x.abandon(r, fmt.Errorf("emitting accepted: %w", err))
@@ -310,9 +320,9 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 		}
 		sandbox = sb
 	}
+	stdout, stderr := x.redacted(r, "stdout"), x.redacted(r, "stderr")
 	proc, err := x.Launcher.Launch(ctx, LaunchSpec{Dir: dir, Workdir: workdir, Scenario: a.ScenarioOrDefault(),
-		Attempt: a.Fence, Stdout: x.guard(r.stream.Output("stdout")), Stderr: x.guard(r.stream.Output("stderr")),
-		Sandbox: sandbox})
+		Attempt: a.Fence, Stdout: stdout, Stderr: stderr, Sandbox: sandbox})
 	if err != nil {
 		if sandbox != nil {
 			sandbox.Release()
@@ -340,9 +350,9 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 func (x *Executor) launchFailed(r *run, a domain.Assignment, err error) error {
 	x.logger().Error("launching the attempt", "step", a.Step, "fence", a.Fence, "err", err)
 	x.releaseWorkspace(r)
-	f := protocol.Failure{Reason: "launch failed: " + err.Error()}
+	f := protocol.Failure{Reason: r.mask("launch failed: " + err.Error())}
 	if errors.Is(err, ErrNetwork) {
-		f = protocol.Failure{Reason: err.Error(), Code: protocol.FailureNetwork}
+		f = protocol.Failure{Reason: r.mask(err.Error()), Code: protocol.FailureNetwork}
 	}
 	if err := r.stream.Emit(protocol.EventFailed, f); err != nil {
 		return x.abandon(r, err) // the re-sent command tries again
@@ -384,7 +394,7 @@ func (x *Executor) prepareWorkspace(ctx context.Context, a domain.Assignment, r 
 	}
 	if err != nil {
 		x.logger().Warn("preparing the workspace", "step", a.Step, "fence", a.Fence, "err", err)
-		if err := r.stream.Emit(protocol.EventFailed, protocol.Failure{Reason: "workspace: " + err.Error()}); err != nil {
+		if err := r.stream.Emit(protocol.EventFailed, protocol.Failure{Reason: r.mask("workspace: " + err.Error())}); err != nil {
 			return "", false, err
 		}
 		return "", true, nil
@@ -512,6 +522,23 @@ func (x *Executor) reserver(r *run) func(int64) error {
 	}
 }
 
+// mask redacts a failure reason that may quote a git error (KIN-77).
+func (r *run) mask(reason string) string { return redact.Lines(reason, r.known...) }
+
+// outputIdle is how long a partial output line (a prompt, a progress line) is held back for redaction before it
+// is sent anyway.
+const outputIdle = time.Second
+
+// redacted is the attempt's output stream with secrets masked before they are spooled (KIN-77): the git token and
+// the runner's other known secrets by exact value, secret shapes by redact.Lines; a secret split across the
+// process's writes is masked too (the partial last line is held back).
+// The known values are read once per attempt: a proxy password changed while it runs is masked from the next one.
+func (x *Executor) redacted(r *run, name string) io.Writer {
+	s := redact.NewStream(x.guard(r.stream.Output(name)), outputIdle, r.known...)
+	r.output = append(r.output, s)
+	return s
+}
+
 // guard drops output once the executor is shut down (a restarting runner's old pipes keep draining, so the process
 // never blocks on a full pipe).
 func (x *Executor) guard(w io.Writer) io.Writer { return guardedWriter{x, w} }
@@ -539,6 +566,11 @@ func (x *Executor) watch(r *run) {
 		exit := r.proc.Wait()
 		if r.sandbox != nil {
 			r.sandbox.Release()
+		}
+		for _, s := range r.output { // the pipes are drained: send the held-back partial lines before the end
+			if err := s.Flush(); err != nil {
+				x.logger().Warn("sending the attempt's last output", "step", r.rec.Step, "err", err)
+			}
 		}
 		stopReports() // the worktree is about to be saved and removed
 		if !x.closed.Load() {

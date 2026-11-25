@@ -134,6 +134,11 @@ ai-runner fingerprint                                    # compare with the runn
   Control Plane committed and acknowledged them, so a disconnect or a restart of either side loses nothing. Every
   event carries its attempt's fencing token: a stale runner's events are rejected and it is told to cancel the
   process. Each session starts with `runner.reconcile` (running attempts, unacknowledged results, spool offsets).
+- Secrets in runner output: the runner masks the secrets it holds (the assignment's git token, proxy passwords) by
+  exact value and secret shapes (tokens, API keys, passwords in URLs, `key=value` pairs, PEM keys) before output is
+  spooled, holding a partial line back (at most 8 KiB, up to 1 s) so a secret split across writes is masked too; the
+  Control Plane masks every output chunk and failure reason again before it is stored, and once more when the task
+  UI reads them. Lines are kept: a masked value becomes `[redacted]` in place.
 - Retention of recorded runner events: nothing of a running execution is deleted. Output goes 14 days after its
   execution finished (`--runner-output-retention-days` / `KINDEV_RUNNER_OUTPUT_RETENTION_DAYS`), other events after
   30 days (`--runner-event-retention-days` / `KINDEV_RUNNER_EVENT_RETENTION_DAYS`); acknowledged commands after 7

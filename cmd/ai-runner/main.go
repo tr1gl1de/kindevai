@@ -339,6 +339,7 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	}
 	agent := networkAgent(d, logger) // KIN-30 network profiles and Test Network
 	agent.Context = ctx
+	x.KnownSecrets = agent.Secrets // KIN-77: proxy passwords are masked in attempt output
 	ch.Commands = withNetwork(agent, ch.Commands)
 	strict := strictEgress(d, exe, logger) // KIN-31: strict profiles run only in a verified sandbox
 	x.Egress = confiner{strict}

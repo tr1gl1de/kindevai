@@ -10,7 +10,17 @@ import { formatDateTime } from "../../ui/format";
 import { useNotify } from "../../ui/notify";
 import { fieldError } from "./IntegrationsPage";
 import { StateText } from "./IntakeSettingsSection";
-import { useProjectYouTrack, useRunIssue, useSaveAutoPlan, useSaveTriggerTag, type IntakeEntry, type ProjectYouTrack } from "./intakeApi";
+import {
+  TASK_STATES,
+  useProjectYouTrack,
+  useRunIssue,
+  useSaveAutoPlan,
+  useSaveStateMap,
+  useSaveTriggerTag,
+  type IntakeEntry,
+  type ProjectYouTrack,
+  type TaskStateName,
+} from "./intakeApi";
 
 const knownReasons = ["unknown_user", "not_allowed", "tag_not_allowed", "issue_not_found", "other_project", "invalid_issue", "unavailable"];
 
@@ -38,6 +48,7 @@ export function ProjectYouTrackPanel({ project, isOwner }: { project: Project; i
           </p>
           {isOwner && <TriggerTag key={data.data.binding.triggerTag} project={project} current={data.data.binding.triggerTag} />}
           <AutoPlan project={project} on={data.data.binding.autoPlan} />
+          <StateMap key={JSON.stringify(data.data.binding.states ?? {})} project={project} states={data.data.binding.states ?? {}} />
           <RunIssue project={project} shortName={data.data.binding.shortName} />
           <Recent data={data.data} />
         </>
@@ -120,6 +131,102 @@ function AutoPlan({ project, on }: { project: Project; on: boolean }) {
       </label>
       <p className="muted">{t("intake.autoPlanHint")}</p>
     </div>
+  );
+}
+
+/** Mirrors the server's rule (KIN-38): a value becomes the YouTrack command "State {v}". */
+const MAX_STATE_VALUE = 80;
+function validStateValue(v: string): boolean {
+  // eslint-disable-next-line no-control-regex
+  return v.length <= MAX_STATE_VALUE && !/[{}\u0000-\u001f\u007f-\u009f]/.test(v);
+}
+
+/**
+ * KIN-107: which YouTrack state a task's issue is moved to when the task enters a state. The Owner and the project
+ * admin edit it; an empty field changes nothing (comments only, the default). Members read the mapped states.
+ */
+function StateMap({ project, states }: { project: Project; states: Record<string, string> }) {
+  const { t } = useTranslation();
+  const notify = useNotify();
+  const save = useSaveStateMap(project.id);
+  const { errors, show, clear, register } = useFieldErrors(TASK_STATES);
+  const [values, setValues] = useState<Record<string, string>>(() => ({ ...states }));
+  const [formError, setFormError] = useState<string>();
+  const label = (s: TaskStateName) => t(`tasks.state_${s}`);
+
+  if (project.myRole !== "owner" && project.myRole !== "project_admin") {
+    const mapped = TASK_STATES.filter((s) => states[s]);
+    return (
+      <section aria-labelledby="youtrack-states" className="card form-card inline-form">
+        <h3 id="youtrack-states">{t("intake.statesTitle")}</h3>
+        {mapped.length === 0 ? (
+          <p className="muted">{t("intake.statesNone")}</p>
+        ) : (
+          <ul>
+            {mapped.map((s) => (
+              <li key={s}>{t("intake.stateMapped", { task: label(s), youtrack: states[s] ?? "" })}</li>
+            ))}
+          </ul>
+        )}
+      </section>
+    );
+  }
+
+  async function onSubmit(ev: FormEvent) {
+    ev.preventDefault();
+    setFormError(undefined);
+    const out: Record<string, string> = {};
+    const bad: Partial<Record<TaskStateName, string>> = {};
+    for (const s of TASK_STATES) {
+      const v = (values[s] ?? "").trim();
+      if (!v) continue;
+      if (!validStateValue(v)) bad[s] = t("intake.stateValueError");
+      out[s] = v;
+    }
+    if (Object.keys(bad).length > 0) {
+      show(bad);
+      return;
+    }
+    try {
+      await save.mutateAsync(out);
+      notify(t("intake.statesSaved"));
+    } catch (err) {
+      if (isApiError(err, "validation")) setFormError(t("intake.stateValueError"));
+      else setFormError(errorMessage(t, err));
+    }
+  }
+
+  return (
+    <form noValidate onSubmit={onSubmit} aria-labelledby="youtrack-states" className="card form-card">
+      <h3 id="youtrack-states">{t("intake.statesTitle")}</h3>
+      <p className="muted" id="youtrack-states-hint">
+        {t("intake.statesHint")}
+      </p>
+      <FormAlert message={formError} />
+      <div className="state-map">
+        {TASK_STATES.map((s) => (
+          <TextField
+            key={s}
+            ref={register(s)}
+            label={label(s)}
+            error={errors[s]}
+            autoComplete="off"
+            spellCheck={false}
+            maxLength={MAX_STATE_VALUE * 2}
+            value={values[s] ?? ""}
+            onChange={(e) => {
+              setValues((v) => ({ ...v, [s]: e.target.value }));
+              clear(s);
+            }}
+          />
+        ))}
+      </div>
+      <div className="form-actions">
+        <button type="submit" className="button primary" disabled={save.isPending}>
+          {save.isPending ? t("form.submitting") : t("intake.saveStates")}
+        </button>
+      </div>
+    </form>
   );
 }
 

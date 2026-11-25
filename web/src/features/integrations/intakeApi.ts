@@ -26,7 +26,24 @@ export interface YouTrackBinding {
   shortName: string;
   triggerTag: string;
   autoPlan: boolean;
+  /** KIN-38: task state → YouTrack state its issue is moved to; unmapped states change nothing (comments only). */
+  states?: Record<string, string>;
 }
+
+/** The task states a project may map to YouTrack states, in workflow order (KB KIN-A-14). */
+export const TASK_STATES = [
+  "CREATED",
+  "ANALYZING",
+  "READY",
+  "AWAITING_APPROVAL",
+  "RUNNING",
+  "VERIFYING",
+  "COMPLETED",
+  "BLOCKED",
+  "FAILED",
+  "CANCELLED",
+] as const;
+export type TaskStateName = (typeof TASK_STATES)[number];
 
 /** GET /api/projects/{id}/youtrack (members who may start AI in the project). */
 export interface ProjectYouTrack {
@@ -145,6 +162,16 @@ export function useSaveAutoPlan(id: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (autoPlan: boolean) => api<YouTrackBinding>("PUT", `${projectPath(id)}/integrations/youtrack/autoplan`, { autoPlan }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: keys.project(id) }),
+  });
+}
+
+/** Saves the task state → YouTrack state map (Owner, project admin); empty values are dropped by the caller. */
+export function useSaveStateMap(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (states: Record<string, string>) =>
+      api<{ states: Record<string, string> }>("PUT", `${projectPath(id)}/integrations/youtrack/states`, { states }),
     onSuccess: () => qc.invalidateQueries({ queryKey: keys.project(id) }),
   });
 }

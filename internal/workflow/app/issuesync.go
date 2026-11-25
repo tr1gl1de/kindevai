@@ -19,9 +19,9 @@ import (
 // IssueSync is the integrations context's write-back as the workflow needs it; the request methods join the
 // caller's transaction.
 type IssueSync interface {
-	Comment(ctx context.Context, key, taskID, issueID, text string) error
+	Comment(ctx context.Context, key, taskID, projectID, issueID, text string) error
 	State(ctx context.Context, key, taskID, projectID, issueID, taskState string) error
-	Article(ctx context.Context, key, taskID, issueID, articleID, section, content string) error
+	Article(ctx context.Context, key, taskID, projectID, issueID, articleID, section, content string) error
 	Publication(ctx context.Context, taskID string) (Publication, error)
 }
 
@@ -86,7 +86,7 @@ func (s *Service) planComment(ctx context.Context, key string, t domain.Task) er
 	p := rev.Plan()
 	text := domain.PlanComment(domain.PlanNote{Revision: rev.Number(), Summary: p.Summary, Risk: rev.Risk(),
 		Steps: len(p.Steps), NeedsApproval: t.State == domain.TaskAwaitingApproval, Link: s.taskLink(t.ID)})
-	if err := s.IssueSync.Comment(ctx, key, t.ID, t.YouTrackIssue, text); err != nil {
+	if err := s.IssueSync.Comment(ctx, key, t.ID, t.ProjectID, t.YouTrackIssue, text); err != nil {
 		return fmt.Errorf("youtrack plan comment: %w", err)
 	}
 	return nil
@@ -112,7 +112,7 @@ func (s *Service) finalComment(ctx context.Context, key string, t domain.Task, d
 		return err
 	}
 	n.AgentTime = times[t.ID].Agent
-	if err := s.IssueSync.Comment(ctx, key, t.ID, t.YouTrackIssue, domain.FinalComment(n)); err != nil {
+	if err := s.IssueSync.Comment(ctx, key, t.ID, t.ProjectID, t.YouTrackIssue, domain.FinalComment(n)); err != nil {
 		return fmt.Errorf("youtrack final comment: %w", err)
 	}
 	return nil
@@ -155,7 +155,7 @@ func (s *Service) decideDocs(ctx context.Context, t domain.Task, writeBack bool)
 	}
 	for i, a := range d.Articles {
 		key := "task/" + t.ID + "/" + e.ID + "/article/" + strconv.Itoa(i)
-		if err := s.IssueSync.Article(ctx, key, t.ID, t.YouTrackIssue, a.Article, a.Section, a.Content); err != nil {
+		if err := s.IssueSync.Article(ctx, key, t.ID, t.ProjectID, t.YouTrackIssue, a.Article, a.Section, a.Content); err != nil {
 			return nil, fmt.Errorf("youtrack article: %w", err)
 		}
 	}

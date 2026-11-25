@@ -10,6 +10,7 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/integrations/adapters/youtrack"
 	integrationsapp "github.com/tr1gl1de/kindevai/internal/integrations/app"
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
+	"github.com/tr1gl1de/kindevai/internal/platform/db"
 	workflowdb "github.com/tr1gl1de/kindevai/internal/workflow/adapters/sqlite"
 	workflowapp "github.com/tr1gl1de/kindevai/internal/workflow/app"
 )
@@ -21,7 +22,7 @@ func wireWriteBack(wf *workflowapp.Service, inst *bootstrap.Installation, msg *m
 	publicURL string) {
 	repo := integrationsdb.New(inst.DB)
 	s := &integrationsapp.IssueSync{Connection: integ.Service, Client: &youtrack.Client{}, Outbox: msg.Outbox, Store: repo,
-		Now: time.Now}
+		Tx: db.Transactor{DB: inst.DB}, Now: time.Now}
 	wf.IssueSync, wf.Docs, wf.TaskLinkBase = workflowIssueSync{s}, workflowdb.New(inst.DB), taskLinkBase(publicURL)
 	msg.Outbox.Handle(integrationsapp.TopicYouTrackWrite, s.HandleWrite)
 }
@@ -39,16 +40,17 @@ func taskLinkBase(publicURL string) string {
 // workflowIssueSync gives the workflow the integrations context's write-back.
 type workflowIssueSync struct{ s *integrationsapp.IssueSync }
 
-func (w workflowIssueSync) Comment(ctx context.Context, key, taskID, issueID, text string) error {
-	return w.s.Comment(ctx, key, taskID, issueID, text)
+func (w workflowIssueSync) Comment(ctx context.Context, key, taskID, projectID, issueID, text string) error {
+	return w.s.Comment(ctx, key, taskID, projectID, issueID, text)
 }
 
 func (w workflowIssueSync) State(ctx context.Context, key, taskID, projectID, issueID, taskState string) error {
 	return w.s.State(ctx, key, taskID, projectID, issueID, taskState)
 }
 
-func (w workflowIssueSync) Article(ctx context.Context, key, taskID, issueID, articleID, section, content string) error {
-	return w.s.Article(ctx, key, taskID, issueID, articleID, section, content)
+func (w workflowIssueSync) Article(ctx context.Context, key, taskID, projectID, issueID, articleID, section,
+	content string) error {
+	return w.s.Article(ctx, key, taskID, projectID, issueID, articleID, section, content)
 }
 
 func (w workflowIssueSync) Publication(ctx context.Context, taskID string) (workflowapp.Publication, error) {

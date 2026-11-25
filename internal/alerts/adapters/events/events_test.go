@@ -122,6 +122,14 @@ func TestSourcesRaiseAndResolve(t *testing.T) {
 			func(h events.Handlers) func(context.Context, messaging.Delivery) error { return h.TaskUnblocked },
 			map[string]any{"projectId": "p1", "taskId": "t9", "reason": "runner"}, map[string]any{"taskId": "t9"},
 			"task/t9/blocked", "p1", domain.KindTaskBlocked},
+		{"youtrack write", // KIN-107: a failed write-back; the task's next published write closes it
+			func(h events.Handlers) func(context.Context, messaging.Delivery) error { return h.YouTrackWriteFailed },
+			func(h events.Handlers) func(context.Context, messaging.Delivery) error {
+				return h.YouTrackWritePublished
+			},
+			map[string]any{"projectId": "p1", "taskId": "t9", "issue": "KIN-7", "kind": "comment", "code": "unauthorized"},
+			map[string]any{"projectId": "p1", "taskId": "t9"},
+			"youtrack/task/t9/write", "p1", domain.KindYouTrackWriteFailed},
 		{"storage recovered",
 			func(h events.Handlers) func(context.Context, messaging.Delivery) error { return h.StorageLevel },
 			func(h events.Handlers) func(context.Context, messaging.Delivery) error { return h.StorageRecovered },

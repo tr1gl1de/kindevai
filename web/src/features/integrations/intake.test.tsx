@@ -247,4 +247,54 @@ describe("project YouTrack panel", () => {
     expect(await screen.findByText("Новые задачи из YouTrack планируются AI автоматически.")).toBeInTheDocument();
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
   });
+
+  it("lets the project admin map task states to YouTrack states; members only read them (KIN-107)", async () => {
+    const state = { v: view({ binding: { shortName: "KIN", triggerTag: "kindevai", autoPlan: false, states: { COMPLETED: "Done" } } }) };
+    const puts: unknown[] = [];
+    projectRoutes(member, state, "project_admin");
+    server.use(
+      http.put("/api/projects/p1/integrations/youtrack/states", async ({ request }) => {
+        const b = (await request.json()) as { states: Record<string, string> };
+        puts.push(b);
+        state.v = view({ binding: { shortName: "KIN", triggerTag: "kindevai", autoPlan: false, states: b.states } });
+        return json(b);
+      }),
+    );
+    const first = await renderApp("/projects/p1");
+    const user = userEvent.setup();
+    const form = await screen.findByRole("form", { name: "YouTrack states" });
+    const labels = ["Created", "Analyzing", "Ready", "Awaiting approval", "Running", "Verifying", "Completed", "Blocked", "Failed", "Cancelled"];
+    expect(within(form).getAllByRole("textbox")).toHaveLength(10);
+    for (const l of labels) expect(within(form).getByLabelText(l)).toBeInTheDocument();
+    expect(within(form).getByLabelText("Completed")).toHaveValue("Done");
+    await expectAccessible(first.container);
+
+    // A value YouTrack's command syntax cannot carry is refused on its field, and focus moves there.
+    await fill(user, within(form).getByLabelText("Running"), "In {Progress}");
+    await user.click(within(form).getByRole("button", { name: "Save states" }));
+    expect(await within(form).findByText("Up to 80 characters, without { } or line breaks.")).toBeInTheDocument();
+    expect(within(form).getByLabelText("Running")).toHaveFocus();
+    expect(within(form).getByLabelText("Running")).toHaveAttribute("aria-invalid", "true");
+    expect(puts).toEqual([]);
+
+    await user.clear(within(form).getByLabelText("Running"));
+    await fill(user, within(form).getByLabelText("Running"), " In Progress ");
+    await user.clear(within(form).getByLabelText("Completed")); // empty: no state change for COMPLETED
+    await user.click(within(form).getByRole("button", { name: "Save states" }));
+    await expectStatus("YouTrack states saved.");
+    expect(puts).toEqual([{ states: { RUNNING: "In Progress" } }]);
+    first.unmount();
+
+    projectRoutes(member, state);
+    await renderApp("/projects/p1", "ru");
+    expect(await screen.findByRole("heading", { name: "Статусы YouTrack" })).toBeInTheDocument();
+    expect(screen.getByText("Выполняется → In Progress")).toBeInTheDocument();
+    expect(screen.queryByRole("form", { name: "Статусы YouTrack" })).not.toBeInTheDocument();
+  });
+
+  it("tells members when no task state is written to YouTrack", async () => {
+    projectRoutes(member, { v: view({ binding: { shortName: "KIN", triggerTag: "kindevai", autoPlan: false, states: {} } }) });
+    await renderApp("/projects/p1");
+    expect(await screen.findByText("Task states are not written to YouTrack: comments only.")).toBeInTheDocument();
+  });
 });

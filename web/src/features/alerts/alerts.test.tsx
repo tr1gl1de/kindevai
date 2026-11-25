@@ -119,6 +119,7 @@ describe("alert center", () => {
           make("C1", "ci_failed", "acme/shop#7", { conclusion: "failure" }),
           make("I1", "integration_circuit_open", "youtrack", {}),
           make("T1", "task_blocked", "t9", { reason: "runner" }),
+          make("Y1", "youtrack_write_failed", "KIN-7", { code: "unauthorized", taskId: "t9" }),
         ]),
       ),
     );
@@ -127,6 +128,7 @@ describe("alert center", () => {
     expect(screen.getByText("CI failed on acme/shop#7 (failure)")).toBeInTheDocument();
     expect(screen.getByText("Integration youtrack is failing: calls suspended")).toBeInTheDocument();
     expect(screen.getByText("Task t9 is blocked (runner)")).toBeInTheDocument();
+    expect(screen.getByText("YouTrack write-back to KIN-7 failed (unauthorized)")).toBeInTheDocument();
   });
 
   it("reports a failed action", async () => {

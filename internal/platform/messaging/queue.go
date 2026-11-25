@@ -14,10 +14,14 @@ import (
 )
 
 // table names one durable queue: its table, the column naming the external system and the dedup key column.
-type table struct{ name, endpoint, key string }
+// ordered tables have an ordering_key column (KIN-107).
+type table struct {
+	name, endpoint, key string
+	ordered             bool
+}
 
 var (
-	outboxTable = table{name: "outbox_events", endpoint: "adapter", key: "idempotency_key"}
+	outboxTable = table{name: "outbox_events", endpoint: "adapter", key: "idempotency_key", ordered: true}
 	inboxTable  = table{name: "inbox_events", endpoint: "source", key: "delivery_id"}
 )
 
@@ -27,13 +31,21 @@ type queries struct {
 
 // sqlFor fills the statement templates; only the compile-time table definitions above are substituted.
 func sqlFor(t table) queries {
+	// A message with an ordering key waits while an earlier one of its endpoint and key is pending (in flight or
+	// backing off); done and dead ones do not hold it back. The inbox has no ordering key: NULL never waits.
+	orderCol, orderVal, orderWait := "", "", ""
+	if t.ordered {
+		orderCol, orderVal = ", ordering_key", ", ?"
+		orderWait = `AND (ordering_key IS NULL OR NOT EXISTS (SELECT 1 FROM {t} AS prev WHERE prev.{e} = {t}.{e}
+			AND prev.ordering_key = {t}.ordering_key AND prev.status = 'pending' AND prev.id < {t}.id))`
+	}
 	r := strings.NewReplacer("{t}", t.name, "{e}", t.endpoint, "{k}", t.key)
 	return queries{
-		insert: r.Replace(`INSERT INTO {t}({e}, topic, {k}, payload, next_attempt_at, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT({e}, {k}) DO NOTHING`),
+		insert: r.Replace(`INSERT INTO {t}({e}, topic, {k}, payload, next_attempt_at, created_at, updated_at` + orderCol + `)
+			VALUES (?, ?, ?, ?, ?, ?, ?` + orderVal + `) ON CONFLICT({e}, {k}) DO NOTHING`),
 		candidates: r.Replace(`SELECT id, {e}, topic, {k}, payload, attempts FROM {t}
 			WHERE status = 'pending' AND next_attempt_at <= ? AND {e} NOT IN (SELECT value FROM json_each(?))
-			AND id NOT IN (SELECT value FROM json_each(?))
+			AND id NOT IN (SELECT value FROM json_each(?)) ` + orderWait + `
 			ORDER BY next_attempt_at, id LIMIT ?`),
 		claim:      r.Replace(`UPDATE {t} SET attempts = attempts + 1, next_attempt_at = ?, updated_at = ? WHERE id = ?`),
 		giveBack:   r.Replace(`UPDATE {t} SET attempts = attempts - 1, next_attempt_at = ?, updated_at = ? WHERE id = ? AND status = 'pending'`),
@@ -99,10 +111,15 @@ func (q *queue) notify() {
 	}
 }
 
-// insert stores a message through the caller's transaction, if any, and reports whether it was new.
-func (q *queue) insert(ctx context.Context, endpoint, topic, key string, payload []byte) (bool, error) {
+// insert stores a message through the caller's transaction, if any, and reports whether it was new. ordering is
+// the message's ordering key (only for an ordered table; "" = none).
+func (q *queue) insert(ctx context.Context, endpoint, topic, key string, payload []byte, ordering ...string) (bool, error) {
 	now := ms(q.cfg.Now())
-	res, err := db.Conn(ctx, q.d).ExecContext(ctx, q.sql.insert, endpoint, topic, key, payload, now, now, now)
+	args := []any{endpoint, topic, key, payload, now, now, now}
+	for _, o := range ordering {
+		args = append(args, sql.NullString{String: o, Valid: o != ""})
+	}
+	res, err := db.Conn(ctx, q.d).ExecContext(ctx, q.sql.insert, args...)
 	if err != nil {
 		return false, fmt.Errorf("storing message: %w", err)
 	}

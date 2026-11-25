@@ -97,6 +97,12 @@ func RenderAlert(l Language, a Alert) string {
 		}[l]
 	case KindCLIHeld:
 		body = cliHeld(l, a)
+	case KindYouTrackWriteFailed:
+		code := clip(a.Details["code"])
+		body = map[Language]string{
+			LangEN: fmt.Sprintf("YouTrack write-back to %s failed (%s).", subject, code),
+			LangRU: fmt.Sprintf("Запись в YouTrack по %s не удалась (%s).", subject, code),
+		}[l]
 	default:
 		body = map[Language]string{
 			LangEN: fmt.Sprintf("New alert: %s (%s).", a.Kind, subject),

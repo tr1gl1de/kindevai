@@ -80,6 +80,7 @@ func TestRenderAlertNewSources(t *testing.T) {
 		{domain.KindCIFailed, "acme/shop#7", map[string]string{"conclusion": "failure"}, "CI failed", "CI упал"},
 		{domain.KindIntegrationCircuitOpen, "youtrack", nil, "suspended", "приостановлены"},
 		{domain.KindTaskBlocked, "t1", map[string]string{"reason": "runner"}, "is blocked", "заблокирована"},
+		{domain.KindYouTrackWriteFailed, "KIN-7", map[string]string{"code": "unauthorized"}, "YouTrack write-back", "в YouTrack"},
 	}
 	for _, c := range cases {
 		a, err := domain.NewAlert("a", domain.Occurrence{Kind: c.kind, Severity: domain.SeverityWarning, DedupKey: "k",

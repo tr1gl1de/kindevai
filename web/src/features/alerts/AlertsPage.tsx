@@ -70,6 +70,8 @@ export function useAlertText() {
             defaultValue: a.details.cause ?? "?",
           }),
         });
+      case "youtrack_write_failed":
+        return t("alerts.kind_youtrack_write_failed", { subject: a.subject, code: a.details.code ?? "?" });
       default:
         return t("alerts.kind_other", { kind: a.kind, subject: a.subject });
     }

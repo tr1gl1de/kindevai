@@ -669,3 +669,76 @@ func TestOutboxRetryUnhandledRequeuesOnlyNowHandledTopics(t *testing.T) {
 		t.Fatalf("still dead = %q, want [b c]", left)
 	}
 }
+
+func ordered(key, order string) messaging.Message {
+	m := msg(key)
+	m.OrderingKey = order
+	return m
+}
+
+// KIN-107: messages of one adapter and ordering key are delivered one at a time in enqueue order: a later message
+// waits while an earlier one is pending (in flight or backing off); a dead one no longer holds it back. Other keys
+// and unordered messages are not held up.
+func TestOutboxOrderingKeyDeliversInEnqueueOrder(t *testing.T) {
+	t.Parallel()
+	d, _ := newDB(t)
+	c := newClock()
+	cfg := config(c)
+	cfg.Workers = 8
+	cfg.BaseBackoff = time.Second
+	cfg.BreakerThreshold = 100
+	o := messaging.NewOutbox(d, cfg)
+	mu := make(chan struct{}, 1)
+	var got []string
+	failA := 1
+	o.Handle("youtrack.comment", func(_ context.Context, dl messaging.Delivery) error {
+		mu <- struct{}{}
+		defer func() { <-mu }()
+		if dl.Key == "a" && failA > 0 {
+			failA--
+			return errors.New("connection refused")
+		}
+		if dl.Key == "x" {
+			return messaging.Permanent(errors.New("rejected"))
+		}
+		got = append(got, dl.Key)
+		return nil
+	})
+	for _, m := range []messaging.Message{ordered("a", "task/1"), ordered("b", "task/1"), ordered("c", "task/1"),
+		ordered("p", "task/2"), msg("free")} {
+		if err := o.Enqueue(t.Context(), m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, _ := o.Poll(t.Context()); n != 3 { // a (fails), p, free: b and c wait for a
+		t.Fatalf("first poll attempted %d, want 3", n)
+	}
+	if n, _ := o.Poll(t.Context()); n != 0 {
+		t.Fatalf("b was delivered while a was backing off (%d attempted)", n)
+	}
+	c.Advance(time.Minute)
+	for range 3 {
+		if _, err := o.Poll(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	slices.Sort(got[:2]) // p and free ran concurrently
+	if !slices.Equal(got, []string{"free", "p", "a", "b", "c"}) {
+		t.Fatalf("delivered %v, want free and p, then a, b, c", got)
+	}
+
+	// A dead message does not block its successors.
+	for _, m := range []messaging.Message{ordered("x", "task/3"), ordered("y", "task/3")} {
+		if err := o.Enqueue(t.Context(), m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		if _, err := o.Poll(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got[len(got)-1] != "y" {
+		t.Fatalf("y was not delivered after x went dead: %v", got)
+	}
+}

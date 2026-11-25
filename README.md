@@ -306,12 +306,15 @@ A task of a YouTrack issue reports back to the issue, as the integration user (t
 with the accepted plan (summary, risk, steps) and the link to approve it on the task page (`--public-url`), every
 state change if the project maps task states to YouTrack states, and a final comment with the pull requests, the
 agent time (CLI process time) and the documentation decision. By default the map is empty, so only comments are
-written; the Owner or the project's admin sets it with `PUT /api/projects/{id}/integrations/youtrack/states`
-(`{"states":{"RUNNING":"In Progress","COMPLETED":"Fixed"}}`). Every write is an outbox message keyed by the change
+written; the Owner or the project's admin sets it under **YouTrack states** on the project page (one field per task
+state; empty keeps the issue's state) or with `PUT /api/projects/{id}/integrations/youtrack/states`
+(`{"states":{"RUNNING":"In Progress","COMPLETED":"Fixed"}}`). A task's writes reach YouTrack one at a time in the order
+they were made, so the final comment never lands before the state change. Every write is an outbox message keyed by the change
 (its correlation id): a comment carries a `kindev-…` marker, so a retry after a lost response never posts twice, and
 the platform's own writes coming back through the webhook or the poller never create new tasks. While YouTrack is
 unavailable the writes are retried and the task page shows **Awaiting publication to YouTrack**; writes given up
-show as not published with the reason. The implementer may update Knowledge Base sections — only of articles the
+show as not published with the reason and raise a **YouTrack write-back failed** alert in the Alert Center, which
+closes when the task's next write is published. The implementer may update Knowledge Base sections — only of articles the
 approved plan names in its documentation impact — or state `docsNotApplicable` with a reason (`DOCS_NOT_APPLICABLE`);
 the decision is stored and shown on the task page. A section is recomputed on the article as it is right before the
 write, and a concurrent edit makes it re-read and recompute (after three conflicts the write fails visibly).

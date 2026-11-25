@@ -46,17 +46,25 @@ type AgentChoice struct {
 	Model string
 }
 
+// Cooling is a runner's CLI held after cli_limit (KIN-79, KIN-83): until when, or (NeedsOwner) until the Owner
+// marks it ready again after logging it in or fixing its billing.
+type Cooling struct {
+	Until      time.Time
+	NeedsOwner bool
+}
+
 // PickRoute chooses the CLI and runner for a step (KIN-33, KB KIN-A-15 routing: … → Role binding → Runner
 // capabilities → Session availability): the first choice of the permitted chain for which an eligible runner
-// (PickRunner: capabilities, disk, least load) has the CLI installed and is not cooling down on it after a usage
-// limit (cli_limit). When nothing fits, the reason says why: every runner with a CLI of the chain cools down
-// (cli_limit, with the earliest reset) or no runner has any of them (runner).
+// (PickRunner: capabilities, disk, least load) has the CLI installed and is not held on it after a usage limit or a
+// logout (cli_limit). When nothing fits, the reason says why: every runner with a CLI of the chain is held
+// (cli_limit: the earliest reset, or the Owner's action when only that lifts them) or no runner has any of them
+// (runner).
 func PickRoute(cands []RunnerCandidate, caps []string, held map[string]int, chain []AgentChoice,
-	cooling func(runnerID, agent string) (time.Time, bool)) (RunnerCandidate, AgentChoice, Reason, bool) {
+	cooling func(runnerID, agent string) (Cooling, bool)) (RunnerCandidate, AgentChoice, Reason, bool) {
 	if cooling == nil {
-		cooling = func(string, string) (time.Time, bool) { return time.Time{}, false }
+		cooling = func(string, string) (Cooling, bool) { return Cooling{}, false }
 	}
-	var limited []string
+	var limited, owner []string
 	var reset time.Time
 	for _, c := range chain {
 		var ok []RunnerCandidate
@@ -64,12 +72,15 @@ func PickRoute(cands []RunnerCandidate, caps []string, held map[string]int, chai
 			if !r.Eligible(append(slices.Clip(caps), c.Agent)) {
 				continue
 			}
-			if until, cool := cooling(r.ID, c.Agent); cool {
+			if h, cool := cooling(r.ID, c.Agent); cool {
 				if !slices.Contains(limited, c.Agent) {
 					limited = append(limited, c.Agent)
 				}
-				if reset.IsZero() || until.Before(reset) {
-					reset = until
+				switch {
+				case h.NeedsOwner:
+					owner = append(owner, c.Agent+" on runner "+r.ID)
+				case reset.IsZero() || h.Until.Before(reset):
+					reset = h.Until
 				}
 				continue
 			}
@@ -78,6 +89,11 @@ func PickRoute(cands []RunnerCandidate, caps []string, held map[string]int, chai
 		if r, found := PickRunner(ok, caps, held); found {
 			return r, c, Reason{}, true
 		}
+	}
+	if len(limited) > 0 && reset.IsZero() {
+		return RunnerCandidate{}, AgentChoice{}, Reason{Code: WaitCLILimit, Detail: fmt.Sprintf(
+			"waiting for the Owner: %s logged out or refused by billing; log the CLI in on the runner (or fix its billing), then mark it ready again on the Agents page",
+			strings.Join(owner, ", "))}, false
 	}
 	if len(limited) > 0 {
 		return RunnerCandidate{}, AgentChoice{}, Reason{Code: WaitCLILimit, Detail: fmt.Sprintf(

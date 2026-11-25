@@ -40,6 +40,12 @@ func (stopper) StopAgent(context.Context, string) (int, error) { return 1, nil }
 
 func server(t *testing.T) *http.ServeMux {
 	t.Helper()
+	mux, _ := serverWith(t)
+	return mux
+}
+
+func serverWith(t *testing.T) (*http.ServeMux, *app.Service) {
+	t.Helper()
 	d, err := db.Open(t.Context(), filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -52,7 +58,7 @@ func server(t *testing.T) *http.ServeMux {
 		Workflow: stopper{}, Now: func() time.Time { return time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC) }}
 	mux := http.NewServeMux()
 	(&httpapi.Handler{Service: svc}).Register(mux)
-	return mux
+	return mux, svc
 }
 
 func do(t *testing.T, mux *http.ServeMux, who, method, path, body string) (int, map[string]any) {
@@ -67,6 +73,35 @@ func do(t *testing.T, mux *http.ServeMux, who, method, path, body string) (int, 
 	var out map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &out)
 	return w.Code, out
+}
+
+// KIN-83: the Owner sees a held CLI's cause, streak and parked state and marks it ready again; others may not.
+func TestMarkCLIReadyAPI(t *testing.T) {
+	t.Parallel()
+	mux, svc := serverWith(t)
+	for range 4 {
+		if _, err := svc.CoolDown(t.Context(), "r1", "claude", "auth", time.Time{}, "not logged in"); err != nil {
+			t.Fatal(err)
+		}
+		svc.Now = func(now time.Time) func() time.Time { return func() time.Time { return now } }(svc.Now().Add(7 * time.Hour))
+	}
+	code, out := do(t, mux, "owner", "GET", "/api/agents", "")
+	b, _ := json.Marshal(out["cooldowns"])
+	if code != http.StatusOK || !strings.Contains(string(b), `"cause":"auth","parked":true`) || !strings.Contains(string(b), `"strikes":4`) {
+		t.Fatalf("GET = %d %s", code, b)
+	}
+	if code, _ := do(t, mux, "admin", "POST", "/api/agents/cooldowns/r1/claude/ready", ""); code != http.StatusForbidden {
+		t.Fatalf("admin ready = %d", code)
+	}
+	if code, _ := do(t, mux, "owner", "POST", "/api/agents/cooldowns/r1/claude/ready", ""); code != http.StatusNoContent {
+		t.Fatalf("ready = %d", code)
+	}
+	if code, _ := do(t, mux, "owner", "POST", "/api/agents/cooldowns/r1/claude/ready", ""); code != http.StatusNotFound {
+		t.Fatalf("ready again = %d", code)
+	}
+	if code, out := do(t, mux, "owner", "GET", "/api/agents", ""); code != http.StatusOK || len(out["cooldowns"].([]any)) != 0 {
+		t.Fatalf("GET after ready = %d %v", code, out)
+	}
 }
 
 func TestGlobalAgentsAPI(t *testing.T) {

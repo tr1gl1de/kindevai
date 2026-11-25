@@ -63,6 +63,19 @@ export function useEmergencyStop() {
   });
 }
 
+/** The Owner's "CLI ready again" for a runner's held CLI (KIN-83). */
+export function useMarkCLIReady() {
+  const invalidate = useInvalidateAgents();
+  return useMutation({
+    mutationFn: ({ runnerId, agent }: { runnerId: string; agent: AgentCli }) =>
+      api<void>(
+        "POST",
+        `/api/agents/cooldowns/${encodeURIComponent(runnerId)}/${agent}/ready`,
+      ),
+    onSuccess: invalidate,
+  });
+}
+
 export function useSaveBinding(scope: AgentScope) {
   const invalidate = useInvalidateAgents();
   return useMutation({

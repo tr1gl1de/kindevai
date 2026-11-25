@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runner/egress/adapters/nsbox"
 	egress "github.com/tr1gl1de/kindevai/internal/runner/egress/app"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/adapters/cliagent"
+	"github.com/tr1gl1de/kindevai/internal/runner/session/domain"
 )
 
 // cliSandbox confines one CLI run of the KIN-32 adapters (cliagent.Sandbox) in the strict egress sandbox of its
@@ -21,7 +23,10 @@ type cliSandbox struct {
 	dir       string // the attempt's state directory (kept visible in the sandbox)
 }
 
-var _ cliagent.Sandbox = cliSandbox{}
+var (
+	_ cliagent.Sandbox = cliSandbox{}
+	_ cliagent.Refuser = cliSandbox{}
+)
 
 // newCLISandbox returns the sandbox of a CLI run of project by role (the CLI's name): nil when its profile is not
 // strict (the CLI runs on the host, safe mode only), an error when it is strict and cannot be confined here.
@@ -55,4 +60,11 @@ func (c cliSandbox) Wrap(ctx context.Context, cmd cliagent.Command) (cliagent.Co
 		return cliagent.Command{}, err
 	}
 	return cliagent.Command{Path: path, Args: args, Env: env, Dir: cmd.Dir}, nil
+}
+
+// Refused reports a run that `sandbox-run` ended because its sandbox did not verify: exit nsbox.ExitUnverified
+// with nsbox.UnverifiedMarker on stderr (a CLI that merely exits 121 is a CLI error). The run fails with code
+// network and the step waits for the network (KIN-31, KIN-83).
+func (c cliSandbox) Refused(exit domain.Exit, stderrTail string) bool {
+	return !exit.Signaled && exit.Code == nsbox.ExitUnverified && strings.Contains(stderrTail, nsbox.UnverifiedMarker)
 }

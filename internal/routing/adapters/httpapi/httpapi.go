@@ -54,12 +54,16 @@ type SwitchJSON struct {
 	UpdatedAt *time.Time `json:"updatedAt"`
 }
 
-// CooldownJSON is a runner's CLI cooling down after a usage limit.
+// CooldownJSON is a runner's CLI held after cli_limit: cause rate_limit | auth | billing, strikes = holds of that
+// cause in a row, parked = waiting for the Owner's "ready again" (until is then only an upper bound).
 type CooldownJSON struct {
 	RunnerID string    `json:"runnerId"`
 	Agent    string    `json:"agent"`
 	Until    time.Time `json:"until"`
 	Reason   string    `json:"reason"`
+	Cause    string    `json:"cause"`
+	Strikes  int       `json:"strikes"`
+	Parked   bool      `json:"parked"`
 }
 
 // SettingsJSON is GET /api/agents.
@@ -93,6 +97,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/agents", h.settings)
 	mux.HandleFunc("PUT /api/agents/switches/{agent}", h.setGlobalSwitch)
 	mux.HandleFunc("POST /api/agents/switches/{agent}/emergency-stop", h.emergencyStop)
+	mux.HandleFunc("POST /api/agents/cooldowns/{runner}/{agent}/ready", h.markReady)
 	mux.HandleFunc("PUT /api/agents/bindings/{role}", h.setGlobalBinding)
 	mux.HandleFunc("DELETE /api/agents/bindings/{role}", h.resetGlobalBinding)
 	mux.HandleFunc("GET /api/projects/{id}/agents", h.projectSettings)
@@ -168,7 +173,8 @@ func (h *Handler) settings(w http.ResponseWriter, r *http.Request) {
 		out.Bindings = append(out.Bindings, bindingJSON(v))
 	}
 	for _, c := range s.Cooldowns {
-		out.Cooldowns = append(out.Cooldowns, CooldownJSON{RunnerID: c.RunnerID, Agent: c.Agent, Until: c.Until, Reason: c.Reason})
+		out.Cooldowns = append(out.Cooldowns, CooldownJSON{RunnerID: c.RunnerID, Agent: c.Agent, Until: c.Until, Reason: c.Reason,
+			Cause: c.Cause, Strikes: c.Strikes, Parked: c.Parked})
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
@@ -266,6 +272,19 @@ func (h *Handler) emergencyStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]int{"stopped": n})
+}
+
+// markReady is the Owner's "CLI ready again" for a runner's held CLI (KIN-83).
+func (h *Handler) markReady(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	if err := h.Service.MarkReady(r.Context(), p, r.PathValue("runner"), r.PathValue("agent")); err != nil {
+		h.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func decodeBinding(w http.ResponseWriter, r *http.Request) (domain.Binding, bool) {

@@ -30,8 +30,8 @@ type AgentRoute struct {
 	Chain []domain.AgentChoice // permitted choices in order; empty: nothing permitted
 	// Blocked explains an empty Chain (shown as the task's BLOCKED(agent) detail).
 	Blocked string
-	// Cooling reports a runner's CLI cooling down after a usage limit (cli_limit) until the returned time; nil: none.
-	Cooling func(runnerID, agent string) (time.Time, bool)
+	// Cooling reports a runner's CLI held after cli_limit (until a reset, or until the Owner acts); nil: none.
+	Cooling func(runnerID, agent string) (domain.Cooling, bool)
 }
 
 // AgentMock is the agent of mock plans (the mock adapter, no AI): they are never routed.

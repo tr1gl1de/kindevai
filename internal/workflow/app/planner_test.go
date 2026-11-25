@@ -354,7 +354,7 @@ func TestPlanningWaitsForARunnerAndTheCLILimit(t *testing.T) {
 	if err := e.svc.StartPlanningAttempt(t.Context(), a.StepID, "r1", a.Fence); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.svc.HoldPlanningForCLILimit(t.Context(), a.StepID, "r1", a.Fence, "usage limit", reset); err != nil {
+	if err := e.svc.HoldPlanningForCLILimit(t.Context(), a.StepID, "r1", a.Fence, "rate_limit", "usage limit", reset); err != nil {
 		t.Fatal(err)
 	}
 	if got := e.task(t, task.ID); got.State != domain.TaskBlocked || got.BlockReason != domain.WaitCLILimit {
@@ -493,5 +493,37 @@ func TestFailedReplanKeepsThePlanAndLateAnswersAreDropped(t *testing.T) {
 	}
 	if r := e.run(t, task.ID); r.State != domain.PlanningCancelled {
 		t.Fatalf("run %+v", r)
+	}
+}
+
+// KIN-83: a planner whose CLI is logged out waits for the hold routing decided; a parked hold waits for the Owner.
+func TestPlanningOnALoggedOutCLIWaitsForTheOwner(t *testing.T) {
+	t.Parallel()
+	e := newPlannerEnv()
+	e.pool.set("p1", cliRunner("r1", "claude"))
+	parked := e.clock.Now().Add(7 * 24 * time.Hour)
+	e.limits.hold = CLIHold{Known: true, Until: parked, NeedsOwner: true}
+	task := e.newTask(t, "")
+	if _, err := e.svc.StartPlanning(t.Context(), admin, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	a := e.assigned(t)
+	if err := e.svc.StartPlanningAttempt(t.Context(), a.StepID, "r1", a.Fence); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.HoldPlanningForCLILimit(t.Context(), a.StepID, "r1", a.Fence, "auth", "not logged in", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.limits.got) != 1 || !strings.HasPrefix(e.limits.got[0], "r1 claude auth") {
+		t.Fatalf("hold %v", e.limits.got)
+	}
+	got := e.task(t, task.ID)
+	if got.State != domain.TaskBlocked || got.BlockReason != domain.WaitCLILimit ||
+		!strings.Contains(got.Reason.Detail, "waiting for the Owner") {
+		t.Fatalf("blocked %+v", got)
+	}
+	e.clock.Add(2 * time.Hour)
+	if e.schedule(t); len(e.disp.takeAssigned()) != 0 {
+		t.Fatal("a parked planner was assigned again")
 	}
 }

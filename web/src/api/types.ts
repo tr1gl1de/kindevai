@@ -206,6 +206,10 @@ export interface Runner {
   availability: RunnerAvailability;
   lastHeartbeatAt: string | null;
   capabilities: RunnerCapabilities | null;
+  /** KIN-116: the Owner's parallel-step limit (null: the runner's --max-parallel-steps applies). */
+  maxParallelSteps?: number | null;
+  /** The limit the scheduler applies: the lower of the Owner's and the runner's flag; 0 = no limit. */
+  effectiveMaxParallelSteps?: number;
 }
 
 export type RunnerAvailability = "never_connected" | "online" | "unreachable";
@@ -218,6 +222,8 @@ export interface RunnerCapabilities {
   strictEgress: boolean;
   tools: { name: string; version: string }[];
   reportedAt: string;
+  /** The runner's --max-parallel-steps (KIN-76); 0 = no limit. */
+  maxParallelSteps?: number;
 }
 
 // Storage Overview (GET /api/storage/overview, KIN-20; metrics per KB KIN-A-26).

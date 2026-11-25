@@ -46,6 +46,10 @@
 .availability-unreachable {
   border-color: var(--warn-border);
   background: var(--warn-bg);
+  color: var(--warn-text);
+  --text: var(--warn-text);
+  --muted: var(--warn-muted);
+  --link: var(--warn-link);
 }
 /* Infrastructure → Storage (KIN-55) */
 .storage-machine {

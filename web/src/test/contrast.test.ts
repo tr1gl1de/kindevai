@@ -2,7 +2,8 @@
 // KIN-110, KIN-111: every foreground/background colour pair the stylesheets use meets WCAG 2.2 AA in both themes —
 // 4.5:1 for text (1.4.3), 3:1 for borders, focus rings, chart lines and other non-text UI (1.4.11) — and no
 // stylesheet bypasses the theme with a hard-coded colour. axe cannot check contrast in jsdom (no layout), so this
-// is the real guard. Telegram theme variables are not ours to check; the fallbacks after them are.
+// is the real guard. Telegram theme variables are not ours to check; the fallbacks after them are, and warning
+// surfaces must stay readable with any Telegram palette (KIN-114, at the end).
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -83,6 +84,9 @@ const PAIRS: [string, string[], number][] = [
   ["--danger", SURFACES, UI], // invalid inputs, failed-state badge borders, critical threshold
   ["--warn-border", SURFACES, UI], // warn badges/cards, warning threshold
   ["--border-strong", SURFACES, UI], // input, button and segmented control boundaries, chart axes
+  ["--warn-text", ["--warn-bg"], TEXT], // text on warning surfaces (KIN-114)
+  ["--warn-muted", ["--warn-bg"], TEXT], // hints on warning surfaces
+  ["--warn-link", ["--warn-bg"], TEXT], // links on warning surfaces, e.g. the maintenance banner
 ];
 
 // Colour tokens with no contrast requirement, and why.
@@ -180,5 +184,98 @@ describe.each(Object.keys(sheets))("%s", (file) => {
       .filter(({ selector, body }) => control.test(selector) && /border[\w-]*\s*:[^;]*var\(--border\)/.test(body))
       .map(({ selector }) => selector);
     expect(offenders).toEqual([]);
+  });
+});
+
+// KIN-114: Telegram's theme params replace --text, --muted and --link, and nothing bounds them against our --warn-bg
+// (Telegram's own light hint #707579 and link #2481cc reach only 4.3:1 and 3.8:1 on it). So every rule that paints
+// --warn-bg points those tokens, and its own colour, at warn tokens Telegram never sets. Resolved like the browser
+// does — the rule's custom properties first, then the theme block, var() fallbacks when Telegram leaves one unset —
+// the text, hints and links on each warning surface must reach 4.5:1 whatever palette Telegram sends.
+const TELEGRAM_PALETTES: Record<string, { theme: keyof typeof themes; params: Record<string, string> }> = {
+  "Telegram light": {
+    theme: "light",
+    params: { bg_color: "#ffffff", secondary_bg_color: "#f4f4f5", text_color: "#000000", hint_color: "#707579", link_color: "#2481cc", button_color: "#3390ec", button_text_color: "#ffffff" },
+  },
+  "Telegram dark": {
+    theme: "dark",
+    params: { bg_color: "#17212b", secondary_bg_color: "#232e3c", text_color: "#f5f5f5", hint_color: "#708499", link_color: "#6ab3f3", button_color: "#5288c1", button_text_color: "#ffffff" },
+  },
+  // A palette that would make warning text vanish if any of it reached a warning surface.
+  // Telegram's background picks the theme (applyThemeParams), so its light/dark side always matches the theme.
+  "hostile light": {
+    theme: "light",
+    params: { bg_color: "#ffffff", secondary_bg_color: "#efefef", text_color: "#fff6e0", hint_color: "#fff6e0", link_color: "#fff6e0" },
+  },
+  "hostile dark": {
+    theme: "dark",
+    params: { bg_color: "#000000", secondary_bg_color: "#2a2a2a", text_color: "#2b2412", hint_color: "#2b2412", link_color: "#2b2412" },
+  },
+};
+
+function rawTokens(selector: string): Record<string, string> {
+  const start = css.indexOf(`${selector} {`);
+  const body = css.slice(css.indexOf("{", start) + 1, css.indexOf("}", start));
+  return Object.fromEntries([...body.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)].map((m) => [m[1]!, m[2]!.trim()]));
+}
+// The dark block overrides the light base, as the cascade does.
+const rawThemes = { light: rawTokens(":root"), dark: { ...rawTokens(":root"), ...rawTokens(':root[data-theme="dark"]') } };
+
+// Resolves a colour value: `#hex`, or `var(--name[, fallback])` looked up in the scopes (innermost first), where
+// --tg-theme-* comes from Telegram's params and falls back when Telegram does not send it.
+function resolve(value: string, scopes: Record<string, string>[], tg: Record<string, string>, depth = 0): string {
+  if (depth > 10) throw new Error(`var() cycle in ${value}`);
+  const v = value.trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(v)) return v.toLowerCase();
+  const m = /^var\((--[\w-]+)\s*(?:,\s*(.+))?\)$/.exec(v);
+  if (!m) throw new Error(`cannot resolve ${v}`);
+  const name = m[1]!;
+  const fallback = m[2];
+  const tgKey = name.startsWith("--tg-theme-") ? name.slice("--tg-theme-".length).replaceAll("-", "_") : null;
+  const found = tgKey !== null ? tg[tgKey] : scopes.find((s) => name in s)?.[name];
+  if (found !== undefined) return resolve(found, scopes, tg, depth + 1);
+  if (fallback === undefined) throw new Error(`${name} is not set`);
+  return resolve(fallback, scopes, tg, depth + 1);
+}
+
+const warnRules = Object.entries(sheets).flatMap(([file, sheet]) =>
+  rules(sheet)
+    .filter(({ selector, body }) => !selector.startsWith(":root") && /background(-color)?\s*:\s*var\(--warn-bg\)/.test(body))
+    .map(({ selector, body }) => ({ where: `${file} ${selector}`, decls: Object.fromEntries(declarations(body)) })),
+);
+
+it("finds the warning surfaces", () => {
+  expect(warnRules.length).toBeGreaterThanOrEqual(10);
+});
+
+describe.each(Object.entries(TELEGRAM_PALETTES))("warning surfaces with the %s palette", (_, { theme, params }) => {
+  const root = rawThemes[theme];
+  const cases = warnRules.flatMap(({ where, decls }) => {
+    const scopes = [decls, root];
+    const bg = resolve("var(--warn-bg)", scopes, params);
+    // Without its own colour the surface inherits the page text colour, computed outside it.
+    const own = decls.color ?? null;
+    return [
+      [where, "colour", own === null ? resolve("var(--text)", [root], params) : resolve(own, scopes, params), bg],
+      [where, "--text", resolve("var(--text)", scopes, params), bg],
+      [where, "--muted", resolve("var(--muted)", scopes, params), bg],
+      [where, "--link", resolve("var(--link)", scopes, params), bg],
+    ] as const;
+  });
+
+  it.each(cases)("%s: %s %s on %s has at least 4.5:1", (_where, _token, fg, bg) => {
+    expect(ratio(fg, bg)).toBeGreaterThanOrEqual(TEXT);
+  });
+
+  // Controls and code blocks inside a warning card keep Telegram's --bg/--surface fill but take the card's
+  // redefined --text and --muted.
+  const nested = ["--bg", "--surface"].flatMap((fill) =>
+    ["--warn-text", "--warn-muted"].map((fg) => {
+      const scopes = [root];
+      return [fg, fill, resolve(`var(${fg})`, scopes, params), resolve(`var(${fill})`, scopes, params)] as const;
+    }),
+  );
+  it.each(nested)("%s on a nested %s fill (%s on %s) has at least 4.5:1", (_fg, _fill, fg, bg) => {
+    expect(ratio(fg, bg)).toBeGreaterThanOrEqual(TEXT);
   });
 });

@@ -141,7 +141,7 @@ func (r *Repository) RevokeToken(ctx context.Context, id string, now time.Time) 
 }
 
 const runnerCols = `id, public_key, fingerprint, hostname, os, arch, version, status, created_by, enrollment_token_id,
-	enrolled_at, approved_by, approved_at, disabled_at, revoked_by, revoked_at, last_seen_at`
+	enrolled_at, approved_by, approved_at, disabled_at, revoked_by, revoked_at, last_seen_at, max_parallel_steps`
 
 func scanRunner(row scanner) (domain.Runner, error) {
 	var x domain.Runner
@@ -149,7 +149,8 @@ func scanRunner(row scanner) (domain.Runner, error) {
 	var status, enrolled string
 	var createdBy, approvedBy, approvedAt, disabledAt, revokedBy, revokedAt, lastSeen sql.NullString
 	err := row.Scan(&x.ID, &key, &x.Fingerprint, &x.Metadata.Hostname, &x.Metadata.OS, &x.Metadata.Arch, &x.Metadata.Version,
-		&status, &createdBy, &x.EnrollmentTokenID, &enrolled, &approvedBy, &approvedAt, &disabledAt, &revokedBy, &revokedAt, &lastSeen)
+		&status, &createdBy, &x.EnrollmentTokenID, &enrolled, &approvedBy, &approvedAt, &disabledAt, &revokedBy, &revokedAt, &lastSeen,
+		&x.MaxParallelSteps)
 	if errors.Is(err, sql.ErrNoRows) {
 		return x, domain.ErrNotFound
 	}
@@ -249,12 +250,12 @@ func (r *Repository) runnerRows(ctx context.Context) ([]domain.Runner, error) {
 	return out, nil
 }
 
-// SaveRunner writes the status fields and replaces the project permissions.
+// SaveRunner writes the status fields and the Owner's parallel-step limit and replaces the project permissions.
 func (r *Repository) SaveRunner(ctx context.Context, x domain.Runner) error {
 	c := db.Conn(ctx, r.db)
 	res, err := c.ExecContext(ctx, `UPDATE runners SET status = ?, approved_by = ?, approved_at = ?, disabled_at = ?,
-		revoked_by = ?, revoked_at = ? WHERE id = ?`, string(x.Status), nullStr(x.ApprovedBy), nullTS(x.ApprovedAt),
-		nullTS(x.DisabledAt), nullStr(x.RevokedBy), nullTS(x.RevokedAt), x.ID)
+		revoked_by = ?, revoked_at = ?, max_parallel_steps = ? WHERE id = ?`, string(x.Status), nullStr(x.ApprovedBy),
+		nullTS(x.ApprovedAt), nullTS(x.DisabledAt), nullStr(x.RevokedBy), nullTS(x.RevokedAt), x.MaxParallelSteps, x.ID)
 	if err != nil {
 		return fmt.Errorf("saving runner: %w", err)
 	}

@@ -15,7 +15,7 @@ type Candidate struct {
 	DiskHeavyAllowed bool         // false while a volume of the runner is critical (KIN-20)
 	StrictEgress     bool         // its strict egress sandbox verified (KIN-31)
 	Disk             domain.Level // the highest level of its volumes (KIN-76: a fuller disk ranks lower)
-	MaxParallelSteps int          // the parallel-step limit it declared; 0 = none (KIN-76)
+	MaxParallelSteps int          // its effective parallel-step limit (KIN-116: Owner's value capped by its flag); 0 = none
 }
 
 // Candidates lists, by id, the runners that may receive the project's steps now: APPROVED and granted the project
@@ -47,13 +47,15 @@ func (t *Telemetry) Candidates(ctx context.Context, projectID string, online fun
 				c.Disk = l
 			}
 		}
+		flag := 0
 		if p.Capabilities != nil {
 			c.StrictEgress = p.Capabilities.StrictEgress
-			c.MaxParallelSteps = p.Capabilities.MaxParallelSteps
+			flag = p.Capabilities.MaxParallelSteps
 			for _, tool := range p.Capabilities.Tools {
 				c.Tools = append(c.Tools, tool.Name)
 			}
 		}
+		c.MaxParallelSteps = domain.EffectiveMaxParallelSteps(r.MaxParallelSteps, flag)
 		out = append(out, c)
 	}
 	slices.SortFunc(out, func(a, b Candidate) int { return strings.Compare(a.ID, b.ID) })

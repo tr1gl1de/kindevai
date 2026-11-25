@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -86,5 +87,46 @@ func TestCandidateLimitAndDiskLevel(t *testing.T) {
 	}
 	if got, _ := f.tel.Candidates(ctx, "p1", online); len(got) != 1 || got[0].Disk != domain.LevelHigh || !got[0].DiskHeavyAllowed {
 		t.Fatalf("high disk: %+v", got)
+	}
+}
+
+// KIN-116: the scheduler gets the effective limit: the Owner's value capped by the runner's flag; cleared → the
+// flag. Only the Owner sets it, audited.
+func TestCandidatesUseTheOwnersParallelStepLimit(t *testing.T) {
+	t.Parallel()
+	f := newTelFixture(t)
+	ctx := t.Context()
+	a := f.approved(t, keyA)
+	if err := f.tel.Heartbeat(ctx, a.ID, "s1"); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := domain.NewCapabilities("linux", "amd64", false, false, nil, f.clock.Now())
+	c, _ = c.WithMaxParallelSteps(4)
+	if err := f.tel.Capabilities(ctx, a.ID, "s1", c); err != nil {
+		t.Fatal(err)
+	}
+	online := func(string) bool { return true }
+	limit := func() int {
+		t.Helper()
+		got, err := f.tel.Candidates(ctx, "p1", online)
+		if err != nil || len(got) != 1 {
+			t.Fatalf("candidates %+v %v", got, err)
+		}
+		return got[0].MaxParallelSteps
+	}
+	if _, err := f.svc.SetMaxParallelSteps(ctx, member, a.ID, 1); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("member: %v", err)
+	}
+	for _, c := range []struct{ ui, want int }{{1, 1}, {6, 4}, {0, 4}} {
+		v, err := f.svc.SetMaxParallelSteps(ctx, owner, a.ID, c.ui)
+		if err != nil || v.Runner.MaxParallelSteps != c.ui {
+			t.Fatalf("set %d: %+v %v", c.ui, v.Runner.MaxParallelSteps, err)
+		}
+		if got := limit(); got != c.want {
+			t.Fatalf("ui %d flag 4: effective %d, want %d", c.ui, got, c.want)
+		}
+	}
+	if e := f.audit.last(); e.Kind != KindMaxParallelChanged || e.Details["maxParallelSteps"] != "runner flag" {
+		t.Fatalf("audit %+v", e)
 	}
 }

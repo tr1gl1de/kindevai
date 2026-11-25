@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,6 +29,8 @@ const (
 	KindDisabled        = "runner.disabled"
 	KindEnabled         = "runner.enabled"
 	KindRevoked         = "runner.revoked"
+	// KindMaxParallelChanged: the Owner set or cleared a runner's parallel-step limit (KIN-116).
+	KindMaxParallelChanged = "runner.max_parallel_changed"
 )
 
 // Repository stores enrollment tokens and runners. Every method runs on the caller's transaction (db.Conn).
@@ -437,6 +440,21 @@ func (s *Service) SetProjects(ctx context.Context, actor auth.Principal, id stri
 			return nil, err
 		}
 		return projectDetails(*r), s.checkProjects(ctx, r.ProjectIDs)
+	})
+}
+
+// SetMaxParallelSteps sets (1..64) or clears (0) the Owner's parallel-step limit of a runner (Owner only, KIN-116).
+// The scheduler applies the lower of it and the runner's --max-parallel-steps.
+func (s *Service) SetMaxParallelSteps(ctx context.Context, actor auth.Principal, id string, n int) (RunnerView, error) {
+	return s.change(ctx, actor, id, KindMaxParallelChanged, func(_ context.Context, r *domain.Runner, _ time.Time) (map[string]string, error) {
+		if err := r.SetMaxParallelSteps(n); err != nil {
+			return nil, err
+		}
+		v := "runner flag"
+		if n > 0 {
+			v = strconv.Itoa(n)
+		}
+		return map[string]string{"maxParallelSteps": v}, nil
 	})
 }
 

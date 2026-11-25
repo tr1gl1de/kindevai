@@ -195,3 +195,70 @@ describe("needsHttpsForRemote", () => {
     expect(needsHttpsForRemote("https://ai.example.com")).toBe(false);
   });
 });
+
+describe("runner parallel-step limit (KIN-116)", () => {
+  const approved: Runner = {
+    ...pending,
+    status: "approved",
+    approvedAt: "2026-11-24T10:05:00Z",
+    projects: [{ id: "p1", name: "Alpha" }],
+    availability: "online",
+    capabilities: { os: "linux", arch: "amd64", wsl: false, strictEgress: false, tools: [], reportedAt: "2026-11-24T11:00:00Z",
+      maxParallelSteps: 4 },
+    maxParallelSteps: null,
+    effectiveMaxParallelSteps: 4,
+  };
+
+  it("sets, validates and clears the Owner's limit next to the runner's flag", async () => {
+    let current: Runner = approved;
+    const bodies: unknown[] = [];
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/runners/r1", () => json(current)),
+      http.put("/api/runners/r1/max-parallel-steps", async ({ request }) => {
+        const b = (await request.json()) as { maxParallelSteps: number | null };
+        bodies.push(b);
+        const n = b.maxParallelSteps;
+        current = { ...current, maxParallelSteps: n, effectiveMaxParallelSteps: n === null ? 4 : Math.min(n, 4) };
+        return json(current);
+      }),
+    );
+    const { container } = await renderApp("/runners/r1");
+    const user = userEvent.setup();
+    const section = await screen.findByRole("region", { name: "Parallel steps" });
+    expect(within(section).getByText("--max-parallel-steps 4")).toBeInTheDocument();
+    expect(within(section).getByText("4 steps")).toBeInTheDocument();
+    const input = within(section).getByRole("spinbutton", { name: "Owner's limit" });
+    await user.type(input, "70");
+    await user.click(within(section).getByRole("button", { name: "Save limit" }));
+    expect(await within(section).findByText("Enter a whole number from 1 to 64, or leave it empty.")).toBeInTheDocument();
+    expect(bodies).toEqual([]);
+    await user.clear(input);
+    await user.type(input, "2");
+    await user.click(within(section).getByRole("button", { name: "Save limit" }));
+    await expectStatus("Parallel-step limit saved.");
+    const saved = screen.getByRole("region", { name: "Parallel steps" });
+    expect(within(saved).getByText("2 steps")).toBeInTheDocument();
+    const field = within(saved).getByRole("spinbutton", { name: "Owner's limit" });
+    expect(field).toHaveValue(2);
+    await user.clear(field);
+    await user.click(within(saved).getByRole("button", { name: "Save limit" }));
+    await expectStatus("Parallel-step limit saved.");
+    expect(bodies).toEqual([{ maxParallelSteps: 2 }, { maxParallelSteps: null }]);
+    await expectAccessible(container);
+  });
+
+  it("names a runner without any limit, in Russian", async () => {
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/runners/r1", () => json({ ...approved, capabilities: { ...approved.capabilities!, maxParallelSteps: 0 },
+        effectiveMaxParallelSteps: 0 })),
+    );
+    await renderApp("/runners/r1", "ru");
+    const section = await screen.findByRole("region", { name: "Параллельные шаги" });
+    expect(within(section).getAllByText("без лимита")).toHaveLength(2);
+    expect(within(section).getByRole("spinbutton", { name: "Лимит Owner'а" })).toBeInTheDocument();
+  });
+});

@@ -32,4 +32,4 @@ CREATE TABLE planning_runs (
 ) STRICT;
 CREATE INDEX planning_runs_task ON planning_runs(task_id, created_at);
 CREATE UNIQUE INDEX planning_runs_one_active ON planning_runs(task_id) WHERE state IN ('PREPARING', 'QUEUED', 'RUNNING');
-CREATE INDEX planning_runs_active ON planning_runs(state) WHERE state IN ('QUEUED', 'RUNNING');
+CREATE INDEX planning_runs_active ON planning_runs(state) WHERE state IN ('PREPARING', 'QUEUED', 'RUNNING');

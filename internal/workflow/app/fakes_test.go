@@ -417,7 +417,7 @@ func (m *memPlanning) ActivePlanningRuns(context.Context) ([]string, error) {
 	defer m.mu.Unlock()
 	var out []string
 	for _, id := range m.ord {
-		if st := m.runs[id].State; st == domain.PlanningQueued || st == domain.PlanningRunning {
+		if m.runs[id].State.Active() {
 			out = append(out, id)
 		}
 	}

@@ -33,7 +33,6 @@ type plannerEnv struct {
 	schedEnv
 	router *fakeRouter
 	plans  *memPlanning
-	outbox *alertOutbox
 	limits *fakeCLILimits
 }
 
@@ -423,6 +422,76 @@ func TestPlanningAttemptLostAndCancelled(t *testing.T) {
 		t.Fatalf("commands %v", c)
 	}
 	if r := e.run(t, task2.ID); r.State != domain.PlanningCancelled {
+		t.Fatalf("run %+v", r)
+	}
+}
+
+// Review (KIN-34): a planner that changes files breaks its read-only contract: the process is stopped and the
+// attempt ends without a plan.
+func TestPlannerThatChangesFilesIsStopped(t *testing.T) {
+	t.Parallel()
+	e := newPlannerEnv()
+	task := e.newTask(t, "")
+	a := e.plan(t, task.ID)
+	if err := e.svc.PlannerChangedFiles(t.Context(), a.StepID, "r1", a.Fence, []string{"evil.sh"}); err != nil {
+		t.Fatal(err)
+	}
+	if c := e.disp.take(); len(c) != 1 || c[0] != fmt.Sprintf("cancel r1 %s/1 scope_exceeded", a.StepID) {
+		t.Fatalf("commands %v", c)
+	}
+	if r := e.run(t, task.ID); r.State != domain.PlanningQueued || r.Used != 1 || !strings.Contains(r.Feedback, "evil.sh") {
+		t.Fatalf("run %+v", r)
+	}
+}
+
+// Review: a run stuck reading YouTrack (the message never delivered) goes on without the issue text.
+func TestPreparingRunTimesOut(t *testing.T) {
+	t.Parallel()
+	e := newPlannerEnv()
+	e.svc.Outbox, e.svc.IssueContext = &alertOutbox{}, &fakeIssueContext{}
+	task := e.newTask(t, "KIN-7")
+	if _, err := e.svc.StartPlanning(t.Context(), admin, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.clock.Add(MaxContextWait + time.Second)
+	a := e.assigned(t)
+	if r := e.run(t, task.ID); r.State != domain.PlanningRunning || !strings.Contains(r.Context.Note, "unavailable") ||
+		!strings.Contains(a.Prompt, "unavailable") {
+		t.Fatalf("run %+v", r)
+	}
+}
+
+// Review: a failed replan keeps the task's current plan instead of failing the task; a late answer after the task
+// left ANALYZING (e.g. a plan from the chat) is dropped.
+func TestFailedReplanKeepsThePlanAndLateAnswersAreDropped(t *testing.T) {
+	t.Parallel()
+	e := newPlannerEnv()
+	e.policy.raise = domain.RiskL2
+	task := e.newTask(t, "")
+	if err := e.answer(t, e.plan(t, task.ID), "r1", "s", goodPlan); err != nil {
+		t.Fatal(err)
+	}
+	a := e.plan(t, task.ID)
+	_ = e.answer(t, a, "r1", "s", "no plan")
+	_ = e.answer(t, e.assigned(t), "r1", "s", "still no plan")
+	if got := e.task(t, task.ID); got.State != domain.TaskAwaitingApproval || got.PlanRevision != 1 {
+		t.Fatalf("after a failed replan %+v", got)
+	}
+	if r := e.run(t, task.ID); r.State != domain.PlanningFailed {
+		t.Fatalf("run %+v", r)
+	}
+	a = e.plan(t, task.ID)
+	if _, err := e.svc.SubmitPlan(t.Context(), task.ID, domain.Plan{Risk: domain.RiskL1, Summary: "chat",
+		Steps: []domain.PlanStep{{Key: "a", Title: "A", Repository: "acme/api"}}}, "chat"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.answer(t, a, "r1", "s", goodPlan); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.task(t, task.ID); got.PlanRevision != 2 {
+		t.Fatalf("a late planner answer replaced the plan: %+v", got)
+	}
+	if r := e.run(t, task.ID); r.State != domain.PlanningCancelled {
 		t.Fatalf("run %+v", r)
 	}
 }

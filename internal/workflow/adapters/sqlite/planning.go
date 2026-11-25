@@ -108,9 +108,9 @@ func (r *Repository) SavePlanningRun(ctx context.Context, p *domain.PlanningRun)
 	return nil
 }
 
-// ActivePlanningRuns lists QUEUED and RUNNING runs, oldest first.
+// ActivePlanningRuns lists the runs that have not ended, oldest first.
 func (r *Repository) ActivePlanningRuns(ctx context.Context) ([]string, error) {
-	return r.ids(ctx, "listing planning runs", `SELECT id FROM planning_runs WHERE state IN ('QUEUED', 'RUNNING')
+	return r.ids(ctx, "listing planning runs", `SELECT id FROM planning_runs WHERE state IN ('PREPARING', 'QUEUED', 'RUNNING')
 		ORDER BY created_at, rowid`)
 }
 

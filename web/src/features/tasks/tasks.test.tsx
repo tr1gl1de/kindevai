@@ -458,7 +458,7 @@ describe("AI planner (KIN-34)", () => {
     await user.click(await screen.findByRole("button", { name: "Plan with AI" }));
     await expectStatus("The AI planner is analysing the task.");
     expect(posted).toBe(1);
-    const planner = await screen.findByRole("group", { name: "AI planner" });
+    const planner = await screen.findByRole("region", { name: "AI planner" });
     expect(within(planner).getByText("Waiting for a runner")).toBeInTheDocument();
     expect(within(planner).getByText(/repository_not_in_project/)).toBeInTheDocument();
     expect(within(planner).getByText("issue text · articles KIN-A-15")).toBeInTheDocument();
@@ -494,7 +494,7 @@ describe("AI planner (KIN-34)", () => {
       http.get("/api/tasks/t1", () => json(planned)),
     );
     const { container } = await renderApp("/tasks/t1", "ru");
-    expect(await screen.findByRole("group", { name: "AI-планировщик" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "AI-планировщик" })).toBeInTheDocument();
     expect(screen.getByRole("table", { name: "Шаги плана (одновременно до 2)" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Перепланировать с AI" })).toBeInTheDocument();
     await expectAccessible(container);

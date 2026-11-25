@@ -1002,3 +1002,15 @@ func TestCompletedResultIsRedacted(t *testing.T) {
 		t.Fatalf("empty body %s", got)
 	}
 }
+
+// Review (KIN-34): redaction keeps an ordinary plan intact (hashes and long paths are not secrets).
+func TestCompletedPlanSurvivesRedaction(t *testing.T) {
+	t.Parallel()
+	plan := `{"summary":"bump to 3f2a9c1e7b4d00000000000000000000deadbeef","risk":"L1","maxParallel":1,"steps":[` +
+		`{"key":"a","title":"A","repository":"acme/app","scope":["internal/workflow/adapters/sqlite/planning_runs/**"],"dependsOn":[],"capabilities":[]}]}`
+	body, _ := json.Marshal(protocol.Completed{Agent: &protocol.AgentReport{Result: plan}})
+	var got protocol.Completed
+	if err := json.Unmarshal(redactBody(protocol.EventCompleted, body), &got); err != nil || got.Agent.Result != plan {
+		t.Fatalf("plan changed by redaction: %q %v", got.Agent.Result, err)
+	}
+}

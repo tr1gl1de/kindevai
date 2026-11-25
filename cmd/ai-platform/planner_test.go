@@ -150,9 +150,8 @@ func TestPlannerThroughTheRunnerChannel(t *testing.T) {
 			if err := ex.StartAttempt(ctx, runnerID, a.Step, a.Fence, now, c.agent); err != nil {
 				t.Fatal(err)
 			}
-			if err := sc.CheckChanges(ctx, runnerID, a.Step, a.Fence, protocol.WorkspaceChanges{FilesTotal: 1,
-				Files: []protocol.ChangedFile{{Path: "outside.txt", Status: "A"}}}); err != nil {
-				t.Fatalf("a planner's worktree is not scope-checked: %v", err)
+			if err := sc.CheckChanges(ctx, runnerID, a.Step, a.Fence, protocol.WorkspaceChanges{}); err != nil {
+				t.Fatalf("a planner that changed nothing: %v", err)
 			}
 			if err := ex.RecordAgentReport(ctx, runnerID, a.Step, a.Fence, cliAnswer(t, c.dialect, c.file)); err != nil {
 				t.Fatal(err)
@@ -246,4 +245,35 @@ func TestRealCLIPlannerSmoke(t *testing.T) {
 		t.Fatalf("plan invalid: %v\n%s", err, res.Text)
 	}
 	t.Logf("session %s, %d steps, risk %s: %s", res.Session, len(plan.Steps), plan.Risk, plan.Summary)
+}
+
+// Review (KIN-34): a planner attempt that reports changed files is stopped through the channel's scope port.
+func TestPlannerChangesThroughTheScopePort(t *testing.T) {
+	t.Parallel()
+	cp, runnerID := plannerCP(t, plannerRouter{agent: "claude"})
+	ctx := t.Context()
+	task, err := cp.wf.CreateTaskAs(ctx, ownerP, "p1", "Read only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cp.wf.StartPlanning(ctx, ownerP, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := cp.wf.Schedule(ctx); err != nil {
+		t.Fatal(err)
+	}
+	a := lastAssign(t, cp, runnerID)
+	sc := runnerScope{apv: cp.approvals, wf: cp.wf}
+	if err := sc.CheckChanges(ctx, runnerID, a.Step, a.Fence, protocol.WorkspaceChanges{FilesTotal: 1,
+		Files: []protocol.ChangedFile{{Path: "outside.txt", Status: "A"}}}); err != nil {
+		t.Fatal(err)
+	}
+	cmds, _ := runnersdb.New(cp.inst.DB).CommandsAfter(ctx, runnerID, 0, 100)
+	if last := cmds[len(cmds)-1]; last.Kind != protocol.CommandCancel || !strings.Contains(string(last.Body), "scope_exceeded") {
+		t.Fatalf("last command %s %s", last.Kind, last.Body)
+	}
+	d := cp.detail(t, task.ID)
+	if d.Planning.State != workflow.PlanningQueued || !strings.Contains(d.Planning.Feedback, "outside.txt") {
+		t.Fatalf("planning %+v", d.Planning)
+	}
 }

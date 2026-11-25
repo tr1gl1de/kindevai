@@ -296,7 +296,7 @@ func PlannerPrompt(in PlannerInput) string {
 		return cutUTF8(head.String()+rules.String(), MaxPromptBytes)
 	}
 	var task strings.Builder
-	fmt.Fprintf(&task, "# Plan the task: %s\n", in.Task.Title)
+	fmt.Fprintf(&task, "# Plan the task: %s\n", strings.Join(strings.Fields(in.Task.Title), " "))
 	if in.Task.YouTrackIssue != "" {
 		fmt.Fprintf(&task, "YouTrack issue: %s\n", in.Task.YouTrackIssue)
 	}

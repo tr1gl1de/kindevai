@@ -16,8 +16,8 @@ func attachScopeCheck(ch *runnersapp.Channel, apv *approvalsapp.Service, wf *wor
 	ch.Scope = runnerScope{apv: apv, wf: wf}
 }
 
-// runnerScope checks steps' changes. A planner attempt (KIN-34) has no scope to check: it runs read-only, its
-// worktree is never pushed or merged and is discarded with the attempt, and only its answer is used.
+// runnerScope checks steps' changes. A planner attempt (KIN-34) has an empty scope: it may only read, so any
+// changed file stops it and ends the attempt without a plan (its worktree is never published).
 type runnerScope struct {
 	apv *approvalsapp.Service
 	wf  *workflowapp.Service
@@ -27,7 +27,14 @@ type runnerScope struct {
 // or a truncated report) are unreported and stop the step; a hold that loses the race to a newer token is stale.
 func (r runnerScope) CheckChanges(ctx context.Context, runnerID, step string, fence int64, ch protocol.WorkspaceChanges) error {
 	if planning(step) {
-		return nil
+		if len(ch.Files) == 0 && ch.FilesTotal == 0 && !ch.Truncated {
+			return nil
+		}
+		files := make([]string, 0, len(ch.Files))
+		for _, f := range ch.Files {
+			files = append(files, f.Path)
+		}
+		return attemptError(r.wf.PlannerChangedFiles(ctx, step, runnerID, fence, files))
 	}
 	files := make([]string, 0, len(ch.Files))
 	for _, f := range ch.Files {

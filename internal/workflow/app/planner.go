@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
@@ -25,7 +27,7 @@ type PlanningRepository interface {
 	PlanningRun(ctx context.Context, id string) (domain.PlanningRun, error)
 	LatestPlanningRun(ctx context.Context, taskID string) (domain.PlanningRun, error) // domain.ErrNotFound
 	SavePlanningRun(ctx context.Context, r *domain.PlanningRun) error
-	// ActivePlanningRuns lists the runs that are QUEUED or RUNNING (the scheduler's work).
+	// ActivePlanningRuns lists the runs that have not ended (the scheduler's work).
 	ActivePlanningRuns(ctx context.Context) ([]string, error)
 	// PlanningRunsHeldBy lists the RUNNING runs whose current attempt is the runner's.
 	PlanningRunsHeldBy(ctx context.Context, runnerID string) ([]string, error)
@@ -56,6 +58,9 @@ const (
 	AdapterYouTrack = "youtrack"
 	// MaxContextFetchAttempts: after this many failed deliveries planning goes on without the issue text.
 	MaxContextFetchAttempts = 5
+	// MaxContextWait: a run still reading its context after this long (the delivery is held back or dead) goes on
+	// without the issue text.
+	MaxContextWait = 15 * time.Minute
 	// plannerStepKey names the planner's attempts on the runner channel.
 	plannerStepKey = "planner"
 )
@@ -100,6 +105,9 @@ func (s *Service) StartPlanning(ctx context.Context, p auth.Principal, taskID st
 		prepare := t.YouTrackIssue != "" && s.IssueContext != nil && s.Outbox != nil
 		run := domain.NewPlanningRun(s.NewID(), t.ID, p.UserID, prepare, now)
 		run.Session, run.SessionRunner, run.SessionAgent = prev.Session, prev.SessionRunner, prev.SessionAgent
+		if t.YouTrackIssue != "" && !prepare {
+			run.Context.Note = "the issue text is unavailable (YouTrack is not connected); plan from the title and the repository"
+		}
 		if err := s.Planning.CreatePlanningRun(ctx, &run); err != nil {
 			return err
 		}
@@ -142,7 +150,11 @@ func (s *Service) HandlePlanningContext(ctx context.Context, d messaging.Deliver
 		if !errors.Is(err, ErrContextUnavailable) && d.Attempt < MaxContextFetchAttempts {
 			return err
 		}
-		c = domain.PlanningContext{Note: "the issue text is unavailable (" + err.Error() + "); plan from the title and the repository"}
+		why := "YouTrack unreachable"
+		if errors.Is(err, ErrContextUnavailable) {
+			why = err.Error() // our own fixed wording (not configured, refused, issue gone)
+		}
+		c = domain.PlanningContext{Note: "the issue text is unavailable (" + why + "); plan from the title and the repository"}
 	}
 	return s.Tx.InTx(ctx, func(ctx context.Context) error {
 		run, err := s.Planning.PlanningRun(ctx, p.RunID)
@@ -185,8 +197,25 @@ func (s *Service) schedulePlanningRun(ctx context.Context, id string) error {
 			return err
 		}
 		now := s.now()
+		if run.State == domain.PlanningPreparing {
+			if now.Sub(run.CreatedAt) < MaxContextWait {
+				return nil
+			}
+			if err := run.ContextReady(domain.PlanningContext{Note: "the issue text is unavailable (YouTrack did not answer in time); " +
+				"plan from the title and the repository"}, now); err != nil {
+				return err
+			}
+		}
 		if run.LeaseExpired(now) {
-			return s.endPlanningAttempt(ctx, &run, "lease expired: the runner stopped reporting on the planner", now)
+			runner, fence := run.RunnerID, run.Fence
+			if err := s.endPlanningAttempt(ctx, &run, "lease expired: the runner stopped reporting on the planner", now); err != nil {
+				return err
+			}
+			if s.Dispatcher == nil {
+				return nil
+			}
+			// The runner may still run the CLI: stop it before another runner may plan the task.
+			return s.Dispatcher.Cancel(ctx, runner, run.StepID(), fence, CancelReasonStale)
 		}
 		if !run.Due(now) {
 			return nil
@@ -322,6 +351,22 @@ func (s *Service) failPlanningTask(ctx context.Context, taskID, reason string, n
 	if t.State != domain.TaskAnalyzing {
 		return nil // the task moved on (cancelled, planned by other means)
 	}
+	if t.PlanRevision > 0 {
+		// A failed replan keeps the current plan: the task returns where its revision routes it (its approvals were
+		// never superseded); the run's reason says why there is no new one.
+		rev, err := s.Repo.Revision(ctx, t.ID, t.PlanRevision)
+		if err != nil {
+			return err
+		}
+		to := domain.TaskReady
+		if rev.Risk().RequiresApproval() {
+			to = domain.TaskAwaitingApproval
+		}
+		if err := t.Transition(to, domain.Reason{}, now); err != nil {
+			return err
+		}
+		return s.saveTask(ctx, &t)
+	}
 	if err := t.Transition(domain.TaskFailed, domain.Reason{Detail: reason}, now); err != nil {
 		return err
 	}
@@ -387,11 +432,21 @@ func (s *Service) RecordPlanningReport(ctx context.Context, stepID, runnerID str
 // that is no valid plan queues the repeat with the reason, or FAILS the task after the last attempt.
 func (s *Service) CompletePlanningAttempt(ctx context.Context, stepID, runnerID string, fence int64) error {
 	return s.updatePlanningAttempt(ctx, stepID, runnerID, fence, func(ctx context.Context, run *domain.PlanningRun, now time.Time) error {
-		plan, err := domain.ExtractPlan(run.Result)
-		if err == nil {
-			if err = s.resumeAnalysis(ctx, run.TaskID, now); err != nil {
+		if err := s.resumeAnalysis(ctx, run.TaskID, now); err != nil {
+			return err
+		}
+		if t, err := s.Repo.Task(ctx, run.TaskID); err != nil {
+			return err
+		} else if t.State != domain.TaskAnalyzing {
+			// The task got a plan by other means meanwhile (the plan chat, by hand) or moved on: a late answer never
+			// replaces it.
+			if err := run.Cancel("the task is no longer being planned", now); err != nil {
 				return err
 			}
+			return s.Planning.SavePlanningRun(ctx, run)
+		}
+		plan, err := domain.ExtractPlan(run.Result)
+		if err == nil {
 			var rev domain.PlanRevision
 			rev, err = s.SubmitPlan(ctx, run.TaskID, plan, PlannerAuthorPrefix+run.Agent)
 			if err == nil {
@@ -432,6 +487,25 @@ func (s *Service) resumeAnalysis(ctx context.Context, taskID string, now time.Ti
 func (s *Service) FailPlanningAttempt(ctx context.Context, stepID, runnerID string, fence int64, reason string) error {
 	return s.updatePlanningAttempt(ctx, stepID, runnerID, fence, func(ctx context.Context, run *domain.PlanningRun, now time.Time) error {
 		return s.endPlanningAttempt(ctx, run, "the planner run failed: "+reason, now)
+	})
+}
+
+// PlannerChangedFiles stops a planner that changed files in its worktree (it must only read): the process is
+// cancelled and the attempt ends without a plan (repeat or FAIL). The worktree is never published either way.
+func (s *Service) PlannerChangedFiles(ctx context.Context, stepID, runnerID string, fence int64, files []string) error {
+	return s.updatePlanningAttempt(ctx, stepID, runnerID, fence, func(ctx context.Context, run *domain.PlanningRun, now time.Time) error {
+		shown := files
+		if len(shown) > 5 {
+			shown = append(slices.Clone(shown[:5]), "…")
+		}
+		why := "the planner changed files although it may only read: " + strings.Join(shown, ", ")
+		if err := s.endPlanningAttempt(ctx, run, why, now); err != nil {
+			return err
+		}
+		if s.Dispatcher == nil {
+			return nil
+		}
+		return s.Dispatcher.Cancel(ctx, runnerID, stepID, fence, CancelReasonScopeExceeded)
 	})
 }
 

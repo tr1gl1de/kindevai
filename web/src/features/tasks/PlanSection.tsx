@@ -121,8 +121,8 @@ function PlannerRun({ taskId, run }: { taskId: string; run: PlanningRun }) {
     run.articles.length > 0 && t("tasks.plannerArticles", { ids: run.articles.join(", ") }),
   ].filter(Boolean);
   return (
-    <div className={`card planner planner-${run.state.toLowerCase()}`} role="group" aria-label={t("tasks.plannerTitle")}>
-      <h3>{t("tasks.plannerTitle")}</h3>
+    <section className={`card planner planner-${run.state.toLowerCase()}`} aria-labelledby="task-planner">
+      <h3 id="task-planner">{t("tasks.plannerTitle")}</h3>
       <dl className="details">
         <dt>{t("tasks.plannerState")}</dt>
         <dd>
@@ -167,7 +167,7 @@ function PlannerRun({ taskId, run }: { taskId: string; run: PlanningRun }) {
       </dl>
       {run.hasSession && <p className="muted">{t("tasks.plannerSession")}</p>}
       {run.attempt > 0 && <PlannerAttempt taskId={taskId} run={run} />}
-    </div>
+    </section>
   );
 }
 

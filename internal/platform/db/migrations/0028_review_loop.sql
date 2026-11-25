@@ -17,3 +17,6 @@ ALTER TABLE step_attempts ADD COLUMN base_sha TEXT NOT NULL DEFAULT '';
 ALTER TABLE step_attempts ADD COLUMN head_sha TEXT NOT NULL DEFAULT '';
 ALTER TABLE step_attempts ADD COLUMN files TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE step_attempts ADD COLUMN files_total INTEGER NOT NULL DEFAULT 0 CHECK (files_total >= 0);
+-- integrations context (KIN-35): a registered repository's test command (run by the runner with /bin/sh in the
+-- worktree after an implementer's CLI; '' none configured).
+ALTER TABLE project_repositories ADD COLUMN test_command TEXT NOT NULL DEFAULT '';

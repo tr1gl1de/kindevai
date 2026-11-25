@@ -105,20 +105,26 @@ func environ(extra ...string) []string {
 		"GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "HOME=" + os.DevNull}, extra...)
 }
 
+// limited keeps the first max bytes a command writes and notes more (over). It is no io.ReaderFrom: exec copies
+// through Write, so the bound holds (an embedded bytes.Buffer's ReadFrom would bypass it). Write never fails, so
+// the command runs to its end.
 type limited struct {
-	bytes.Buffer
+	buf  bytes.Buffer
 	max  int
 	over bool
 }
 
 func (l *limited) Write(p []byte) (int, error) {
-	if l.Len()+len(p) > l.max {
+	if room := l.max - l.buf.Len(); len(p) > room {
 		l.over = true
-		p = p[:max(0, l.max-l.Len())]
+		l.buf.Write(p[:max(room, 0)])
+		return len(p), nil
 	}
-	l.Buffer.Write(p)
-	return len(p), nil
+	return l.buf.Write(p)
 }
+
+func (l *limited) Bytes() []byte  { return l.buf.Bytes() }
+func (l *limited) String() string { return l.buf.String() }
 
 // run executes git with args after the hardening config; extraConfig adds -c entries (the credential helper).
 func (g *Git) run(ctx context.Context, env, extraConfig []string, args ...string) ([]byte, error) {
@@ -302,6 +308,34 @@ func (g *Git) Diff(ctx context.Context, admin, from, to string) ([]domain.Change
 		return nil, err
 	}
 	return domain.ParseNameStatus(out)
+}
+
+// Patch implements app.Git: the unified diff from..to (commits) for a reviewer (KIN-35), at most limit bytes (cut
+// reports more). No external diff or textconv driver runs (repository config is untrusted).
+func (g *Git) Patch(ctx context.Context, admin, from, to string, limit int) (string, bool, error) {
+	if err := errors.Join(checkSHA(from), checkSHA(to)); err != nil {
+		return "", false, err
+	}
+	timeout := g.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var full []string
+	for _, c := range g.config() {
+		full = append(full, "-c", c)
+	}
+	full = append(full, "diff", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--end-of-options", from, to)
+	cmd := exec.CommandContext(ctx, g.program(), full...) //nolint:gosec // G204: fixed program, validated arguments
+	cmd.Env = environ("GIT_DIR=" + admin)
+	stdout, stderr := &limited{max: limit}, &limited{max: 2048}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.WaitDelay = 5 * time.Second
+	if err := cmd.Run(); err != nil {
+		return "", false, fmt.Errorf("git diff: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), stdout.over, nil
 }
 
 // Changes implements app.Git: the worktree against base (tracked paths, the agent's commits included) plus the

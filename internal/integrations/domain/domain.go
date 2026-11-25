@@ -271,9 +271,12 @@ type Repository struct {
 	Owner             string
 	Name              string
 	IntegrationBranch string
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-	GitHub            GitHubState // read from GitHub by the App (KIN-28)
+	// TestCommand is run by the runner in the worktree after an implementer's AI CLI (KIN-35): the objective test
+	// evidence of the review loop. "" when none is configured (shown as a gap, never as a pass).
+	TestCommand string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	GitHub      GitHubState // read from GitHub by the App (KIN-28)
 }
 
 // NewRepository validates a registration; an empty branch means DefaultIntegrationBranch.
@@ -316,6 +319,20 @@ func (r *Repository) SetIntegrationBranch(branch string, now time.Time) error {
 		return invalid("integrationBranch", "branch_protected")
 	}
 	r.IntegrationBranch, r.UpdatedAt = branch, now
+	return nil
+}
+
+// MaxTestCommand bounds a repository's test command (characters).
+const MaxTestCommand = 500
+
+// SetTestCommand changes the repository's test command: one line of printable text ("" for none).
+func (r *Repository) SetTestCommand(cmd string, now time.Time) error {
+	cmd = strings.TrimSpace(cmd)
+	if utf8.RuneCountInString(cmd) > MaxTestCommand || !utf8.ValidString(cmd) ||
+		strings.ContainsFunc(cmd, func(c rune) bool { return unicode.IsControl(c) }) {
+		return invalid("testCommand", "test_command_format")
+	}
+	r.TestCommand, r.UpdatedAt = cmd, now
 	return nil
 }
 

@@ -46,6 +46,11 @@ func (g *fakeGit) Diff(_ context.Context, admin, from, to string) ([]domain.Chan
 	return g.changes, nil
 }
 
+func (g *fakeGit) Patch(_ context.Context, admin, from, to string, limit int) (string, bool, error) {
+	g.log("patch " + from + " " + to)
+	return "diff --git a/x b/x", false, nil
+}
+
 func (g *fakeGit) Changes(_ context.Context, admin, dir, base string) ([]domain.Change, error) {
 	g.log("changes " + base)
 	return g.changes, nil

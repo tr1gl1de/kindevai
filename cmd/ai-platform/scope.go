@@ -7,6 +7,7 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	runnersapp "github.com/tr1gl1de/kindevai/internal/runners/app"
 	workflowapp "github.com/tr1gl1de/kindevai/internal/workflow/app"
+	workflow "github.com/tr1gl1de/kindevai/internal/workflow/domain"
 )
 
 // attachScopeCheck makes the runner channel check every workspace.changes report against the step's approved
@@ -39,6 +40,13 @@ func (r runnerScope) CheckChanges(ctx context.Context, runnerID, step string, fe
 	files := make([]string, 0, len(ch.Files))
 	for _, f := range ch.Files {
 		files = append(files, f.Path)
+	}
+	if !ch.Interim {
+		// The final report is the attempt's handoff artifact (base, head, changed files; KIN-35).
+		if err := r.wf.RecordChanges(ctx, step, runnerID, fence, workflow.WorkChanges{BaseSHA: ch.BaseSHA, HeadSHA: ch.HeadSHA,
+			Files: files, Total: ch.FilesTotal}); err != nil {
+			return attemptError(err)
+		}
 	}
 	unreported := max(ch.FilesTotal-len(ch.Files), 0)
 	if ch.Truncated && unreported == 0 {

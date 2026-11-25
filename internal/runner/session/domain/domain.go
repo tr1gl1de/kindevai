@@ -72,7 +72,24 @@ type Assignment struct {
 	Resume            string
 	BypassPermissions bool
 	Timeout           time.Duration
+	// The review loop (KIN-35): TestCommand runs with /bin/sh in the worktree after the CLI ended successfully (an
+	// implementer); DiffBase..DiffHead is the work a reviewer reviews (its prompt gets the bounded diff; it runs
+	// read-only).
+	TestCommand string
+	DiffBase    string
+	DiffHead    string
 }
+
+// RoleReviewer is the platform role of a reviewer attempt: its CLI runs read-only (KIN-35).
+const RoleReviewer = "reviewer"
+
+// ReadOnly reports an attempt whose CLI may only read (a reviewer): the CLI's read-only mode, never the bypass.
+func (a Assignment) ReadOnly() bool { return a.Role == RoleReviewer }
+
+// MaxTestCommand bounds Assignment.TestCommand (bytes).
+const MaxTestCommand = 500
+
+var shaRe = regexp.MustCompile(`^[0-9a-f]{4,64}$`)
 
 // CLI reports an assignment run by an AI CLI (not the mock agent).
 func (a Assignment) CLI() bool { return a.Adapter == AgentClaude || a.Adapter == AgentCodex }
@@ -145,7 +162,8 @@ func CheckAssignment(a Assignment, p Policy) error {
 		}
 	case a.Adapter != AdapterMock:
 		return fmt.Errorf("%w: %q", ErrUnknownAdapter, a.Adapter)
-	case a.Model != "" || a.Prompt != "" || a.Resume != "" || a.BypassPermissions || a.Timeout != 0:
+	case a.Model != "" || a.Prompt != "" || a.Resume != "" || a.BypassPermissions || a.Timeout != 0 || a.TestCommand != "" ||
+		a.DiffBase != "" || a.DiffHead != "":
 		return bad("agent fields for the mock agent")
 	case a.Scenario != "" && !slices.Contains(scenarios, a.Scenario):
 		return bad("scenario")
@@ -172,6 +190,11 @@ func checkAgent(a Assignment) error {
 		return bad("session id")
 	case a.Timeout < 0 || a.Timeout > MaxAgentTimeout:
 		return bad("timeout")
+	case a.TestCommand != "" && (a.ReadOnly() || len(a.TestCommand) > MaxTestCommand || !utf8.ValidString(a.TestCommand) ||
+		strings.ContainsFunc(a.TestCommand, func(r rune) bool { return r < 0x20 || r == 0x7f })):
+		return bad("test command")
+	case (a.DiffBase == "") != (a.DiffHead == "") || a.DiffBase != "" && (!shaRe.MatchString(a.DiffBase) || !shaRe.MatchString(a.DiffHead)):
+		return bad("diff range")
 	}
 	return nil
 }

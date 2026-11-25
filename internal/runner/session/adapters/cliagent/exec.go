@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -24,7 +26,30 @@ const (
 	StderrFile = "agent.stderr"
 	EndFile    = "agent.end.json"
 	PromptFile = "prompt.md"
+	// The test run after the CLI (KIN-35): the command (written by the runner), its output and how it ended.
+	TestsCommandFile = "tests.cmd"
+	TestsOutputFile  = "tests.out"
+	TestsEndFile     = "tests.json"
 )
+
+// TestsEnd is how the test command ended, as `ai-runner agent-exec` recorded it (Code -1: killed or not started).
+type TestsEnd struct {
+	Code       int   `json:"code"`
+	TimedOut   bool  `json:"timedOut,omitempty"`
+	DurationMS int64 `json:"durationMs"`
+}
+
+// DefaultTestsTimeout bounds a test run when the runner names none; MaxTestsOutput bounds its output file.
+const (
+	DefaultTestsTimeout = 30 * time.Minute
+	MaxTestsOutput      = 8 << 20
+)
+
+// testEnv are the variables a test run inherits from the CLI's environment: what builds need, never the CLI's
+// credentials or configuration (a repository's tests are untrusted code).
+var testEnv = []string{"PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TERM",
+	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "GOPATH", "GOCACHE", "GOMODCACHE",
+	"GOFLAGS", "GOPROXY", "GOTOOLCHAIN", "CGO_ENABLED", "NODE_OPTIONS", "npm_config_cache", "PIP_CACHE_DIR"}
 
 // ExecEnd is how the CLI ended, as `ai-runner agent-exec` recorded it.
 type ExecEnd struct {
@@ -46,6 +71,8 @@ func ExecMain(args []string, stderr io.Writer) int {
 	prompt := fs.String("prompt", "", "the prompt file (the CLI's stdin)")
 	timeout := fs.Duration("timeout", 0, "the run's timeout")
 	grace := fs.Duration("grace", DefaultGrace, "time between SIGTERM and SIGKILL")
+	tests := fs.String("tests", "", "a file with the test command to run in the working directory after the CLI succeeded")
+	testsTimeout := fs.Duration("tests-timeout", DefaultTestsTimeout, "the test run's timeout")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -63,6 +90,10 @@ func ExecMain(args []string, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintln(stderr, "agent-exec:", err)
 		end = ExecEnd{Code: 127}
+	}
+	if *tests != "" && end.Code == 0 && !end.Signaled && !end.TimedOut {
+		// Before the CLI's end is recorded: a follower that sees the end finds the test result too.
+		runTests(*state, *tests, *testsTimeout, *grace, stderr)
 	}
 	if err := writeEnd(*state, end); err != nil {
 		fmt.Fprintln(stderr, "agent-exec: recording the end:", err)
@@ -171,17 +202,7 @@ func openOutput(name string) (*os.File, error) {
 	return f, nil
 }
 
-func writeEnd(state string, e ExecEnd) error {
-	b, err := json.Marshal(e)
-	if err != nil {
-		return err
-	}
-	tmp := filepath.Join(state, EndFile+".tmp")
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, filepath.Join(state, EndFile))
-}
+func writeEnd(state string, e ExecEnd) error { return writeJSON(state, EndFile, e) }
 
 // ReadEnd reads how the CLI of the attempt in state ended; ok=false when agent-exec recorded nothing (it was
 // killed, or never ran).
@@ -195,4 +216,94 @@ func ReadEnd(state string) (ExecEnd, bool) {
 		return ExecEnd{}, false
 	}
 	return e, true
+}
+
+// runTests runs the test command of file with /bin/sh in the working directory, in the attempt's process group (a
+// cancel reaches it; ExecMain ends what it leaves behind), stopped when the timeout passes, with an allowlisted
+// environment and its output in TestsOutputFile, and records how it ended in TestsEndFile.
+func runTests(state, file string, timeout, grace time.Duration, stderr io.Writer) {
+	end := TestsEnd{Code: -1}
+	defer func() {
+		if err := writeJSON(state, TestsEndFile, end); err != nil {
+			fmt.Fprintln(stderr, "agent-exec: recording the test result:", err)
+		}
+	}()
+	cmdText, err := os.ReadFile(file) //nolint:gosec // the runner's own file in the attempt's state directory
+	if err != nil {
+		fmt.Fprintln(stderr, "agent-exec: reading the test command:", err)
+		return
+	}
+	out, err := openOutput(filepath.Join(state, TestsOutputFile))
+	if err != nil {
+		fmt.Fprintln(stderr, "agent-exec:", err)
+		return
+	}
+	defer out.Close()
+	cmd := exec.Command("/bin/sh", "-c", string(cmdText)) //nolint:gosec,noctx // the repository's configured test command
+	cmd.Env = append(filterEnv(os.Environ(), testEnv), "CI=true")
+	w := &capped{f: out, left: MaxTestsOutput, name: "test output"}
+	cmd.Stdout, cmd.Stderr = w, w
+	cmd.WaitDelay = grace
+	start := time.Now()
+	if err := cmd.Start(); err != nil {
+		_, _ = fmt.Fprintf(out, "starting the test command: %v\n", err)
+		return
+	}
+	var timedOut atomic.Bool
+	timer := time.AfterFunc(timeout, func() {
+		timedOut.Store(true)
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		time.AfterFunc(grace, func() { _ = cmd.Process.Kill() })
+	})
+	err = cmd.Wait()
+	timer.Stop()
+	end.DurationMS, end.TimedOut = time.Since(start).Milliseconds(), timedOut.Load()
+	var ee *exec.ExitError
+	switch {
+	case err == nil:
+		end.Code = 0
+	case errors.As(err, &ee) && ee.ExitCode() >= 0:
+		end.Code = ee.ExitCode()
+	}
+}
+
+func filterEnv(env, keep []string) []string {
+	var out []string
+	for _, kv := range env {
+		if k, _, ok := strings.Cut(kv, "="); ok && slices.Contains(keep, k) {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+func writeJSON(state, name string, v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	tmp := filepath.Join(state, name+".tmp")
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(state, name))
+}
+
+// ReadTests reads the test result of the attempt in state: ok=false when no test run was recorded. The output is
+// the tail of TestsOutputFile, at most n bytes.
+func ReadTests(state string, n int) (end TestsEnd, output string, ok bool) {
+	b, err := os.ReadFile(filepath.Join(state, TestsEndFile)) //nolint:gosec // the attempt's own file
+	if err != nil || json.Unmarshal(b, &end) != nil {
+		return TestsEnd{}, "", false
+	}
+	f, err := os.Open(filepath.Join(state, TestsOutputFile)) //nolint:gosec // the attempt's own file
+	if err != nil {
+		return end, "", true
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err == nil && st.Size() > int64(n) {
+		_, _ = f.Seek(st.Size()-int64(n), io.SeekStart)
+	}
+	tail, _ := io.ReadAll(io.LimitReader(f, int64(n)))
+	return end, string(tail), true
 }

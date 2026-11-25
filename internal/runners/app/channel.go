@@ -72,6 +72,12 @@ type AgentReporter interface {
 	RecordAgentReport(ctx context.Context, runnerID, step string, fence int64, r protocol.AgentReport) error
 }
 
+// TestReporter is implemented by an Executions that stores the runner's test evidence (KIN-35: execution.tests),
+// applied in the event's transaction; the output tail is redacted first.
+type TestReporter interface {
+	RecordTests(ctx context.Context, runnerID, step string, fence int64, r protocol.TestResult) error
+}
+
 // ScopeChecker evaluates what an attempt reports it changed (workspace.changes) against the step's approved scope
 // (KIN-51), in the event's transaction. runnerID comes from the authenticated session and the attempt's token was
 // checked first. A violation holds the step for a new approval; errors are those of Executions.
@@ -574,6 +580,18 @@ func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Ev
 			return h.HoldAttemptForNetwork(ctx, runnerID, e.Step, e.Fence, reason, at)
 		}
 		return c.Executions.FailAttempt(ctx, runnerID, e.Step, e.Fence, reason, at)
+	case protocol.EventTests:
+		tr, ok := c.Executions.(TestReporter)
+		if !ok {
+			return c.Executions.CheckAttempt(ctx, runnerID, e.Step, e.Fence)
+		}
+		var r protocol.TestResult
+		if err := json.Unmarshal(e.Body, &r); err != nil {
+			// Unreadable evidence is no pass: recorded as a failed run, so the step is never accepted on it.
+			r = protocol.TestResult{ExitCode: -1, Output: "the runner's test result could not be read"}
+		}
+		r.Command, r.Output = truncate(redact.Text(r.Command), protocol.MaxTestCommand), truncate(redact.Lines(r.Output), protocol.MaxTestOutput)
+		return tr.RecordTests(ctx, runnerID, e.Step, e.Fence, r)
 	}
 	if err := c.Executions.CheckAttempt(ctx, runnerID, e.Step, e.Fence); err != nil || e.Kind != protocol.EventWorkspaceChanges ||
 		c.Scope == nil {
@@ -641,6 +659,17 @@ func redactBody(kind string, body json.RawMessage) json.RawMessage {
 		rep := *d.Agent
 		rep.Result = red
 		v = protocol.Completed{Agent: &rep}
+	case protocol.EventTests:
+		var r protocol.TestResult
+		if body == nil || json.Unmarshal(body, &r) != nil {
+			return nil
+		}
+		red := r
+		red.Command, red.Output = redact.Text(r.Command), redact.Lines(r.Output)
+		if red == r {
+			return body
+		}
+		v = red
 	case protocol.EventAgent:
 		var a protocol.AgentEvent
 		if body == nil || json.Unmarshal(body, &a) != nil {

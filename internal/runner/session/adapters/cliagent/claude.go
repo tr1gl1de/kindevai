@@ -17,11 +17,15 @@ import (
 // .claude/settings*.json are not loaded, so untrusted repository settings can neither allow tools nor run hooks on
 // the host (CLAUDE.md, skills and agents still apply); `--settings {"disableAllHooks":true}` also stops hooks that
 // a repository skill or agent could declare in its frontmatter. The bypass is `--dangerously-skip-permissions`, only inside
-// the strict-egress sandbox, where the repository's settings load as usual.
+// the strict-egress sandbox, where the repository's settings load as usual. Read-only (a reviewer, KIN-35) is
+// `--permission-mode default --disallowedTools Edit,MultiEdit,Write,NotebookEdit,Bash` with the safe mode's settings.
 type Claude struct{}
 
 // safeSettings is the settings JSON of safe mode: no hooks run on the host.
 const safeSettings = `{"disableAllHooks":true}`
+
+// readOnlyDenied are the tools a read-only run (a reviewer, KIN-35) may not use even if a setting allowed them.
+const readOnlyDenied = "Edit,MultiEdit,Write,NotebookEdit,Bash"
 
 // Name is the agent name.
 func (Claude) Name() string { return domain.AgentClaude }
@@ -29,9 +33,14 @@ func (Claude) Name() string { return domain.AgentClaude }
 // Args builds the command line. Every value is validated by domain.AgentRequest.Check.
 func (Claude) Args(r domain.AgentRequest, p domain.Permissions) []string {
 	args := []string{"-p", "--output-format", "stream-json", "--verbose"}
-	if p == domain.PermissionsBypass {
+	switch p {
+	case domain.PermissionsBypass:
 		args = append(args, "--dangerously-skip-permissions")
-	} else {
+	case domain.PermissionsReadOnly:
+		// Default mode in print mode denies whatever would prompt; the write and shell tools are also disallowed.
+		args = append(args, "--permission-mode", "default", "--disallowedTools", readOnlyDenied, "--setting-sources", "user",
+			"--settings", safeSettings)
+	default:
 		args = append(args, "--permission-mode", "acceptEdits", "--setting-sources", "user", "--settings", safeSettings)
 	}
 	if r.Model != "" {

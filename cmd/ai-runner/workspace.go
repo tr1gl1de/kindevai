@@ -77,3 +77,8 @@ func changes(res *workspaceapp.Result) *protocol.WorkspaceChanges {
 	return &protocol.WorkspaceChanges{Branch: res.Branch, BaseSHA: res.BaseSHA, HeadSHA: res.HeadSHA, Files: files,
 		FilesTotal: res.Total, Truncated: res.Truncated, InstructionsChanged: ichanged}
 }
+
+// Diff is the diff a reviewer reviews (KIN-35).
+func (w sessionWorkspaces) Diff(ctx context.Context, step string, fence int64, from, to string, limit int) (string, bool, error) {
+	return w.m.Diff(ctx, step, fence, from, to, limit)
+}

@@ -50,14 +50,16 @@ func newApprovals(inst *bootstrap.Installation, msg *messagingModule, audit *aud
 	wf := &workflowapp.Service{
 		Repo:     workflowdb.New(inst.DB),
 		Projects: workflowRepositories{projects: projectsSvc, repos: integ.Service}, // KIN-28 registry validates plans
-		Access:   taskAccess{projectsSvc},
-		Policy:   hooks,
-		Events:   hooks,
-		Outbox:   msg.Outbox,                                  // KIN-60 BLOCKED alerts
-		Notifier: workflownotify.Notifier{Outbox: msg.Outbox}, // finished tasks → Telegram (KIN-62)
-		Tx:       tx,
-		Now:      time.Now,
-		NewID:    rand.Text,
+		// KIN-35: the registry's test command of a repository for the review loop's implementer attempts
+		TestCommands: workflowRepositories{projects: projectsSvc, repos: integ.Service},
+		Access:       taskAccess{projectsSvc},
+		Policy:       hooks,
+		Events:       hooks,
+		Outbox:       msg.Outbox,                                  // KIN-60 BLOCKED alerts
+		Notifier:     workflownotify.Notifier{Outbox: msg.Outbox}, // finished tasks → Telegram (KIN-62)
+		Tx:           tx,
+		Now:          time.Now,
+		NewID:        rand.Text,
 	}
 	apv.Workflow = approvalswf.Port{Svc: wf}
 	return &approvalsModule{Workflow: wf, Approvals: apv,

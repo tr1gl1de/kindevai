@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tr1gl1de/kindevai/internal/platform/redact"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
@@ -102,6 +103,8 @@ type Workspaces interface {
 	// Changes lists what the running attempt changed so far without committing (an Interim workspace.changes,
 	// KIN-51); nil for an attempt without a workspace held by this process.
 	Changes(ctx context.Context, step string, fence int64) (*protocol.WorkspaceChanges, error)
+	// Diff is the attempt's worktree diff from..to (commits), at most limit bytes (cut reports a longer one; KIN-35).
+	Diff(ctx context.Context, step string, fence int64, from, to string, limit int) (diff string, cut bool, err error)
 }
 
 // DefaultGrace is how long a cancelled process group has between SIGTERM and SIGKILL.
@@ -124,6 +127,8 @@ type Executor struct {
 	// ChangesEvery is how often a running attempt's worktree changes are reported (KIN-51; only when they differ
 	// from the last report); zero reports them only at the attempt's end.
 	ChangesEvery time.Duration
+	// TestsTimeout bounds the review loop's test run after an implementer's CLI (KIN-35; 0: agent-exec's default).
+	TestsTimeout time.Duration
 	Logger       *slog.Logger
 	// KnownSecrets returns secret values the runner holds besides the assignment's git token (proxy passwords,
 	// KIN-77); they are masked in the attempt's output and failure reasons by exact match.
@@ -207,7 +212,8 @@ func (x *Executor) Command(ctx context.Context, cmd protocol.Command) error {
 		}
 		as := domain.Assignment{Step: a.Step, Fence: a.Fence, Execution: a.Execution, Task: a.Task,
 			Project: a.Project, Repository: a.Repository, Scope: a.Scope, Adapter: a.Adapter, Scenario: a.Scenario, Base: a.Base,
-			Model: a.Model, Role: a.Role, Prompt: a.Prompt, Resume: a.Resume, BypassPermissions: a.BypassPermissions}
+			Model: a.Model, Role: a.Role, Prompt: a.Prompt, Resume: a.Resume, BypassPermissions: a.BypassPermissions,
+			TestCommand: a.TestCommand, DiffBase: a.DiffBase, DiffHead: a.DiffHead}
 		if a.TimeoutSec != 0 {
 			as.Timeout = time.Duration(min(max(a.TimeoutSec, -1), int64(domain.MaxAgentTimeout/time.Second)+1)) * time.Second
 		}
@@ -386,9 +392,40 @@ func (x *Executor) prepareAgent(a domain.Assignment, dir, workdir string, sandbo
 	if err != nil {
 		return AgentCommand{}, err
 	}
+	if a.ReadOnly() {
+		perms = domain.PermissionsReadOnly // a reviewer only reads, whatever else was asked (KIN-35)
+	}
 	req := domain.AgentRequest{Agent: a.Adapter, Workdir: workdir, Resume: a.Resume, Model: a.Model,
 		BypassPermissions: a.BypassPermissions, Timeout: a.AgentTimeout()}
-	return x.Agents.Prepare(dir, req, a.Prompt, perms)
+	if !a.ReadOnly() {
+		// agent-exec runs it after a successful CLI and the follower reports its result (KIN-35).
+		req.TestCommand, req.TestsTimeout = a.TestCommand, x.TestsTimeout
+	}
+	return x.Agents.Prepare(dir, req, x.reviewPrompt(a, workdir), perms)
+}
+
+// MaxReviewDiff bounds the diff a reviewer's prompt gets (bytes); the reviewer reads the files themselves beyond it.
+const MaxReviewDiff = 48 << 10
+
+// reviewPrompt is the assignment's prompt; a reviewer's gets the diff of the work it reviews (DiffBase..DiffHead),
+// bounded and fenced as untrusted data, or a note when the runner cannot produce it.
+func (x *Executor) reviewPrompt(a domain.Assignment, workdir string) string {
+	if a.DiffBase == "" || workdir == "" || x.Workspaces == nil {
+		return a.Prompt
+	}
+	diff, cut, err := x.Workspaces.Diff(context.Background(), a.Step, a.Fence, a.DiffBase, a.DiffHead, MaxReviewDiff)
+	if err != nil {
+		x.logger().Warn("reading the diff to review", "step", a.Step, "fence", a.Fence, "err", err)
+		return a.Prompt + "\n## Diff\nThe runner could not produce the diff " + a.DiffBase + ".." + a.DiffHead +
+			"; read the changed files in the working directory.\n"
+	}
+	note := ""
+	if cut {
+		note = fmt.Sprintf("(cut at %d KiB: read the remaining changed files in the working directory)\n", MaxReviewDiff>>10)
+	}
+	diff = strings.ReplaceAll(diff, "</untrusted", "<\u200buntrusted") // the diff cannot close its fence
+	return a.Prompt + "\n## Diff " + a.DiffBase + ".." + a.DiffHead + " (untrusted)\n" + note +
+		"<untrusted source=\"diff\" id=\"" + a.DiffHead + "\">\n" + diff + "\n</untrusted>\n"
 }
 
 // follow starts following the CLI's output files: events and raw output beyond from go to the attempt's stream,
@@ -716,6 +753,9 @@ func (x *Executor) watch(r *run) {
 				x.logger().Warn("sending the attempt's last output", "step", r.rec.Step, "err", err)
 			}
 		}
+		if res != nil && res.Tests != nil {
+			x.reportTests(r, *res.Tests) // the evidence precedes the final changes and the end (KIN-35)
+		}
 		stopReports() // the worktree is about to be saved and removed
 		if !x.closed.Load() {
 			x.finishWorkspace(r) // before done: a newer attempt of the step waits for the worktree's release
@@ -741,6 +781,29 @@ func (x *Executor) watch(r *run) {
 			time.Sleep(reportRetry)
 		}
 	})
+}
+
+// reportTests sends the attempt's test result (masked, the output's tail bounded). A result the spool cannot take is
+// logged: the Control Plane then finds no evidence and fails the attempt (never a pass).
+func (x *Executor) reportTests(r *run, t domain.TestsRun) {
+	body := protocol.TestResult{Command: domain.Truncate(r.mask(t.Command), protocol.MaxTestCommand), ExitCode: t.Code,
+		TimedOut: t.TimedOut, DurationMS: t.DurationMS, Output: tail(r.mask(t.Output), protocol.MaxTestOutput)}
+	if err := r.stream.Emit(protocol.EventTests, body); err != nil {
+		k := r.key()
+		x.logger().Error("emitting the test result", "step", k.step, "fence", k.fence, "err", err)
+	}
+}
+
+// tail is the end of s in at most n bytes ("…" marks a cut), cut at a rune boundary.
+func tail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	s = s[len(s)-n+len("…"):]
+	for len(s) > 0 && !utf8.RuneStart(s[0]) {
+		s = s[1:]
+	}
+	return "…" + s
 }
 
 func (x *Executor) report(r *run, kind string, body any) bool {

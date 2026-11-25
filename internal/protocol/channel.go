@@ -53,13 +53,17 @@ const (
 	// EventAgent is one typed event of the attempt's AI CLI (KIN-79): its session, text, tool use, result or
 	// failure, parsed from the CLI's output (the raw output goes as execution.output).
 	EventAgent = "execution.agent" // body: AgentEvent
+	// EventTests is the runner's test evidence (KIN-35): the assignment's TestCommand run in the worktree after the
+	// AI CLI ended, sent before the attempt's final workspace.changes and terminal event.
+	EventTests = "execution.tests" // body: TestResult
 )
 
 // TerminalEvent reports whether kind ends an attempt.
 func TerminalEvent(kind string) bool { return kind == EventCompleted || kind == EventFailed }
 
 var eventKinds = map[string]bool{EventAccepted: true, EventStarted: true, EventOutput: true, EventOutputDropped: true,
-	EventCompleted: true, EventFailed: true, EventWorkspacePrepared: true, EventWorkspaceChanges: true, EventAgent: true}
+	EventCompleted: true, EventFailed: true, EventWorkspacePrepared: true, EventWorkspaceChanges: true, EventAgent: true,
+	EventTests: true}
 
 // Limits of the channel. MaxOutputChunk raw bytes of output escape to at most 6× in JSON (\u00XX), so an output
 // event stays below MaxMessageBytes.
@@ -130,6 +134,13 @@ type Assign struct {
 	Resume            string `json:"resume,omitempty"`
 	BypassPermissions bool   `json:"bypassPermissions,omitempty"`
 	TimeoutSec        int64  `json:"timeoutSec,omitempty"`
+	// The review loop (KIN-35). TestCommand is the repository's test command: after the CLI ended successfully the
+	// runner runs it with /bin/sh in the worktree, inside the attempt's confinement, and reports execution.tests.
+	// DiffBase..DiffHead is the work a reviewer (Role reviewer) reviews: the runner adds the bounded diff to its
+	// prompt and runs the CLI read-only.
+	TestCommand string `json:"testCommand,omitempty"`
+	DiffBase    string `json:"diffBase,omitempty"`
+	DiffHead    string `json:"diffHead,omitempty"`
 	// Base is the branch the attempt's worktree starts from (the repository's integration branch, KIN-26/KIN-29).
 	// Empty: the attempt runs in an empty directory (no registered repository).
 	Base string `json:"base,omitempty"`
@@ -246,6 +257,22 @@ const (
 	FailureCLIError  = "cli_error"
 	FailureTimeout   = "timeout"
 	FailureCancelled = "cancelled"
+)
+
+// TestResult is the body of execution.tests: how the test command ended (ExitCode -1 when it was killed or did not
+// start), how long it ran and the masked tail of its output (at most MaxTestOutput bytes).
+type TestResult struct {
+	Command    string `json:"command"`
+	ExitCode   int    `json:"exitCode"`
+	TimedOut   bool   `json:"timedOut,omitempty"`
+	DurationMS int64  `json:"durationMs"`
+	Output     string `json:"output,omitempty"`
+}
+
+// MaxTestOutput bounds TestResult.Output; MaxTestCommand bounds Assign.TestCommand.
+const (
+	MaxTestOutput  = 4 << 10
+	MaxTestCommand = 500
 )
 
 // Completed is the body of execution.completed: what the AI CLI run reported (nil for the mock agent).

@@ -153,11 +153,14 @@ func TestProjectBindingAndRepositories(t *testing.T) {
 	if err := repo.SetIntegrationBranch("next", t0.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
+	if err := repo.SetTestCommand("make test", t0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 	if err := r.SaveRepository(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
 	got, err := r.Repository(ctx, "p1", "r1")
-	if err != nil || got.IntegrationBranch != "next" || got.Owner != "Acme" || !got.UpdatedAt.Equal(t0.Add(time.Hour)) || !got.CreatedAt.Equal(t0) {
+	if err != nil || got.IntegrationBranch != "next" || got.TestCommand != "make test" || got.Owner != "Acme" || !got.UpdatedAt.Equal(t0.Add(time.Hour)) || !got.CreatedAt.Equal(t0) {
 		t.Fatalf("got %+v %v", got, err)
 	}
 	if _, err := r.Repository(ctx, "p2", "r1"); !errors.Is(err, domain.ErrNotFound) {

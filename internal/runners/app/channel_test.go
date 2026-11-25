@@ -1014,3 +1014,45 @@ func TestCompletedPlanSurvivesRedaction(t *testing.T) {
 		t.Fatalf("plan changed by redaction: %q %v", got.Agent.Result, err)
 	}
 }
+
+// testWorkflow stores the runner's test evidence (the real workflow does, KIN-35).
+type testWorkflow struct {
+	*fakeWorkflow
+	tests *[]protocol.TestResult
+}
+
+func (w testWorkflow) RecordTests(_ context.Context, _, _ string, _ int64, r protocol.TestResult) error {
+	w.mu.Lock()
+	*w.tests = append(*w.tests, r)
+	w.mu.Unlock()
+	return nil
+}
+
+// KIN-35: execution.tests reaches the workflow with its output redacted; an unreadable body is recorded as a failed
+// run (never as a pass); the stored body is redacted too.
+func TestTestEvidenceIsRecordedRedacted(t *testing.T) {
+	t.Parallel()
+	e := newChannelEnv()
+	var got []protocol.TestResult
+	e.ch.Executions = testWorkflow{e.wf, &got}
+	e.wf.fence["s1"], e.wf.state["s1"] = 1, "running"
+	sess, _ := newSession("r1")
+	secret := "ghp_" + strings.Repeat("aB3", 12)
+	body, _ := json.Marshal(protocol.TestResult{Command: "make test", ExitCode: 2, DurationMS: 30, Output: "FAIL token " + secret})
+	evs := []protocol.Event{
+		{Epoch: "sp", Seq: 1, Step: "s1", Fence: 1, AttemptSeq: 1, Kind: protocol.EventTests, At: 1_000, Body: body},
+		{Epoch: "sp", Seq: 2, Base: 1, Step: "s1", Fence: 1, AttemptSeq: 2, Kind: protocol.EventTests, At: 2_000, Body: json.RawMessage(`"x"`)},
+	}
+	for _, ev := range evs {
+		if err := handle(t, e.ch, sess, protocol.TypeEvent, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(got) != 2 || got[0].ExitCode != 2 || got[0].Command != "make test" || strings.Contains(got[0].Output, secret) ||
+		!strings.Contains(got[0].Output, "FAIL token") || got[1].ExitCode != -1 {
+		t.Fatalf("recorded %+v", got)
+	}
+	if red := redactBody(protocol.EventTests, body); strings.Contains(string(red), secret) {
+		t.Fatalf("stored body %s", red)
+	}
+}

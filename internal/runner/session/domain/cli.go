@@ -46,6 +46,10 @@ type AgentRequest struct {
 	BypassPermissions bool
 	// Timeout bounds the run (wall clock); the process group is stopped when it passes.
 	Timeout time.Duration
+	// TestCommand is run with /bin/sh in Workdir after the CLI succeeded (KIN-35; "" none), within TestsTimeout
+	// (0: the default).
+	TestCommand  string
+	TestsTimeout time.Duration
 }
 
 var (
@@ -93,6 +97,8 @@ const (
 	PermissionsSafe Permissions = "safe"
 	// PermissionsBypass: --dangerously-skip-permissions / --dangerously-bypass-approvals-and-sandbox.
 	PermissionsBypass Permissions = "bypass"
+	// PermissionsReadOnly: the CLI may read but not write or run commands (a reviewer, KIN-35); never the bypass.
+	PermissionsReadOnly Permissions = "read-only"
 )
 
 // ChoosePermissions decides the run's permission mode: the bypass only when the run is confined by the verified
@@ -256,6 +262,19 @@ type AgentResult struct {
 	Usage   Usage
 	Exit    Exit
 	Failure *AgentFailure // nil on success
+	// Tests is the test run after a successful CLI (KIN-35): nil when the attempt had no test command or the CLI
+	// failed.
+	Tests *TestsRun
+}
+
+// TestsRun is how the attempt's test command ended (Code -1: killed, not started or not finished) and the tail of
+// its output.
+type TestsRun struct {
+	Command    string
+	Code       int
+	TimedOut   bool
+	DurationMS int64
+	Output     string
 }
 
 // Outcome reports success or the failure reason.

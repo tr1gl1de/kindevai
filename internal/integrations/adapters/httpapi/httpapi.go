@@ -100,6 +100,7 @@ type Repository struct {
 	Name              string     `json:"name"`
 	FullName          string     `json:"fullName"`
 	IntegrationBranch string     `json:"integrationBranch"`
+	TestCommand       string     `json:"testCommand"`
 	ProtectedBranches []string   `json:"protectedBranches"`
 	CreatedAt         time.Time  `json:"createdAt"`
 	UpdatedAt         time.Time  `json:"updatedAt"`
@@ -134,9 +135,10 @@ type RepositoryRequest struct {
 	IntegrationBranch string `json:"integrationBranch"`
 }
 
-// BranchRequest changes a repository's integration branch.
+// BranchRequest changes a repository's integration branch and, when present, its test command (KIN-35).
 type BranchRequest struct {
-	IntegrationBranch string `json:"integrationBranch"`
+	IntegrationBranch string  `json:"integrationBranch"`
+	TestCommand       *string `json:"testCommand,omitempty"`
 }
 
 // Register mounts the routes.
@@ -229,7 +231,7 @@ func repoView(r domain.Repository) Repository {
 		unprotected = []string{}
 	}
 	return Repository{ID: r.ID, Owner: r.Owner, Name: r.Name, FullName: r.FullName(), IntegrationBranch: r.IntegrationBranch,
-		ProtectedBranches: r.ProtectedBranches(), CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+		TestCommand: r.TestCommand, ProtectedBranches: r.ProtectedBranches(), CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 		GitHub: RepoGitHub{Installed: g.InstallationID != 0, DefaultBranch: g.DefaultBranch, Protection: string(protection),
 			Unprotected: unprotected, Sync: checkView(g.Sync)}}
 }
@@ -387,7 +389,7 @@ func (h *Handler) updateRepo(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
-	repo, err := h.Service.UpdateRepository(r.Context(), p, r.PathValue("id"), r.PathValue("repo"), req.IntegrationBranch)
+	repo, err := h.Service.UpdateRepository(r.Context(), p, r.PathValue("id"), r.PathValue("repo"), req.IntegrationBranch, req.TestCommand)
 	if err != nil {
 		h.fail(w, err)
 		return

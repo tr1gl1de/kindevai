@@ -22,6 +22,9 @@ type AgentCommand struct {
 	Dir        string // the worktree
 	PromptFile string // in the attempt's state directory, outside Dir
 	Timeout    time.Duration
+	// TestsFile holds the test command agent-exec runs after a successful CLI (KIN-35; "" none), TestsTimeout bounds it.
+	TestsFile    string
+	TestsTimeout time.Duration
 }
 
 // AgentFollow says where a follower sends what the CLI writes.

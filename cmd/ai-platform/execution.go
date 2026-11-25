@@ -149,9 +149,11 @@ func assignBody(a workflowapp.Assignment) protocol.Assign {
 	}
 	body := protocol.Assign{Step: a.StepID, Fence: a.Fence, Execution: a.ExecutionID, Task: a.TaskID,
 		Project: a.ProjectID, Repository: a.Repository, Scope: scope, Adapter: a.Agent, Model: a.Model, Role: a.Role,
-		Prompt: a.Prompt, Resume: a.Resume} // the CLI run's prompt/context package (KIN-79) and session (KIN-34)
+		Prompt: a.Prompt, Resume: a.Resume, // the CLI run's prompt/context package (KIN-79) and session (KIN-34)
+		TestCommand: a.TestCommand, DiffBase: a.DiffBase, DiffHead: a.DiffHead} // the review loop (KIN-35)
 	if a.Agent == "" || a.Agent == workflowapp.AgentMock {
 		body.Adapter, body.Model, body.Prompt, body.Resume, body.Scenario = protocol.AdapterMock, "", "", "", mockScenario(a.StepKey)
+		body.TestCommand, body.DiffBase, body.DiffHead = "", "", ""
 	}
 	return body
 }

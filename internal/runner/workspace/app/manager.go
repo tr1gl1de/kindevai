@@ -63,6 +63,8 @@ type Git interface {
 	Diff(ctx context.Context, admin, from, to string) ([]domain.Change, error)
 	// Changes lists the paths the worktree (untracked files included) changed against base, read-only.
 	Changes(ctx context.Context, admin, dir, base string) ([]domain.Change, error)
+	// Patch is the unified diff from..to (commits), at most limit bytes (cut: there was more; KIN-35 review).
+	Patch(ctx context.Context, admin, from, to string, limit int) (string, bool, error)
 	// RemoveWorktree removes the worktree; the branch stays in the mirror.
 	RemoveWorktree(ctx context.Context, mirror, dir string) error
 }
@@ -226,6 +228,22 @@ func (m *Manager) Changes(ctx context.Context, step string, fence int64) (*Resul
 	}
 	fitted, cut := domain.Fit(files, func(c domain.Change) int { return len(c.Path) + entryOverhead }, changesBudget)
 	return &Result{Branch: meta.Branch, BaseSHA: meta.BaseSHA, Files: fitted, Total: len(files), Truncated: cut}, nil
+}
+
+// Diff is the diff from..to in the attempt's workspace (a reviewer's work to review, KIN-35), at most limit bytes.
+// It fails for an attempt whose workspace this process does not hold.
+func (m *Manager) Diff(ctx context.Context, step string, fence int64, from, to string, limit int) (string, bool, error) {
+	m.mu.Lock()
+	_, held := m.held[key(step, fence)]
+	m.mu.Unlock()
+	meta, ok, err := m.Store.LoadMeta(step, fence)
+	switch {
+	case err != nil:
+		return "", false, err
+	case !held || !ok:
+		return "", false, fmt.Errorf("no workspace for attempt %s", key(step, fence))
+	}
+	return m.Git.Patch(ctx, meta.Admin, from, to, limit)
 }
 
 // SnapshotMessage is the commit message of work an attempt left uncommitted.

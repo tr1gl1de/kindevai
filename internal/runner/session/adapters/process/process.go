@@ -26,7 +26,7 @@ import (
 // environment: the runner's own variables (and any secret in them) are never inherited.
 //
 // An attempt with an AI CLI (LaunchSpec.Agent, KIN-79) runs as `Program AgentArgs... --state <dir> --prompt <file>
-// --timeout <d> -- <cli> <args>...` (`ai-runner agent-exec`) in the worktree, with the CLI's environment after Env.
+// --timeout <d> [--tests <file> [--tests-timeout <d>]] -- <cli> <args>...` (`ai-runner agent-exec`) in the worktree, with the CLI's environment after Env.
 type Launcher struct {
 	Program string
 	Args    []string
@@ -57,8 +57,14 @@ func (l *Launcher) Launch(ctx context.Context, s app.LaunchSpec) (app.Process, e
 		if wrap == nil {
 			wrap = []string{"agent-exec"}
 		}
-		args = append(append(append([]string{}, wrap...), "--state", s.Dir, "--prompt", ag.PromptFile,
-			"--timeout", ag.Timeout.String(), "--"), append([]string{ag.Path}, ag.Args...)...)
+		args = append(append([]string{}, wrap...), "--state", s.Dir, "--prompt", ag.PromptFile, "--timeout", ag.Timeout.String())
+		if ag.TestsFile != "" { // the review loop's test run after the CLI (KIN-35)
+			args = append(args, "--tests", ag.TestsFile)
+			if ag.TestsTimeout > 0 {
+				args = append(args, "--tests-timeout", ag.TestsTimeout.String())
+			}
+		}
+		args = append(append(args, "--"), append([]string{ag.Path}, ag.Args...)...)
 		env = append(env, ag.Env...)
 		dir = ag.Dir
 	}

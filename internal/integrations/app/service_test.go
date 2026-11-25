@@ -283,12 +283,24 @@ func TestRepositoryRegistry(t *testing.T) {
 	if _, err := e.svc.AddRepository(ctx, owner, "p1", app.RepositoryInput{Owner: "x", Name: "y", IntegrationBranch: "main"}); !errors.As(err, &ve) || ve.Code != "branch_protected" {
 		t.Fatalf("protected: %v", err)
 	}
-	if _, err := e.svc.UpdateRepository(ctx, owner, "p2", r.ID, "next"); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := e.svc.UpdateRepository(ctx, owner, "p2", r.ID, "next", nil); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("other project's repo: %v", err)
 	}
-	r2, err := e.svc.UpdateRepository(ctx, owner, "p1", r.ID, "next")
+	r2, err := e.svc.UpdateRepository(ctx, owner, "p1", r.ID, "next", nil)
 	if err != nil || r2.IntegrationBranch != "next" {
 		t.Fatalf("update: %+v %v", r2, err)
+	}
+	// KIN-35: the test command is set with the branch, kept when absent and refused when it is no single line.
+	cmd := "  make test  "
+	if r2, err = e.svc.UpdateRepository(ctx, owner, "p1", r.ID, "next", &cmd); err != nil || r2.TestCommand != "make test" {
+		t.Fatalf("test command: %+v %v", r2, err)
+	}
+	if r2, err = e.svc.UpdateRepository(ctx, owner, "p1", r.ID, "next", nil); err != nil || r2.TestCommand != "make test" {
+		t.Fatalf("test command kept: %+v %v", r2, err)
+	}
+	bad := "make test\nrm -rf /"
+	if _, err := e.svc.UpdateRepository(ctx, owner, "p1", r.ID, "next", &bad); !errors.As(err, &ve) || ve.Code != "test_command_format" {
+		t.Fatalf("multi-line test command: %v", err)
 	}
 	pi, err := e.svc.ProjectIntegrations(ctx, owner, "p1")
 	if err != nil || len(pi.Repositories) != 1 || pi.Repositories[0].IntegrationBranch != "next" {
@@ -306,7 +318,8 @@ func TestRepositoryRegistry(t *testing.T) {
 	if err := e.svc.RemoveRepository(ctx, owner, "p1", r.ID); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("second remove: %v", err)
 	}
-	want := []string{app.KindRepositoryAdded, app.KindRepositoryUpdated, app.KindRepositoryRemoved}
+	want := []string{app.KindRepositoryAdded, app.KindRepositoryUpdated, app.KindRepositoryUpdated, app.KindRepositoryUpdated,
+		app.KindRepositoryRemoved}
 	if k := e.audit.kinds(); !slices.Equal(k, want) {
 		t.Fatalf("audit %v", k)
 	}

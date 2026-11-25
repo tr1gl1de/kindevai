@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -16,7 +17,7 @@ var stepTable = map[StepState][]StepState{
 	StepPending:   {StepReady, StepCancelled},
 	StepReady:     {StepClaimed, StepWaiting, StepCancelled},
 	StepClaimed:   {StepReady, StepRunning, StepWaiting, StepFailed, StepCancelled},
-	StepRunning:   {StepSucceeded, StepWaiting, StepFailed, StepCancelled},
+	StepRunning:   {StepReady, StepSucceeded, StepWaiting, StepFailed, StepCancelled},
 	StepWaiting:   {StepReady, StepRunning, StepSucceeded, StepFailed, StepCancelled},
 	StepFailed:    {StepReady},
 	StepSucceeded: nil,
@@ -126,7 +127,7 @@ func TestStartRequiresALiveLease(t *testing.T) {
 	}
 	s := e.StepByKey("backend")
 	if s.State != StepRunning || !s.LeaseExpiresAt.Equal(t0.Add(2*ttl-time.Second)) || len(s.Attempts) != 1 ||
-		s.Attempts[0] != (Attempt{Number: 1, RunnerID: "r1", Fence: 1, State: AttemptRunning, StartedAt: t0.Add(ttl - time.Second)}) {
+		!reflect.DeepEqual(s.Attempts[0], Attempt{Number: 1, RunnerID: "r1", Fence: 1, State: AttemptRunning, StartedAt: t0.Add(ttl - time.Second)}) {
 		t.Fatalf("started step = %+v", s)
 	}
 	if err := e.Start(id, "r1", l.Fence, t0.Add(ttl), ttl); !errors.Is(err, ErrInvalidTransition) {

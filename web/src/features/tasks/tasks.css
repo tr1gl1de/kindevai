@@ -134,6 +134,44 @@ td.ws-path {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* Implementation and review loop (KIN-35) */
+.review-loop {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--border);
+}
+.review-loop h5,
+.review-loop h6 {
+  margin: 8px 0 4px;
+  font-size: 0.95rem;
+}
+.review-loop .prewrap {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.review-loop .file-list {
+  padding-left: 20px;
+  overflow-wrap: anywhere;
+}
+.review-loop .list-title {
+  margin: 8px 0 0;
+  font-weight: 600;
+}
+.review-loop details summary {
+  min-height: var(--tap);
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+.tests-failed,
+.tests-missing,
+.verdict-changes_requested {
+  border-color: var(--danger);
+}
+.tests-not_configured {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+}
 /* Plan revision diff (KIN-97) */
 .revision-nav {
   display: flex;

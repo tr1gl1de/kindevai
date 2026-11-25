@@ -196,7 +196,7 @@ func (r *Repository) SetProjectYouTrack(ctx context.Context, projectID, shortNam
 
 const repoCols = `id, project_id, owner, name, integration_branch, created_at, updated_at, gh_installation_id,
 	gh_default_branch, gh_protection, gh_unprotected, gh_sync_status, gh_sync_id, gh_sync_code, gh_sync_detail,
-	gh_sync_requested_at, gh_synced_at`
+	gh_sync_requested_at, gh_synced_at, test_command`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -206,7 +206,8 @@ func scanRepo(row scanner) (domain.Repository, error) {
 	var requested, synced sql.NullString
 	g := &r.GitHub
 	err := row.Scan(&r.ID, &r.ProjectID, &r.Owner, &r.Name, &r.IntegrationBranch, &created, &updated, &g.InstallationID,
-		&g.DefaultBranch, &protection, &unprotected, &syncStatus, &g.Sync.ID, &g.Sync.Code, &g.Sync.Detail, &requested, &synced)
+		&g.DefaultBranch, &protection, &unprotected, &syncStatus, &g.Sync.ID, &g.Sync.Code, &g.Sync.Detail, &requested, &synced,
+		&r.TestCommand)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, domain.ErrNotFound
 	}
@@ -240,7 +241,7 @@ func repoArgs(repo domain.Repository) []any {
 	}
 	return []any{repo.ID, repo.ProjectID, repo.Owner, repo.Name, repo.IntegrationBranch, ts(repo.CreatedAt), ts(repo.UpdatedAt),
 		g.InstallationID, g.DefaultBranch, string(protection), strings.Join(g.Unprotected, ","), string(status), g.Sync.ID,
-		g.Sync.Code, g.Sync.Detail, nullTS(g.Sync.RequestedAt), nullTS(g.Sync.CheckedAt)}
+		g.Sync.Code, g.Sync.Detail, nullTS(g.Sync.RequestedAt), nullTS(g.Sync.CheckedAt), repo.TestCommand}
 }
 
 func (r *Repository) listRepos(ctx context.Context, where string, args ...any) ([]domain.Repository, error) {
@@ -295,7 +296,7 @@ func (r *Repository) Repository(ctx context.Context, projectID, id string) (doma
 // CreateRepository inserts a repository.
 func (r *Repository) CreateRepository(ctx context.Context, repo domain.Repository) error {
 	_, err := r.conn(ctx).ExecContext(ctx, "INSERT INTO project_repositories("+repoCols+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, repoArgs(repo)...)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, repoArgs(repo)...)
 	switch {
 	case db.IsUniqueViolation(err):
 		return domain.ErrRepositoryExists
@@ -312,7 +313,8 @@ func (r *Repository) SaveRepository(ctx context.Context, repo domain.Repository)
 	a := repoArgs(repo)
 	res, err := r.conn(ctx).ExecContext(ctx, `UPDATE project_repositories SET integration_branch = ?, updated_at = ?,
 		gh_installation_id = ?, gh_default_branch = ?, gh_protection = ?, gh_unprotected = ?, gh_sync_status = ?, gh_sync_id = ?,
-		gh_sync_code = ?, gh_sync_detail = ?, gh_sync_requested_at = ?, gh_synced_at = ? WHERE id = ? AND project_id = ?`,
+		gh_sync_code = ?, gh_sync_detail = ?, gh_sync_requested_at = ?, gh_synced_at = ?, test_command = ?
+		WHERE id = ? AND project_id = ?`,
 		append(append([]any{a[4], a[6]}, a[7:]...), repo.ID, repo.ProjectID)...)
 	if err != nil {
 		return fmt.Errorf("saving repository: %w", err)

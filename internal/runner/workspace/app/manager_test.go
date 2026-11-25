@@ -56,9 +56,19 @@ func (g *fakeGit) Snapshot(_ context.Context, admin, dir, msg string) (string, e
 	return "head-sha", nil
 }
 
+func (g *fakeGit) Head(_ context.Context, admin string) (string, error) {
+	g.log("head")
+	return "head-sha", nil
+}
+
 func (g *fakeGit) Diff(_ context.Context, admin, from, to string) ([]domain.Change, error) {
 	g.log("diff " + from + " " + to)
 	return g.changes, nil
+}
+
+func (g *fakeGit) Patch(_ context.Context, admin, from, to string, limit int) (string, bool, error) {
+	g.log("patch " + from + " " + to)
+	return "diff --git a/x b/x", false, nil
 }
 
 func (g *fakeGit) Changes(_ context.Context, admin, dir, base string) ([]domain.Change, error) {
@@ -254,6 +264,25 @@ func TestFinishReportsChangesAndRemovesTheWorktree(t *testing.T) {
 	}
 	if res, err := m.Finish(t.Context(), "st1", 1); res != nil || err != nil {
 		t.Fatalf("second finish: %v %v", res, err)
+	}
+}
+
+// KIN-35: a reviewer's workspace commits nothing at its end: whatever it wrote is discarded with the worktree and
+// the branch keeps the reviewed head.
+func TestReadOnlyWorkspaceIsNotSnapshotted(t *testing.T) {
+	t.Parallel()
+	m, g, _, _ := newManager()
+	r := req()
+	r.ReadOnly = true
+	if _, err := m.Prepare(t.Context(), r); err != nil {
+		t.Fatal(err)
+	}
+	res, err := m.Finish(t.Context(), "st1", 1)
+	if err != nil || res == nil || res.HeadSHA != "head-sha" {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if slices.Contains(g.calls, "snapshot") || !slices.Contains(g.calls, "head") || len(g.removed) != 1 {
+		t.Fatalf("calls %v removed %v", g.calls, g.removed)
 	}
 }
 

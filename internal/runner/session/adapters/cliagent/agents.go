@@ -58,8 +58,16 @@ func (g *Agents) Prepare(dir string, req domain.AgentRequest, prompt string, p d
 	if err != nil {
 		return app.AgentCommand{}, err
 	}
-	return app.AgentCommand{Path: c.Path, Args: c.Args, Env: c.Env, Dir: c.Dir, PromptFile: req.PromptFile,
-		Timeout: req.Timeout}, nil
+	cmd := app.AgentCommand{Path: c.Path, Args: c.Args, Env: c.Env, Dir: c.Dir, PromptFile: req.PromptFile,
+		Timeout: req.Timeout}
+	if req.TestCommand != "" {
+		// The test command goes to a file in the attempt's state directory, outside the worktree (KIN-35).
+		cmd.TestsFile, cmd.TestsTimeout = filepath.Join(dir, TestsCommandFile), req.TestsTimeout
+		if err := writePrompt(cmd.TestsFile, req.TestCommand); err != nil {
+			return app.AgentCommand{}, fmt.Errorf("writing the test command: %w", err)
+		}
+	}
+	return cmd, nil
 }
 
 // Secrets are the CLI login values the runner passes to its CLIs (the stored tokens): masked in attempt output.
@@ -271,5 +279,26 @@ func (f *follower) Finish(exit domain.Exit, cancelled string) domain.AgentResult
 	if e, ok := ReadEnd(f.dir); ok {
 		end.Exit, end.TimedOut = domain.Exit{Code: e.Code, Signaled: e.Signaled}, e.TimedOut
 	}
-	return f.tr.Result(end)
+	res := f.tr.Result(end)
+	if res.Failure == nil {
+		res.Tests = readTestsRun(f.dir)
+	}
+	return res
 }
+
+// readTestsRun is the attempt's test run: nil without a test command; a run that left no result (agent-exec was
+// killed) is a failed one.
+func readTestsRun(dir string) *domain.TestsRun {
+	cmd, err := os.ReadFile(filepath.Join(dir, TestsCommandFile)) //nolint:gosec // the attempt's own file
+	if err != nil {
+		return nil
+	}
+	t := &domain.TestsRun{Command: string(cmd), Code: -1, Output: "the test run did not finish"}
+	if end, out, ok := ReadTests(dir, MaxTestsTail); ok {
+		t.Code, t.TimedOut, t.DurationMS, t.Output = end.Code, end.TimedOut, end.DurationMS, out
+	}
+	return t
+}
+
+// MaxTestsTail is how much of the test output's end is reported (protocol.MaxTestOutput).
+const MaxTestsTail = 4 << 10

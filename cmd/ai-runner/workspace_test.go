@@ -183,8 +183,18 @@ func TestCancelDuringASlowFetchOnARealRepository(t *testing.T) {
 	if err := syscall.Kill(pid, 0); err == nil {
 		t.Fatalf("fetch process %d still alive", pid)
 	}
-	if recs, err := j.List(); err != nil || len(recs) != 0 {
-		t.Fatalf("journal %+v %v", recs, err)
+	// The record is removed right after the end is on the stream (Executor.report), so the test may see the event
+	// first: wait for it instead of reading the journal once.
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		recs, err := j.List()
+		if err == nil && len(recs) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("journal %+v %v", recs, err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if _, err := os.Stat(filepath.Join(data, "workspaces", "acme", "api", "KIN-9--s1")); err == nil {
 		t.Fatal("worktree left")

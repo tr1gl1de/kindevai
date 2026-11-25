@@ -34,7 +34,7 @@ var _ sessionapp.Workspaces = sessionWorkspaces{}
 
 func (w sessionWorkspaces) Prepare(ctx context.Context, r sessionapp.WorkspaceRequest) (string, protocol.WorkspacePrepared, error) {
 	p, err := w.m.Prepare(ctx, workspaceapp.Request{Step: r.Step, Fence: r.Fence, Task: r.Task, Repository: r.Repository,
-		Base: r.Base, Token: workspaceapp.NewToken(r.Token.Reveal()), Progress: r.Progress})
+		Base: r.Base, Token: workspaceapp.NewToken(r.Token.Reveal()), Progress: r.Progress, ReadOnly: r.ReadOnly})
 	if err != nil {
 		return "", protocol.WorkspacePrepared{}, err
 	}
@@ -76,4 +76,9 @@ func changes(res *workspaceapp.Result) *protocol.WorkspaceChanges {
 	}
 	return &protocol.WorkspaceChanges{Branch: res.Branch, BaseSHA: res.BaseSHA, HeadSHA: res.HeadSHA, Files: files,
 		FilesTotal: res.Total, Truncated: res.Truncated, InstructionsChanged: ichanged}
+}
+
+// Diff is the diff a reviewer reviews (KIN-35).
+func (w sessionWorkspaces) Diff(ctx context.Context, step string, fence int64, from, to string, limit int) (string, bool, error) {
+	return w.m.Diff(ctx, step, fence, from, to, limit)
 }

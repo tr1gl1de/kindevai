@@ -204,8 +204,19 @@ func (r runnerExecutions) RecordAgentReport(ctx context.Context, runnerID, step 
 	return attemptError(r.wf.RecordAgentReport(ctx, step, runnerID, fence, agentReport(rep)))
 }
 
+var _ runnersapp.TestReporter = runnerExecutions{}
+
+// RecordTests stores the runner's test evidence with the attempt (KIN-35); a planner attempt has none (checked only).
+func (r runnerExecutions) RecordTests(ctx context.Context, runnerID, step string, fence int64, t protocol.TestResult) error {
+	if planning(step) {
+		return attemptError(r.wf.CheckPlanningAttempt(ctx, step, runnerID, fence))
+	}
+	return attemptError(r.wf.RecordTests(ctx, step, runnerID, fence, workflow.TestRun{Command: t.Command, ExitCode: t.ExitCode,
+		TimedOut: t.TimedOut, DurationMS: t.DurationMS, Output: t.Output}))
+}
+
 func agentReport(r protocol.AgentReport) workflow.AgentReport {
-	out := workflow.AgentReport{Session: r.Session, Model: r.Model, Version: r.Version}
+	out := workflow.AgentReport{Session: r.Session, Model: r.Model, Version: r.Version, Result: r.Result}
 	if u := r.Usage; u != nil {
 		out.Usage = workflow.AgentUsage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens,
 			CacheReadTokens: u.CacheReadTokens, CacheWriteTokens: u.CacheWriteTokens, CostUSD: u.CostUSD, Turns: u.Turns}

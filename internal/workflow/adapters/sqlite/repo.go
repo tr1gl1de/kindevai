@@ -263,8 +263,8 @@ func (r *Repository) loadExecution(ctx context.Context, q string, arg string) (d
 
 func (r *Repository) steps(ctx context.Context, c db.Executor, execID string) ([]domain.Step, error) {
 	rows, err := c.QueryContext(ctx, `SELECT id, step_key, title, repository, depends_on, state, wait_reason, reason,
-		fence, runner_id, lease_expires_at, agent, model, wait_until, network_holds FROM workflow_steps WHERE execution_id = ?
-		ORDER BY position`, execID)
+		fence, runner_id, lease_expires_at, agent, model, wait_until, review, phase, review_round, pinned_runner,
+		test_command, attempt_base, network_holds FROM workflow_steps WHERE execution_id = ? ORDER BY position`, execID)
 	if err != nil {
 		return nil, fmt.Errorf("reading steps: %w", err)
 	}
@@ -276,7 +276,8 @@ func (r *Repository) steps(ctx context.Context, c db.Executor, execID string) ([
 		var deps string
 		var wait, runner, lease, until sql.NullString
 		if err := rows.Scan(&s.ID, &s.Key, &s.Title, &s.Repository, &deps, &s.State, &wait, &s.Reason, &s.Fence,
-			&runner, &lease, &s.Agent, &s.Model, &until, &s.NetworkHolds); err != nil {
+			&runner, &lease, &s.Agent, &s.Model, &until, &s.Review, &s.Phase, &s.Round, &s.PinnedRunner, &s.TestCommand, &s.AttemptBase,
+			&s.NetworkHolds); err != nil {
 			return nil, fmt.Errorf("reading step: %w", err)
 		}
 		if err := json.Unmarshal([]byte(deps), &s.DependsOn); err != nil {
@@ -327,31 +328,40 @@ func (r *Repository) SaveExecution(ctx context.Context, e *domain.Execution) err
 	}
 	for _, s := range e.Steps {
 		res, err := c.ExecContext(ctx, `UPDATE workflow_steps SET state = ?, wait_reason = ?, reason = ?, fence = ?,
-			runner_id = ?, lease_expires_at = ?, agent = ?, model = ?, wait_until = ?, network_holds = ?
-			WHERE id = ? AND execution_id = ?`,
+			runner_id = ?, lease_expires_at = ?, agent = ?, model = ?, wait_until = ?, review = ?, phase = ?, review_round = ?,
+			pinned_runner = ?, test_command = ?, attempt_base = ?, network_holds = ? WHERE id = ? AND execution_id = ?`,
 			s.State, nullStr(s.WaitReason), s.Reason, s.Fence, nullStr(s.RunnerID), nullTS(s.LeaseExpiresAt), s.Agent,
-			s.Model, nullTS(s.WaitUntil), s.NetworkHolds, s.ID, e.ID)
+			s.Model, nullTS(s.WaitUntil), s.Review, s.Phase, s.Round, s.PinnedRunner, s.TestCommand, s.AttemptBase,
+			s.NetworkHolds, s.ID, e.ID)
 		if err := oneRow(res, err, "saving step "+s.Key); err != nil {
 			return err
 		}
 		for _, a := range s.Attempts {
+			tests, files, err := attemptJSON(a)
+			if err != nil {
+				return err
+			}
 			if _, err := c.ExecContext(ctx, `INSERT INTO step_attempts(step_id, number, runner_id, fence, state, error,
 				started_at, finished_at, agent, work_started_at, work_ended_at, work_incomplete, agent_session, agent_model,
-				agent_version, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, turns)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				agent_version, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, turns,
+				role, review_round, agent_result, test_command, tests, base_sha, head_sha, files, files_total)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(step_id, number) DO UPDATE SET state = excluded.state, error = excluded.error,
 				finished_at = excluded.finished_at, agent = excluded.agent,
 				agent_session = excluded.agent_session, agent_model = excluded.agent_model,
 				agent_version = excluded.agent_version, input_tokens = excluded.input_tokens,
 				output_tokens = excluded.output_tokens, cache_read_tokens = excluded.cache_read_tokens,
 				cache_write_tokens = excluded.cache_write_tokens, cost_usd = excluded.cost_usd, turns = excluded.turns,
+				agent_result = excluded.agent_result, tests = excluded.tests, base_sha = excluded.base_sha,
+				head_sha = excluded.head_sha, files = excluded.files, files_total = excluded.files_total,
 				work_started_at = coalesce(work_started_at, excluded.work_started_at),
 				work_ended_at = coalesce(work_ended_at, excluded.work_ended_at),
 				work_incomplete = max(work_incomplete, excluded.work_incomplete)`,
 				s.ID, a.Number, a.RunnerID, a.Fence, a.State, a.Error, ts(a.StartedAt), nullTS(a.FinishedAt), a.Agent,
 				nullTS(a.WorkStart), nullTS(a.WorkEnd), a.WorkIncomplete, a.Report.Session, a.Report.Model, a.Report.Version,
 				max(a.Report.Usage.InputTokens, 0), max(a.Report.Usage.OutputTokens, 0), max(a.Report.Usage.CacheReadTokens, 0),
-				max(a.Report.Usage.CacheWriteTokens, 0), max(a.Report.Usage.CostUSD, 0), max(a.Report.Usage.Turns, 0)); err != nil {
+				max(a.Report.Usage.CacheWriteTokens, 0), max(a.Report.Usage.CostUSD, 0), max(a.Report.Usage.Turns, 0),
+				a.Role, a.Round, a.Report.Result, a.TestCommand, tests, a.BaseSHA, a.HeadSHA, files, max(a.FilesTotal, 0)); err != nil {
 				return fmt.Errorf("saving attempt %d of step %s: %w", a.Number, s.Key, err)
 			}
 		}
@@ -493,17 +503,29 @@ func (r *Repository) ListTasks(ctx context.Context, f app.TaskFilter, limit int)
 
 const attemptCols = `a.number, a.runner_id, a.fence, a.state, a.error, a.started_at, a.finished_at, a.agent,
 	a.work_started_at, a.work_ended_at, a.work_incomplete, a.agent_session, a.agent_model, a.agent_version,
-	a.input_tokens, a.output_tokens, a.cache_read_tokens, a.cache_write_tokens, a.cost_usd, a.turns`
+	a.input_tokens, a.output_tokens, a.cache_read_tokens, a.cache_write_tokens, a.cost_usd, a.turns, a.role,
+	a.review_round, a.agent_result, a.test_command, a.tests, a.base_sha, a.head_sha, a.files, a.files_total`
 
 func scanAttempt(row scanner, key *string) (domain.Attempt, error) {
 	var a domain.Attempt
 	var started string
-	var finished, workStart, workEnd sql.NullString
+	var finished, workStart, workEnd, tests sql.NullString
+	var files string
 	if err := row.Scan(key, &a.Number, &a.RunnerID, &a.Fence, &a.State, &a.Error, &started, &finished, &a.Agent,
 		&workStart, &workEnd, &a.WorkIncomplete, &a.Report.Session, &a.Report.Model, &a.Report.Version,
 		&a.Report.Usage.InputTokens, &a.Report.Usage.OutputTokens, &a.Report.Usage.CacheReadTokens,
-		&a.Report.Usage.CacheWriteTokens, &a.Report.Usage.CostUSD, &a.Report.Usage.Turns); err != nil {
+		&a.Report.Usage.CacheWriteTokens, &a.Report.Usage.CostUSD, &a.Report.Usage.Turns, &a.Role, &a.Round,
+		&a.Report.Result, &a.TestCommand, &tests, &a.BaseSHA, &a.HeadSHA, &files, &a.FilesTotal); err != nil {
 		return a, fmt.Errorf("reading attempt: %w", err)
+	}
+	if tests.Valid {
+		a.Tests = &domain.TestRun{}
+		if err := json.Unmarshal([]byte(tests.String), a.Tests); err != nil {
+			return a, fmt.Errorf("reading attempt %d tests: %w", a.Number, err)
+		}
+	}
+	if err := json.Unmarshal([]byte(files), &a.Files); err != nil {
+		return a, fmt.Errorf("reading attempt %d files: %w", a.Number, err)
 	}
 	var err error
 	if a.StartedAt, err = parseTS(started); err == nil {
@@ -595,4 +617,25 @@ func (r *Repository) ActiveSteps(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("counting active steps: %w", err)
 	}
 	return n, nil
+}
+
+// attemptJSON encodes the attempt's test evidence (NULL: none) and changed files.
+func attemptJSON(a domain.Attempt) (sql.NullString, string, error) {
+	var tests sql.NullString
+	if a.Tests != nil {
+		b, err := json.Marshal(a.Tests)
+		if err != nil {
+			return tests, "", fmt.Errorf("encoding test evidence: %w", err)
+		}
+		tests = sql.NullString{String: string(b), Valid: true}
+	}
+	files := a.Files
+	if files == nil {
+		files = []string{}
+	}
+	b, err := json.Marshal(files)
+	if err != nil {
+		return tests, "", fmt.Errorf("encoding changed files: %w", err)
+	}
+	return tests, string(b), nil
 }

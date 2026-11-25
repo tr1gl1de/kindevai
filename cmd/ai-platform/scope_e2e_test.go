@@ -68,6 +68,10 @@ func (w testWorkspaces) Finish(ctx context.Context, step string, fence int64) (*
 	return testChanges(w.m.Finish(ctx, step, fence))
 }
 
+func (w testWorkspaces) Diff(ctx context.Context, step string, fence int64, from, to string, limit int) (string, bool, error) {
+	return w.m.Diff(ctx, step, fence, from, to, limit)
+}
+
 func (w testWorkspaces) Changes(ctx context.Context, step string, fence int64) (*protocol.WorkspaceChanges, error) {
 	ch, err := testChanges(w.m.Changes(ctx, step, fence))
 	if ch != nil {

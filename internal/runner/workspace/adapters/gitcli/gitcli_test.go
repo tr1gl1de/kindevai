@@ -192,6 +192,42 @@ func TestSnapshotDiffAndRemoveKeepTheBranch(t *testing.T) {
 	}
 }
 
+// KIN-35: a reviewer's diff is the unified diff base..head, cut at the limit; no external diff driver of the
+// repository's (untrusted) config runs.
+func TestPatchIsBoundedAndRunsNoDriver(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	sha, _ := e.git.FetchBase(ctx, e.mirror, "acme/api", "dev", app.Token{})
+	_, admin, err := e.git.AddWorktree(ctx, e.mirror, e.wt, "feature/KIN-1-s2", sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "driver-ran")
+	write(t, filepath.Join(e.wt, ".gitattributes"), "*.md diff=evil\n")
+	sh(t, e.mirror, "config", "diff.evil.command", "touch "+marker)
+	sh(t, e.mirror, "config", "diff.evil.textconv", "touch "+marker+";cat")
+	write(t, filepath.Join(e.wt, "README.md"), strings.Repeat("changed line\n", 200))
+	head, err := e.git.Snapshot(ctx, admin, e.wt, "snapshot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, cut, err := e.git.Patch(ctx, admin, sha, head, 1<<20)
+	if err != nil || cut || !strings.Contains(full, "+changed line") || !strings.Contains(full, "diff --git a/README.md") {
+		t.Fatalf("patch: cut %v err %v\n%s", cut, err, full)
+	}
+	short, cut, err := e.git.Patch(ctx, admin, sha, head, 100)
+	if err != nil || !cut || len(short) != 100 {
+		t.Fatalf("bounded patch: %d bytes cut %v err %v", len(short), cut, err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the repository's diff driver ran")
+	}
+	if _, _, err := e.git.Patch(ctx, admin, "--output=/tmp/x", head, 100); err == nil {
+		t.Fatal("an option as a revision was accepted")
+	}
+}
+
 // An agent that rewrites the worktree's .git file cannot make the runner's git use its own repository (and its
 // core.fsmonitor command): worktree commands name the administrative directory explicitly.
 func TestRewrittenDotGitIsNotFollowed(t *testing.T) {

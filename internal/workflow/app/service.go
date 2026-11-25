@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"time"
 
@@ -114,6 +115,8 @@ type Service struct {
 	// context package from the outbox handler (with Outbox); nil: planners get the task title only.
 	Planning     PlanningRepository
 	IssueContext IssueContextSource
+	// TestCommands gives a repository's test command for the review loop's implementer attempts (KIN-35); nil: none.
+	TestCommands TestCommands
 	// Discussion stores the plan discussion (KIN-43; with Planning); nil: the plan chat is off. Audit records its
 	// messages, answers and limits (KIN-16); nil: not audited.
 	Discussion DiscussionRepository
@@ -332,7 +335,9 @@ func attemptsEqual(a, b domain.Execution) bool {
 		}
 		for j := range x.Attempts {
 			if a, b := x.Attempts[j], y.Attempts[j]; a.State != b.State || a.Agent != b.Agent || a.Report != b.Report ||
-				a.WorkIncomplete != b.WorkIncomplete || !ptrTimeEqual(a.WorkStart, b.WorkStart) || !ptrTimeEqual(a.WorkEnd, b.WorkEnd) {
+				a.WorkIncomplete != b.WorkIncomplete || !ptrTimeEqual(a.WorkStart, b.WorkStart) || !ptrTimeEqual(a.WorkEnd, b.WorkEnd) ||
+				a.Role != b.Role || a.Round != b.Round || a.TestCommand != b.TestCommand || !reflect.DeepEqual(a.Tests, b.Tests) ||
+				a.BaseSHA != b.BaseSHA || a.HeadSHA != b.HeadSHA || !slices.Equal(a.Files, b.Files) || a.FilesTotal != b.FilesTotal {
 				return false
 			}
 		}
@@ -452,7 +457,7 @@ func (s *Service) CompleteStep(ctx context.Context, stepID, runnerID string, fen
 // CompleteStepAt is CompleteStep with the event's time on the runner's clock, which ends the attempt's agent time.
 func (s *Service) CompleteStepAt(ctx context.Context, stepID, runnerID string, fence int64, at time.Time) error {
 	err := s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
-		if err := e.Succeed(stepID, runnerID, fence, now); err != nil {
+		if err := e.SucceedWithin(stepID, runnerID, fence, now, s.maxAttempts()); err != nil {
 			return refusedReport{err}
 		}
 		e.MarkWorkEnd(stepID, runnerID, fence, at, now)
@@ -585,6 +590,31 @@ func (s *Service) RecordAgentReport(ctx context.Context, stepID, runnerID string
 			return fmt.Errorf("attempt %d of step %s on runner %s: %w", fence, st.Key, runnerID, domain.ErrStaleFence)
 		}
 		e.RecordAgentReport(stepID, runnerID, fence, r)
+		return nil
+	})
+}
+
+// RecordTests stores the runner's test evidence (KIN-35) with the attempt of runnerID under fence, whatever the
+// step's state now; an attempt the runner does not hold is domain.ErrStaleFence.
+func (s *Service) RecordTests(ctx context.Context, stepID, runnerID string, fence int64, r domain.TestRun) error {
+	return s.updateAttempt(ctx, stepID, runnerID, fence, func(e *domain.Execution) { e.RecordTests(stepID, runnerID, fence, r) })
+}
+
+// RecordChanges stores an attempt's final workspace report (base, head, changed files; KIN-35 handoff artifact).
+func (s *Service) RecordChanges(ctx context.Context, stepID, runnerID string, fence int64, c domain.WorkChanges) error {
+	return s.updateAttempt(ctx, stepID, runnerID, fence, func(e *domain.Execution) { e.RecordChanges(stepID, runnerID, fence, c) })
+}
+
+func (s *Service) updateAttempt(ctx context.Context, stepID, runnerID string, fence int64, fn func(e *domain.Execution)) error {
+	return s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, _ time.Time) error {
+		st := e.Step(stepID)
+		if st == nil {
+			return domain.ErrNotFound
+		}
+		if !slices.ContainsFunc(st.Attempts, func(a domain.Attempt) bool { return a.RunnerID == runnerID && a.Fence == fence }) {
+			return fmt.Errorf("attempt %d of step %s on runner %s: %w", fence, st.Key, runnerID, domain.ErrStaleFence)
+		}
+		fn(e)
 		return nil
 	})
 }

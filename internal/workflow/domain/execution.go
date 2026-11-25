@@ -27,12 +27,13 @@ var AllStepStates = []StepState{StepPending, StepReady, StepClaimed, StepRunning
 
 // stepTransitions is the Step FSM. CLAIMED -> READY: the lease ran out before the runner started. WAITING ->
 // RUNNING/SUCCEEDED/FAILED: reconciliation found the process alive or its result. FAILED -> READY: retry within
-// the attempt budget.
+// the attempt budget. RUNNING/WAITING -> READY: a phase of the review loop ended and the next one (review, fix round)
+// is due (KIN-35).
 var stepTransitions = map[StepState][]StepState{
 	StepPending: {StepReady, StepCancelled},
 	StepReady:   {StepClaimed, StepWaiting, StepCancelled},
 	StepClaimed: {StepReady, StepRunning, StepWaiting, StepFailed, StepCancelled},
-	StepRunning: {StepSucceeded, StepWaiting, StepFailed, StepCancelled},
+	StepRunning: {StepReady, StepSucceeded, StepWaiting, StepFailed, StepCancelled},
 	StepWaiting: {StepReady, StepRunning, StepSucceeded, StepFailed, StepCancelled},
 	StepFailed:  {StepReady},
 }
@@ -81,6 +82,16 @@ type Attempt struct {
 	WorkIncomplete bool
 	// Report is what the AI CLI reported (KIN-79): native session, model, CLI version and usage.
 	Report AgentReport
+	// The review loop (KIN-35): the attempt's role (implementer, reviewer; "" outside the loop) and fix round, the
+	// test command it was sent and the runner's test evidence, and its final workspace report (base, head, files).
+	Role        string
+	Round       int
+	TestCommand string
+	Tests       *TestRun
+	BaseSHA     string
+	HeadSHA     string
+	Files       []string
+	FilesTotal  int
 }
 
 // AgentReport is an AI CLI run's report on one attempt (KIN-79, KB KIN-A-16).
@@ -89,6 +100,9 @@ type AgentReport struct {
 	Model   string
 	Version string
 	Usage   AgentUsage
+	// Result is the CLI's final answer (untrusted; at most MaxAgentResult bytes): the implementer's handoff or the
+	// reviewer's verdict (KIN-35).
+	Result string
 }
 
 // AgentUsage is the token usage and cost of an attempt's CLI run.
@@ -119,6 +133,10 @@ func (e *Execution) RecordAgentReport(stepID, runnerID string, fence int64, r Ag
 		return false
 	}
 	r.Session, r.Model, r.Version = cutUTF8(r.Session, 128), cutUTF8(r.Model, 128), cutUTF8(r.Version, 64)
+	r.Result = cutUTF8(r.Result, MaxAgentResult)
+	if a.Report == r {
+		return false
+	}
 	a.Report = r
 	return true
 }
@@ -155,6 +173,17 @@ type Step struct {
 	// first claim. They stay after the attempt ends, so a review step can tell which CLI authored the work.
 	Agent string
 	Model string
+	// The review loop (KIN-35, review.go): Review is on for a routed implementer step on an AI CLI; Phase is the
+	// current phase, Round the fix round (0 for the first implementation), PinnedRunner the runner that holds the
+	// step's work branch after its first implementation and TestCommand the test command of the current claim.
+	Review       bool
+	Phase        string
+	Round        int
+	PinnedRunner string
+	TestCommand  string
+	// AttemptBase is the number of attempts before the loop last started over (its runner was released): only later
+	// attempts count for the loop's budgets and evidence.
+	AttemptBase int
 }
 
 // WaitingForNetwork is what the UI shows as WAITING_FOR_NETWORK.
@@ -265,6 +294,8 @@ func (e Execution) Clone() Execution {
 		s.WaitUntil = clonePtr(s.WaitUntil)
 		s.Attempts = slices.Clone(s.Attempts)
 		for j, a := range s.Attempts {
+			s.Attempts[j].Tests = clonePtr(a.Tests)
+			s.Attempts[j].Files = slices.Clone(a.Files)
 			s.Attempts[j].FinishedAt = clonePtr(a.FinishedAt)
 			s.Attempts[j].WorkStart, s.Attempts[j].WorkEnd = clonePtr(a.WorkStart), clonePtr(a.WorkEnd)
 		}
@@ -381,9 +412,14 @@ func (e *Execution) Start(stepID, runnerID string, fence int64, now time.Time, t
 	exp := now.Add(ttl)
 	s.move(StepRunning)
 	s.LeaseExpiresAt = &exp
-	s.Attempts = append(s.Attempts, Attempt{Number: len(s.Attempts) + 1, RunnerID: runnerID, Fence: fence,
-		State: AttemptRunning, StartedAt: now, Agent: s.Agent})
+	s.Attempts = append(s.Attempts, s.newAttempt(runnerID, fence, now))
 	return nil
+}
+
+// newAttempt is the step's next attempt under fence, with the phase's role, round and test command.
+func (s *Step) newAttempt(runnerID string, fence int64, now time.Time) Attempt {
+	return Attempt{Number: len(s.Attempts) + 1, RunnerID: runnerID, Fence: fence, State: AttemptRunning, StartedAt: now,
+		Agent: s.Agent, Role: s.attemptRole(), Round: s.Round, TestCommand: s.TestCommand}
 }
 
 // Renew extends the lease of a CLAIMED or RUNNING step (heartbeat) and returns the new expiry.
@@ -413,12 +449,21 @@ func reportable(s *Step) bool { return s.State == StepRunning || s.unknownAttemp
 
 // Succeed records the step's success, promotes its dependents and finishes the execution when all steps succeeded.
 func (e *Execution) Succeed(stepID, runnerID string, fence int64, now time.Time) error {
+	return e.SucceedWithin(stepID, runnerID, fence, now, DefaultMaxAttempts)
+}
+
+// SucceedWithin is Succeed with the retry budget a review-loop attempt that did not pass (failed tests, an invalid
+// verdict, KIN-35) is retried within.
+func (e *Execution) SucceedWithin(stepID, runnerID string, fence int64, now time.Time, maxAttempts int) error {
 	s, err := e.holder(stepID, runnerID, fence, "succeed")
 	if err != nil {
 		return err
 	}
 	if !reportable(s) {
 		return invalidStep(s, "succeed")
+	}
+	if s.Review && !e.finishPhase(s, now, maxAttempts) {
+		return nil
 	}
 	s.finishAttempt(AttemptSucceeded, "", now)
 	s.move(StepSucceeded)
@@ -445,8 +490,7 @@ func (e *Execution) Fail(stepID, runnerID string, fence int64, msg string, now t
 		msg = "failed"
 	}
 	if s.State == StepClaimed { // the launch itself failed: it still counts as an attempt
-		s.Attempts = append(s.Attempts, Attempt{Number: len(s.Attempts) + 1, RunnerID: runnerID, Fence: fence,
-			State: AttemptRunning, StartedAt: now, Agent: s.Agent})
+		s.Attempts = append(s.Attempts, s.newAttempt(runnerID, fence, now))
 	}
 	e.failAttempt(s, msg, now, maxAttempts)
 	return nil
@@ -566,6 +610,13 @@ func (e *Execution) ReleaseRunner(runnerID, msg string, now time.Time, maxAttemp
 		}
 		// A step that uses up its budget fails the execution, which cancels the remaining steps (no longer held).
 		e.failAttempt(s, msg, now, maxAttempts)
+	}
+	// A review loop whose work branch lives on this runner starts over elsewhere (KIN-35): nothing else can reach it.
+	for i := range e.Steps {
+		if s := &e.Steps[i]; s.PinnedRunner == runnerID && !s.Holding() && e.State == ExecutionRunning &&
+			(s.State == StepReady || s.State == StepWaiting) {
+			s.restartReview()
+		}
 	}
 	return out
 }
@@ -715,8 +766,7 @@ func (e *Execution) hold(stepID, runnerID string, fence int64, msg string, reaso
 	}
 	msg = reasonText(msg)
 	if s.State == StepClaimed {
-		s.Attempts = append(s.Attempts, Attempt{Number: len(s.Attempts) + 1, RunnerID: runnerID, Fence: fence,
-			State: AttemptRunning, StartedAt: now, Agent: s.Agent})
+		s.Attempts = append(s.Attempts, s.newAttempt(runnerID, fence, now))
 	}
 	s.finishAttempt(AttemptCancelled, msg, now)
 	s.move(StepWaiting)
@@ -724,11 +774,13 @@ func (e *Execution) hold(stepID, runnerID string, fence int64, msg string, reaso
 	return nil
 }
 
-// countedAttempts are the attempts that use the retry budget: cancelled ones (held for approval) do not.
+// countedAttempts are the attempts that use the retry budget: cancelled ones (held for approval) do not, nor do
+// those of another phase or fix round of the review loop (each has its own budget, KIN-35).
 func (s *Step) countedAttempts() int {
 	n := 0
-	for _, a := range s.Attempts {
-		if a.State != AttemptCancelled {
+	role := s.attemptRole()
+	for _, a := range s.Attempts[min(s.AttemptBase, len(s.Attempts)):] {
+		if a.State != AttemptCancelled && a.Role == role && a.Round == s.Round {
 			n++
 		}
 	}
@@ -795,3 +847,7 @@ func (e *Execution) finish(state ExecutionState, reason string, now time.Time) {
 	}
 	e.State, e.Reason, e.FinishedAt = state, reason, &now
 }
+
+// DefaultMaxAttempts is the retry budget of a step (one retry after a confirmed failure, KIN-23), per phase and
+// fix round of the review loop.
+const DefaultMaxAttempts = 2

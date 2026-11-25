@@ -16,7 +16,7 @@ import (
 // turn.completed with usage, turn.failed, error) follow the Codex CLI documentation of `codex exec`; the recorded
 // streams in testdata are hand-written to it. Safe mode is `--sandbox workspace-write` (Codex's own sandbox: writes
 // only in the workspace, no network; exec never asks for approval). The bypass is
-// `--dangerously-bypass-approvals-and-sandbox`, only inside the strict-egress sandbox. `--full-auto` is not used.
+// `--dangerously-bypass-approvals-and-sandbox`, only inside the strict-egress sandbox. `--full-auto` is not used. Read-only (a reviewer, KIN-35) is `--sandbox read-only`.
 type Codex struct{}
 
 // Name is the agent name.
@@ -25,9 +25,12 @@ func (Codex) Name() string { return domain.AgentCodex }
 // Args builds the command line. Every value is validated by domain.AgentRequest.Check.
 func (Codex) Args(r domain.AgentRequest, p domain.Permissions) []string {
 	args := []string{"exec", "--json", "--skip-git-repo-check"}
-	if p == domain.PermissionsBypass {
+	switch p {
+	case domain.PermissionsBypass:
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
-	} else {
+	case domain.PermissionsReadOnly:
+		args = append(args, "--sandbox", "read-only")
+	default:
 		args = append(args, "--sandbox", "workspace-write")
 	}
 	if r.Model != "" {

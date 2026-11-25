@@ -23,11 +23,23 @@ type fakeWorkspaces struct {
 	checks   int      // Changes calls
 	late     bool     // Changes was called after Finish
 	finErr   error    // Finish fails
+	diff     string   // what Diff returns (KIN-35)
+	diffs    []string // the ranges Diff was asked for
 	// KIN-71: phases reports these phases through the request's Progress; gate, when set, then holds Prepare until
 	// it is closed or its context ends (a slow fetch); started gets each Prepare as it begins.
 	phases  []string
 	gate    chan struct{}
 	started chan string
+}
+
+func (w *fakeWorkspaces) Diff(_ context.Context, step string, fence int64, from, to string, limit int) (string, bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.diffs = append(w.diffs, from+".."+to)
+	if len(w.diff) > limit {
+		return w.diff[:limit], true, nil
+	}
+	return w.diff, false, nil
 }
 
 func (w *fakeWorkspaces) Changes(_ context.Context, step string, fence int64) (*protocol.WorkspaceChanges, error) {

@@ -70,10 +70,14 @@ type Git interface {
 	AddWorktree(ctx context.Context, mirror, dir, branch, baseSHA string) (fork, admin string, err error)
 	// Snapshot commits uncommitted work in the worktree (hooks disabled) and returns HEAD.
 	Snapshot(ctx context.Context, admin, dir, message string) (string, error)
+	// Head returns the worktree's HEAD commit without committing anything.
+	Head(ctx context.Context, admin string) (string, error)
 	// Diff lists the paths changed between two commits.
 	Diff(ctx context.Context, admin, from, to string) ([]domain.Change, error)
 	// Changes lists the paths the worktree (untracked files included) changed against base, read-only.
 	Changes(ctx context.Context, admin, dir, base string) ([]domain.Change, error)
+	// Patch is the unified diff from..to (commits), at most limit bytes (cut: there was more; KIN-35 review).
+	Patch(ctx context.Context, admin, from, to string, limit int) (string, bool, error)
 	// RemoveWorktree removes the worktree; the branch stays in the mirror.
 	RemoveWorktree(ctx context.Context, mirror, dir string) error
 }
@@ -96,6 +100,9 @@ type Meta struct {
 	Dir          string               `json:"dir"`
 	Admin        string               `json:"admin"`
 	Instructions []domain.Instruction `json:"instructions"`
+	// ReadOnly: a reviewer's workspace (KIN-35). Its end commits nothing: whatever it wrote is discarded with the
+	// worktree, so the work branch keeps the reviewed head.
+	ReadOnly bool `json:"readOnly,omitempty"`
 }
 
 // Store is the workspace layout under the runner data dir (adapters/fsstore).
@@ -119,6 +126,7 @@ type Request struct {
 	Repository string
 	Base       string
 	Token      Token
+	ReadOnly   bool // a reviewer's workspace: Finish commits nothing (KIN-35)
 	// Progress, when set, gets the preparation's phases (Phase*) as it reaches them.
 	Progress func(phase string)
 }
@@ -282,7 +290,7 @@ func (m *Manager) prepare(ctx context.Context, r Request, branch, mirror, dir st
 	files, truncated, err := m.Scanner.Scan(dir)
 	if err == nil {
 		err = m.Store.SaveMeta(Meta{Step: r.Step, Fence: r.Fence, Repository: r.Repository, Branch: branch, Base: r.Base,
-			BaseSHA: fork, Mirror: mirror, Dir: dir, Admin: admin, Instructions: files})
+			BaseSHA: fork, Mirror: mirror, Dir: dir, Admin: admin, Instructions: files, ReadOnly: r.ReadOnly})
 	}
 	if err != nil {
 		_ = m.removeWorktree(mirror, dir)
@@ -339,6 +347,22 @@ func (m *Manager) Changes(ctx context.Context, step string, fence int64) (*Resul
 	return &Result{Branch: meta.Branch, BaseSHA: meta.BaseSHA, Files: fitted, Total: len(files), Truncated: cut}, nil
 }
 
+// Diff is the diff from..to in the attempt's workspace (a reviewer's work to review, KIN-35), at most limit bytes.
+// It fails for an attempt whose workspace this process does not hold.
+func (m *Manager) Diff(ctx context.Context, step string, fence int64, from, to string, limit int) (string, bool, error) {
+	m.mu.Lock()
+	_, held := m.held[key(step, fence)]
+	m.mu.Unlock()
+	meta, ok, err := m.Store.LoadMeta(step, fence)
+	switch {
+	case err != nil:
+		return "", false, err
+	case !held || !ok:
+		return "", false, fmt.Errorf("no workspace for attempt %s", key(step, fence))
+	}
+	return m.Git.Patch(ctx, meta.Admin, from, to, limit)
+}
+
 // SnapshotMessage is the commit message of work an attempt left uncommitted.
 const SnapshotMessage = "kindevai: uncommitted changes at the end of attempt %s/%d"
 
@@ -364,7 +388,12 @@ func (m *Manager) Finish(ctx context.Context, step string, fence int64) (*Result
 	if err != nil {
 		return nil, fmt.Errorf("scanning instructions: %w", err)
 	}
-	head, err := m.Git.Snapshot(ctx, meta.Admin, meta.Dir, fmt.Sprintf(SnapshotMessage, step, fence))
+	var head string
+	if meta.ReadOnly {
+		head, err = m.Git.Head(ctx, meta.Admin)
+	} else {
+		head, err = m.Git.Snapshot(ctx, meta.Admin, meta.Dir, fmt.Sprintf(SnapshotMessage, step, fence))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("saving the attempt's work to %s: %w", meta.Branch, err)
 	}

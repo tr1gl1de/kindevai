@@ -86,13 +86,19 @@ func TestPrepareWritesThePromptOutsideTheWorktree(t *testing.T) {
 // runExec runs agent-exec (the test binary) as the leader of its own process group, like the launcher does.
 func runExec(t *testing.T, f *fixture, state string, timeout time.Duration, env ...string) *exec.Cmd {
 	t.Helper()
+	return runExecWith(t, f, state, timeout, nil, env...)
+}
+
+// runExecWith is runExec with extra agent-exec flags.
+func runExecWith(t *testing.T, f *fixture, state string, timeout time.Duration, flags []string, env ...string) *exec.Cmd {
+	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	bin, _ := filepath.Abs("testdata/fakecli.sh")
-	cmd := exec.Command(exe, "--state", state, "--prompt", f.prompt, "--timeout", timeout.String(), "--grace", "100ms", //nolint:gosec // test
-		"--", bin, "-p")
+	args := append([]string{"--state", state, "--prompt", f.prompt, "--timeout", timeout.String(), "--grace", "100ms"}, flags...)
+	cmd := exec.Command(exe, append(args, "--", bin, "-p")...) //nolint:gosec // test
 	cmd.Env = append([]string{"KINDEV_TEST_AGENT_EXEC=1", "FAKE_OUT=" + f.out, "PATH=/usr/bin:/bin"}, env...)
 	cmd.Dir = f.workdir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -269,5 +275,97 @@ func TestCappedOutputStopsAtTheLimitAndMarksTheCut(t *testing.T) {
 	b, _ := os.ReadFile(f.Name())
 	if !strings.HasPrefix(string(b), "0123456789\n[agent-exec: stdout cut at") || strings.Count(string(b), "cut at") != 1 {
 		t.Fatalf("file %q", b)
+	}
+}
+
+// testsFile writes the test command for agent-exec's --tests.
+func testsFile(t *testing.T, command string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), TestsCommandFile)
+	if err := os.WriteFile(p, []byte(command), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// KIN-35: after the CLI succeeded agent-exec runs the test command in the worktree without the CLI's credentials and
+// records its exit code, duration and output; a failed CLI gets no test run.
+func TestExecRunsTheTestsAfterASuccessfulCLI(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	state := t.TempDir()
+	cmd := runExecWith(t, f, state, time.Minute, []string{"--tests",
+		testsFile(t, `pwd; echo "key=${ANTHROPIC_API_KEY:-none} ci=$CI home=$HOME proxy=$HTTPS_PROXY"; exit 3`)},
+		"FAKE_STREAM="+abs(t, "testdata/claude/read.jsonl"), "ANTHROPIC_API_KEY=sk-secret", "HOME=/home/runner",
+		"HTTPS_PROXY=http://user:hunter2@proxy.local:3128")
+	_ = cmd.Wait()
+	end, out, ok := ReadTests(state, 1<<10)
+	if !ok || end.Code != 3 || end.TimedOut {
+		t.Fatalf("tests %+v %v", end, ok)
+	}
+	if !strings.Contains(out, f.workdir) || !strings.Contains(out, "key=none ci=true home="+filepath.Join(state, TestsHome)) ||
+		!strings.Contains(out, "proxy=http://proxy.local:3128") || strings.Contains(out, "hunter2") {
+		t.Fatalf("test output %q", out)
+	}
+	if e, ok := ReadEnd(state); !ok || e.Code != 0 {
+		t.Fatalf("the CLI's end %+v %v", e, ok)
+	}
+
+	failed := t.TempDir()
+	cmd = runExecWith(t, f, failed, time.Minute, []string{"--tests", testsFile(t, "exit 0")}, "FAKE_EXIT=2")
+	_ = cmd.Wait()
+	if _, _, ok := ReadTests(failed, 1<<10); ok {
+		t.Fatal("tests ran after a failed CLI")
+	}
+}
+
+func TestExecStopsTestsThatRunTooLong(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	state := t.TempDir()
+	cmd := runExecWith(t, f, state, time.Minute, []string{"--tests", testsFile(t, "echo started; sleep 30"), "--tests-timeout", "200ms"},
+		"FAKE_STREAM="+abs(t, "testdata/claude/read.jsonl"))
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent-exec did not stop the hanging tests")
+	}
+	if end, out, ok := ReadTests(state, 1<<10); !ok || !end.TimedOut || end.Code == 0 || !strings.Contains(out, "started") {
+		t.Fatalf("tests %+v %q %v", end, out, ok)
+	}
+}
+
+// KIN-35: the test command goes to a file outside the worktree; the follower reports the run (a run that left no
+// result is a failed one) and nothing for an attempt without a test command.
+func TestPrepareWritesTheTestCommandAndTheResultIsRead(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	dir := t.TempDir()
+	g := agentsFor(f, Claude{})
+	req := domain.AgentRequest{Agent: domain.AgentClaude, Workdir: f.workdir, Timeout: time.Minute, TestCommand: "make test",
+		TestsTimeout: time.Minute}
+	cmd, err := g.Prepare(dir, req, "x", domain.PermissionsSafe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(cmd.TestsFile); string(b) != "make test" || filepath.Dir(cmd.TestsFile) != dir || cmd.TestsTimeout != time.Minute {
+		t.Fatalf("tests file %q: %q", cmd.TestsFile, b)
+	}
+	if r := readTestsRun(dir); r == nil || r.Code != -1 || r.Command != "make test" {
+		t.Fatalf("unfinished run %+v", r)
+	}
+	if err := writeJSON(dir, TestsEndFile, TestsEnd{Code: 0, DurationMS: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, TestsOutputFile), []byte(strings.Repeat("y", 2*MaxTestsTail)+"PASS"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := readTestsRun(dir); r == nil || r.Code != 0 || r.DurationMS != 7 || len(r.Output) != MaxTestsTail || !strings.HasSuffix(r.Output, "PASS") {
+		t.Fatalf("run %+v", r)
+	}
+	if r := readTestsRun(t.TempDir()); r != nil {
+		t.Fatalf("run without a test command %+v", r)
 	}
 }

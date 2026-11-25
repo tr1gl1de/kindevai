@@ -525,3 +525,17 @@ func TestUnverifiedSandboxFailsWithNetwork(t *testing.T) {
 		}
 	}
 }
+
+// KIN-35: a read-only run (a reviewer) never gets the write or shell tools, nor the bypass.
+func TestReadOnlyArgs(t *testing.T) {
+	t.Parallel()
+	req := domain.AgentRequest{}
+	claude := Claude{}.Args(req, domain.PermissionsReadOnly)
+	if want := []string{"-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "default", "--disallowedTools",
+		"Edit,MultiEdit,Write,NotebookEdit,Bash", "--setting-sources", "user", "--settings", `{"disableAllHooks":true}`}; !slices.Equal(claude, want) {
+		t.Fatalf("claude argv = %q", claude)
+	}
+	if codex := (Codex{}).Args(req, domain.PermissionsReadOnly); !slices.Contains(codex, "read-only") || slices.Contains(codex, "workspace-write") {
+		t.Fatalf("codex argv = %q", codex)
+	}
+}

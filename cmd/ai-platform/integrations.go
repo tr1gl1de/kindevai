@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/integrations/adapters/github"
@@ -93,6 +94,22 @@ func (w workflowRepositories) Repositories(ctx context.Context, projectID string
 		out = append(out, r.FullName())
 	}
 	return out, nil
+}
+
+var _ workflowapp.TestCommands = workflowRepositories{}
+
+// TestCommand is the registered repository's test command (KIN-35); "" for a repository the registry does not know.
+func (w workflowRepositories) TestCommand(ctx context.Context, projectID, repository string) (string, error) {
+	rs, err := w.repos.RepositoriesOf(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+	for _, r := range rs {
+		if strings.EqualFold(r.FullName(), repository) {
+			return r.TestCommand, nil
+		}
+	}
+	return "", nil
 }
 
 // integrationProjects gives the integrations context the projects context's app API, translating its errors.

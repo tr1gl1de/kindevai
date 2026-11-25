@@ -121,6 +121,7 @@ function Repositories({ project, repositories }: { project: Project; repositorie
               <tr>
                 <th scope="col">{t("integrations.repository")}</th>
                 <th scope="col">{t("integrations.integrationBranch")}</th>
+                <th scope="col">{t("integrations.testCommand")}</th>
                 <th scope="col">{t("integrations.protectedBranches")}</th>
                 <th scope="col">
                   <span className="visually-hidden">{t("members.actions")}</span>
@@ -132,12 +133,13 @@ function Repositories({ project, repositories }: { project: Project; repositorie
                 <tr key={r.id}>
                   <td>{r.fullName}</td>
                   {editing === r.id ? (
-                    <td colSpan={3}>
+                    <td colSpan={4}>
                       <BranchEditor project={project} repo={r} onDone={() => setEditing(null)} />
                     </td>
                   ) : (
                     <>
                       <td>{r.integrationBranch}</td>
+                      <td>{r.testCommand ? <code>{r.testCommand}</code> : <span className="muted">{t("integrations.noTestCommand")}</span>}</td>
                       <td className="repo-cell">
                         {r.protectedBranches.join(", ")}
                         <RepoGitHubState project={project} repo={r} onError={setError} />
@@ -227,8 +229,9 @@ function BranchEditor({ project, repo, onDone }: { project: Project; repo: Proje
   const { t } = useTranslation();
   const notify = useNotify();
   const update = useUpdateRepository(project.id);
-  const { errors, show, clear, register } = useFieldErrors(["integrationBranch"] as const);
+  const { errors, show, clear, register } = useFieldErrors(["integrationBranch", "testCommand"] as const);
   const [branch, setBranch] = useState(repo.integrationBranch);
+  const [testCommand, setTestCommand] = useState(repo.testCommand ?? "");
   const [formError, setFormError] = useState<string>();
   const input = useRef<HTMLInputElement | null>(null);
   // The editor replaces the button that opened it: keep keyboard focus in place.
@@ -242,11 +245,12 @@ function BranchEditor({ project, repo, onDone }: { project: Project; repo: Proje
       return;
     }
     try {
-      const r = await update.mutateAsync({ repoId: repo.id, integrationBranch: branch.trim() });
+      const r = await update.mutateAsync({ repoId: repo.id, integrationBranch: branch.trim(), testCommand: testCommand.trim() });
       notify(t("integrations.branchChanged", { repo: r.fullName, branch: r.integrationBranch }));
       onDone();
     } catch (err) {
       if (isApiError(err, "validation") && err.field === "integrationBranch") show({ integrationBranch: fieldError(t, err.detail) });
+      else if (isApiError(err, "validation") && err.field === "testCommand") show({ testCommand: fieldError(t, err.detail) });
       else setFormError(errorMessage(t, err));
     }
   }
@@ -268,6 +272,20 @@ function BranchEditor({ project, repo, onDone }: { project: Project; repo: Proje
         onChange={(e) => {
           setBranch(e.target.value);
           clear("integrationBranch");
+        }}
+      />
+      <TextField
+        ref={register("testCommand")}
+        label={t("integrations.testCommand")}
+        hint={t("integrations.testCommandHint")}
+        error={errors.testCommand}
+        autoCapitalize="none"
+        autoComplete="off"
+        spellCheck={false}
+        value={testCommand}
+        onChange={(e) => {
+          setTestCommand(e.target.value);
+          clear("testCommand");
         }}
       />
       <div className="form-actions">

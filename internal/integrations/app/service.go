@@ -460,7 +460,7 @@ func (s *Service) BindYouTrackProject(ctx context.Context, actor auth.Principal,
 }
 
 func repoDetails(r domain.Repository) map[string]string {
-	return map[string]string{"repository": r.FullName(), "integrationBranch": r.IntegrationBranch}
+	return map[string]string{"repository": r.FullName(), "integrationBranch": r.IntegrationBranch, "testCommand": r.TestCommand}
 }
 
 func repoSubject(id string) string { return "repository:" + id }
@@ -495,8 +495,9 @@ func (s *Service) AddRepository(ctx context.Context, actor auth.Principal, proje
 	return r, nil
 }
 
-// UpdateRepository changes a repository's integration branch (Owner only).
-func (s *Service) UpdateRepository(ctx context.Context, actor auth.Principal, projectID, id, branch string) (domain.Repository, error) {
+// UpdateRepository changes a repository's integration branch and, when testCommand is not nil, its test command
+// (KIN-35) (Owner only).
+func (s *Service) UpdateRepository(ctx context.Context, actor auth.Principal, projectID, id, branch string, testCommand *string) (domain.Repository, error) {
 	p, err := s.project(ctx, actor, projectID)
 	if err != nil {
 		return domain.Repository{}, err
@@ -508,6 +509,11 @@ func (s *Service) UpdateRepository(ctx context.Context, actor auth.Principal, pr
 		}
 		if err := r.SetIntegrationBranch(branch, s.Now()); err != nil {
 			return err
+		}
+		if testCommand != nil {
+			if err := r.SetTestCommand(*testCommand, s.Now()); err != nil {
+				return err
+			}
 		}
 		if err := s.Store.SaveRepository(ctx, r); err != nil {
 			return fmt.Errorf("saving repository: %w", err)

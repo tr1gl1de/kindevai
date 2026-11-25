@@ -181,6 +181,19 @@ ai-runner fingerprint                                    # compare with the runn
   task FAILS with the reason. The planner's native session is kept: a repeat or replan on the same runner and the plan
   chat continue it. `KINDEV_REAL_CLI_SMOKE=1 go test -run TestRealCLIPlannerSmoke ./cmd/ai-platform/` asks the
   installed Claude CLI for a real plan.
+- Implementation and independent review (KIN-35): a plan step routed to an AI CLI runs a loop on its work branch
+  `feature/<task>--<step>`. The implementer gets the approved step (task title and plan text fenced as untrusted, the
+  scope, the plan's tests, the repository's test command) and ends with a handoff (summary, documentation impact, open
+  questions). After its CLI, `agent-exec` runs the repository's **test command** (Project → Repositories, e.g.
+  `make test`) with `/bin/sh` in the worktree, inside the attempt's confinement and with an allowlisted environment
+  (no CLI credentials); the runner reports exit code, duration and the output's tail (`execution.tests`) — the
+  model's claim is never evidence. A failing or missing result fails the attempt (one retry with the output), no
+  test command is shown as "not configured". A reviewer then runs on the same runner (it holds the branch) with a CLI
+  other than the author's when routing allows, read-only (Claude `--permission-mode default` without write/shell
+  tools, Codex `--sandbox read-only`), with the bounded diff base..head fenced in its prompt; it answers a JSON verdict
+  `approve | changes_requested` with findings. Changes requested start a fix round with the findings (at most 2), after
+  which the step FAILS with the reason; a reviewer that changes the branch fails its attempt. The task page shows the
+  phase, the handoff (base/head, changed files, test evidence) and the verdict. Pushing and the PR are KIN-36.
 - Plan discussion API (KIN-43; the chat UI is KIN-44): the Owner and project admins write about the current plan
   revision of a task awaiting approval or ready (`POST /api/tasks/{id}/discussion/messages`, 202; members and viewers
   read `GET /api/tasks/{id}/discussion`). Each message is one turn run by the planner role's CLI like a planner

@@ -805,7 +805,7 @@ export interface Attempt {
   cliVersion?: string;
   usage?: AgentUsage;
   /** The review loop (KIN-35): implementer or reviewer, the fix round and an implementer's test evidence. */
-  role?: "implementer" | "reviewer";
+  role?: "implementer" | "reviewer" | "publisher";
   round?: number;
   testStatus?: TestStatus;
 }
@@ -856,7 +856,7 @@ export interface Verdict {
 
 /** A step's implementation and review loop (KIN-35). */
 export interface ReviewLoop {
-  phase: "implement" | "review";
+  phase: "implement" | "review" | "publish";
   round: number;
   maxRounds: number;
   pinnedRunner?: string;
@@ -963,6 +963,21 @@ export interface TaskDetail {
   execution: Execution | null;
   canManage: boolean;
   time: TaskTime;
+  /** The task's change set (KIN-36): published branches and their pull requests. */
+  pullRequests?: PullRequest[];
+}
+
+/** A published branch and its pull request into the integration branch (KIN-36); url is https only. */
+export interface PullRequest {
+  repository: string;
+  branch: string;
+  headSha: string;
+  state: "opening" | "open" | "failed";
+  number?: number;
+  url?: string;
+  base?: string;
+  error?: string;
+  updatedAt: string;
 }
 
 /** One recorded runner event of an attempt; data is process output (plain text, never markup). */

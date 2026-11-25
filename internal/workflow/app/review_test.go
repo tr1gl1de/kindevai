@@ -91,9 +91,10 @@ func TestReviewLoopRunsImplementationTestsReviewAndFixes(t *testing.T) {
 	}
 	runAssigned(t, e, task.ID, "only", "r1", `{"verdict":"approve","summary":"good","findings":[]}`, nil,
 		domain.WorkChanges{BaseSHA: "b0", HeadSHA: "h2", Files: []string{"src/a.go"}, Total: 1})
-	tk, ex := e.state(t, task.ID)
-	if ex.State != domain.ExecutionSucceeded || tk.State != domain.TaskVerifying {
-		t.Fatalf("after approval: execution %s task %s", ex.State, tk.State)
+	// KIN-36: the approved work is published next, on the runner holding the branch.
+	e.schedule(t)
+	if got = e.disp.takeAssigned(); len(got) != 1 || got[0].Role != "publisher" || got[0].DiffHead != "h2" {
+		t.Fatalf("publish %+v", got)
 	}
 }
 

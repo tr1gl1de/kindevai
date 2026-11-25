@@ -118,6 +118,8 @@ type TaskDetail struct {
 	Planning  *domain.PlanningRun // the latest planner run (KIN-34); nil when the task was never planned by AI
 	CanManage bool
 	Time      TaskTime // over all the task's executions
+	// ChangeSet is the task's published branches and their pull requests (KIN-36), oldest first.
+	ChangeSet []domain.GitArtifact
 }
 
 // TaskDetail returns a task p may see (domain.ErrNotFound otherwise).
@@ -163,6 +165,9 @@ func (s *Service) TaskDetail(ctx context.Context, p auth.Principal, id string) (
 		return TaskDetail{}, err
 	}
 	d.Time = times[t.ID]
+	if d.ChangeSet, err = s.TaskChangeSet(ctx, t.ID); err != nil {
+		return TaskDetail{}, err
+	}
 	return d, nil
 }
 

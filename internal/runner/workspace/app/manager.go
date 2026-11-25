@@ -80,6 +80,8 @@ type Git interface {
 	Patch(ctx context.Context, admin, from, to string, limit int) (string, bool, error)
 	// RemoveWorktree removes the worktree; the branch stays in the mirror.
 	RemoveWorktree(ctx context.Context, mirror, dir string) error
+	// Push publishes commit sha of the mirror to branch of repository, fast-forward only (KIN-36).
+	Push(ctx context.Context, mirror, repository, branch, sha string, tok Token) error
 }
 
 // Scanner discovers instruction files below a worktree without following symlinks out of it.
@@ -412,4 +414,38 @@ func (m *Manager) Finish(ctx context.Context, step string, fence int64) (*Result
 		func(c domain.InstructionChange) int { return len(c.Path) + 2*entryOverhead }, instructionBudget/4)
 	return &Result{Branch: meta.Branch, BaseSHA: meta.BaseSHA, HeadSHA: head, Files: fitted, Total: len(files),
 		Truncated: cut, InstructionsChanged: ichanged}, nil
+}
+
+// PushRequest asks to publish a step's work branch (KIN-36): Head is the commit the review approved.
+type PushRequest struct {
+	Step       string
+	Task       string
+	Repository string
+	Head       string
+	Token      Token
+}
+
+// Push publishes the step's work branch (feature/<task>--<step>) at r.Head from the repository cache to the
+// repository, fast-forward only. It returns the branch. The branch is derived here, never taken from the request,
+// so a push can only ever target the step's own feature branch.
+func (m *Manager) Push(ctx context.Context, r PushRequest) (string, error) {
+	owner, name, err := domain.SplitRepository(r.Repository)
+	if err != nil {
+		return "", err
+	}
+	branch, err := domain.WorkBranch(r.Task, r.Step)
+	if err != nil {
+		return "", err
+	}
+	mirror := m.Store.MirrorPath(owner, name)
+	queued := true // nothing to report
+	release, err := acquire(ctx, m.mirrorSem(&m.fetches, mirror), Request{}, &queued)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	if err := m.Git.Push(ctx, mirror, r.Repository, branch, r.Head, r.Token); err != nil {
+		return "", fmt.Errorf("pushing %s: %w", branch, err)
+	}
+	return branch, nil
 }

@@ -140,8 +140,11 @@ func reviewLoopView(s domain.Step) *ReviewLoopView {
 		return nil
 	}
 	v := &ReviewLoopView{Phase: "implement", Round: s.Round, MaxRounds: domain.MaxFixRounds, PinnedRunner: s.PinnedRunner}
-	if s.Phase == domain.PhaseReview {
+	switch s.Phase {
+	case domain.PhaseReview:
 		v.Phase = "review"
+	case domain.PhasePublish: // KIN-36: pushing the approved work
+		v.Phase = "publish"
 	}
 	if a, ok := s.LastImplementation(); ok {
 		h := domain.ParseHandoff(a.Report.Result)
@@ -302,6 +305,35 @@ type DetailView struct {
 	Execution *ExecutionView `json:"execution"`
 	CanManage bool           `json:"canManage"`
 	Time      TimeView       `json:"time"`
+	// PullRequests is the task's change set (KIN-36): each published branch and its pull request.
+	PullRequests []PullRequestView `json:"pullRequests"`
+}
+
+// PullRequestView is one published branch of the task and its pull request into the integration branch: state
+// opening | open | failed; URL only as an https link.
+type PullRequestView struct {
+	Repository string    `json:"repository"`
+	Branch     string    `json:"branch"`
+	HeadSHA    string    `json:"headSha"`
+	State      string    `json:"state"`
+	Number     int       `json:"number,omitempty"`
+	URL        string    `json:"url,omitempty"`
+	Base       string    `json:"base,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+func pullRequestViews(arts []domain.GitArtifact) []PullRequestView {
+	out := make([]PullRequestView, 0, len(arts))
+	for _, a := range arts {
+		v := PullRequestView{Repository: a.Repository, Branch: a.Branch, HeadSHA: a.HeadSHA, State: string(a.State),
+			Number: a.PRNumber, Base: a.PRBase, Error: a.Error, UpdatedAt: a.UpdatedAt}
+		if strings.HasPrefix(a.PRURL, "https://") {
+			v.URL = a.PRURL
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 // ListItemView is a task in the list with its time.
@@ -522,7 +554,8 @@ func (h *Handler) detail(w http.ResponseWriter, r *http.Request, p auth.Principa
 		h.fail(w, err)
 		return
 	}
-	v := DetailView{Task: taskView(d.Task), CanManage: d.CanManage, Time: timeView(d.Time)}
+	v := DetailView{Task: taskView(d.Task), CanManage: d.CanManage, Time: timeView(d.Time),
+		PullRequests: pullRequestViews(d.ChangeSet)}
 	if d.Revision != nil {
 		v.Revision = revisionView(*d.Revision)
 	}

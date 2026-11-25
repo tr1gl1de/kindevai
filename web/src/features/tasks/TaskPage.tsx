@@ -15,6 +15,7 @@ import { AttemptLog } from "./AttemptLog";
 import { AttemptWorkspace } from "./AttemptWorkspace";
 import { PlanSection } from "./PlanSection";
 import { ReviewSection } from "./ReviewSection";
+import { PullRequestsSection } from "./PullRequestsSection";
 import { isTerminal, useCancelTask, useMockRun, usePlanTask, useRetryTask, useTask, useTaskApprovals } from "./api";
 import { AgentTimeValue, AttemptStateBadge, CalendarValue, StepStateBadge, TaskStateBadge } from "./badges";
 import "./tasks.css";
@@ -90,6 +91,8 @@ function TaskCard({ d, isOwner }: { d: TaskDetail; isOwner: boolean }) {
       <PlanSection d={d} />
 
       {d.canManage && <Actions d={d} />}
+
+      <PullRequestsSection prs={d.pullRequests ?? []} />
 
       <StepsSection d={d} isOwner={isOwner} />
 
@@ -343,7 +346,7 @@ function Attempts({ taskId, s, isOwner }: { taskId: string; s: Step; isOwner: bo
                   {a.agent ?? "—"}
                   {a.role && (
                     <div className="muted">
-                      {t(a.role === "reviewer" ? "tasks.roleReviewer" : "tasks.roleImplementer")}
+                      {t(a.role === "reviewer" ? "tasks.roleReviewer" : a.role === "publisher" ? "tasks.rolePublisher" : "tasks.roleImplementer")}
                       {a.round ? ` · ${t("tasks.roundShort", { n: a.round })}` : ""}
                     </div>
                   )}

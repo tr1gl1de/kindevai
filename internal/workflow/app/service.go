@@ -121,6 +121,10 @@ type Service struct {
 	// messages, answers and limits (KIN-16); nil: not audited.
 	Discussion DiscussionRepository
 	Audit      AuditLog
+	// ChangeSets stores published branches and their pull requests, PullRequests opens them (KIN-36; with Outbox).
+	// Both are required once a review-loop step publishes: without them its publish cannot be recorded.
+	ChangeSets   ChangeSets
+	PullRequests PullRequests
 }
 
 // Pause reports whether the scheduler must not hand out new work (maintenance mode, KIN-41). Running attempts
@@ -324,6 +328,9 @@ func (s *Service) applyExecution(ctx context.Context, e domain.Execution, fn fun
 	if err := s.cancelReleased(ctx, &before, &e); err != nil {
 		return err
 	}
+	if err := s.published(ctx, &before, &e, now); err != nil {
+		return err
+	}
 	return s.syncTask(ctx, &e, now)
 }
 
@@ -337,7 +344,8 @@ func attemptsEqual(a, b domain.Execution) bool {
 			if a, b := x.Attempts[j], y.Attempts[j]; a.State != b.State || a.Agent != b.Agent || a.Report != b.Report ||
 				a.WorkIncomplete != b.WorkIncomplete || !ptrTimeEqual(a.WorkStart, b.WorkStart) || !ptrTimeEqual(a.WorkEnd, b.WorkEnd) ||
 				a.Role != b.Role || a.Round != b.Round || a.TestCommand != b.TestCommand || !reflect.DeepEqual(a.Tests, b.Tests) ||
-				a.BaseSHA != b.BaseSHA || a.HeadSHA != b.HeadSHA || !slices.Equal(a.Files, b.Files) || a.FilesTotal != b.FilesTotal {
+				a.BaseSHA != b.BaseSHA || a.HeadSHA != b.HeadSHA || !slices.Equal(a.Files, b.Files) || a.FilesTotal != b.FilesTotal ||
+				a.PushedBranch != b.PushedBranch {
 				return false
 			}
 		}

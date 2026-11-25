@@ -272,6 +272,11 @@ func (s *Service) route(ctx context.Context, routed bool, routes map[[2]string]A
 				Detail: fmt.Sprintf(DetailPinnedRunner, st.PinnedRunner)}, false, nil
 		}
 	}
+	if st.Phase == domain.PhasePublish {
+		// KIN-36: the runner's own git push of the reviewed head, no AI CLI to route.
+		c, ok := domain.PickRunner(cands, ps.Capabilities, held)
+		return c, domain.AgentChoice{Agent: domain.AgentPublish}, domain.Reason{Code: domain.WaitRunner, Detail: DetailNoRunner}, ok, nil
+	}
 	if !routed {
 		c, ok := domain.PickRunner(cands, ps.Capabilities, held)
 		var choice domain.AgentChoice
@@ -357,6 +362,10 @@ func stepAssignment(e *domain.Execution, t domain.Task, plan domain.Plan, ps dom
 		Prompt: domain.StepPrompt(t, plan, ps)}
 	switch {
 	case !st.Review:
+	case st.Phase == domain.PhasePublish:
+		// KIN-36: push exactly the reviewed head; the runner derives the branch from the task and step.
+		impl, _ := st.LastImplementation()
+		a.Role, a.Model, a.Prompt, a.DiffHead = domain.StepRolePublisher, "", "", impl.HeadSHA
 	case st.Phase == domain.PhaseReview:
 		impl, _ := st.LastImplementation()
 		a.Role, a.DiffBase, a.DiffHead = domain.StepRoleReviewer, impl.BaseSHA, impl.HeadSHA

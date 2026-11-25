@@ -55,3 +55,35 @@ func TestReviewLoopView(t *testing.T) {
 		}
 	}
 }
+
+// KIN-36: the task page gets its change set: each published branch with head, state and the pull request link
+// (https only); a step in its publish phase shows it.
+func TestPullRequestsView(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+	arts := []domain.GitArtifact{
+		{Repository: "acme/app", Branch: "feature/t1--s1", HeadSHA: "h1", State: domain.ArtifactOpen, PRNumber: 7,
+			PRURL: "https://github.com/acme/app/pull/7", PRBase: "dev", UpdatedAt: now},
+		{Repository: "acme/web", Branch: "feature/t1--s2", HeadSHA: "h2", State: domain.ArtifactFailed,
+			PRURL: "javascript:alert(1)", Error: "not installed", UpdatedAt: now},
+	}
+	b, err := json.Marshal(pullRequestViews(arts))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"repository":"acme/app"`, `"branch":"feature/t1--s1"`, `"headSha":"h1"`, `"state":"open"`,
+		`"number":7`, `"url":"https://github.com/acme/app/pull/7"`, `"base":"dev"`, `"state":"failed"`, `"error":"not installed"`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("view lacks %s:\n%s", want, b)
+		}
+	}
+	if strings.Contains(string(b), "javascript") {
+		t.Fatalf("unsafe link kept:\n%s", b)
+	}
+	if v := pullRequestViews(nil); v == nil || len(v) != 0 {
+		t.Fatal("no change set must be an empty list")
+	}
+	if v := reviewLoopView(domain.Step{Review: true, Phase: domain.PhasePublish}); v.Phase != "publish" {
+		t.Fatalf("phase %q", v.Phase)
+	}
+}

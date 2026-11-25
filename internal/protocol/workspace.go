@@ -6,6 +6,20 @@ package protocol
 // instruction files (workspace.prepared) before starting the process, and what the attempt changed
 // (workspace.changes, the input of KIN-51 scope enforcement) before its terminal event.
 
+// Preparation phases of WorkspacePreparing (KIN-71).
+const (
+	PreparingQueued   = "queued"   // waiting for a preparation slot or another preparation of the repository
+	PreparingFetching = "fetching" // fetching the base
+	PreparingCheckout = "checkout" // creating the worktree
+)
+
+// WorkspacePreparing is the body of workspace.preparing: the runner prepares the attempt's workspace in the
+// background (the assignment was acknowledged at once) and reports its phase and how long it has taken so far.
+type WorkspacePreparing struct {
+	Phase      string `json:"phase"`
+	ElapsedSec int64  `json:"elapsedSec"`
+}
+
 // GitCredential is a short-lived git token for one repository. It is plaintext on the wire (inside the
 // authenticated TLS session) and formats as [redacted], so it never reaches a log line.
 type GitCredential struct {

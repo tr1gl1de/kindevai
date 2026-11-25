@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bufio"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -8,11 +9,13 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -553,6 +556,59 @@ func TestWaitDrainsConnectionsAfterShutdown(t *testing.T) {
 	defer cancel()
 	go func() { _ = closeCode(t, c) }() // a cooperative runner answers the close
 	if err := e.h.Wait(ctx); err != nil || e.h.Live() != 0 {
+		t.Fatalf("Wait = %v, live %d", err, e.h.Live())
+	}
+}
+
+// stallingHijack holds the connection handler right after the HTTP server handed the connection over, before the
+// WebSocket handshake goes on.
+type stallingHijack struct {
+	http.ResponseWriter
+	hijacked, release chan struct{}
+}
+
+func (s *stallingHijack) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	c, brw, err := http.NewResponseController(s.ResponseWriter).Hijack()
+	close(s.hijacked)
+	<-s.release
+	return c, brw, err
+}
+
+// KIN-74: srv.Shutdown stops tracking a connection once it is hijacked, so the gateway must already count it then;
+// otherwise Wait (called after Shutdown) returns while that handler still runs and races its WaitGroup.Add.
+func TestWaitCountsAConnectionHijackedDuringShutdown(t *testing.T) {
+	t.Parallel()
+	hijacked, release := make(chan struct{}), make(chan struct{})
+	e := newEnv(t, opts{server: func(s *http.Server) {
+		next := s.Handler
+		s.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(&stallingHijack{ResponseWriter: w, hijacked: hijacked, release: release}, r)
+		})
+	}})
+	var once sync.Once
+	unstall := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unstall)
+	dialed := make(chan error, 1)
+	go func() {
+		c, _, err := websocket.Dial(t.Context(), e.url, &websocket.DialOptions{Subprotocols: []string{protocol.Subprotocol}})
+		if err == nil {
+			_ = c.CloseNow()
+		}
+		dialed <- err
+	}()
+	select {
+	case <-hijacked:
+	case err := <-dialed:
+		t.Fatalf("dial ended before the upgrade: %v", err)
+	}
+	if err := e.srv.Config.Shutdown(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.h.Live(); n != 1 {
+		t.Fatalf("live = %d after Shutdown with a hijacked connection, want 1", n)
+	}
+	unstall()
+	if err := e.h.Wait(t.Context()); err != nil || e.h.Live() != 0 {
 		t.Fatalf("Wait = %v, live %d", err, e.h.Live())
 	}
 }

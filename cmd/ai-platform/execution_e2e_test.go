@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	integrations "github.com/tr1gl1de/kindevai/internal/integrations/domain"
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
+	"github.com/tr1gl1de/kindevai/internal/platform/datadir"
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
 	projectsdb "github.com/tr1gl1de/kindevai/internal/projects/adapters/sqlite"
 	projectsapp "github.com/tr1gl1de/kindevai/internal/projects/app"
@@ -58,13 +60,24 @@ func TestMain(m *testing.M) {
 
 // End-to-end mock execution (KIN-23): a real SQLite Control Plane wired like `serve` (workflow + approvals +
 // runners gateway and channel + scheduler) and a runner built from the real ai-runner packages (connector, spool,
-// executor, process launcher with the mock agent as a child process). Timings are shortened: leases of
-// e2eLeaseTTL, heartbeats every e2eHeartbeat.
+// executor, process launcher with the mock agent as a child process). Heartbeats and scheduler passes are
+// shortened; leases keep the production length so that none runs out on its own under load (KIN-74: a CLAIMED
+// lease is never renewed, and a short one expired before a slow -race start). A test that needs a lease to run out
+// moves the workflow's clock past it (e2eClock.advance) instead of waiting. Every wait is bounded by e2eWait.
 const (
-	e2eLeaseTTL  = 1500 * time.Millisecond
+	e2eLeaseTTL  = workflowapp.DefaultLeaseTTL
 	e2eHeartbeat = 100 * time.Millisecond
 	e2eSchedule  = 30 * time.Millisecond
+	e2eWait      = 2 * time.Minute // generous: a passing test never waits this long, a loaded -race run may need it
 )
+
+// e2eClock is the Control Plane workflow's clock: real time plus an offset a test moves forward.
+type e2eClock struct{ offset atomic.Int64 }
+
+func (c *e2eClock) now() time.Time { return time.Now().Add(time.Duration(c.offset.Load())) }
+
+// advance moves the clock past d: leases that end within d have run out at the scheduler's next pass.
+func (c *e2eClock) advance(d time.Duration) { c.offset.Add(int64(d)) }
 
 // e2eSlots bounds how many of these tests run at once: each mock agent re-executes the race-instrumented test
 // binary, and running them all together starves the package's other start-up-time-bounded tests.
@@ -89,6 +102,8 @@ type controlPlane struct {
 	wf        *workflowapp.Service
 	approvals *approvalsapp.Service
 	hub       *runnersapp.Hub
+	tel       *runnersapp.Telemetry
+	clock     *e2eClock
 	stop      func()
 }
 
@@ -101,12 +116,15 @@ func startCP(t *testing.T, dataDir, addr string) *controlPlane {
 // startCPWith is startCP with the repositories' checkout sources (KIN-29 worktrees; nil: none registered).
 func startCPWith(t *testing.T, dataDir, addr string, sources checkoutSources) *controlPlane {
 	t.Helper()
+	return startCPWithClock(t, dataDir, addr, sources, &e2eClock{})
+}
+
+// startCPWithClock is startCPWith with the workflow on clock (a restarted Control Plane keeps its predecessor's).
+func startCPWithClock(t *testing.T, dataDir, addr string, sources checkoutSources, clock *e2eClock) *controlPlane {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.WithoutCancel(t.Context()))
 	logger := slog.New(slog.DiscardHandler)
-	inst, err := bootstrap.Run(ctx, bootstrap.Options{DataDir: dataDir})
-	if err != nil {
-		t.Fatal(err)
-	}
+	inst := bootstrapWhenUnlocked(t, ctx, dataDir)
 	audit := newAudit(inst, logger)
 	msg := newMessaging(inst, logger)
 	hub := runnersapp.NewHub()
@@ -115,6 +133,7 @@ func startCPWith(t *testing.T, dataDir, addr string, sources checkoutSources) *c
 	integ := newIntegrations(inst, msg, audit, gh, logger)
 	apv := newApprovals(inst, msg, audit, integ, logger)
 	apv.Workflow.LeaseTTL = e2eLeaseTTL
+	apv.Workflow.Now = clock.now
 	gateway := newRunnerGateway(inst, hub, tel, nil, nil, logger)
 	channel := newRunnerChannel(inst, apv.Workflow, runners.DefaultRetention(), logger)
 	channel.PollInterval = 20 * time.Millisecond
@@ -126,8 +145,11 @@ func startCPWith(t *testing.T, dataDir, addr string, sources checkoutSources) *c
 	attachScopeCheck(channel, apv.Approvals)
 	mux := http.NewServeMux()
 	gateway.Register(mux)
-	var ln net.Listener
-	deadline := time.Now().Add(5 * time.Second)
+	var (
+		ln  net.Listener
+		err error
+	)
+	deadline := time.Now().Add(e2eWait)
 	for {
 		if ln, err = (&net.ListenConfig{}).Listen(ctx, "tcp", addr); err == nil || time.Now().After(deadline) {
 			break
@@ -141,7 +163,8 @@ func startCPWith(t *testing.T, dataDir, addr string, sources checkoutSources) *c
 	srv.RegisterOnShutdown(hub.Shutdown)
 	go func() { _ = srv.Serve(ln) }()
 	stopScheduler := startScheduler(ctx, apv.Workflow, e2eSchedule, logger)
-	cp := &controlPlane{dataDir: dataDir, addr: ln.Addr().String(), inst: inst, wf: apv.Workflow, approvals: apv.Approvals, hub: hub}
+	cp := &controlPlane{dataDir: dataDir, addr: ln.Addr().String(), inst: inst, wf: apv.Workflow, approvals: apv.Approvals,
+		hub: hub, tel: tel, clock: clock}
 	var once sync.Once
 	cp.stop = func() {
 		once.Do(func() {
@@ -156,6 +179,24 @@ func startCPWith(t *testing.T, dataDir, addr string, sources checkoutSources) *c
 	}
 	t.Cleanup(cp.stop)
 	return cp
+}
+
+// bootstrapWhenUnlocked opens the Control Plane over dataDir, waiting while the previous one's data directory lock
+// is still held: the flock is shared by every child forked before the lock was dropped, until that child execs, and
+// this test binary forks mock agents concurrently (only a test runs a Control Plane and runners in one process).
+func bootstrapWhenUnlocked(t *testing.T, ctx context.Context, dataDir string) *bootstrap.Installation {
+	t.Helper()
+	deadline := time.Now().Add(e2eWait)
+	for {
+		inst, err := bootstrap.Run(ctx, bootstrap.Options{DataDir: dataDir})
+		if err == nil {
+			return inst
+		}
+		if !errors.Is(err, datadir.ErrLocked) || time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // seed creates the Owner, projects p1 and p2 with one repository each and an enrolled runner approved for
@@ -294,20 +335,23 @@ func (r *runner) restart(t *testing.T, addr string) *runner {
 	return startRunner(t, r.dir, addr, r.id, r.key, nil, r.launches)
 }
 
-func waitFor(t *testing.T, what string, timeout time.Duration, cond func() (bool, string)) {
+// waitFor polls cond until it holds; it fails the test after e2eWait with cond's last reported state.
+func waitFor(t *testing.T, what string, cond func() (bool, string)) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	var last string
+	ctx, cancel := context.WithTimeout(t.Context(), e2eWait)
+	defer cancel()
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
 	for {
 		ok, state := cond()
 		if ok {
 			return
 		}
-		last = state
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s; last state: %s", what, last)
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for %s; last state: %s", what, state)
+		case <-tick.C:
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -334,14 +378,36 @@ func describe(d workflowapp.TaskDetail) string {
 	return s
 }
 
-func (cp *controlPlane) waitTask(t *testing.T, taskID string, timeout time.Duration, ok func(workflowapp.TaskDetail) bool) workflowapp.TaskDetail {
+func (cp *controlPlane) waitTask(t *testing.T, taskID string, ok func(workflowapp.TaskDetail) bool) workflowapp.TaskDetail {
 	t.Helper()
 	var d workflowapp.TaskDetail
-	waitFor(t, "task "+taskID, timeout, func() (bool, string) {
+	waitFor(t, "task "+taskID, func() (bool, string) {
 		d = cp.detail(t, taskID)
-		return ok(d), describe(d)
+		if ok(d) {
+			return true, ""
+		}
+		state := describe(d)
+		if d.Task.State == workflow.TaskBlocked && d.Task.BlockReason == workflow.WaitRunner {
+			state += cp.describeRunners(t)
+		}
+		return false, state
 	})
 	return d
+}
+
+// describeRunners is the runners' side of a task waiting for a runner: session and heartbeat presence.
+func (cp *controlPlane) describeRunners(t *testing.T) string {
+	t.Helper()
+	pres, err := cp.tel.Presence(t.Context())
+	if err != nil {
+		return " runners: " + err.Error()
+	}
+	s := " runners:"
+	for id, p := range pres {
+		s += fmt.Sprintf(" %s(session=%t %s heartbeat=%v tools=%v)", id, cp.hub.Online(id), p.Availability, p.LastHeartbeatAt,
+			p.Capabilities != nil)
+	}
+	return s
 }
 
 func (cp *controlPlane) mockTask(t *testing.T, project, scenario string) string {
@@ -388,7 +454,7 @@ func TestMockExecutionEndToEnd(t *testing.T) {
 	r := startRunner(t, t.TempDir(), cp.addr, id, key, nil, nil)
 
 	ok := cp.mockTask(t, "p1", "success")
-	d := cp.waitTask(t, ok, 30*time.Second, succeeded)
+	d := cp.waitTask(t, ok, succeeded)
 	if a := d.Execution.Steps[0].Attempts; len(a) != 1 || a[0].RunnerID != id || a[0].State != workflow.AttemptSucceeded {
 		t.Fatalf("attempts %+v", a)
 	}
@@ -400,21 +466,21 @@ func TestMockExecutionEndToEnd(t *testing.T) {
 		t.Fatalf("task time %+v", d.Time)
 	}
 	var output string
-	waitFor(t, "output stored", 5*time.Second, func() (bool, string) {
+	waitFor(t, "output stored", func() (bool, string) {
 		_ = cp.inst.DB.QueryRowContext(t.Context(), `SELECT COALESCE(group_concat(body, ''), '') FROM runner_attempt_events
 			WHERE step_id = ? AND kind = 'execution.output'`, d.Execution.Steps[0].ID).Scan(&output)
 		return strings.Contains(output, "mock agent: done"), output
 	})
 
 	flaky := cp.mockTask(t, "p1", "flaky")
-	d = cp.waitTask(t, flaky, 30*time.Second, succeeded)
+	d = cp.waitTask(t, flaky, succeeded)
 	if a := d.Execution.Steps[0].Attempts; len(a) != 2 || a[0].State != workflow.AttemptFailed ||
 		!strings.Contains(a[0].Error, "exit status 1") || a[1].Fence != a[0].Fence+1 {
 		t.Fatalf("flaky attempts %+v", a)
 	}
 
 	crash := cp.mockTask(t, "p1", "crash")
-	d = cp.waitTask(t, crash, 30*time.Second, func(d workflowapp.TaskDetail) bool { return d.Task.State == workflow.TaskFailed })
+	d = cp.waitTask(t, crash, func(d workflowapp.TaskDetail) bool { return d.Task.State == workflow.TaskFailed })
 	if a := d.Execution.Steps[0].Attempts; len(a) != 2 || !strings.Contains(a[1].Error, "signal") {
 		t.Fatalf("crash attempts %+v", a)
 	}
@@ -433,7 +499,7 @@ func TestSchedulingScopeAndRunnerSideCheck(t *testing.T) {
 	other, otherKey := cp.seed(t, "p2")
 	startRunner(t, t.TempDir(), cp.addr, other, otherKey, nil, nil)
 	task := cp.mockTask(t, "p1", "success")
-	d := cp.waitTask(t, task, 30*time.Second, func(d workflowapp.TaskDetail) bool {
+	d := cp.waitTask(t, task, func(d workflowapp.TaskDetail) bool {
 		return d.Task.State == workflow.TaskBlocked && d.Task.BlockReason == workflow.WaitRunner
 	})
 	if d.Task.Reason.Detail != workflowapp.DetailNoRunner {
@@ -447,7 +513,7 @@ func TestSchedulingScopeAndRunnerSideCheck(t *testing.T) {
 	id, key := cp2.seed(t, "p1")
 	r := startRunner(t, t.TempDir(), cp2.addr, id, key, []string{"p2"}, nil) // the runner itself allows only p2
 	task = cp2.mockTask(t, "p1", "success")
-	d = cp2.waitTask(t, task, 30*time.Second, func(d workflowapp.TaskDetail) bool { return d.Task.State == workflow.TaskFailed })
+	d = cp2.waitTask(t, task, func(d workflowapp.TaskDetail) bool { return d.Task.State == workflow.TaskFailed })
 	if a := d.Execution.Steps[0].Attempts; len(a) != 2 || !strings.Contains(a[0].Error, "not allowed on this runner") {
 		t.Fatalf("attempts %+v", a)
 	}
@@ -459,7 +525,7 @@ func TestSchedulingScopeAndRunnerSideCheck(t *testing.T) {
 	pending, pendingKey := cp3.seed(t) // enrolled, never approved: it cannot even connect
 	startRunner(t, t.TempDir(), cp3.addr, pending, pendingKey, nil, nil)
 	task = cp3.mockTask(t, "p1", "success")
-	cp3.waitTask(t, task, 30*time.Second, func(d workflowapp.TaskDetail) bool { return d.Task.State == workflow.TaskBlocked })
+	cp3.waitTask(t, task, func(d workflowapp.TaskDetail) bool { return d.Task.State == workflow.TaskBlocked })
 }
 
 // Cancelling the task stops the attempt's whole process group on the runner.
@@ -470,9 +536,9 @@ func TestCancelKillsTheProcessGroup(t *testing.T) {
 	id, key := cp.seed(t, "p1")
 	r := startRunner(t, t.TempDir(), cp.addr, id, key, nil, nil)
 	task := cp.mockTask(t, "p1", "hang")
-	cp.waitTask(t, task, 30*time.Second, stepRunning)
+	cp.waitTask(t, task, stepRunning)
 	var pid int
-	waitFor(t, "process reported", 5*time.Second, func() (bool, string) {
+	waitFor(t, "process reported", func() (bool, string) {
 		if a := r.x.Attempts(); len(a) == 1 {
 			pid = a[0].PGID
 		}
@@ -484,12 +550,12 @@ func TestCancelKillsTheProcessGroup(t *testing.T) {
 	if _, err := cp.wf.CancelTaskAs(t.Context(), ownerP, task, "stop it"); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "process group gone", 30*time.Second, func() (bool, string) { return !process.Alive(pid, pid), "" })
+	waitFor(t, "process group gone", func() (bool, string) { return !process.Alive(pid, pid), "" })
 	if d := cp.detail(t, task); d.Task.State != workflow.TaskCancelled || d.Execution.State != workflow.ExecutionCancelled {
 		t.Fatalf("after cancel: %s", describe(d))
 	}
 	// KIN-25: the killed process's end, reported after the cancellation, closes its agent time.
-	cp.waitTask(t, task, 30*time.Second, func(d workflowapp.TaskDetail) bool {
+	cp.waitTask(t, task, func(d workflowapp.TaskDetail) bool {
 		return d.Time.Agent.Status == workflow.WorkComplete
 	})
 }
@@ -504,11 +570,12 @@ func TestLostRunnerReconcilesWithoutASecondProcess(t *testing.T) {
 	id, key := cp.seed(t, "p1")
 	r := startRunner(t, t.TempDir(), cp.addr, id, key, nil, nil)
 	task := cp.mockTask(t, "p1", "gate")
-	d := cp.waitTask(t, task, 30*time.Second, stepRunning)
+	d := cp.waitTask(t, task, stepRunning)
 	fence := d.Execution.Steps[0].Fence
 
 	r.disconnect()
-	d = cp.waitTask(t, task, 30*time.Second, func(d workflowapp.TaskDetail) bool {
+	cp.clock.advance(2 * e2eLeaseTTL) // the lost runner's lease runs out
+	d = cp.waitTask(t, task, func(d workflowapp.TaskDetail) bool {
 		return d.Task.State == workflow.TaskBlocked && d.Execution.Steps[0].AttemptUnknown()
 	})
 	if d.Task.Reason.Detail != workflowapp.DetailRunnerLost {
@@ -520,14 +587,14 @@ func TestLostRunnerReconcilesWithoutASecondProcess(t *testing.T) {
 	}
 
 	r = r.restart(t, cp.addr) // the runner process restarts and adopts the running agent
-	d = cp.waitTask(t, task, 30*time.Second, func(d workflowapp.TaskDetail) bool {
+	d = cp.waitTask(t, task, func(d workflowapp.TaskDetail) bool {
 		return d.Task.State == workflow.TaskRunning && stepRunning(d)
 	})
 	if st := d.Execution.Steps[0]; st.Fence != fence || len(st.Attempts) != 1 {
 		t.Fatalf("after reconcile: %+v", st)
 	}
 	release(t, attemptDir(r, d))
-	cp.waitTask(t, task, 30*time.Second, succeeded)
+	cp.waitTask(t, task, succeeded)
 	if n := r.launches.n.Load(); n != 1 {
 		t.Fatalf("%d processes launched in total", n)
 	}
@@ -541,15 +608,16 @@ func TestDeadProcessIsRetriedAfterReconcile(t *testing.T) {
 	id, key := cp.seed(t, "p1")
 	r := startRunner(t, t.TempDir(), cp.addr, id, key, nil, nil)
 	task := cp.mockTask(t, "p1", "hang")
-	cp.waitTask(t, task, 30*time.Second, stepRunning)
+	cp.waitTask(t, task, stepRunning)
 	r.disconnect()
 	r.x.Close()
 	r.x.KillAll() // the machine lost the process
 	_ = r.spool.Close()
-	cp.waitTask(t, task, 30*time.Second, func(d workflowapp.TaskDetail) bool { return d.Execution.Steps[0].AttemptUnknown() })
+	cp.clock.advance(2 * e2eLeaseTTL) // the lost runner's lease runs out
+	cp.waitTask(t, task, func(d workflowapp.TaskDetail) bool { return d.Execution.Steps[0].AttemptUnknown() })
 	_ = os.RemoveAll(filepath.Join(r.dir, "attempts")) // and its journal (no result to report)
 	startRunner(t, r.dir, cp.addr, id, key, nil, r.launches)
-	d := cp.waitTask(t, task, 30*time.Second, func(d workflowapp.TaskDetail) bool {
+	d := cp.waitTask(t, task, func(d workflowapp.TaskDetail) bool {
 		return len(d.Execution.Steps[0].Attempts) == 2 && stepRunning(d)
 	})
 	if a := d.Execution.Steps[0].Attempts[0]; a.State != workflow.AttemptFailed || !strings.Contains(a.Error, "process lost") {
@@ -570,18 +638,18 @@ func TestControlPlaneRestartContinuesTheExecution(t *testing.T) {
 	id, key := cp.seed(t, "p1")
 	r := startRunner(t, t.TempDir(), cp.addr, id, key, nil, nil)
 	task := cp.mockTask(t, "p1", "gate")
-	d := cp.waitTask(t, task, 30*time.Second, stepRunning)
+	d := cp.waitTask(t, task, stepRunning)
 	dir := attemptDir(r, d)
 	addr := cp.addr
 
 	cp.stop()
-	time.Sleep(2 * e2eLeaseTTL) // down longer than a lease
-	cp = startCP(t, dataDir, addr)
-	cp.waitTask(t, task, 30*time.Second, func(d workflowapp.TaskDetail) bool {
+	cp.clock.advance(2 * e2eLeaseTTL) // down longer than a lease
+	cp = startCPWithClock(t, dataDir, addr, nil, cp.clock)
+	cp.waitTask(t, task, func(d workflowapp.TaskDetail) bool {
 		return d.Task.State == workflow.TaskRunning && stepRunning(d)
 	})
 	release(t, dir)
-	d = cp.waitTask(t, task, 30*time.Second, succeeded)
+	d = cp.waitTask(t, task, succeeded)
 	if a := d.Execution.Steps[0].Attempts; len(a) != 1 {
 		t.Fatalf("attempts %+v", a)
 	}
@@ -594,7 +662,7 @@ func TestControlPlaneRestartContinuesTheExecution(t *testing.T) {
 func runningPGID(t *testing.T, r *runner) int {
 	t.Helper()
 	var pgid int
-	waitFor(t, "process reported", 5*time.Second, func() (bool, string) {
+	waitFor(t, "process reported", func() (bool, string) {
 		if a := r.x.Attempts(); len(a) == 1 {
 			pgid = a[0].PGID
 		}
@@ -612,7 +680,7 @@ func TestDisabledRunnerStopsItsAttemptAndTheStepIsRetried(t *testing.T) {
 	id, key := cp.seed(t, "p1")
 	r := startRunner(t, t.TempDir(), cp.addr, id, key, nil, nil)
 	task := cp.mockTask(t, "p1", "hang")
-	first := cp.waitTask(t, task, 30*time.Second, stepRunning).Execution.Steps[0]
+	first := cp.waitTask(t, task, stepRunning).Execution.Steps[0]
 	pgid := runningPGID(t, r)
 	svc := cp.runners()
 	if _, err := svc.Disable(t.Context(), ownerP, id); err != nil {
@@ -623,11 +691,11 @@ func TestDisabledRunnerStopsItsAttemptAndTheStepIsRetried(t *testing.T) {
 		!strings.Contains(st.Attempts[0].Error, "runner disabled") {
 		t.Fatalf("after disable: %s", describe(d))
 	}
-	waitFor(t, "process group gone", 30*time.Second, func() (bool, string) { return !process.Alive(pgid, pgid), "" })
+	waitFor(t, "process group gone", func() (bool, string) { return !process.Alive(pgid, pgid), "" })
 	if _, err := svc.Enable(t.Context(), ownerP, id); err != nil {
 		t.Fatal(err)
 	}
-	d = cp.waitTask(t, task, 30*time.Second, func(d workflowapp.TaskDetail) bool {
+	d = cp.waitTask(t, task, func(d workflowapp.TaskDetail) bool {
 		return stepRunning(d) && d.Execution.Steps[0].Fence > first.Fence
 	})
 	if n := r.launches.n.Load(); n != 2 {
@@ -644,14 +712,14 @@ func TestRevokedRunnerStopsItsAttemptBeforeExiting(t *testing.T) {
 	id, key := cp.seed(t, "p1")
 	r := startRunner(t, t.TempDir(), cp.addr, id, key, nil, nil)
 	task := cp.mockTask(t, "p1", "hang")
-	cp.waitTask(t, task, 30*time.Second, stepRunning)
+	cp.waitTask(t, task, stepRunning)
 	pgid := runningPGID(t, r)
 	if _, err := cp.runners().Revoke(t.Context(), ownerP, id); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case <-r.done:
-	case <-time.After(30 * time.Second):
+	case <-time.After(e2eWait):
 		t.Fatal("the revoked runner kept running")
 	}
 	if !errors.Is(r.err, conndomain.ErrRunnerRevoked) {

@@ -183,6 +183,23 @@ func TestReviewerStepIsRoutedWithTheAuthorsCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.disp.takeAssigned()
+	// The implementer step's own independent review (KIN-35) comes first, then the plan's reviewer step.
+	e.schedule(t)
+	if got := e.disp.takeAssigned(); len(got) != 1 || got[0].StepKey != "impl" || got[0].Role != "reviewer" || got[0].Agent != "claude" {
+		t.Fatalf("in-step review assignment %+v", got)
+	}
+	_, ex = e.state(t, task.ID)
+	impl = ex.StepByKey("impl")
+	if err := e.svc.StartStep(t.Context(), impl.ID, "r1", impl.Fence); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.RecordAgentReport(t.Context(), impl.ID, "r1", impl.Fence,
+		domain.AgentReport{Result: `{"verdict":"approve","summary":"ok","findings":[]}`}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.CompleteStep(t.Context(), impl.ID, "r1", impl.Fence); err != nil {
+		t.Fatal(err)
+	}
 	e.schedule(t)
 	got := e.disp.takeAssigned()
 	if len(got) != 1 || got[0].StepKey != "review" || got[0].Agent != "claude" || got[0].Role != "reviewer" {

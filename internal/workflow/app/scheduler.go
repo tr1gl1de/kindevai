@@ -56,6 +56,17 @@ type Assignment struct {
 	// ("" for a new one; the planner's repeat and replan on the same runner, KIN-34).
 	Prompt string
 	Resume string
+	// The review loop (KIN-35): TestCommand is the repository's test command the runner runs in the worktree after an
+	// implementer's CLI ("" none); DiffBase..DiffHead the work a reviewer reviews (the runner adds the bounded diff to
+	// its prompt).
+	TestCommand string
+	DiffBase    string
+	DiffHead    string
+}
+
+// TestCommands gives the test command configured for a project's repository (KIN-35; "" when none is).
+type TestCommands interface {
+	TestCommand(ctx context.Context, projectID, repository string) (string, error)
 }
 
 // Dispatcher queues runner commands in the use case's transaction (the runner's ordered command log, KIN-22), so a
@@ -85,6 +96,9 @@ const (
 	DetailRunnerLost = "waiting for the runner to reconnect: the outcome of a running attempt is unknown until it reconciles"
 	DetailNoAgent    = "waiting for an AI CLI: none is enabled for the step's role in this project"
 	DetailCLILimit   = "waiting for a CLI usage limit to reset"
+	// DetailPinnedRunner: a step of the review loop waits for the runner whose repository cache holds its work
+	// branch (KIN-35; %s is the runner).
+	DetailPinnedRunner = "waiting for runner %s: it holds the step's work branch (implementation, review and fixes run there)"
 )
 
 // routedWait: the wait reasons the scheduler itself sets and lifts by routing the step again.
@@ -195,7 +209,7 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 				continue
 			}
 			ps := caps[st.Key]
-			c, choice, reason, ok, err := s.route(ctx, routed, routes, &e, t.ProjectID, ps, cands, held)
+			c, choice, reason, ok, err := s.route(ctx, routed, routes, &e, t.ProjectID, ps, st, cands, held)
 			if err != nil {
 				return err
 			}
@@ -219,16 +233,18 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 					return err
 				}
 			}
-			l, err := e.ClaimWith(st.ID, c.ID, choice, now, s.leaseTTL())
+			claim, err := s.stepClaim(ctx, routed, t.ProjectID, ps, st, choice)
+			if err != nil {
+				return err
+			}
+			l, err := e.ClaimStep(st.ID, c.ID, claim, now, s.leaseTTL())
 			if errors.Is(err, domain.ErrParallelismLimit) {
 				break
 			}
 			if err != nil {
 				return err
 			}
-			if err := s.Dispatcher.Assign(ctx, c.ID, Assignment{StepID: st.ID, StepKey: st.Key, Fence: l.Fence,
-				ExecutionID: e.ID, TaskID: t.ID, ProjectID: t.ProjectID, Repository: ps.Repository, Scope: ps.Scope,
-				Agent: choice.Agent, Model: choice.Model, Role: ps.StepRole(), Prompt: domain.StepPrompt(t, rev.Plan(), ps)}); err != nil {
+			if err := s.Dispatcher.Assign(ctx, c.ID, stepAssignment(&e, t, rev.Plan(), ps, st, choice, l.Fence)); err != nil {
 				return fmt.Errorf("queueing the assignment: %w", err)
 			}
 			held[c.ID]++
@@ -245,7 +261,15 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 // route picks the runner and AI CLI for a step (KIN-33). Unrouted (mock plans, or no router configured) it is a
 // plain runner pick; routed, the permitted chain of the step's role decides, and the reason says why nothing fits.
 func (s *Service) route(ctx context.Context, routed bool, routes map[[2]string]AgentRoute, e *domain.Execution,
-	projectID string, ps domain.PlanStep, cands []Candidate, held map[string]int) (Candidate, domain.AgentChoice, domain.Reason, bool, error) {
+	projectID string, ps domain.PlanStep, st *domain.Step, cands []Candidate, held map[string]int) (Candidate, domain.AgentChoice, domain.Reason, bool, error) {
+	if st.PinnedRunner != "" {
+		// The step's work branch lives in this runner's repository cache: its review and fix rounds run there only.
+		cands = slices.DeleteFunc(slices.Clone(cands), func(c Candidate) bool { return c.ID != st.PinnedRunner })
+		if len(cands) == 0 {
+			return Candidate{}, domain.AgentChoice{}, domain.Reason{Code: domain.WaitRunner,
+				Detail: fmt.Sprintf(DetailPinnedRunner, st.PinnedRunner)}, false, nil
+		}
+	}
 	if !routed {
 		c, ok := domain.PickRunner(cands, ps.Capabilities, held)
 		var choice domain.AgentChoice
@@ -255,6 +279,9 @@ func (s *Service) route(ctx context.Context, routed bool, routes map[[2]string]A
 		return c, choice, domain.Reason{Code: domain.WaitRunner, Detail: DetailNoRunner}, ok, nil
 	}
 	key := [2]string{ps.StepRole(), author(e, ps)}
+	if st.Phase == domain.PhaseReview {
+		key = [2]string{domain.StepRoleReviewer, st.Author()} // the independent review of the step's own work
+	}
 	r, cached := routes[key]
 	if !cached {
 		var err error
@@ -291,12 +318,55 @@ func author(e *domain.Execution, ps domain.PlanStep) string {
 		last := d.Attempts[len(d.Attempts)-1]
 		if f := last.FinishedAt; best == "" || f != nil && f.After(at) {
 			best = d.Agent
+			if a := d.Author(); a != "" {
+				best = a // the step ran its own review loop (KIN-35): its implementer wrote the work, not its reviewer
+			}
 			if f != nil {
 				at = *f
 			}
 		}
 	}
 	return best
+}
+
+// stepClaim decides the review loop for a claim (KIN-35): a routed implementer step on an AI CLI runs it, and its
+// implementation attempts get the repository's test command.
+func (s *Service) stepClaim(ctx context.Context, routed bool, projectID string, ps domain.PlanStep, st *domain.Step,
+	choice domain.AgentChoice) (domain.StepClaim, error) {
+	c := domain.StepClaim{Agent: choice,
+		Review: routed && ps.StepRole() == domain.StepRoleImplementer && choice.Agent != "" && choice.Agent != AgentMock}
+	if (c.Review || st.Review) && st.Phase == domain.PhaseImplement && s.TestCommands != nil {
+		cmd, err := s.TestCommands.TestCommand(ctx, projectID, ps.Repository)
+		if err != nil {
+			return domain.StepClaim{}, fmt.Errorf("test command of %s: %w", ps.Repository, err)
+		}
+		c.TestCommand = cmd
+	}
+	return c, nil
+}
+
+// stepAssignment is the execution.assign of a claimed step: outside the review loop the plain step prompt; in it the
+// implementer's prompt (plan step, test command, fix feedback) or the reviewer's (the work base..head, the runner's
+// test evidence, the implementer's handoff).
+func stepAssignment(e *domain.Execution, t domain.Task, plan domain.Plan, ps domain.PlanStep, st *domain.Step,
+	choice domain.AgentChoice, fence int64) Assignment {
+	a := Assignment{StepID: st.ID, StepKey: st.Key, Fence: fence, ExecutionID: e.ID, TaskID: t.ID, ProjectID: t.ProjectID,
+		Repository: ps.Repository, Scope: ps.Scope, Agent: choice.Agent, Model: choice.Model, Role: ps.StepRole(),
+		Prompt: domain.StepPrompt(t, plan, ps)}
+	switch {
+	case !st.Review:
+	case st.Phase == domain.PhaseReview:
+		impl, _ := st.LastImplementation()
+		a.Role, a.DiffBase, a.DiffHead = domain.StepRoleReviewer, impl.BaseSHA, impl.HeadSHA
+		a.Prompt = domain.ReviewPrompt(domain.ReviewInput{Task: t, Plan: plan, Step: ps,
+			Handoff: domain.ParseHandoff(impl.Report.Result), Files: impl.Files, Tests: impl.Tests, BaseSHA: impl.BaseSHA,
+			HeadSHA: impl.HeadSHA, Round: st.Round})
+	default:
+		a.TestCommand = st.TestCommand
+		a.Prompt = domain.ImplementerPrompt(domain.ImplementerInput{Task: t, Plan: plan, Step: ps, TestCommand: st.TestCommand,
+			Feedback: st.RetryFeedback(), Round: st.Round})
+	}
+	return a
 }
 
 func executionEqual(a, b domain.Execution) bool {
@@ -306,7 +376,8 @@ func executionEqual(a, b domain.Execution) bool {
 	for i := range a.Steps {
 		x, y := a.Steps[i], b.Steps[i]
 		if x.State != y.State || x.Fence != y.Fence || x.WaitReason != y.WaitReason || x.RunnerID != y.RunnerID ||
-			x.Agent != y.Agent || x.Model != y.Model {
+			x.Agent != y.Agent || x.Model != y.Model || x.Review != y.Review || x.Phase != y.Phase || x.Round != y.Round ||
+			x.PinnedRunner != y.PinnedRunner || x.TestCommand != y.TestCommand {
 			return false
 		}
 	}

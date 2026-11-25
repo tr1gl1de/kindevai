@@ -268,6 +268,51 @@ func TestExecutionRoundTrip(t *testing.T) {
 	}
 }
 
+// The review loop's state (KIN-35) survives a save: phase, round, pinned runner and the attempt's artifacts.
+func TestReviewLoopRoundTrip(t *testing.T) {
+	t.Parallel()
+	d, _ := testDB(t)
+	svc := service(d, fixed)
+	ctx := t.Context()
+	_, e := running(t, svc)
+	repo := sqlite.New(d)
+	x, err := repo.Execution(ctx, e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := x.StepByKey("backend").ID
+	l, err := x.ClaimStep(id, "r1", domain.StepClaim{Agent: domain.AgentChoice{Agent: "claude"}, Review: true, TestCommand: "make test"}, t0, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := x.Start(id, "r1", l.Fence, t0, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	x.RecordAgentReport(id, "r1", l.Fence, domain.AgentReport{Session: "s", Result: `{"summary":"done"}`})
+	x.RecordTests(id, "r1", l.Fence, domain.TestRun{Command: "make test", ExitCode: 0, DurationMS: 5, Output: "ok"})
+	x.RecordChanges(id, "r1", l.Fence, domain.WorkChanges{BaseSHA: "b", HeadSHA: "h", Files: []string{"a.go"}, Total: 3})
+	if err := x.Succeed(id, "r1", l.Fence, t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveExecution(ctx, &x); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.Execution(ctx, e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := got.StepByKey("backend")
+	if !s.Review || s.Phase != domain.PhaseReview || s.PinnedRunner != "r1" || s.TestCommand != "make test" || s.State != domain.StepReady {
+		t.Fatalf("step = %+v", s)
+	}
+	a := s.Attempts[0]
+	if a.Role != domain.StepRoleImplementer || a.Report.Result != `{"summary":"done"}` || a.TestCommand != "make test" ||
+		a.Tests == nil || *a.Tests != (domain.TestRun{Command: "make test", DurationMS: 5, Output: "ok"}) ||
+		a.BaseSHA != "b" || a.HeadSHA != "h" || len(a.Files) != 1 || a.Files[0] != "a.go" || a.FilesTotal != 3 {
+		t.Fatalf("attempt = %+v", a)
+	}
+}
+
 func TestOneRunningExecutionPerTask(t *testing.T) {
 	t.Parallel()
 	d, _ := testDB(t)

@@ -147,7 +147,7 @@ func (e Execution) AgentTime(now time.Time) AgentTime {
 	return t
 }
 
-func clonePtr(t *time.Time) *time.Time {
+func clonePtr[T any](t *T) *T {
 	if t == nil {
 		return nil
 	}

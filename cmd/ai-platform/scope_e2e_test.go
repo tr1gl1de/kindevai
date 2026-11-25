@@ -230,7 +230,7 @@ func TestCompletionWithoutAChangesReportStopsTheStep(t *testing.T) {
 	e2eSlot(t)
 	cp, _ := scopeEnvWith(t, 0, func(w sessionapp.Workspaces) sessionapp.Workspaces { return noFinalReport{w} })
 	task := cp.mockTask(t, "p1", "success")
-	d := cp.waitTask(t, task, 30*time.Second, heldForApproval)
+	d := cp.waitTask(t, task, heldForApproval)
 	st := d.Execution.Steps[0]
 	if len(st.Attempts) != 1 || st.Attempts[0].State != workflow.AttemptCancelled ||
 		!strings.Contains(st.Attempts[0].Error, "no changes report") {
@@ -241,5 +241,5 @@ func TestCompletionWithoutAChangesReportStopsTheStep(t *testing.T) {
 	}
 
 	with, _ := scopeEnv(t, 0)
-	with.waitTask(t, with.mockTask(t, "p1", "success"), 30*time.Second, succeeded)
+	with.waitTask(t, with.mockTask(t, "p1", "success"), succeeded)
 }

@@ -332,3 +332,68 @@ func TestAttemptWorkspaceAPI(t *testing.T) {
 		t.Fatalf("unknown attempt %d", c)
 	}
 }
+
+type plannerRoute struct{}
+
+func (plannerRoute) Route(context.Context, string, string, string) (app.AgentRoute, error) {
+	return app.AgentRoute{Chain: []domain.AgentChoice{{Agent: "claude"}}}, nil
+}
+
+type plannerPool struct{}
+
+func (plannerPool) Candidates(context.Context, string) ([]app.Candidate, error) {
+	return []app.Candidate{{ID: "r1", Tools: []string{"claude"}, DiskHeavyAllowed: true}}, nil
+}
+
+// KIN-34: POST /plan starts the planner; the task page shows the planning run and the plan's steps and impact.
+func TestPlanAPI(t *testing.T) {
+	t.Parallel()
+	srv, svc := newServer(t)
+	var d DetailView
+	call(t, srv, "owner", "POST", "/api/tasks", `{"projectId":"p1","title":"Login"}`, &d)
+	id := d.Task.ID
+	var e map[string]string
+	if c := call(t, srv, "owner", "POST", "/api/tasks/"+id+"/plan", "", &e); c != http.StatusServiceUnavailable || e["error"] != "planner_unavailable" {
+		t.Fatalf("planner off %d %v", c, e)
+	}
+	svc.Planning, svc.Agents, svc.Runners = svc.Repo.(*sqlite.Repository), plannerRoute{}, plannerPool{}
+	if c := call(t, srv, "member", "POST", "/api/tasks/"+id+"/plan", "", nil); c != http.StatusForbidden {
+		t.Fatalf("member plan %d", c)
+	}
+	if c := call(t, srv, "owner", "POST", "/api/tasks/"+id+"/plan", "", &d); c != http.StatusAccepted || d.Task.State != "ANALYZING" ||
+		d.Planning == nil || d.Planning.State != "QUEUED" || d.Planning.MaxAttempts != domain.MaxPlanningAttempts {
+		t.Fatalf("plan %d %+v %+v", c, d.Task, d.Planning)
+	}
+	if c := call(t, srv, "owner", "POST", "/api/tasks/"+id+"/plan", "", nil); c != http.StatusConflict {
+		t.Fatalf("plan twice %d", c)
+	}
+	if err := svc.Schedule(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	call(t, srv, "owner", "GET", "/api/tasks/"+id, "", &d)
+	p := d.Planning
+	if p.State != "RUNNING" || p.Agent != "claude" || p.RunnerID != "r1" || p.Attempt != 1 || !strings.HasPrefix(p.StepID, domain.PlanningStepPrefix) {
+		t.Fatalf("running %+v", p)
+	}
+	ctx := t.Context()
+	plan := `{"summary":"s","risk":"L1","maxParallel":1,"tests":["unit"],"steps":[{"key":"a","title":"A","repository":"acme/app","scope":["x/"],"dependsOn":[],"capabilities":[]}]}`
+	if err := svc.RecordPlanningReport(ctx, p.StepID, "r1", 1, domain.AgentReport{Session: "sess"}, plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CompletePlanningAttempt(ctx, p.StepID, "r1", 1); err != nil {
+		t.Fatal(err)
+	}
+	call(t, srv, "member", "GET", "/api/tasks/"+id, "", &d)
+	if d.Task.State != "READY" || d.Planning.State != "SUCCEEDED" || !d.Planning.HasSession || d.Revision == nil ||
+		len(d.Revision.Steps) != 1 || d.Revision.Steps[0].Scope[0] != "x/" || d.Revision.Tests[0] != "unit" ||
+		d.Revision.Contracts == nil || d.Revision.CreatedBy != "planner/claude" {
+		t.Fatalf("planned %+v %+v %+v", d.Task, d.Planning, d.Revision)
+	}
+	var page EventPageView
+	if c := call(t, srv, "member", "GET", "/api/tasks/"+id+"/steps/"+p.StepID+"/attempts/1/events", "", &page); c != http.StatusOK {
+		t.Fatalf("planner attempt events %d", c)
+	}
+	if c := call(t, srv, "member", "GET", "/api/tasks/"+id+"/steps/"+p.StepID+"/attempts/2/events", "", nil); c != http.StatusNotFound {
+		t.Fatalf("unknown planner attempt %d", c)
+	}
+}

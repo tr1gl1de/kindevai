@@ -988,3 +988,17 @@ func TestAgentEventsAreCheckedAndRedacted(t *testing.T) {
 		t.Fatalf("redacted %s", red)
 	}
 }
+
+// KIN-34: the CLI's final answer in execution.completed is redacted before it is stored and reported.
+func TestCompletedResultIsRedacted(t *testing.T) {
+	t.Parallel()
+	body, _ := json.Marshal(protocol.Completed{Agent: &protocol.AgentReport{Session: "s1",
+		Result: "{\"summary\":\"use ghp_" + strings.Repeat("aB3", 12) + "\"}\nline two"}})
+	red := redactBody(protocol.EventCompleted, body)
+	if strings.Contains(string(red), "ghp_aB3") || !strings.Contains(string(red), "line two") || !strings.Contains(string(red), `"session":"s1"`) {
+		t.Fatalf("redacted %s", red)
+	}
+	if got := redactBody(protocol.EventCompleted, nil); got != nil {
+		t.Fatalf("empty body %s", got)
+	}
+}

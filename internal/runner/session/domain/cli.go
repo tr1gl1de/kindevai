@@ -181,9 +181,6 @@ const (
 	FailureCLI       FailureCode = "cli_error" // the CLI failed otherwise
 	FailureTimeout   FailureCode = "timeout"   // the run's timeout passed
 	FailureCancelled FailureCode = "cancelled" // the run was cancelled
-	// FailureNetwork: the run's strict egress sandbox did not verify, the CLI never started (KIN-31); the step
-	// waits for the network instead of using its retry budget.
-	FailureNetwork FailureCode = "network"
 )
 
 // Causes of FailureCLILimit.
@@ -251,9 +248,6 @@ type End struct {
 	StderrTail string // the end of stderr, for errors the CLI reported only there
 	TimedOut   bool
 	Cancelled  string // the cancel reason; empty when not cancelled
-	// SandboxRefused: the strict egress sandbox did not verify and the CLI never started (the launcher's sandbox
-	// recognised its own refusal, KIN-31, on a signal the CLI cannot forge, KIN-88).
-	SandboxRefused bool
 }
 
 // AgentResult is the outcome of a CLI run.
@@ -340,8 +334,6 @@ func (t *Transcript) Result(end End) AgentResult {
 	switch {
 	case end.Cancelled != "":
 		r.Failure = &AgentFailure{Code: FailureCancelled, Message: end.Cancelled}
-	case end.SandboxRefused:
-		r.Failure = &AgentFailure{Code: FailureNetwork, Message: tail}
 	case end.TimedOut:
 		r.Failure = &AgentFailure{Code: FailureTimeout, Message: "timed out"}
 	case t.failure != nil:

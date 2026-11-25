@@ -150,7 +150,9 @@ func execCLI(state, prompt string, timeout, grace time.Duration, argv []string) 
 	end := ExecEnd{TimedOut: timedOut.Load()}
 	var ee *exec.ExitError
 	switch {
-	case err == nil:
+	case err == nil, errors.Is(err, exec.ErrWaitDelay):
+		// ErrWaitDelay: the CLI exited 0 and something it left behind still held its output; that is cut off and
+		// killed with the group (killGroup), the run succeeded (KIN-102).
 	case errors.As(err, &ee):
 		if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
 			end.Signaled, end.Code = true, -1

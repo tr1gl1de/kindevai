@@ -108,7 +108,7 @@ func TestMain(m *testing.M) {
 }
 
 // helperCommands are the subcommands the daemon starts from its own binary, never typed by users.
-var helperCommands = []string{"mock-agent", "agent-exec", "sandbox-run", "sandbox-exec", gitcli.HelperCommand}
+var helperCommands = []string{"mock-agent", "agent-exec", "sandbox-exec", gitcli.HelperCommand}
 
 type result struct {
 	err            error
@@ -342,6 +342,10 @@ func TestVersionAndUsage(t *testing.T) {
 	}
 	if r := cli(t.Context(), "", "", nil, "bogus"); r.err == nil {
 		t.Fatal("unknown command accepted")
+	}
+	// KIN-102: the standalone CLI sandbox launcher is gone; a CLI runs only as the command of the daemon's sandbox.
+	if r := cli(t.Context(), "", "", nil, "sandbox-run"); r.err == nil || !strings.Contains(r.err.Error(), "unknown command") {
+		t.Fatalf("sandbox-run: %v", r.err)
 	}
 }
 

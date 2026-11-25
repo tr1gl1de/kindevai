@@ -3,10 +3,9 @@
 package cliagent
 
 import (
-	"bytes"
-	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -16,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tr1gl1de/kindevai/internal/runner/session/app"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/domain"
 )
 
@@ -50,7 +50,7 @@ func (f *fixture) adapter(d Dialect, env ...string) *Adapter {
 		f.t.Fatal(err)
 	}
 	return &Adapter{Dialect: d, Config: Config{Binary: bin, Home: f.home, Path: "/usr/bin:/bin",
-		Env: append([]string{"FAKE_OUT=" + f.out}, env...), Grace: 200 * time.Millisecond}}
+		Env: append([]string{"FAKE_OUT=" + f.out}, env...)}}
 }
 
 func (f *fixture) request(agent string) domain.AgentRequest {
@@ -70,42 +70,88 @@ func stream(name string) string {
 	return "FAKE_STREAM=" + p
 }
 
-type collector struct {
-	mu  sync.Mutex
-	evs []domain.AgentEvent
-	ch  chan domain.AgentEvent
+// ran is what a CLI run left: its result, raw output and parsed events.
+type ran struct {
+	res            domain.AgentResult
+	stdout, stderr string
+	events         []domain.AgentEvent
 }
 
-func newCollector() *collector { return &collector{ch: make(chan domain.AgentEvent, 64)} }
-
-func (c *collector) on(e domain.AgentEvent) {
-	c.mu.Lock()
-	c.evs = append(c.evs, e)
-	c.mu.Unlock()
-	select {
-	case c.ch <- e:
-	default:
-	}
-}
-
-func start(t *testing.T, a *Adapter, req domain.AgentRequest, h Hooks) *Run {
+// runCLI runs the adapter's command for req the way the daemon does (KIN-79, the one production path since
+// KIN-102): `agent-exec` (the test binary) leads its own process group with the command's environment and working
+// directory and the prompt file on the CLI's stdin, and Agents.Follow parses the output files it writes. cancel,
+// when set, runs once the CLI produced output, with the group's id; it stops the group as the executor does and
+// returns the cancel reason.
+func runCLI(t *testing.T, a *Adapter, req domain.AgentRequest, p domain.Permissions, cancel func(pgid int) string) ran {
 	t.Helper()
-	r, err := a.Start(t.Context(), req, h)
+	c, err := a.Command(req, p)
 	if err != nil {
-		t.Fatalf("Start: %v", err)
+		t.Fatalf("Command: %v", err)
 	}
-	t.Cleanup(func() { r.Cancel("test cleanup"); r.Wait() })
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := t.TempDir()
+	args := []string{"--state", state, "--prompt", req.PromptFile, "--timeout", req.Timeout.String(), "--grace", "200ms",
+		"--", c.Path}
+	cmd := exec.Command(exe, append(args, c.Args...)...) //nolint:gosec,noctx // test; killed with its group
+	cmd.Env, cmd.Dir = append([]string{"KINDEV_TEST_AGENT_EXEC=1"}, c.Env...), c.Dir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pgid := cmd.Process.Pid
+	t.Cleanup(func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) })
+	var (
+		mu  sync.Mutex
+		r   ran
+		out lockedBuf
+		eo  lockedBuf
+	)
+	fl, err := (&Agents{Adapters: map[string]*Adapter{a.Dialect.Name(): a}, Poll: 5 * time.Millisecond,
+		Save: time.Millisecond}).Follow(a.Dialect.Name(), state, app.AgentFollow{Stdout: &out, Stderr: &eo,
+		OnEvent: func(e domain.AgentEvent) { mu.Lock(); r.events = append(r.events, e); mu.Unlock() }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reason := ""
+	if cancel != nil {
+		deadline := time.Now().Add(20 * time.Second)
+		for out.String() == "" {
+			if time.Now().After(deadline) {
+				t.Fatal("the CLI wrote nothing")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		reason = cancel(pgid)
+	}
+	waited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(waited) }()
+	select {
+	case <-waited:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the run did not end")
+	}
+	exit := domain.Exit{Code: cmd.ProcessState.ExitCode()}
+	if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		exit = domain.Exit{Signaled: true}
+	}
+	res := fl.Finish(exit, reason)
+	mu.Lock()
+	defer mu.Unlock()
+	r.res, r.stdout, r.stderr = res, out.String(), eo.String()
 	return r
 }
 
-func waitResult(t *testing.T, r *Run) domain.AgentResult {
+// args is the argv the adapter builds for req in permission mode p.
+func args(t *testing.T, a *Adapter, req domain.AgentRequest, p domain.Permissions) []string {
 	t.Helper()
-	select {
-	case <-r.Done():
-	case <-time.After(20 * time.Second):
-		t.Fatal("the run did not end")
+	c, err := a.Command(req, p)
+	if err != nil {
+		t.Fatalf("Command: %v", err)
 	}
-	return r.Wait()
+	return c.Args
 }
 
 // AC: Claude Code runs headless with stream-json; the prompt comes on stdin from a file outside the workspace; the
@@ -113,16 +159,12 @@ func waitResult(t *testing.T, r *Run) domain.AgentResult {
 func TestClaudeRun(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	c := newCollector()
-	var raw bytes.Buffer
-	r := start(t, f.adapter(Claude{}, stream("claude/read.jsonl")), f.request(domain.AgentClaude),
-		Hooks{OnEvent: c.on, Stdout: &raw})
-	res := waitResult(t, r)
-	if ok, reason := res.Outcome(); !ok {
+	r := runCLI(t, f.adapter(Claude{}, stream("claude/read.jsonl")), f.request(domain.AgentClaude), domain.PermissionsSafe, nil)
+	if ok, reason := r.res.Outcome(); !ok {
 		t.Fatalf("run failed: %s", reason)
 	}
-	if res.Session != "8bc06756-ac80-4061-889c-c0ee7d40571c" || res.Text != "kindevai fixture" || res.Usage.Turns != 2 {
-		t.Fatalf("result = %+v", res)
+	if r.res.Session != "8bc06756-ac80-4061-889c-c0ee7d40571c" || r.res.Text != "kindevai fixture" || r.res.Usage.Turns != 2 {
+		t.Fatalf("result = %+v", r.res)
 	}
 	want := []string{"-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits",
 		"--setting-sources", "user", "--settings", `{"disableAllHooks":true}`}
@@ -133,14 +175,13 @@ func TestClaudeRun(t *testing.T) {
 		t.Fatalf("stdin = %q", f.recorded("stdin"))
 	}
 	kinds := []domain.EventKind{}
-	for _, e := range c.evs {
+	for _, e := range r.events {
 		kinds = append(kinds, e.Kind)
 	}
 	if !slices.Equal(kinds, []domain.EventKind{domain.EventSession, domain.EventToolUse, domain.EventText, domain.EventResult}) {
 		t.Fatalf("events = %v", kinds)
 	}
-	want2, _ := os.ReadFile("testdata/claude/read.jsonl")
-	if raw.String() != string(want2) {
+	if want, _ := os.ReadFile("testdata/claude/read.jsonl"); r.stdout != string(want) {
 		t.Fatal("raw stdout is not passed through unchanged")
 	}
 }
@@ -163,8 +204,7 @@ func TestResumeArgs(t *testing.T) {
 			f := newFixture(t)
 			req := f.request(c.d.Name())
 			req.Resume, req.Model = "sess-1", "sonnet"
-			waitResult(t, start(t, f.adapter(c.d), req, Hooks{}))
-			if got := strings.Split(strings.TrimSuffix(f.recorded("argv"), "\n"), "\n"); !slices.Equal(got, c.want) {
+			if got := args(t, f.adapter(c.d), req, domain.PermissionsSafe); !slices.Equal(got, c.want) {
 				t.Fatalf("argv = %q, want %q", got, c.want)
 			}
 		})
@@ -175,10 +215,9 @@ func TestResumeArgs(t *testing.T) {
 func TestCodexRun(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	r := start(t, f.adapter(Codex{}, stream("codex/success.jsonl")), f.request(domain.AgentCodex), Hooks{})
-	res := waitResult(t, r)
-	if ok, reason := res.Outcome(); !ok || res.Session != "0199a213-81c0-7800-8aa1-bbab2a035a53" {
-		t.Fatalf("result = %+v (%s)", res, reason)
+	r := runCLI(t, f.adapter(Codex{}, stream("codex/success.jsonl")), f.request(domain.AgentCodex), domain.PermissionsSafe, nil)
+	if ok, reason := r.res.Outcome(); !ok || r.res.Session != "0199a213-81c0-7800-8aa1-bbab2a035a53" {
+		t.Fatalf("result = %+v (%s)", r.res, reason)
 	}
 	want := []string{"exec", "--json", "--skip-git-repo-check", "--sandbox", "workspace-write", "-"}
 	if got := strings.Fields(f.recorded("argv")); !slices.Equal(got, want) {
@@ -193,7 +232,7 @@ func TestEnvironmentIsMinimal(t *testing.T) {
 	t.Setenv("KINDEV_SECRET_TOKEN", "s3cr3t")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-leak")
 	f := newFixture(t)
-	waitResult(t, start(t, f.adapter(Claude{}, stream("claude/read.jsonl")), f.request(domain.AgentClaude), Hooks{}))
+	runCLI(t, f.adapter(Claude{}, stream("claude/read.jsonl")), f.request(domain.AgentClaude), domain.PermissionsSafe, nil)
 	env := f.recorded("env")
 	for _, leak := range []string{"s3cr3t", "sk-leak", "KINDEV_SECRET_TOKEN"} {
 		if strings.Contains(env, leak) {
@@ -215,7 +254,7 @@ func TestHomeInsideTheWorkspaceIsRefused(t *testing.T) {
 	f := newFixture(t)
 	a := f.adapter(Claude{})
 	a.Config.Home = filepath.Join(f.workdir, "home")
-	if _, err := a.Start(t.Context(), f.request(domain.AgentClaude), Hooks{}); err == nil {
+	if _, err := a.Command(f.request(domain.AgentClaude), domain.PermissionsSafe); err == nil {
 		t.Fatal("a HOME inside the workspace would expose the CLI's login to the agent")
 	}
 }
@@ -230,7 +269,7 @@ func TestSymlinksAreResolved(t *testing.T) {
 	}
 	a := f.adapter(Claude{})
 	a.Config.Home = link
-	if _, err := a.Start(t.Context(), f.request(domain.AgentClaude), Hooks{}); err == nil {
+	if _, err := a.Command(f.request(domain.AgentClaude), domain.PermissionsSafe); err == nil {
 		t.Fatal("a HOME linked into the workspace was accepted")
 	}
 	inside := filepath.Join(f.workdir, "prompt.md")
@@ -243,150 +282,61 @@ func TestSymlinksAreResolved(t *testing.T) {
 	}
 	req := f.request(domain.AgentClaude)
 	req.PromptFile = plink
-	if _, err := f.adapter(Claude{}).Start(t.Context(), req, Hooks{}); !errors.Is(err, domain.ErrInvalidAgentRequest) {
+	if _, err := f.adapter(Claude{}).Command(req, domain.PermissionsSafe); !errors.Is(err, domain.ErrInvalidAgentRequest) {
 		t.Fatalf("a prompt linked into the workspace: %v", err)
 	}
 }
 
-// A cancel that arrives after the CLI ended does not turn a success into a failure.
-func TestCancelAfterExitKeepsTheResult(t *testing.T) {
+// AC (owner decision 24.11.2026): the permission bypass drops the CLI's own permission prompts and sandbox. Only the
+// session executor chooses it, and only for a run inside the verified strict egress sandbox (domain.ChoosePermissions,
+// session/app TestPermissionBypassOnlyInsideTheStrictSandbox).
+func TestPermissionBypassArgs(t *testing.T) {
 	t.Parallel()
-	f := newFixture(t)
-	r := start(t, f.adapter(Claude{}, stream("claude/read.jsonl")), f.request(domain.AgentClaude), Hooks{})
-	res := waitResult(t, r)
-	r.Cancel("late")
-	if ok, reason := r.Wait().Outcome(); !ok || res.Failure != nil {
-		t.Fatalf("late cancel changed the result: %s", reason)
-	}
-}
-
-type fakeSandbox struct {
-	strict  bool
-	wrapped bool
-	mu      sync.Mutex
-}
-
-func (s *fakeSandbox) StrictEgress(context.Context) bool { return s.strict }
-func (s *fakeSandbox) Wrap(_ context.Context, c Command) (Command, error) {
-	s.mu.Lock()
-	s.wrapped = true
-	s.mu.Unlock()
-	c.Env = append(c.Env, "SANDBOXED=1")
-	return c, nil
-}
-
-// AC (owner decision 24.11.2026): the permission bypass only inside the verified strict-egress sandbox, otherwise
-// the CLI is refused (never started on the host with the bypass).
-func TestPermissionBypass(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name    string
-		d       Dialect
-		sandbox *fakeSandbox
-		flag    string
-		refused bool
+	for _, c := range []struct {
+		d    Dialect
+		flag string
 	}{
-		{"claude on the host", Claude{}, nil, "", true},
-		{"claude in an unverified sandbox", Claude{}, &fakeSandbox{}, "", true},
-		{"claude in the strict sandbox", Claude{}, &fakeSandbox{strict: true}, "--dangerously-skip-permissions", false},
-		{"codex on the host", Codex{}, nil, "", true},
-		{"codex in the strict sandbox", Codex{}, &fakeSandbox{strict: true}, "--dangerously-bypass-approvals-and-sandbox", false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-			f := newFixture(t)
-			a := f.adapter(c.d)
-			if c.sandbox != nil {
-				a.Config.Sandbox = c.sandbox
-			}
-			req := f.request(c.d.Name())
-			req.BypassPermissions = true
-			r, err := a.Start(t.Context(), req, Hooks{})
-			if c.refused {
-				if !errors.Is(err, domain.ErrBypassWithoutSandbox) {
-					t.Fatalf("Start = %v, want ErrBypassWithoutSandbox", err)
-				}
-				if _, statErr := os.Stat(filepath.Join(f.out, "argv")); statErr == nil {
-					t.Fatal("the CLI was started")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			waitResult(t, r)
-			argv := strings.Fields(f.recorded("argv"))
-			if !slices.Contains(argv, c.flag) || slices.Contains(argv, "--permission-mode") || slices.Contains(argv, "--sandbox") {
-				t.Fatalf("argv = %q", argv)
-			}
-			if !strings.Contains(f.recorded("env"), "SANDBOXED=1") || !c.sandbox.wrapped {
-				t.Fatal("the command was not wrapped by the sandbox")
-			}
-		})
+		{Claude{}, "--dangerously-skip-permissions"},
+		{Codex{}, "--dangerously-bypass-approvals-and-sandbox"},
+	} {
+		f := newFixture(t)
+		argv := args(t, f.adapter(c.d), f.request(c.d.Name()), domain.PermissionsBypass)
+		if !slices.Contains(argv, c.flag) || slices.Contains(argv, "--permission-mode") || slices.Contains(argv, "--sandbox") {
+			t.Fatalf("%s argv = %q", c.d.Name(), argv)
+		}
 	}
 }
 
-// Safe mode in a sandbox still wraps the command (the strict-egress sandbox confines it either way).
-func TestSafeModeInSandboxIsWrapped(t *testing.T) {
-	t.Parallel()
-	f := newFixture(t)
-	a := f.adapter(Claude{}, stream("claude/read.jsonl"))
-	sb := &fakeSandbox{}
-	a.Config.Sandbox = sb
-	waitResult(t, start(t, a, f.request(domain.AgentClaude), Hooks{}))
-	if !sb.wrapped || !strings.Contains(f.recorded("argv"), "acceptEdits") {
-		t.Fatal("safe mode run was not wrapped")
-	}
-}
-
-// AC: timeouts: the process group gets SIGTERM, then SIGKILL after the grace period (the fake ignores SIGTERM).
+// AC: timeouts: the process group gets SIGTERM, then SIGKILL after the grace period (the fake ignores SIGTERM); the
+// session id seen before the timeout is kept (the run can be resumed).
 func TestTimeoutKillsTheGroup(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	req := f.request(domain.AgentClaude)
 	req.Timeout = 300 * time.Millisecond
-	r := start(t, f.adapter(Claude{}, stream("claude/read.jsonl"), "FAKE_MODE=hang"), req, Hooks{})
-	res := waitResult(t, r)
-	if res.Failure == nil || res.Failure.Code != domain.FailureTimeout || !res.Exit.Signaled {
-		t.Fatalf("result = %+v", res)
+	r := runCLI(t, f.adapter(Claude{}, stream("claude/read.jsonl"), "FAKE_MODE=hang"), req, domain.PermissionsSafe, nil)
+	if r.res.Failure == nil || r.res.Failure.Code != domain.FailureTimeout || !r.res.Exit.Signaled {
+		t.Fatalf("result = %+v", r.res)
 	}
-	if res.Session == "" {
-		t.Fatal("the session id seen before the timeout is kept (the run can be resumed)")
+	if r.res.Session == "" {
+		t.Fatal("the session id seen before the timeout is lost")
 	}
 }
 
-// AC: cancel stops the run's process group.
+// AC: a cancel stops the run's process group (SIGTERM, SIGKILL after the grace period, as the executor does) and the
+// run ends cancelled with its reason.
 func TestCancel(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	c := newCollector()
-	r := start(t, f.adapter(Claude{}, stream("claude/read.jsonl"), "FAKE_MODE=hang"), f.request(domain.AgentClaude),
-		Hooks{OnEvent: c.on})
-	select {
-	case <-c.ch:
-	case <-time.After(10 * time.Second):
-		t.Fatal("no event")
-	}
-	r.Cancel("runner_disabled")
-	res := waitResult(t, r)
-	if _, reason := res.Outcome(); res.Failure == nil || res.Failure.Code != domain.FailureCancelled ||
+	r := runCLI(t, f.adapter(Claude{}, stream("claude/read.jsonl"), "FAKE_MODE=hang"), f.request(domain.AgentClaude),
+		domain.PermissionsSafe, func(pgid int) string {
+			_ = syscall.Kill(-pgid, syscall.SIGTERM)
+			time.AfterFunc(300*time.Millisecond, func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) })
+			return "runner_disabled"
+		})
+	if _, reason := r.res.Outcome(); r.res.Failure == nil || r.res.Failure.Code != domain.FailureCancelled ||
 		reason != "cancelled: runner_disabled" {
-		t.Fatalf("result = %+v", res)
-	}
-}
-
-func TestContextCancelStopsTheRun(t *testing.T) {
-	t.Parallel()
-	f := newFixture(t)
-	ctx, cancel := context.WithCancel(t.Context())
-	r, err := f.adapter(Claude{}, "FAKE_MODE=hang").Start(ctx, f.request(domain.AgentClaude), Hooks{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cancel()
-	if res := waitResult(t, r); res.Failure == nil || res.Failure.Code != domain.FailureCancelled {
-		t.Fatalf("result = %+v", res.Failure)
+		t.Fatalf("result = %+v (%s)", r.res, reason)
 	}
 }
 
@@ -394,8 +344,9 @@ func TestContextCancelStopsTheRun(t *testing.T) {
 func TestLeftoverProcessesAreKilled(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	r := start(t, f.adapter(Claude{}, stream("claude/read.jsonl"), "FAKE_MODE=leftover"), f.request(domain.AgentClaude), Hooks{})
-	if ok, reason := waitResult(t, r).Outcome(); !ok {
+	r := runCLI(t, f.adapter(Claude{}, stream("claude/read.jsonl"), "FAKE_MODE=leftover"), f.request(domain.AgentClaude),
+		domain.PermissionsSafe, nil)
+	if ok, reason := r.res.Outcome(); !ok {
 		t.Fatal(reason)
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(f.recorded("leftover")))
@@ -415,15 +366,13 @@ func TestLeftoverProcessesAreKilled(t *testing.T) {
 func TestStderrLimitIsCLILimit(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	var errOut bytes.Buffer
-	r := start(t, f.adapter(Codex{}, "FAKE_MODE=stderr", "FAKE_EXIT=1",
+	r := runCLI(t, f.adapter(Codex{}, "FAKE_MODE=stderr", "FAKE_EXIT=1",
 		"FAKE_STDERR=ERROR: exceeded retry limit, last status: 429 Too Many Requests"), f.request(domain.AgentCodex),
-		Hooks{Stderr: &errOut})
-	res := waitResult(t, r)
-	if res.Failure == nil || res.Failure.Code != domain.FailureCLILimit || res.Failure.Cause != domain.CauseRateLimit {
-		t.Fatalf("failure = %+v", res.Failure)
+		domain.PermissionsSafe, nil)
+	if r.res.Failure == nil || r.res.Failure.Code != domain.FailureCLILimit || r.res.Failure.Cause != domain.CauseRateLimit {
+		t.Fatalf("failure = %+v", r.res.Failure)
 	}
-	if !strings.Contains(errOut.String(), "429") {
+	if !strings.Contains(r.stderr, "429") {
 		t.Fatal("stderr is not passed through")
 	}
 }
@@ -432,11 +381,11 @@ func TestStderrLimitIsCLILimit(t *testing.T) {
 func TestClaudeLogoutIsCLILimit(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	r := start(t, f.adapter(Claude{}, stream("claude/auth.jsonl"), "FAKE_EXIT=1"), f.request(domain.AgentClaude), Hooks{})
-	res := waitResult(t, r)
-	if _, reason := res.Outcome(); res.Failure == nil || res.Failure.Code != domain.FailureCLILimit ||
-		res.Failure.Cause != domain.CauseAuth || !strings.Contains(reason, "Not logged in") {
-		t.Fatalf("failure = %+v", res.Failure)
+	r := runCLI(t, f.adapter(Claude{}, stream("claude/auth.jsonl"), "FAKE_EXIT=1"), f.request(domain.AgentClaude),
+		domain.PermissionsSafe, nil)
+	if _, reason := r.res.Outcome(); r.res.Failure == nil || r.res.Failure.Code != domain.FailureCLILimit ||
+		r.res.Failure.Cause != domain.CauseAuth || !strings.Contains(reason, "Not logged in") {
+		t.Fatalf("failure = %+v", r.res.Failure)
 	}
 }
 
@@ -452,13 +401,13 @@ func TestOversizedLineIsBounded(t *testing.T) {
 	}
 	a := f.adapter(Claude{}, "FAKE_STREAM="+big)
 	a.Config.MaxLine = 1 << 20
-	res := waitResult(t, start(t, a, f.request(domain.AgentClaude), Hooks{}))
-	if ok, reason := res.Outcome(); !ok || res.Text != "kindevai fixture" {
-		t.Fatalf("result = %+v (%s)", res, reason)
+	r := runCLI(t, a, f.request(domain.AgentClaude), domain.PermissionsSafe, nil)
+	if ok, reason := r.res.Outcome(); !ok || r.res.Text != "kindevai fixture" {
+		t.Fatalf("result = %+v (%s)", r.res, reason)
 	}
 }
 
-func TestStartValidates(t *testing.T) {
+func TestCommandValidates(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	cases := []struct {
@@ -469,60 +418,38 @@ func TestStartValidates(t *testing.T) {
 		{"agent of another dialect", func(_ *Adapter, r *domain.AgentRequest) { r.Agent = domain.AgentCodex }},
 		{"relative binary", func(a *Adapter, _ *domain.AgentRequest) { a.Config.Binary = "claude" }},
 		{"missing prompt file", func(_ *Adapter, r *domain.AgentRequest) { r.PromptFile = filepath.Join(f.home, "none") }},
-		{"prompt is a directory", func(_ *Adapter, r *domain.AgentRequest) { r.PromptFile = f.home }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			a, r := f.adapter(Claude{}), f.request(domain.AgentClaude)
 			c.mutate(a, &r)
-			if run, err := a.Start(t.Context(), r, Hooks{}); err == nil {
-				run.Cancel("test")
-				run.Wait()
-				t.Fatal("Start accepted it")
+			if _, err := a.Command(r, domain.PermissionsSafe); err == nil {
+				t.Fatal("Command accepted it")
 			}
 		})
 	}
 }
 
-// refusingSandbox ends the wrapped command like `ai-runner sandbox-run` whose sandbox did not verify: a marker on
-// stderr and exit code 121, the CLI never started. recorded is the launcher's own signal (KIN-88: the status the
-// CLI cannot write); it is told the wrapped command, which carries the run's environment.
-type refusingSandbox struct {
-	marker   string
-	recorded bool
-}
-
-func (refusingSandbox) StrictEgress(context.Context) bool { return true }
-func (s refusingSandbox) Wrap(_ context.Context, c Command) (Command, error) {
-	return Command{Path: "/bin/sh", Args: []string{"-c", "echo \"$0: egress ip mismatch\" >&2; exit 121", s.marker},
-		Env: append(c.Env, "KINDEV_SANDBOX_RUN=/state/run.json"), Dir: c.Dir}, nil
-}
-func (s refusingSandbox) Refused(wrapped Command, exit domain.Exit) bool {
-	return exit.Code == 121 && s.recorded && slices.Contains(wrapped.Env, "KINDEV_SANDBOX_RUN=/state/run.json")
-}
-
-// KIN-31 follow-up (KIN-83): a CLI run whose strict egress sandbox did not verify fails with code network (the step
-// waits for the network, no retry budget used), not as a CLI error; the same exit without the marker stays a CLI
-// error.
-func TestUnverifiedSandboxFailsWithNetwork(t *testing.T) {
+// A prompt that is not a regular file never reaches the CLI: agent-exec refuses to start it.
+func TestExecRefusesAPromptThatIsNotAFile(t *testing.T) {
 	t.Parallel()
-	for _, c := range []struct {
-		sb   refusingSandbox
-		want domain.FailureCode
-	}{
-		{refusingSandbox{marker: "kindev: strict egress sandbox not verified", recorded: true}, domain.FailureNetwork},
-		// KIN-88: a CLI printing the marker and exiting 121 is not the sandbox refusing.
-		{refusingSandbox{marker: "kindev: strict egress sandbox not verified"}, domain.FailureCLI},
-		{refusingSandbox{marker: "some CLI"}, domain.FailureCLI},
-	} {
-		f := newFixture(t)
-		a := f.adapter(Claude{})
-		a.Config.Sandbox = c.sb
-		res := waitResult(t, start(t, a, f.request(domain.AgentClaude), Hooks{}))
-		if res.Failure == nil || res.Failure.Code != c.want || res.Exit.Code != 121 {
-			t.Fatalf("%+v: result %+v %+v, want %s", c.sb, res, res.Failure, c.want)
-		}
+	f := newFixture(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, _ := filepath.Abs("testdata/fakecli.sh")
+	state := t.TempDir()
+	cmd := exec.Command(exe, "--state", state, "--prompt", f.home, "--timeout", "1m", "--", bin) //nolint:gosec,noctx // test
+	cmd.Env = []string{"KINDEV_TEST_AGENT_EXEC=1", "FAKE_OUT=" + f.out, "PATH=/usr/bin:/bin"}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	_ = cmd.Run()
+	if e, ok := ReadEnd(state); !ok || e.Code != 127 {
+		t.Fatalf("end %+v %v, want 127", e, ok)
+	}
+	if _, err := os.Stat(filepath.Join(f.out, "argv")); err == nil {
+		t.Fatal("the CLI was started")
 	}
 }
 

@@ -167,6 +167,9 @@ type Executor struct {
 	// often one in progress is reported (DefaultPrepareKeepalive when zero).
 	PrepareTimeout   time.Duration
 	PrepareKeepalive time.Duration
+	// QuotaEvery is how often the session store of a running attempt whose sandbox bounds it (Quota) is measured
+	// (DefaultQuotaEvery when zero, KIN-115).
+	QuotaEvery time.Duration
 
 	mu       sync.Mutex
 	runs     map[key]*run
@@ -355,7 +358,7 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 	if err != nil {
 		return fmt.Errorf("preparing the attempt directory: %w", err)
 	}
-	r := &run{rec: domain.Record{Step: a.Step, Fence: a.Fence, Execution: a.Execution, Project: a.Project,
+	r := &run{rec: domain.Record{Step: a.Step, Fence: a.Fence, Execution: a.Execution, Project: a.Project, Task: a.Task,
 		Scenario: a.ScenarioOrDefault(), Preparing: a.Base != ""}, done: make(chan struct{})}
 	if err := x.Journal.Save(r.rec); err != nil {
 		return fmt.Errorf("recording the attempt: %w", err)
@@ -452,6 +455,7 @@ func (x *Executor) launch(ctx context.Context, r *run, a domain.Assignment, dir,
 	}
 	x.runs[k] = r
 	x.guardEgress(r)
+	x.guardQuota(r)
 	if err := r.stream.Emit(protocol.EventStarted, protocol.Started{Agent: a.Adapter}); err != nil {
 		x.logger().Error("emitting started", "step", a.Step, "err", err)
 	}
@@ -1058,6 +1062,58 @@ func (x *Executor) guardEgress(r *run) {
 	})
 }
 
+// DefaultQuotaEvery is how often a running attempt's session store is measured (KIN-115). An agent can write past
+// the quota for at most this long (plus the grace period); the measurement stops as soon as the store is over, so
+// its cost is bounded by the quota.
+const DefaultQuotaEvery = 2 * time.Second
+
+func (x *Executor) quotaEvery() time.Duration {
+	if x.QuotaEvery <= 0 {
+		return DefaultQuotaEvery
+	}
+	return x.QuotaEvery
+}
+
+// guardQuota stops the attempt once its sandbox reports the attempt's session store over its quota (KIN-115): before
+// an attempt the store is shrunk, but during one an agent could otherwise fill the disk through it.
+func (x *Executor) guardQuota(r *run) {
+	q, ok := r.sandbox.(Quota)
+	if !ok {
+		return
+	}
+	every, life := x.quotaEvery(), x.lifetime()
+	x.wg.Go(func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-r.done:
+				return
+			case <-life.Done(): // Close: the next runner process adopts the attempt and watches it again
+				return
+			case <-t.C:
+			}
+			if x.closed.Load() {
+				return // the next runner process adopts the attempt and watches it again
+			}
+			why := q.OverQuota()
+			if why == "" {
+				continue
+			}
+			x.mu.Lock()
+			stop := !x.closed.Load() && !ended(r) && r.cancelled == ""
+			if stop {
+				k := r.key()
+				x.logger().Warn("session store over its quota; stopping the attempt", "step", k.step, "fence", k.fence,
+					"reason", why)
+				x.terminate(r, why)
+			}
+			x.mu.Unlock()
+			return
+		}
+	})
+}
+
 // reattach serves the strict egress sandbox of an attempt adopted after a restart again (KIN-81): its proxy
 // adapter lived in the old runner process. When it cannot be, the attempt is stopped (it has no way out) and ends
 // with code network. Called under x.mu, before the run is watched.
@@ -1301,6 +1357,7 @@ func (x *Executor) Recover(ctx context.Context) error {
 		x.logger().Info("adopted attempt after restart", "step", rec.Step, "fence", rec.Fence, "pid", rec.PID)
 		x.watch(r)
 		x.guardEgress(r)
+		x.guardQuota(r)
 	}
 	return nil
 }

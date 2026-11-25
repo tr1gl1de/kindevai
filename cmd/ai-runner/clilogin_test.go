@@ -142,6 +142,42 @@ func TestConfinerSessionStoreOverLimit(t *testing.T) {
 	}
 }
 
+// AC (KIN-115): the sandbox of a strict CLI attempt reports its task's session store over the quota while it runs
+// (the executor then stops the attempt); also an attempt adopted after a restart, found by its record's task.
+func TestConfinerWatchesTheSessionStore(t *testing.T) {
+	t.Parallel()
+	store := &cliagent.SessionStore{Root: filepath.Join(t.TempDir(), "cli-sessions"), Limit: 100}
+	c := confiner{sessions: sessionBinds(store), quota: store.OverQuota}
+	a := sessiondomain.Assignment{Project: "P1", Task: "T1", Adapter: sessiondomain.AgentClaude}
+	binds, _, err := c.sessions(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb := c.watched(summarySandbox{summary: "x"}, a.Project, a.Task, a.Adapter)
+	q, ok := sb.(sessionapp.Quota)
+	if !ok || sb.Summary() != "x" {
+		t.Fatalf("the sandbox does not watch the store: %T", sb)
+	}
+	if why := q.OverQuota(); why != "" {
+		t.Fatalf("within the quota: %q", why)
+	}
+	if err := os.WriteFile(filepath.Join(binds[0].Source, "s.jsonl"), make([]byte, 200), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if why := q.OverQuota(); !strings.Contains(why, "over its quota") {
+		t.Fatalf("over the quota: %q", why)
+	}
+	rec := sessiondomain.Record{Project: "P1", Task: "T1", Agent: sessiondomain.AgentClaude}
+	if _, ok := c.watched(summarySandbox{}, rec.Project, rec.Task, rec.Agent).(sessionapp.Quota); !ok {
+		t.Fatal("an adopted attempt's sandbox is not watched")
+	}
+	for _, tc := range []struct{ name, task, agent string }{{"no task (old record)", "", "claude"}, {"mock agent", "T1", ""}} {
+		if _, ok := c.watched(summarySandbox{}, "P1", tc.task, tc.agent).(sessionapp.Quota); ok {
+			t.Errorf("%s: watched", tc.name)
+		}
+	}
+}
+
 type summarySandbox struct {
 	sessionapp.Sandbox
 	summary string

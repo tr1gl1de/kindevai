@@ -79,6 +79,23 @@ type fakeConfiner struct {
 	mu         sync.Mutex
 	reattach   *fakeSandbox // what Reattach returns (nil: an error)
 	reattached []domain.Record
+	// quota, when set, makes the sandboxes it returns bound the attempt's session store (KIN-115).
+	quota func() string
+}
+
+// quotaBox is a sandbox that bounds the attempt's session store (KIN-115).
+type quotaBox struct {
+	*fakeSandbox
+	over func() string
+}
+
+func (q quotaBox) OverQuota() string { return q.over() }
+
+func (c *fakeConfiner) sandbox(b *fakeSandbox) Sandbox {
+	if c.quota != nil {
+		return quotaBox{b, c.quota}
+	}
+	return b
 }
 
 func (c *fakeConfiner) Reattach(_ context.Context, rec domain.Record, _ string) (Sandbox, error) {
@@ -88,7 +105,7 @@ func (c *fakeConfiner) Reattach(_ context.Context, rec domain.Record, _ string) 
 	if c.reattach == nil {
 		return nil, errors.New("the adapter socket directory is gone")
 	}
-	return c.reattach, nil
+	return c.sandbox(c.reattach), nil
 }
 
 func (c *fakeConfiner) Confine(_ context.Context, a domain.Assignment, _, _ string) (Sandbox, error) {
@@ -99,7 +116,7 @@ func (c *fakeConfiner) Confine(_ context.Context, a domain.Assignment, _, _ stri
 	if c.box == nil {
 		return nil, nil
 	}
-	return c.box, nil
+	return c.sandbox(c.box), nil
 }
 
 func failure(t *testing.T, e event) protocol.Failure {

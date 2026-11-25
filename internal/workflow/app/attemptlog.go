@@ -147,6 +147,9 @@ func (s *Service) attemptVisible(ctx context.Context, p auth.Principal, taskID, 
 	if _, ok := v[t.ProjectID]; !ok {
 		return domain.ErrNotFound
 	}
+	if _, ok := domain.PlanningRunID(stepID); ok {
+		return s.planningVisible(ctx, t.ID, stepID, fence)
+	}
 	e, err := s.Repo.ExecutionByStep(ctx, stepID)
 	if err != nil {
 		return err

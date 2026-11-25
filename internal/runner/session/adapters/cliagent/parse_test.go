@@ -84,6 +84,9 @@ func TestRecordedOutcomes(t *testing.T) {
 		{Claude{}, "claude/rate-limit.jsonl", false, domain.FailureCLILimit, domain.CauseRateLimit, "0d2f3c1e-7a51-4b0e-9a64-3c1d2e5f6a7b"},
 		{Claude{}, "claude/max-turns.jsonl", false, domain.FailureCLI, "", "6e7f0a1b-2c3d-4e5f-8a9b-0c1d2e3f4a5b"},
 		{Codex{}, "codex/success.jsonl", true, "", "", "0199a213-81c0-7800-8aa1-bbab2a035a53"},
+		// KIN-34: planner runs whose final answer is the plan (hand-written to the documented formats).
+		{Claude{}, "claude/plan.jsonl", true, "", "", "5f0c7a2e-1b3d-4c5e-8f9a-0b1c2d3e4f50"},
+		{Codex{}, "codex/plan.jsonl", true, "", "", "0199a213-81c0-7800-8aa1-bbab2a035a60"},
 		{Codex{}, "codex/rate-limit.jsonl", false, domain.FailureCLILimit, domain.CauseRateLimit, "0199a213-81c0-7800-8aa1-bbab2a035a54"},
 		{Codex{}, "codex/auth.jsonl", false, domain.FailureCLILimit, domain.CauseAuth, "0199a213-81c0-7800-8aa1-bbab2a035a55"},
 	}

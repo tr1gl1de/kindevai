@@ -79,6 +79,8 @@ export function useCreateTask() {
 
 export const useMockRun = (id: string) =>
   useTaskAction(id, (scenario: MockScenario) => api<TaskDetail>("POST", `${path(id)}/mock-run`, { scenario }));
+/** Starts the AI planner (KIN-34): the task goes ANALYZING with a new planning run. */
+export const usePlanTask = (id: string) => useTaskAction(id, () => api<TaskDetail>("POST", `${path(id)}/plan`));
 export const useCancelTask = (id: string) =>
   useTaskAction(id, (reason: string) => api<TaskDetail>("POST", `${path(id)}/cancel`, { reason }));
 export const useRetryTask = (id: string) => useTaskAction(id, () => api<TaskDetail>("POST", `${path(id)}/retry`, {}));

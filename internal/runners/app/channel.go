@@ -594,6 +594,7 @@ func (c *Channel) agentReport(ctx context.Context, runnerID string, e protocol.E
 	}
 	rep := *r // the runner's (untrusted) text: masked like any reported text before it is stored
 	rep.Session, rep.Model, rep.Version = redact.Text(rep.Session), redact.Text(rep.Model), redact.Text(rep.Version)
+	rep.Result = redact.Lines(rep.Result)
 	return ar.RecordAgentReport(ctx, runnerID, e.Step, e.Fence, rep)
 }
 
@@ -627,6 +628,18 @@ func redactBody(kind string, body json.RawMessage) json.RawMessage {
 		}
 		f.Reason = red
 		v = f
+	case protocol.EventCompleted:
+		var d protocol.Completed
+		if body == nil || json.Unmarshal(body, &d) != nil || d.Agent == nil {
+			return body // no CLI report: nothing the process wrote
+		}
+		red := redact.Lines(d.Agent.Result)
+		if red == d.Agent.Result {
+			return body
+		}
+		rep := *d.Agent
+		rep.Result = red
+		v = protocol.Completed{Agent: &rep}
 	case protocol.EventAgent:
 		var a protocol.AgentEvent
 		if body == nil || json.Unmarshal(body, &a) != nil {

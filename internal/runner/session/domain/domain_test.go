@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func valid() Assignment {
@@ -23,7 +24,19 @@ func TestCheckAssignment(t *testing.T) {
 		{"valid", func(*Assignment) {}, allow, nil},
 		{"no allowlist accepts any project", func(a *Assignment) { a.Project = "P9" }, Policy{}, nil},
 		{"foreign project", func(a *Assignment) { a.Project = "P2" }, allow, ErrProjectNotAllowed},
-		{"unknown adapter", func(a *Assignment) { a.Adapter = "claude" }, allow, ErrUnknownAdapter},
+		{"unknown adapter", func(a *Assignment) { a.Adapter = "zcode" }, allow, ErrUnknownAdapter},
+		{"claude with a prompt", cli(AgentClaude, nil), allow, nil},
+		{"codex with model and resume", cli(AgentCodex, func(a *Assignment) { a.Model, a.Resume = "gpt-5-codex", "0199a-b2" }), allow, nil},
+		{"cli without a prompt", cli(AgentClaude, func(a *Assignment) { a.Prompt = "" }), allow, ErrInvalidAssignment},
+		{"cli prompt too large", cli(AgentClaude, func(a *Assignment) { a.Prompt = strings.Repeat("x", MaxPrompt+1) }), allow, ErrInvalidAssignment},
+		{"cli with a scenario", cli(AgentClaude, func(a *Assignment) { a.Scenario = "success" }), allow, ErrInvalidAssignment},
+		{"model with shell characters", cli(AgentClaude, func(a *Assignment) { a.Model = "x; rm -rf /" }), allow, ErrInvalidAssignment},
+		{"model that looks like a flag", cli(AgentClaude, func(a *Assignment) { a.Model = "--dangerously-skip-permissions" }), allow, ErrInvalidAssignment},
+		{"resume that looks like a flag", cli(AgentClaude, func(a *Assignment) { a.Resume = "-x" }), allow, ErrInvalidAssignment},
+		{"timeout over the maximum", cli(AgentClaude, func(a *Assignment) { a.Timeout = MaxAgentTimeout + 1 }), allow, ErrInvalidAssignment},
+		{"negative timeout", cli(AgentClaude, func(a *Assignment) { a.Timeout = -1 }), allow, ErrInvalidAssignment},
+		{"bad role", cli(AgentClaude, func(a *Assignment) { a.Role = "a b" }), allow, ErrInvalidAssignment},
+		{"mock with CLI fields", func(a *Assignment) { a.Prompt = "x" }, allow, ErrInvalidAssignment},
 		{"unknown scenario", func(a *Assignment) { a.Scenario = "rm -rf /" }, allow, ErrInvalidAssignment},
 		{"empty scenario means success", func(a *Assignment) { a.Scenario = "" }, allow, nil},
 		{"step id with path separator", func(a *Assignment) { a.Step = "../x" }, allow, ErrInvalidAssignment},
@@ -45,6 +58,28 @@ func TestCheckAssignment(t *testing.T) {
 				t.Fatalf("CheckAssignment = %v, want %v", err, c.want)
 			}
 		})
+	}
+}
+
+func cli(agent string, more func(a *Assignment)) func(a *Assignment) {
+	return func(a *Assignment) {
+		a.Adapter, a.Scenario, a.Prompt = agent, "", "Fix the bug"
+		if more != nil {
+			more(a)
+		}
+	}
+}
+
+func TestAgentTimeoutDefault(t *testing.T) {
+	t.Parallel()
+	a := valid()
+	cli(AgentClaude, nil)(&a)
+	if a.AgentTimeout() != DefaultAgentTimeout {
+		t.Fatal(a.AgentTimeout())
+	}
+	a.Timeout = time.Minute
+	if a.AgentTimeout() != time.Minute {
+		t.Fatal(a.AgentTimeout())
 	}
 }
 

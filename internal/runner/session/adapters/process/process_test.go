@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tr1gl1de/kindevai/internal/runner/session/adapters/cliagent"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/adapters/mockagent"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/app"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/domain"
@@ -19,6 +20,9 @@ import (
 // The test binary doubles as the mock agent (like `ai-runner mock-agent`).
 func TestMain(m *testing.M) {
 	if os.Getenv("KINDEV_TEST_MOCK_AGENT") == "1" {
+		if len(os.Args) > 1 && os.Args[1] == "agent-exec" {
+			os.Exit(cliagent.ExecMain(os.Args[2:], os.Stderr))
+		}
 		os.Exit(mockagent.Main(os.Args[1:], os.Stdout, os.Stderr))
 	}
 	os.Exit(m.Run())

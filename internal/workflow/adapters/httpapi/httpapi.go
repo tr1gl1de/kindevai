@@ -76,6 +76,30 @@ type AttemptView struct {
 	WorkEndedAt   *time.Time `json:"workEndedAt"`
 	WorkStatus    string     `json:"workStatus"`
 	WorkMs        int64      `json:"workMs"`
+	// What the AI CLI reported (KIN-79): its native session, model, CLI version and usage; omitted for the mock
+	// agent.
+	Session    string     `json:"session,omitempty"`
+	Model      string     `json:"model,omitempty"`
+	CLIVersion string     `json:"cliVersion,omitempty"`
+	Usage      *UsageView `json:"usage,omitempty"`
+}
+
+// UsageView is AI CLI usage: tokens, cost in USD (0 when the CLI reports none, e.g. Codex) and turns.
+type UsageView struct {
+	InputTokens      int64   `json:"inputTokens"`
+	OutputTokens     int64   `json:"outputTokens"`
+	CacheReadTokens  int64   `json:"cacheReadTokens"`
+	CacheWriteTokens int64   `json:"cacheWriteTokens"`
+	CostUSD          float64 `json:"costUsd"`
+	Turns            int     `json:"turns"`
+}
+
+func usageView(u domain.AgentUsage) *UsageView {
+	if u == (domain.AgentUsage{}) {
+		return nil
+	}
+	return &UsageView{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, CacheReadTokens: u.CacheReadTokens,
+		CacheWriteTokens: u.CacheWriteTokens, CostUSD: u.CostUSD, Turns: u.Turns}
 }
 
 // StepView is one step of an execution.
@@ -105,6 +129,7 @@ type ExecutionView struct {
 	FinishedAt   *time.Time    `json:"finishedAt"`
 	Steps        []StepView    `json:"steps"`
 	AgentTime    AgentTimeView `json:"agentTime"`
+	Usage        *UsageView    `json:"usage,omitempty"` // the AI CLI usage of all attempts (KIN-79)
 }
 
 // RevisionView is the task's current plan revision.
@@ -289,6 +314,7 @@ func executionView(e domain.Execution, now time.Time) *ExecutionView {
 	v := &ExecutionView{ID: e.ID, PlanRevision: e.PlanRevision, PlanHash: e.PlanHash, State: string(e.State),
 		Reason: e.Reason, CreatedAt: e.CreatedAt, FinishedAt: e.FinishedAt, Steps: make([]StepView, 0, len(e.Steps)),
 		AgentTime: agentTimeView(e.AgentTime(now))}
+	var total domain.AgentUsage
 	for _, s := range e.Steps {
 		sv := StepView{ID: s.ID, Key: s.Key, Title: s.Title, Repository: s.Repository, DependsOn: orEmpty(s.DependsOn),
 			State: string(s.State), WaitReason: string(s.WaitReason), Reason: s.Reason, RunnerID: s.RunnerID, Fence: s.Fence,
@@ -297,10 +323,13 @@ func executionView(e domain.Execution, now time.Time) *ExecutionView {
 			st, d := a.Work(now)
 			sv.Attempts = append(sv.Attempts, AttemptView{Number: a.Number, RunnerID: a.RunnerID, Fence: a.Fence,
 				State: string(a.State), Error: a.Error, StartedAt: a.StartedAt, FinishedAt: a.FinishedAt, Agent: a.Agent,
-				WorkStartedAt: a.WorkStart, WorkEndedAt: a.WorkEnd, WorkStatus: string(st), WorkMs: d.Milliseconds()})
+				WorkStartedAt: a.WorkStart, WorkEndedAt: a.WorkEnd, WorkStatus: string(st), WorkMs: d.Milliseconds(),
+				Session: a.Report.Session, Model: a.Report.Model, CLIVersion: a.Report.Version, Usage: usageView(a.Report.Usage)})
+			total.Add(a.Report.Usage)
 		}
 		v.Steps = append(v.Steps, sv)
 	}
+	v.Usage = usageView(total)
 	return v
 }
 

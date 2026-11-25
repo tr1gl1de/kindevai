@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tr1gl1de/kindevai/internal/platform/bootstrap"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
@@ -122,6 +125,8 @@ func wireStrictEgress(wf *workflowapp.Service, strict func(ctx context.Context, 
 }
 
 // runnerDispatcher queues the workflow's commands in the runner's command log (joins the caller's transaction).
+// An assignment for an AI CLI (claude, codex; chosen by routing, KIN-33) carries the CLI run (KIN-79); any other
+// runs the mock agent, whose planner names its step after the scenario.
 type runnerDispatcher struct{ ch *runnersapp.Channel }
 
 func mockScenario(stepKey string) string {
@@ -143,9 +148,10 @@ func assignBody(a workflowapp.Assignment) protocol.Assign {
 		scope = []string{}
 	}
 	body := protocol.Assign{Step: a.StepID, Fence: a.Fence, Execution: a.ExecutionID, Task: a.TaskID,
-		Project: a.ProjectID, Repository: a.Repository, Scope: scope, Adapter: a.Agent, Model: a.Model, Role: a.Role}
+		Project: a.ProjectID, Repository: a.Repository, Scope: scope, Adapter: a.Agent, Model: a.Model, Role: a.Role,
+		Prompt: a.Prompt} // the CLI run's prompt/context package (KIN-79)
 	if a.Agent == "" || a.Agent == workflowapp.AgentMock {
-		body.Adapter, body.Model, body.Scenario = protocol.AdapterMock, "", mockScenario(a.StepKey)
+		body.Adapter, body.Model, body.Prompt, body.Scenario = protocol.AdapterMock, "", "", mockScenario(a.StepKey)
 	}
 	return body
 }
@@ -203,6 +209,13 @@ func (l workflowAttemptLog) AttemptEvents(ctx context.Context, stepID string, fe
 			var f protocol.Failure
 			_ = json.Unmarshal(e.Body, &f)
 			v.Reason = f.Reason
+		case protocol.EventAgent:
+			var ag protocol.AgentEvent
+			if e.Body == nil || json.Unmarshal(e.Body, &ag) != nil {
+				v.Omitted, v.Reason = true, e.Reason
+				break
+			}
+			v.Reason = agentSummary(ag)
 		}
 		out = append(out, v)
 	}
@@ -253,4 +266,47 @@ func (l workflowAttemptLog) latest(ctx context.Context, stepID string, fence int
 		return time.Time{}, false, err
 	}
 	return e.RunnerAt, true, nil
+}
+
+// maxAgentSummary bounds one CLI event's line in the attempt log (the raw output holds everything).
+const maxAgentSummary = 500
+
+// agentSummary is a CLI event (KIN-79) as one line of the attempt log: the runner's text, never interpreted.
+func agentSummary(a protocol.AgentEvent) string {
+	parts := []string{a.Kind}
+	add := func(s string) {
+		if s = strings.TrimSpace(s); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	switch a.Kind {
+	case "session":
+		add(a.Session)
+		add(a.Model)
+		if a.Version != "" {
+			add("v" + a.Version)
+		}
+	case "tool_use":
+		add(a.Tool)
+		add(a.Input)
+	case "failure":
+		add(a.Code)
+		add(a.Cause)
+		add(a.Message)
+	default:
+		add(a.Text)
+	}
+	if u := a.Usage; u != nil {
+		add(fmt.Sprintf("%d in / %d out tokens, %d turns, $%.4f", u.InputTokens, u.OutputTokens, u.Turns, u.CostUSD))
+	}
+	line := strings.Join(parts, " · ")
+	line = strings.Join(strings.Fields(line), " ")
+	if len(line) > maxAgentSummary {
+		line = line[:maxAgentSummary]
+		for len(line) > 0 && !utf8.ValidString(line) {
+			line = line[:len(line)-1]
+		}
+		line += "…"
+	}
+	return line
 }

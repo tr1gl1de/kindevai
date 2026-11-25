@@ -79,6 +79,48 @@ type Attempt struct {
 	WorkStart      *time.Time
 	WorkEnd        *time.Time
 	WorkIncomplete bool
+	// Report is what the AI CLI reported (KIN-79): native session, model, CLI version and usage.
+	Report AgentReport
+}
+
+// AgentReport is an AI CLI run's report on one attempt (KIN-79, KB KIN-A-16).
+type AgentReport struct {
+	Session string
+	Model   string
+	Version string
+	Usage   AgentUsage
+}
+
+// AgentUsage is the token usage and cost of an attempt's CLI run.
+type AgentUsage struct {
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+	CostUSD          float64
+	Turns            int
+}
+
+// Add accumulates o into u.
+func (u *AgentUsage) Add(o AgentUsage) {
+	u.InputTokens += o.InputTokens
+	u.OutputTokens += o.OutputTokens
+	u.CacheReadTokens += o.CacheReadTokens
+	u.CacheWriteTokens += o.CacheWriteTokens
+	u.CostUSD += o.CostUSD
+	u.Turns += o.Turns
+}
+
+// RecordAgentReport stores the CLI's report with the attempt of runnerID under fence, whatever the step's state
+// (a cancelled or superseded attempt still used tokens). It reports whether the attempt changed.
+func (e *Execution) RecordAgentReport(stepID, runnerID string, fence int64, r AgentReport) bool {
+	a := e.attemptFor(stepID, runnerID, fence)
+	if a == nil || a.Report == r {
+		return false
+	}
+	r.Session, r.Model, r.Version = cutUTF8(r.Session, 128), cutUTF8(r.Model, 128), cutUTF8(r.Version, 64)
+	a.Report = r
+	return true
 }
 
 // Lease is a runner's claim on a step. Every later report must carry Fence; a newer claim makes it stale.
@@ -98,7 +140,9 @@ type Step struct {
 	DependsOn  []string
 	State      StepState
 	WaitReason WaitReason // set only while WAITING
-	Reason     string     // why the step failed or was cancelled
+	// WaitUntil is when a step WAITING for its CLI's limit is retried (KIN-79); nil otherwise.
+	WaitUntil *time.Time
+	Reason    string // why the step failed or was cancelled
 	// Fence is the last fencing token issued for the step. It only grows, across attempts and runners.
 	Fence          int64
 	RunnerID       string     // holder of the current claim (CLAIMED, RUNNING, or WAITING on an unknown attempt)
@@ -138,7 +182,7 @@ func (s *Step) lastAttempt() *Attempt {
 func (s *Step) move(to StepState) {
 	s.State = to
 	if to != StepWaiting {
-		s.WaitReason = ""
+		s.WaitReason, s.WaitUntil = "", nil
 	}
 	if to != StepClaimed && to != StepRunning {
 		s.LeaseExpiresAt = nil
@@ -214,6 +258,7 @@ func (e Execution) Clone() Execution {
 			l := *s.LeaseExpiresAt
 			s.LeaseExpiresAt = &l
 		}
+		s.WaitUntil = clonePtr(s.WaitUntil)
 		s.Attempts = slices.Clone(s.Attempts)
 		for j, a := range s.Attempts {
 			s.Attempts[j].FinishedAt = clonePtr(a.FinishedAt)
@@ -581,6 +626,37 @@ func (s *Step) NetworkRetryDue(now time.Time) bool {
 	}
 	a := s.lastAttempt()
 	return a == nil || a.FinishedAt == nil || !now.Before(a.FinishedAt.Add(NetworkRetryDelay))
+}
+
+// HoldForCLILimit parks a CLAIMED or RUNNING step whose AI CLI hit its subscription/rate limit or is logged out
+// (KIN-79): like a hold for the network the attempt is cancelled (no retry budget used) and the claim released; the
+// step WAITs with reason cli_limit until resetsAt (CLILimitRetryDelay from now when the CLI did not say, or said a
+// time already past), when the scheduler assigns it again.
+func (e *Execution) HoldForCLILimit(stepID, runnerID string, fence int64, msg string, resetsAt, now time.Time) error {
+	if err := e.hold(stepID, runnerID, fence, msg, WaitCLILimit, now); err != nil {
+		return err
+	}
+	until := resetsAt.UTC()
+	if resetsAt.IsZero() || !resetsAt.After(now) {
+		until = now.Add(CLILimitRetryDelay).UTC()
+	}
+	if limit := now.Add(MaxCLILimitWait); until.After(limit) {
+		until = limit.UTC()
+	}
+	e.Step(stepID).WaitUntil = &until
+	return nil
+}
+
+// CLILimitRetryDelay is how long a step held for its CLI's limit waits when the CLI named no reset time;
+// MaxCLILimitWait bounds a reset time the CLI named.
+const (
+	CLILimitRetryDelay = 30 * time.Minute
+	MaxCLILimitWait    = 7 * 24 * time.Hour
+)
+
+// CLILimitRetryDue reports a step WAITING for its CLI's limit whose wait is over.
+func (s *Step) CLILimitRetryDue(now time.Time) bool {
+	return s.State == StepWaiting && s.WaitReason == WaitCLILimit && (s.WaitUntil == nil || !now.Before(*s.WaitUntil))
 }
 
 func (e *Execution) hold(stepID, runnerID string, fence int64, msg string, reason WaitReason, now time.Time) error {

@@ -50,13 +50,16 @@ const (
 	// Workspace events (KIN-29), sent before the attempt's process starts and before its terminal event.
 	EventWorkspacePrepared = "workspace.prepared" // body: WorkspacePrepared
 	EventWorkspaceChanges  = "workspace.changes"  // body: WorkspaceChanges
+	// EventAgent is one typed event of the attempt's AI CLI (KIN-79): its session, text, tool use, result or
+	// failure, parsed from the CLI's output (the raw output goes as execution.output).
+	EventAgent = "execution.agent" // body: AgentEvent
 )
 
 // TerminalEvent reports whether kind ends an attempt.
 func TerminalEvent(kind string) bool { return kind == EventCompleted || kind == EventFailed }
 
 var eventKinds = map[string]bool{EventAccepted: true, EventStarted: true, EventOutput: true, EventOutputDropped: true,
-	EventCompleted: true, EventFailed: true, EventWorkspacePrepared: true, EventWorkspaceChanges: true}
+	EventCompleted: true, EventFailed: true, EventWorkspacePrepared: true, EventWorkspaceChanges: true, EventAgent: true}
 
 // Limits of the channel. MaxOutputChunk raw bytes of output escape to at most 6× in JSON (\u00XX), so an output
 // event stays below MaxMessageBytes.
@@ -118,6 +121,15 @@ type Assign struct {
 	// platform role (planner, implementer, reviewer), informational (KIN-33).
 	Model string `json:"model,omitempty"`
 	Role  string `json:"role,omitempty"`
+	// The CLI run (KIN-79; adapters claude and codex only). Prompt is the prompt/context package: the runner writes it
+	// to a file in the attempt's state directory, outside the worktree, and the CLI reads it on stdin. Resume is the
+	// native session id to continue (empty: a new session). BypassPermissions asks for the CLI's permission bypass,
+	// which the runner grants only inside the verified strict egress sandbox (KIN-31) and refuses elsewhere.
+	// TimeoutSec bounds the run (0: the runner's default).
+	Prompt            string `json:"prompt,omitempty"`
+	Resume            string `json:"resume,omitempty"`
+	BypassPermissions bool   `json:"bypassPermissions,omitempty"`
+	TimeoutSec        int64  `json:"timeoutSec,omitempty"`
 	// Base is the branch the attempt's worktree starts from (the repository's integration branch, KIN-26/KIN-29).
 	// Empty: the attempt runs in an empty directory (no registered repository).
 	Base string `json:"base,omitempty"`
@@ -126,8 +138,18 @@ type Assign struct {
 	Credential *GitCredential `json:"credential,omitempty"`
 }
 
-// Agent adapters a runner may be assigned.
-const AdapterMock = "mock"
+// Agent adapters a runner may be assigned: the mock agent and the AI CLIs (KIN-32/KIN-79).
+const (
+	AdapterMock   = "mock"
+	AdapterClaude = "claude"
+	AdapterCodex  = "codex"
+)
+
+// CLIAdapter reports an adapter that runs an AI CLI.
+func CLIAdapter(adapter string) bool { return adapter == AdapterClaude || adapter == AdapterCodex }
+
+// MaxPromptBytes bounds Assign.Prompt (the command body must stay below MaxBodyBytes).
+const MaxPromptBytes = 32 << 10
 
 // Mock scenarios (AdapterMock): deterministic behaviours of the mock agent process.
 const (
@@ -206,10 +228,72 @@ type Started struct {
 	Agent string `json:"agent,omitempty"`
 }
 
-// Failure is the body of execution.failed. Code classifies a failure the Control Plane treats specially.
+// Failure is the body of execution.failed. Code classifies a failure the Control Plane treats specially; for an AI
+// CLI run (KIN-79) Cause refines it (FailureCLILimit: rate_limit | auth | billing), ResetsAt is when a rate limit
+// resets (unix milliseconds, if the CLI said so) and Agent is what the run reported before it failed.
 type Failure struct {
-	Reason string `json:"reason"`
-	Code   string `json:"code,omitempty"`
+	Reason   string       `json:"reason"`
+	Code     string       `json:"code,omitempty"`
+	Cause    string       `json:"cause,omitempty"`
+	ResetsAt int64        `json:"resetsAt,omitempty"`
+	Agent    *AgentReport `json:"agent,omitempty"`
+}
+
+// Failure codes of an AI CLI run (KIN-79). FailureCLILimit: the CLI hit its subscription/rate limit or is logged
+// out; the step waits (BLOCKED cli_limit) instead of using its retry budget. The others are informational.
+const (
+	FailureCLILimit  = "cli_limit"
+	FailureCLIError  = "cli_error"
+	FailureTimeout   = "timeout"
+	FailureCancelled = "cancelled"
+)
+
+// Completed is the body of execution.completed: what the AI CLI run reported (nil for the mock agent).
+type Completed struct {
+	Agent *AgentReport `json:"agent,omitempty"`
+}
+
+// AgentReport is an AI CLI run's report (KIN-79): its native session id (to resume), model, CLI version and usage.
+type AgentReport struct {
+	Session string      `json:"session,omitempty"`
+	Model   string      `json:"model,omitempty"`
+	Version string      `json:"version,omitempty"`
+	Usage   *AgentUsage `json:"usage,omitempty"`
+}
+
+// AgentUsage is the token usage and cost of a run as the CLI reported it (Codex reports no cost).
+type AgentUsage struct {
+	InputTokens      int64   `json:"inputTokens"`
+	OutputTokens     int64   `json:"outputTokens"`
+	CacheReadTokens  int64   `json:"cacheReadTokens"`
+	CacheWriteTokens int64   `json:"cacheWriteTokens"`
+	CostUSD          float64 `json:"costUsd"`
+	Turns            int     `json:"turns"`
+	DurationMS       int64   `json:"durationMs"`
+}
+
+// Bounds of an AgentEvent's text fields: an event is a summary (the raw output is streamed separately) and its
+// body stays below MaxBodyBytes even when every byte escapes to \u00XX.
+const (
+	MaxAgentText  = 6 << 10
+	MaxAgentInput = 1 << 10
+)
+
+// AgentEvent is the body of execution.agent: one typed event of the AI CLI (kind session | text | tool_use |
+// usage | result | failure | retrying).
+type AgentEvent struct {
+	Kind     string      `json:"kind"`
+	Session  string      `json:"session,omitempty"`
+	Model    string      `json:"model,omitempty"`
+	Version  string      `json:"version,omitempty"`
+	Text     string      `json:"text,omitempty"`
+	Tool     string      `json:"tool,omitempty"`
+	Input    string      `json:"input,omitempty"`
+	Usage    *AgentUsage `json:"usage,omitempty"`
+	Code     string      `json:"code,omitempty"` // failure: its code, cause and reset time
+	Cause    string      `json:"cause,omitempty"`
+	Message  string      `json:"message,omitempty"`
+	ResetsAt int64       `json:"resetsAt,omitempty"`
 }
 
 // FailureNetwork: the attempt did not run because its strict egress sandbox could not be built or verified

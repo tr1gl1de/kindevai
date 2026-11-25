@@ -219,6 +219,10 @@ func TestTaskTimeEventsAndRetryAPI(t *testing.T) {
 				t.Fatalf("filter %d", c)
 			}
 		}
+		if err := svc.RecordAgentReport(ctx, s.ID, "r1", s.Fence, domain.AgentReport{Session: "sess-" + strconv.Itoa(i),
+			Version: "2.1.0", Usage: domain.AgentUsage{InputTokens: 100, OutputTokens: 10, CostUSD: 0.25, Turns: 2}}); err != nil {
+			t.Fatal(err)
+		}
 		if err := svc.FailStepAt(ctx, s.ID, "r1", s.Fence, "exit 1", at.Add(1500*time.Millisecond)); err != nil {
 			t.Fatal(err)
 		}
@@ -229,6 +233,12 @@ func TestTaskTimeEventsAndRetryAPI(t *testing.T) {
 	a := d.Execution.Steps[0].Attempts[1]
 	if a.Agent != "mock" || a.WorkStatus != "complete" || a.WorkMs != 1500 || a.WorkStartedAt == nil || !a.WorkStartedAt.Equal(at) {
 		t.Fatalf("attempt %+v", a)
+	}
+	if a.Session != "sess-1" || a.CLIVersion != "2.1.0" || a.Usage == nil || a.Usage.InputTokens != 100 || a.Usage.Turns != 2 {
+		t.Fatalf("attempt usage %+v %+v", a, a.Usage)
+	}
+	if u := d.Execution.Usage; u == nil || u.InputTokens != 200 || u.OutputTokens != 20 || u.CostUSD != 0.5 || u.Turns != 4 {
+		t.Fatalf("execution usage %+v", u)
 	}
 	if st := d.Execution.Steps[0].AgentTime; st.Ms != 3000 || st.Status != "complete" {
 		t.Fatalf("step time %+v", st)

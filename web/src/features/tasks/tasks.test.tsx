@@ -187,6 +187,40 @@ describe("task detail", () => {
     await expectAccessible(container);
   });
 
+  it("shows the AI CLI's usage, session and version per attempt and in total, and its events in the log", async () => {
+    const usage = { inputTokens: 1200, outputTokens: 300, cacheReadTokens: 400, cacheWriteTokens: 100, costUsd: 0.125, turns: 4 };
+    const base = detail();
+    const cli = detail({
+      execution: { ...base.execution!, usage,
+        steps: [step({ attempts: [{ number: 1, runnerId: "r1", fence: 1, state: "SUCCEEDED", startedAt: "2026-11-24T10:00:00Z",
+          finishedAt: "2026-11-24T10:00:30Z", agent: "claude", workStartedAt: "2026-11-24T10:00:01Z",
+          workEndedAt: "2026-11-24T10:00:31Z", workStatus: "complete", workMs: 30_000, session: "sess-1",
+          cliVersion: "2.1.0", usage }] })] },
+    });
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/tasks/t1", () => json(cli)),
+      http.get("/api/approvals", () => json([])),
+      http.get("/api/tasks/t1/steps/s1/attempts/1/events", () =>
+        json({ events: [{ seq: 1, kind: "execution.agent", at: "2026-11-24T10:00:02Z", reason: "tool_use · Edit · <b>x</b>" }],
+          next: 1, more: false })),
+    );
+    const { container } = await renderApp("/tasks/t1");
+    const user = userEvent.setup();
+    const attempts = await screen.findByRole("table", { name: "Attempts of step backend" });
+    expect(within(attempts).getByRole("columnheader", { name: "Usage" })).toBeInTheDocument();
+    expect(within(attempts).getByText("2,000 tokens · $0.125 · 4 turns")).toHaveAttribute("title",
+      "1,200 input, 300 output, 400 cache read, 100 cache write tokens");
+    expect(within(attempts).getByText("session sess-1 · CLI 2.1.0")).toBeInTheDocument();
+    expect(screen.getAllByText("2,000 tokens · $0.125 · 4 turns")).toHaveLength(2); // the execution's total too
+    await user.click(screen.getByText("Output and events of attempt 1"));
+    const log = await screen.findByLabelText("Log of attempt 1");
+    await waitFor(() => expect(log).toHaveTextContent("Agent: tool_use · Edit · <b>x</b>"));
+    expect(log.querySelector("b")).toBeNull();
+    await expectAccessible(container);
+  });
+
   it("cancels after naming the task, and retries a failed task (Owner / project admin only)", async () => {
     let state: TaskDetail["task"]["state"] = "RUNNING";
     let cancelBody: unknown;

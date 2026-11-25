@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -29,6 +30,7 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/runner/egress/adapters/nsbox"
 	"github.com/tr1gl1de/kindevai/internal/runner/platform/datadir"
 	"github.com/tr1gl1de/kindevai/internal/runner/platform/secfile"
+	"github.com/tr1gl1de/kindevai/internal/runner/session/adapters/cliagent"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/adapters/journal"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/adapters/mockagent"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/adapters/process"
@@ -134,6 +136,11 @@ func run(ctx context.Context, args []string, e *env) error {
 		return daemon(ctx, args[1:], e)
 	case "mock-agent": // the MockAgentAdapter's child process (KIN-23); started by the daemon, not by users
 		if code := mockagent.Main(args[1:], e.stdout, e.stderr); code != 0 {
+			return exitError(code)
+		}
+		return nil
+	case "agent-exec": // the AI CLI wrapper of an attempt (KIN-79); started by the daemon, not by users
+		if code := cliagent.ExecMain(args[1:], e.stderr); code != 0 {
 			return exitError(code)
 		}
 		return nil
@@ -339,6 +346,9 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	x := newExecutor(ch, d.Path(), exe, splitList(*projects), logger)
 	x.Workspaces, x.ChangesEvery = ws, changesEvery // KIN-51: interim changed-file reports while an attempt runs
 	defer x.Close()                                 // running attempts keep running; the next start adopts them
+	if home, err := os.UserHomeDir(); err == nil {  // KIN-79 CLI agents (set before Recover)
+		x.Agents = cliAgents(home, exec.LookPath, logger)
+	}
 	if err := x.Recover(ctx); err != nil {
 		return fmt.Errorf("recovering running attempts: %w", err)
 	}

@@ -52,6 +52,8 @@ type Assignment struct {
 	Agent string
 	Model string
 	Role  string
+	// Prompt is the step's prompt/context package for an AI CLI (KIN-79).
+	Prompt string
 }
 
 // Dispatcher queues runner commands in the use case's transaction (the runner's ordered command log, KIN-22), so a
@@ -130,10 +132,12 @@ func (s *Service) Schedule(ctx context.Context) error {
 }
 
 // schedulable: READY, WAITING for a runner, an AI CLI or a CLI limit without an unknown attempt (KIN-33), or
-// WAITING for the network once its retry is due (KIN-31).
-func schedulable(st *domain.Step, now time.Time) bool {
+// WAITING for the network once its retry is due (KIN-31). A step a CLI limit held (KIN-79) waits for the limit's
+// reset unless routing may pick another CLI or runner (routed: the runner's CLI cools down in routing meanwhile).
+func schedulable(st *domain.Step, now time.Time, routed bool) bool {
 	return st.State == domain.StepReady ||
-		st.State == domain.StepWaiting && routedWait(st.WaitReason) && !st.AttemptUnknown() ||
+		st.State == domain.StepWaiting && routedWait(st.WaitReason) && !st.AttemptUnknown() &&
+			(st.WaitReason != domain.WaitCLILimit || routed || st.CLILimitRetryDue(now)) ||
 		st.NetworkRetryDue(now)
 }
 
@@ -160,7 +164,8 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 		for _, ps := range rev.Plan().Steps {
 			caps[ps.Key] = ps
 		}
-		if !slices.ContainsFunc(e.Steps, func(st domain.Step) bool { return schedulable(&st, s.now()) }) &&
+		routed := s.Agents != nil && rev.CreatedBy() != MockPlanner
+		if !slices.ContainsFunc(e.Steps, func(st domain.Step) bool { return schedulable(&st, s.now(), routed) }) &&
 			!blockedForRunner && t.State == domain.TaskRunning {
 			return s.blockIfStuck(ctx, &e, &t, nil) // nothing to assign: only the task's block state may change
 		}
@@ -177,12 +182,11 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 		}
 		now := s.now()
 		before := e.Clone()
-		routed := s.Agents != nil && rev.CreatedBy() != MockPlanner
 		why := map[string]domain.Reason{}
 		routes := map[[2]string]AgentRoute{} // role, author → route, read once per pass
 		for i := range e.Steps {
 			st := &e.Steps[i]
-			if !schedulable(st, now) {
+			if !schedulable(st, now, routed) {
 				continue
 			}
 			ps := caps[st.Key]
@@ -219,7 +223,7 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 			}
 			if err := s.Dispatcher.Assign(ctx, c.ID, Assignment{StepID: st.ID, StepKey: st.Key, Fence: l.Fence,
 				ExecutionID: e.ID, TaskID: t.ID, ProjectID: t.ProjectID, Repository: ps.Repository, Scope: ps.Scope,
-				Agent: choice.Agent, Model: choice.Model, Role: ps.StepRole()}); err != nil {
+				Agent: choice.Agent, Model: choice.Model, Role: ps.StepRole(), Prompt: domain.StepPrompt(t, rev.Plan(), ps)}); err != nil {
 				return fmt.Errorf("queueing the assignment: %w", err)
 			}
 			held[c.ID]++

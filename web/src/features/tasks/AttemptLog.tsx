@@ -65,6 +65,9 @@ function LogLine({ e }: { e: LogEntry }) {
     case "execution.failed":
       text = t("tasks.event_failed", { reason: e.text });
       break;
+    case "execution.agent":
+      text = e.omitted ? t("tasks.event_omitted", { reason: e.text }) : t("tasks.event_agent", { text: e.text });
+      break;
     case "execution.output.dropped":
       text = e.omitted ? t("tasks.event_omitted", { reason: e.text }) : t("tasks.event_dropped", { bytes: formatBytes(e.bytes ?? 0, i18n.language) });
       break;

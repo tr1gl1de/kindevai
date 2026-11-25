@@ -658,3 +658,41 @@ func TestStepAgentAndAgentWaitAreStored(t *testing.T) {
 		t.Fatalf("lint = %s/%s", s.State, s.WaitReason)
 	}
 }
+
+// KIN-79: the CLI's report (session, model, version, usage) is stored with the attempt and the cli_limit wait
+// keeps its retry time; both survive a save and load.
+func TestAgentReportAndCLILimitWaitAreStored(t *testing.T) {
+	t.Parallel()
+	d, _ := testDB(t)
+	ctx := t.Context()
+	svc := service(d, func() time.Time { return t0 })
+	repo := sqlite.New(d)
+	_, e := running(t, svc)
+	back := e.StepByKey("backend").ID
+	if _, err := svc.Claim(ctx, back, "r1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.StartStepAt(ctx, back, "r1", 1, t0, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	r := domain.AgentReport{Session: "sess-1", Model: "claude-sonnet", Version: "2.1.0", Usage: domain.AgentUsage{
+		InputTokens: 1200, OutputTokens: 300, CacheReadTokens: 50, CacheWriteTokens: 7, CostUSD: 0.125, Turns: 4}}
+	if err := svc.RecordAgentReport(ctx, back, "r1", 1, r); err != nil {
+		t.Fatal(err)
+	}
+	resets := t0.Add(2 * time.Hour)
+	if err := svc.HoldStepForCLILimit(ctx, back, "r1", 1, "cli_limit: rate_limit", resets, t0); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.Execution(ctx, e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := got.Step(back)
+	if st.Attempts[0].Report != r {
+		t.Fatalf("report %+v", st.Attempts[0].Report)
+	}
+	if st.WaitReason != domain.WaitCLILimit || st.WaitUntil == nil || !st.WaitUntil.Equal(resets) {
+		t.Fatalf("step %+v", st)
+	}
+}

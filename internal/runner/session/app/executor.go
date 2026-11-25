@@ -31,6 +31,8 @@ type LaunchSpec struct {
 	Stderr   io.Writer
 	// Sandbox is set when the attempt's network profile is strict (KIN-31): the process runs only through it.
 	Sandbox Sandbox
+	// Agent is the AI CLI to run instead of the mock agent (KIN-79).
+	Agent *AgentCommand
 }
 
 // Process is a running attempt process (the leader of its own process group).
@@ -116,6 +118,8 @@ type Executor struct {
 	Workspaces Workspaces
 	// Egress confines attempts whose network profile is strict (KIN-31); nil: no attempt is confined.
 	Egress Confiner
+	// Agents runs the AI CLIs (KIN-79); without it a CLI assignment fails.
+	Agents Agents
 	Grace  time.Duration // DefaultGrace when zero
 	// ChangesEvery is how often a running attempt's worktree changes are reported (KIN-51; only when they differ
 	// from the last report); zero reports them only at the attempt's end.
@@ -144,7 +148,9 @@ type run struct {
 	output    []*redact.Stream // stdout, stderr: flushed before the terminal event
 	known     []string         // secret values masked in the attempt's output and failure reasons (KIN-77)
 	cancelled string
-	sandbox   Sandbox // released once the process ended
+	sandbox   Sandbox       // released once the process ended
+	follower  AgentFollower // the AI CLI's output (KIN-79); nil for the mock agent
+	agent     string
 	done      chan struct{}
 	// result is the terminal event kind once the process ended but reporting it failed; the run stays listed
 	// (with the result) and the report is retried.
@@ -200,7 +206,11 @@ func (x *Executor) Command(ctx context.Context, cmd protocol.Command) error {
 			return nil
 		}
 		as := domain.Assignment{Step: a.Step, Fence: a.Fence, Execution: a.Execution, Task: a.Task,
-			Project: a.Project, Repository: a.Repository, Scope: a.Scope, Adapter: a.Adapter, Scenario: a.Scenario, Base: a.Base}
+			Project: a.Project, Repository: a.Repository, Scope: a.Scope, Adapter: a.Adapter, Scenario: a.Scenario, Base: a.Base,
+			Model: a.Model, Role: a.Role, Prompt: a.Prompt, Resume: a.Resume, BypassPermissions: a.BypassPermissions}
+		if a.TimeoutSec != 0 {
+			as.Timeout = time.Duration(min(max(a.TimeoutSec, -1), int64(domain.MaxAgentTimeout/time.Second)+1)) * time.Second
+		}
 		if a.Credential != nil {
 			as.Token = domain.NewSecret(a.Credential.Token)
 		}
@@ -320,9 +330,23 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 		}
 		sandbox = sb
 	}
+	var agent *AgentCommand
+	if a.CLI() {
+		cmd, err := x.prepareAgent(a, dir, workdir, sandbox)
+		if err != nil {
+			if sandbox != nil {
+				sandbox.Release()
+			}
+			return x.launchFailed(r, a, err)
+		}
+		agent, workdir = &cmd, cmd.Dir
+		if err := r.save(x.Journal, func(rec *domain.Record) { rec.Agent = a.Adapter }); err != nil {
+			return x.abandon(r, fmt.Errorf("recording the attempt's agent: %w", err))
+		}
+	}
 	stdout, stderr := x.redacted(r, "stdout"), x.redacted(r, "stderr")
 	proc, err := x.Launcher.Launch(ctx, LaunchSpec{Dir: dir, Workdir: workdir, Scenario: a.ScenarioOrDefault(),
-		Attempt: a.Fence, Stdout: stdout, Stderr: stderr, Sandbox: sandbox})
+		Attempt: a.Fence, Stdout: stdout, Stderr: stderr, Sandbox: sandbox, Agent: agent})
 	if err != nil {
 		if sandbox != nil {
 			sandbox.Release()
@@ -338,11 +362,104 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 		x.logger().Error("recording the attempt's process", "step", a.Step, "err", err)
 	}
 	x.runs[k] = r
-	if err := r.stream.Emit(protocol.EventStarted, protocol.Started{Agent: protocol.AdapterMock}); err != nil {
+	if err := r.stream.Emit(protocol.EventStarted, protocol.Started{Agent: a.Adapter}); err != nil {
 		x.logger().Error("emitting started", "step", a.Step, "err", err)
+	}
+	if agent != nil { // after execution.started: the CLI's events follow it
+		r.agent = a.Adapter
+		if r.follower = x.follow(r, dir, domain.OutputOffsets{}, stdout, stderr); r.follower == nil {
+			// Without its output the run's result is unknown: stop it (reported as cancelled, never as a success).
+			x.terminate(r, "the runner cannot read the CLI's output")
+		}
 	}
 	x.watch(r)
 	return nil
+}
+
+// prepareAgent decides the CLI's permission mode (the bypass only inside the strict egress sandbox, KIN-31: asked
+// for elsewhere the attempt fails, the CLI never runs) and prepares its command.
+func (x *Executor) prepareAgent(a domain.Assignment, dir, workdir string, sandbox Sandbox) (AgentCommand, error) {
+	if x.Agents == nil {
+		return AgentCommand{}, fmt.Errorf("%w: %s", ErrNoAgent, a.Adapter)
+	}
+	perms, err := domain.ChoosePermissions(a.BypassPermissions, (LaunchSpec{Sandbox: sandbox}).PermitBypass() == nil)
+	if err != nil {
+		return AgentCommand{}, err
+	}
+	req := domain.AgentRequest{Agent: a.Adapter, Workdir: workdir, Resume: a.Resume, Model: a.Model,
+		BypassPermissions: a.BypassPermissions, Timeout: a.AgentTimeout()}
+	return x.Agents.Prepare(dir, req, a.Prompt, perms)
+}
+
+// follow starts following the CLI's output files: events and raw output beyond from go to the attempt's stream,
+// the offsets reached are recorded for a restart. A follower that cannot start is logged and nil.
+func (x *Executor) follow(r *run, dir string, from domain.OutputOffsets, stdout, stderr io.Writer) AgentFollower {
+	k := r.key()
+	f, err := x.Agents.Follow(r.agent, dir, AgentFollow{From: from, Stdout: stdout, Stderr: stderr,
+		OnEvent: func(e domain.AgentEvent) { x.emitAgent(r, e) },
+		Progress: func(o domain.OutputOffsets) {
+			if x.closed.Load() {
+				return // the output is no longer sent (guard): the next runner process reads on from the last offsets
+			}
+			if err := r.save(x.Journal, func(rec *domain.Record) { rec.Output = o }); err != nil {
+				x.logger().Warn("recording the attempt's output offsets", "step", k.step, "fence", k.fence, "err", err)
+			}
+		}})
+	if err != nil {
+		x.logger().Error("following the CLI's output", "step", k.step, "fence", k.fence, "err", err)
+		return nil
+	}
+	return f
+}
+
+// emitAgent sends one CLI event (masked and bounded like the output it summarises). It is best effort: an event
+// the spool cannot take is logged, the raw output and the run's result still carry it.
+func (x *Executor) emitAgent(r *run, e domain.AgentEvent) {
+	if x.closed.Load() {
+		return
+	}
+	pe := protocol.AgentEvent{Kind: string(e.Kind), Session: r.ident(e.Session, 128), Model: r.ident(e.Model, 128),
+		Version: r.ident(e.Version, 64), Text: domain.Truncate(r.mask(e.Text), protocol.MaxAgentText), Tool: r.ident(e.Tool, 128),
+		Input: domain.Truncate(r.mask(e.Input), protocol.MaxAgentInput), Usage: usage(e.Usage)}
+	if f := e.Failure; f != nil {
+		pe.Code, pe.Cause, pe.Message = string(f.Code), r.ident(f.Cause, 32), domain.Truncate(r.mask(f.Message), domain.MaxErrorMessage)
+		if !f.ResetsAt.IsZero() {
+			pe.ResetsAt = f.ResetsAt.UnixMilli()
+		}
+	}
+	if err := r.stream.Emit(protocol.EventAgent, pe); err != nil {
+		k := r.key()
+		x.logger().Warn("emitting a CLI event", "step", k.step, "fence", k.fence, "kind", e.Kind, "err", err)
+	}
+}
+
+func usage(u *domain.Usage) *protocol.AgentUsage {
+	if u == nil {
+		return nil
+	}
+	return &protocol.AgentUsage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, CacheReadTokens: u.CacheReadTokens,
+		CacheWriteTokens: u.CacheWriteTokens, CostUSD: u.CostUSD, Turns: u.Turns, DurationMS: u.DurationMS}
+}
+
+// agentEnd is the terminal event of a CLI run: its result with the agent report, the failure typed (cli_limit
+// carries its cause and reset time).
+func (r *run) agentEnd(res domain.AgentResult) (string, any) {
+	rep := &protocol.AgentReport{Session: r.ident(res.Session, 128), Model: r.ident(res.Model, 128),
+		Version: r.ident(res.Version, 64), Usage: usage(&res.Usage)}
+	if res.Failure == nil {
+		return protocol.EventCompleted, protocol.Completed{Agent: rep}
+	}
+	f := res.Failure
+	reason := f.Reason()
+	if f.Code == domain.FailureCancelled {
+		reason = "cancelled: " + f.Message // as for any attempt (domain.Outcome)
+	}
+	body := protocol.Failure{Reason: domain.Truncate(r.mask(reason), protocol.MaxReasonLen), Code: string(f.Code),
+		Cause: r.ident(f.Cause, 32), Agent: rep}
+	if !f.ResetsAt.IsZero() {
+		body.ResetsAt = f.ResetsAt.UnixMilli()
+	}
+	return protocol.EventFailed, body
 }
 
 // launchFailed reports an attempt that could not start. A strict egress failure (ErrNetwork) carries the code
@@ -522,6 +639,10 @@ func (x *Executor) reserver(r *run) func(int64) error {
 	}
 }
 
+// ident bounds and masks a short field the CLI reported (session id, model, version, tool name): CLI output is
+// untrusted and an event must stay below protocol.MaxBodyBytes.
+func (r *run) ident(s string, n int) string { return domain.Truncate(r.mask(s), n) }
+
 // mask redacts a failure reason that may quote a git error (KIN-77).
 func (r *run) mask(reason string) string { return redact.Lines(reason, r.known...) }
 
@@ -564,6 +685,14 @@ func (x *Executor) watch(r *run) {
 	stopReports := x.reportChanges(r)
 	x.wg.Go(func() {
 		exit := r.proc.Wait()
+		var res *domain.AgentResult
+		if r.follower != nil { // read the CLI's output to its end before the output streams are flushed
+			x.mu.Lock()
+			cancelled := r.cancelled
+			x.mu.Unlock()
+			v := r.follower.Finish(exit, cancelled)
+			res = &v
+		}
 		if r.sandbox != nil {
 			r.sandbox.Release()
 		}
@@ -580,15 +709,18 @@ func (x *Executor) watch(r *run) {
 		x.mu.Lock()
 		ok, reason := domain.Outcome(exit, r.cancelled)
 		x.mu.Unlock()
-		kind := protocol.EventCompleted
+		kind, body := protocol.EventCompleted, any(nil)
 		if !ok {
-			kind = protocol.EventFailed
+			kind, body = protocol.EventFailed, protocol.Failure{Reason: reason}
+		}
+		if res != nil {
+			kind, body = r.agentEnd(*res)
 		}
 		for {
 			if x.closed.Load() {
 				return // the next runner process adopts the attempt from the journal
 			}
-			if x.report(r, kind, reason) {
+			if x.report(r, kind, body) {
 				return
 			}
 			time.Sleep(reportRetry)
@@ -596,13 +728,8 @@ func (x *Executor) watch(r *run) {
 	})
 }
 
-func (x *Executor) report(r *run, kind, reason string) bool {
-	var err error
-	if kind == protocol.EventCompleted {
-		err = r.stream.Emit(kind, nil)
-	} else {
-		err = r.stream.Emit(kind, protocol.Failure{Reason: reason})
-	}
+func (x *Executor) report(r *run, kind string, body any) bool {
+	err := r.stream.Emit(kind, body)
 	k := r.key()
 	x.mu.Lock()
 	defer x.mu.Unlock()
@@ -687,6 +814,17 @@ func (x *Executor) Recover(_ context.Context) error {
 			return err
 		}
 		r.proc = x.Launcher.Adopt(rec, d)
+		if rec.Agent != "" { // KIN-79: read the CLI's output files on from where the last runner process stopped
+			r.agent = rec.Agent
+			if x.KnownSecrets != nil {
+				r.known = x.KnownSecrets()
+			}
+			if x.Agents == nil {
+				x.logger().Error("adopted a CLI attempt without CLI agents: its result is lost", "step", rec.Step)
+			} else {
+				r.follower = x.follow(r, d, rec.Output, x.redacted(r, "stdout"), x.redacted(r, "stderr"))
+			}
+		}
 		x.runs[k] = r
 		x.logger().Info("adopted attempt after restart", "step", rec.Step, "fence", rec.Fence, "pid", rec.PID)
 		x.watch(r)

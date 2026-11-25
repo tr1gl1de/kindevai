@@ -151,6 +151,32 @@ func (r runnerExecutions) HoldAttemptForNetwork(ctx context.Context, runnerID, s
 	return attemptError(r.wf.HoldStepForNetwork(ctx, step, runnerID, fence, reason, at))
 }
 
+var (
+	_ runnersapp.CLILimitHolder = runnerExecutions{}
+	_ runnersapp.AgentReporter  = runnerExecutions{}
+)
+
+// HoldAttemptForCLILimit parks the step WAITING(cli_limit) and the task BLOCKED(cli_limit) until the CLI's limit
+// resets (KIN-79).
+func (r runnerExecutions) HoldAttemptForCLILimit(ctx context.Context, runnerID, step string, fence int64, reason string,
+	resetsAt, at time.Time) error {
+	return attemptError(r.wf.HoldStepForCLILimit(ctx, step, runnerID, fence, reason, resetsAt, at))
+}
+
+// RecordAgentReport stores the CLI's usage, session, model and version with the attempt (KIN-79).
+func (r runnerExecutions) RecordAgentReport(ctx context.Context, runnerID, step string, fence int64, rep protocol.AgentReport) error {
+	return attemptError(r.wf.RecordAgentReport(ctx, step, runnerID, fence, agentReport(rep)))
+}
+
+func agentReport(r protocol.AgentReport) workflow.AgentReport {
+	out := workflow.AgentReport{Session: r.Session, Model: r.Model, Version: r.Version}
+	if u := r.Usage; u != nil {
+		out.Usage = workflow.AgentUsage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens,
+			CacheReadTokens: u.CacheReadTokens, CacheWriteTokens: u.CacheWriteTokens, CostUSD: u.CostUSD, Turns: u.Turns}
+	}
+	return out
+}
+
 func attemptError(err error) error {
 	switch {
 	case err == nil:

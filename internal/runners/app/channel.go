@@ -58,6 +58,19 @@ type NetworkHolder interface {
 	HoldAttemptForNetwork(ctx context.Context, runnerID, step string, fence int64, reason string, at time.Time) error
 }
 
+// CLILimitHolder is implemented by an Executions that can park a step for its AI CLI's limit (KIN-79): a failure
+// with code protocol.FailureCLILimit (rate/usage limit or logged out) holds the step WAITING(cli_limit) until
+// resetsAt (zero: unknown) instead of failing the attempt. Without it such a failure is an ordinary failure.
+type CLILimitHolder interface {
+	HoldAttemptForCLILimit(ctx context.Context, runnerID, step string, fence int64, reason string, resetsAt, at time.Time) error
+}
+
+// AgentReporter is implemented by an Executions that stores what an attempt's AI CLI reported (usage, native
+// session, model, version; KIN-79), applied before the attempt's end in the event's transaction.
+type AgentReporter interface {
+	RecordAgentReport(ctx context.Context, runnerID, step string, fence int64, r protocol.AgentReport) error
+}
+
 // ScopeChecker evaluates what an attempt reports it changed (workspace.changes) against the step's approved scope
 // (KIN-51), in the event's transaction. runnerID comes from the authenticated session and the attempt's token was
 // checked first. A violation holds the step for a new approval; errors are those of Executions.
@@ -523,6 +536,11 @@ func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Ev
 		_ = json.Unmarshal(e.Body, &s) // an unreadable body only loses the agent's name
 		return c.Executions.StartAttempt(ctx, runnerID, e.Step, e.Fence, at, s.Agent)
 	case protocol.EventCompleted:
+		var d protocol.Completed
+		_ = json.Unmarshal(e.Body, &d) // an unreadable body only loses the CLI's report
+		if err := c.agentReport(ctx, runnerID, e, d.Agent); err != nil {
+			return err
+		}
 		if c.Scope != nil {
 			// The runner reports an attempt's final changes before its end on the same ordered event stream (an
 			// adopted attempt too: its spool survives the restart), so a missing report is never merely late.
@@ -540,10 +558,21 @@ func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Ev
 	case protocol.EventFailed:
 		var f protocol.Failure
 		_ = json.Unmarshal(e.Body, &f)
-		if h, ok := c.Executions.(NetworkHolder); ok && f.Code == protocol.FailureNetwork {
-			return h.HoldAttemptForNetwork(ctx, runnerID, e.Step, e.Fence, truncate(f.Reason, protocol.MaxReasonLen), at)
+		if err := c.agentReport(ctx, runnerID, e, f.Agent); err != nil {
+			return err
 		}
-		return c.Executions.FailAttempt(ctx, runnerID, e.Step, e.Fence, truncate(f.Reason, protocol.MaxReasonLen), at)
+		reason := truncate(f.Reason, protocol.MaxReasonLen)
+		if h, ok := c.Executions.(CLILimitHolder); ok && f.Code == protocol.FailureCLILimit {
+			var resets time.Time
+			if f.ResetsAt > 0 {
+				resets = time.UnixMilli(f.ResetsAt).UTC()
+			}
+			return h.HoldAttemptForCLILimit(ctx, runnerID, e.Step, e.Fence, reason, resets, at)
+		}
+		if h, ok := c.Executions.(NetworkHolder); ok && f.Code == protocol.FailureNetwork {
+			return h.HoldAttemptForNetwork(ctx, runnerID, e.Step, e.Fence, reason, at)
+		}
+		return c.Executions.FailAttempt(ctx, runnerID, e.Step, e.Fence, reason, at)
 	}
 	if err := c.Executions.CheckAttempt(ctx, runnerID, e.Step, e.Fence); err != nil || e.Kind != protocol.EventWorkspaceChanges ||
 		c.Scope == nil {
@@ -555,6 +584,17 @@ func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Ev
 		ch = protocol.WorkspaceChanges{Truncated: true}
 	}
 	return c.Scope.CheckChanges(ctx, runnerID, e.Step, e.Fence, ch)
+}
+
+// agentReport stores the CLI's report of a finished attempt (when the workflow keeps them).
+func (c *Channel) agentReport(ctx context.Context, runnerID string, e protocol.Event, r *protocol.AgentReport) error {
+	ar, ok := c.Executions.(AgentReporter)
+	if !ok || r == nil {
+		return nil
+	}
+	rep := *r // the runner's (untrusted) text: masked like any reported text before it is stored
+	rep.Session, rep.Model, rep.Version = redact.Text(rep.Session), redact.Text(rep.Model), redact.Text(rep.Version)
+	return ar.RecordAgentReport(ctx, runnerID, e.Step, e.Fence, rep)
 }
 
 // redactBody masks secrets in what an event may carry from the attempt's process (KIN-77): the output data (line
@@ -587,6 +627,19 @@ func redactBody(kind string, body json.RawMessage) json.RawMessage {
 		}
 		f.Reason = red
 		v = f
+	case protocol.EventAgent:
+		var a protocol.AgentEvent
+		if body == nil || json.Unmarshal(body, &a) != nil {
+			return nil
+		}
+		red := a
+		red.Text, red.Input, red.Message = redact.Lines(a.Text), redact.Text(a.Input), redact.Text(a.Message)
+		red.Session, red.Model, red.Version = redact.Text(a.Session), redact.Text(a.Model), redact.Text(a.Version)
+		red.Tool, red.Cause = redact.Text(a.Tool), redact.Text(a.Cause)
+		if red == a {
+			return body
+		}
+		v = red
 	default:
 		return body
 	}

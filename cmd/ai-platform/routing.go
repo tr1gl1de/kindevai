@@ -9,6 +9,7 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
 	projectsdb "github.com/tr1gl1de/kindevai/internal/projects/adapters/sqlite"
 	projectsapp "github.com/tr1gl1de/kindevai/internal/projects/app"
+	"github.com/tr1gl1de/kindevai/internal/protocol"
 	routinghttp "github.com/tr1gl1de/kindevai/internal/routing/adapters/httpapi"
 	routingdb "github.com/tr1gl1de/kindevai/internal/routing/adapters/sqlite"
 	routingapp "github.com/tr1gl1de/kindevai/internal/routing/app"
@@ -31,6 +32,7 @@ func newRouting(inst *bootstrap.Installation, audit *auditModule, wf *workflowap
 		Now:      time.Now,
 	}
 	wf.Agents = workflowRouter{svc: svc}
+	wf.CLILimits = cliCooldowns{svc: svc} // KIN-79: a cli_limit failure cools the runner's CLI down in routing
 	return svc, &routinghttp.Handler{Service: svc, Logger: logger}
 }
 
@@ -48,4 +50,15 @@ func (r workflowRouter) Route(ctx context.Context, projectID, role, author strin
 		out.Chain = append(out.Chain, domain.AgentChoice{Agent: c.Agent, Model: c.Model})
 	}
 	return out, nil
+}
+
+// cliCooldowns records a runner's CLI that hit its limit as a routing cool-down (KIN-79), in the report's
+// transaction. An attempt without a known CLI (the mock agent) has nothing to cool down.
+type cliCooldowns struct{ svc *routingapp.Service }
+
+func (c cliCooldowns) CLILimitHit(ctx context.Context, runnerID, agent string, until time.Time, reason string) error {
+	if !protocol.CLIAdapter(agent) {
+		return nil
+	}
+	return c.svc.CoolDown(ctx, runnerID, agent, until, reason)
 }

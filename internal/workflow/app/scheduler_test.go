@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -497,5 +498,101 @@ func TestHoldingAStepStopsItsProcess(t *testing.T) {
 	}
 	if _, ex = e.state(t, task.ID); ex.Steps[0].State != domain.StepWaiting || ex.Steps[0].WaitReason != domain.WaitApproval {
 		t.Fatalf("step %+v", ex.Steps[0])
+	}
+}
+
+// KIN-79: a CLI that hit its limit holds the step WAITING(cli_limit) and the task BLOCKED(cli_limit) (the Alert
+// Center hears of it) until the limit resets; then the scheduler assigns the step again and resumes the task.
+func TestCLILimitBlocksTheTaskUntilTheLimitResets(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	task := e.task(t, onlyStep())
+	e.pool.set("p1", Candidate{ID: "r1", DiskHeavyAllowed: true})
+	e.schedule(t)
+	_, ex := e.state(t, task.ID)
+	st := ex.Steps[0]
+	_ = e.disp.take()
+	if err := e.svc.StartStep(t.Context(), st.ID, "r1", st.Fence); err != nil {
+		t.Fatal(err)
+	}
+	hits := &fakeCLILimits{}
+	e.svc.CLILimits = hits
+	resets := e.clock.Now().Add(time.Hour)
+	if err := e.svc.HoldStepForCLILimit(t.Context(), st.ID, "r1", st.Fence-1, "x", resets, e.clock.Now()); !errors.Is(err, domain.ErrStaleFence) {
+		t.Fatalf("stale hold = %v", err)
+	}
+	if err := e.svc.HoldStepForCLILimit(t.Context(), st.ID, "r1", st.Fence, "cli_limit: rate_limit: usage limit reached",
+		resets, e.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got, ex := e.state(t, task.ID)
+	if got.State != domain.TaskBlocked || got.BlockReason != domain.WaitCLILimit || !strings.Contains(got.Reason.Detail, "usage limit") ||
+		ex.Steps[0].WaitReason != domain.WaitCLILimit || ex.Steps[0].Attempts[0].WorkEnd == nil {
+		t.Fatalf("task %s %+v step %+v", got.State, got.Reason, ex.Steps[0])
+	}
+	if len(hits.got) != 1 || hits.got[0] != "r1 "+resets.UTC().Format(time.RFC3339) {
+		t.Fatalf("cli limit hits %v", hits.got)
+	}
+	e.clock.Add(time.Hour - time.Second)
+	e.schedule(t)
+	if c := e.disp.take(); len(c) != 0 {
+		t.Fatalf("retried before the reset: %v", c)
+	}
+	if got, _ := e.state(t, task.ID); got.State != domain.TaskBlocked {
+		t.Fatalf("task %s", got.State)
+	}
+	e.clock.Add(time.Second)
+	e.schedule(t)
+	if c := e.disp.take(); !slices.Equal(c, []string{"assign r1 only/2 p1 api"}) {
+		t.Fatalf("commands %v", c)
+	}
+	if got, ex := e.state(t, task.ID); got.State != domain.TaskRunning || ex.Steps[0].State != domain.StepClaimed {
+		t.Fatalf("task %s step %+v", got.State, ex.Steps[0])
+	}
+}
+
+// KIN-79: the CLI's usage and session are stored with the attempt, even when its end was refused (late report).
+func TestAgentReportIsStoredWithTheAttempt(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	task := e.task(t, onlyStep())
+	e.pool.set("p1", Candidate{ID: "r1", DiskHeavyAllowed: true})
+	e.schedule(t)
+	_, ex := e.state(t, task.ID)
+	st := ex.Steps[0]
+	if err := e.svc.StartStep(t.Context(), st.ID, "r1", st.Fence); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.CancelTask(t.Context(), task.ID, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	r := domain.AgentReport{Session: "sess-1", Version: "2.1.0", Usage: domain.AgentUsage{InputTokens: 10, CostUSD: 0.1, Turns: 1}}
+	if err := e.svc.RecordAgentReport(t.Context(), st.ID, "r1", st.Fence, r); err != nil {
+		t.Fatal(err)
+	}
+	if _, ex := e.state(t, task.ID); ex.Steps[0].Attempts[0].Report != r {
+		t.Fatalf("attempt %+v", ex.Steps[0].Attempts[0])
+	}
+	if err := e.svc.RecordAgentReport(t.Context(), st.ID, "r9", st.Fence, r); !errors.Is(err, domain.ErrStaleFence) {
+		t.Fatalf("report of another runner = %v", err)
+	}
+}
+
+type fakeCLILimits struct{ got []string }
+
+func (f *fakeCLILimits) CLILimitHit(_ context.Context, runnerID, agent string, until time.Time, _ string) error {
+	f.got = append(f.got, strings.TrimSpace(runnerID+" "+agent)+" "+until.UTC().Format(time.RFC3339))
+	return nil
+}
+
+// KIN-79 with KIN-33: a step held for its CLI's limit waits for the reset, unless routing may pick another CLI or
+// runner (the held runner's CLI cools down there).
+func TestCLILimitHoldIsSchedulableAtOnceWhenRouted(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	until := now.Add(time.Hour)
+	st := &domain.Step{State: domain.StepWaiting, WaitReason: domain.WaitCLILimit, WaitUntil: &until}
+	if schedulable(st, now, false) || !schedulable(st, until, false) || !schedulable(st, now, true) {
+		t.Fatal("cli_limit hold scheduling wrong")
 	}
 }

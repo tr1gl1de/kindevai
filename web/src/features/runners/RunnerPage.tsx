@@ -12,6 +12,7 @@ import { useNotify } from "../../ui/notify";
 import { useRunner, useRunnerAction, type RunnerAction } from "./api";
 import { AvailabilityBadge } from "./AvailabilityBadge";
 import { StatusBadge } from "./StatusBadge";
+import "./runners.css";
 
 /** Owner-only runner card: identity to verify, project permissions and lifecycle actions. */
 export function RunnerPage() {

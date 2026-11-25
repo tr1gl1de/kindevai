@@ -13,6 +13,7 @@ import { FormAlert } from "../../ui/feedback";
 import { errorMessage, validationMessage } from "../../ui/errors";
 import { useNotify } from "../../ui/notify";
 import { useResetBinding, useSaveBinding, type AgentScope } from "./api";
+import "./agents.css";
 
 export const clis: AgentCli[] = ["claude", "codex"];
 

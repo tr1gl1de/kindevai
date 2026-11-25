@@ -9,6 +9,7 @@ import { useStorageMachine, useStorageOverview } from "./api";
 import { AvailabilityBadge } from "./AvailabilityBadge";
 import { HistoryChart } from "./HistoryChart";
 import { OutputStorageSection } from "./OutputStorage";
+import "./runners.css";
 
 type Days = 7 | 30;
 

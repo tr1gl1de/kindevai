@@ -7,6 +7,7 @@ import { formatBytes, formatDateTime } from "../../ui/format";
 import { useStorageOverview } from "./api";
 import { AvailabilityBadge } from "./AvailabilityBadge";
 import { OutputStorageSummary } from "./OutputStorage";
+import "./runners.css";
 
 /** Dashboard card (KIN-20, KB KIN-A-26): disk space of the Control Plane and every runner with a fill-up forecast. */
 export function StorageOverviewCard() {

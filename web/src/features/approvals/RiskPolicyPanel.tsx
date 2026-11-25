@@ -7,6 +7,7 @@ import { ErrorState, FormAlert, Loading } from "../../ui/feedback";
 import { errorMessage, validationMessage } from "../../ui/errors";
 import { useNotify } from "../../ui/notify";
 import { useRiskPolicy, useSaveRiskPolicy } from "./api";
+import "./approvals.css";
 
 const levels: RiskLevel[] = ["L0", "L1", "L2", "L3"];
 

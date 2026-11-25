@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/runner/session/adapters/cliagent"
+	sessionapp "github.com/tr1gl1de/kindevai/internal/runner/session/app"
 	sessiondomain "github.com/tr1gl1de/kindevai/internal/runner/session/domain"
 )
 
@@ -100,15 +101,53 @@ func TestConfinerSessionBinds(t *testing.T) {
 	store := &cliagent.SessionStore{Root: filepath.Join(t.TempDir(), "cli-sessions")}
 	binds := sessionBinds(store)
 	a := sessiondomain.Assignment{Project: "P1", Task: "T1", Adapter: sessiondomain.AgentClaude}
-	got, err := binds(a)
-	if err != nil || len(got) != 1 || got[0].Source != filepath.Join(store.Root, "P1", "T1", "claude") ||
+	got, notice, err := binds(a)
+	if err != nil || notice != "" || len(got) != 1 || got[0].Source != filepath.Join(store.Root, "P1", "T1", "claude") ||
 		got[0].Rel != ".claude/projects" {
 		t.Fatalf("binds %+v %v", got, err)
 	}
-	if got, err := binds(sessiondomain.Assignment{Project: "P1", Adapter: sessiondomain.AgentClaude}); err != nil || got != nil {
+	if got, _, err := binds(sessiondomain.Assignment{Project: "P1", Adapter: sessiondomain.AgentClaude}); err != nil || got != nil {
 		t.Fatalf("no task: %+v %v", got, err)
 	}
 }
+
+// AC (KIN-96): a session store over its limit is not shrunk silently: the bind carries the notice, and the
+// sandbox's summary (shown in the attempt's output) leads with it.
+func TestConfinerSessionStoreOverLimit(t *testing.T) {
+	t.Parallel()
+	store := &cliagent.SessionStore{Root: filepath.Join(t.TempDir(), "cli-sessions"), Limit: 10}
+	binds := sessionBinds(store)
+	a := sessiondomain.Assignment{Project: "P1", Task: "T1", Adapter: sessiondomain.AgentClaude}
+	got, _, err := binds(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(got[0].Source, "s.jsonl"), make([]byte, 100), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, notice, err := binds(a)
+	if err != nil || !strings.Contains(notice, "limit") {
+		t.Fatalf("notice %q %v", notice, err)
+	}
+	sb := withNotice(summarySandbox{summary: "denied: evil.example"}, notice)
+	if s := sb.Summary(); !strings.HasPrefix(s, notice) || !strings.Contains(s, "denied: evil.example") {
+		t.Fatalf("summary %q", s)
+	}
+	if s := withNotice(summarySandbox{}, notice).Summary(); s != notice {
+		t.Fatalf("summary without the sandbox's own %q", s)
+	}
+	plain := summarySandbox{summary: "x"}
+	if withNotice(plain, "") != sessionapp.Sandbox(plain) {
+		t.Fatal("no notice: the sandbox is not wrapped")
+	}
+}
+
+type summarySandbox struct {
+	sessionapp.Sandbox
+	summary string
+}
+
+func (s summarySandbox) Summary() string { return s.summary }
 
 // The daemon warns about CLIs a sandboxed run could not log in with, and about a token near its end.
 func TestLogCLILogins(t *testing.T) {

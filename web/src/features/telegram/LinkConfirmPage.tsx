@@ -5,6 +5,7 @@ import { errorMessage } from "../../ui/errors";
 import { formatDateTime } from "../../ui/format";
 import { AuthLayout } from "../identity/AuthLayout";
 import { useConfirmLink, useLinkPreview } from "./api";
+import "./telegram.css";
 
 /** Mini App side of "Link Telegram": shows the target account, confirms, then shows the code for the website. */
 export function LinkConfirmPage({ initData, onDone }: { initData: string; onDone: () => void }) {

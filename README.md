@@ -155,8 +155,8 @@ ai-runner fingerprint                                    # compare with the runn
   READY steps only to APPROVED, connected, reachable runners granted the project, with the step's capabilities and
   no critical volume; without one the task is `BLOCKED` (reason `runner`) until one appears. Among those it prefers a
   runner without 2+ failed or lost attempts in the last hour, then the emptier disk (ok, warning, high), then the
-  fewest held steps; a runner started with `ai-runner run --max-parallel-steps N` gets at most N steps at once (a step
-  only such full runners could take waits as `WAITING(runner)`). The runner checks every
+  fewest held steps; a runner started with `ai-runner run --max-parallel-steps N` gets at most N workflow steps at
+  once (planning runs are not counted; a step only such full runners could take waits as `WAITING(runner)`). The runner checks every
   assignment again (`ai-runner run --projects <id,…>` / `KINDEV_RUNNER_PROJECTS` limits the projects it accepts) and
   runs the mock agent as a child process in its own process group; a cancel sends SIGTERM to the group, SIGKILL
   after 5 s. A lost runner's attempt becomes `UNKNOWN` when its 60 s lease (renewed by heartbeats) runs out and

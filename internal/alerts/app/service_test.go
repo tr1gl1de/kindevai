@@ -23,6 +23,7 @@ type memRepo struct {
 	alerts   []domain.Alert
 	prefs    map[string]domain.Preferences
 	analyses *memAnalyses
+	resolved map[string]time.Time
 }
 
 func (r *memRepo) Active(_ context.Context, key string) (domain.Alert, error) {
@@ -45,6 +46,25 @@ func (r *memRepo) Applied(_ context.Context, key, event string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func (r *memRepo) Resolved(_ context.Context, key string) (time.Time, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	at, ok := r.resolved[key]
+	return at, ok, nil
+}
+
+func (r *memRepo) SetResolved(_ context.Context, key string, at time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.resolved == nil {
+		r.resolved = map[string]time.Time{}
+	}
+	if prev, ok := r.resolved[key]; !ok || at.After(prev) {
+		r.resolved[key] = at
+	}
+	return nil
 }
 
 func (r *memRepo) Create(_ context.Context, a domain.Alert) error {
@@ -507,5 +527,49 @@ func TestRaiseNotifiesAgainWhenAsked(t *testing.T) {
 	}
 	if got := len(f.out.sent(t)); got != 2 {
 		t.Fatalf("sent %d messages, want 2 (the new alert and the parked hold)", got)
+	}
+}
+
+// KIN-99: a timed occurrence observed no later than the last "anomaly ended" event of its key is over: it opens no
+// alert and, when an untimed occurrence opened one since, is not grouped into it either. A stale "ended" event (the
+// alert is newer) resolves nothing and leaves no time behind.
+func TestRaiseIgnoresOccurrencesTheLastResolveEnded(t *testing.T) {
+	t.Parallel()
+	f := newFixture()
+	ctx := t.Context()
+	t0 := time.Date(2026, 11, 25, 9, 0, 0, 0, time.UTC)
+	at := func(o domain.Occurrence, when time.Time) domain.Occurrence { o.ObservedAt = when; return o }
+	key := runnerDown(domain.SeverityWarning).DedupKey
+
+	if err := f.svc.ResolveKeyObservedAt(ctx, key, t0); err != nil { // nothing active yet
+		t.Fatal(err)
+	}
+	if err := f.svc.Raise(ctx, "e1", at(runnerDown(domain.SeverityWarning), t0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.repo.Active(ctx, key); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("an occurrence the resolve ended opened an alert: %v", err)
+	}
+	if err := f.svc.Raise(ctx, "e2", runnerDown(domain.SeverityWarning)); err != nil { // untimed: opens as before
+		t.Fatal(err)
+	}
+	if err := f.svc.Raise(ctx, "e3", at(runnerDown(domain.SeverityCritical), t0.Add(-time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	a, err := f.repo.Active(ctx, key)
+	if err != nil || a.Occurrences != 1 || a.Severity != domain.SeverityWarning {
+		t.Fatalf("an ended occurrence was grouped: %+v, %v", a, err)
+	}
+	if err := f.svc.Raise(ctx, "e4", at(runnerDown(domain.SeverityWarning), t0.Add(2*time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.ResolveKeyObservedAt(ctx, key, t0.Add(time.Hour)); err != nil { // older than the alert: stale
+		t.Fatal(err)
+	}
+	if _, err := f.repo.Active(ctx, key); err != nil {
+		t.Fatalf("a stale resolve closed the alert: %v", err)
+	}
+	if got, _, _ := f.repo.Resolved(ctx, key); !got.Equal(t0) {
+		t.Fatalf("a stale resolve moved the tombstone to %v", got)
 	}
 }

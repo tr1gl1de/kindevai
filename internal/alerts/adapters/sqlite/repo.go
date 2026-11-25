@@ -112,6 +112,33 @@ func (r *Repository) Applied(ctx context.Context, key, event string) (bool, erro
 	return n > 0, nil
 }
 
+// Resolved returns the latest observation time of an "anomaly ended" event for the dedup key (KIN-99).
+func (r *Repository) Resolved(ctx context.Context, key string) (time.Time, bool, error) {
+	var at string
+	err := r.conn(ctx).QueryRowContext(ctx, `SELECT observed_at FROM alert_resolutions WHERE dedup_key = ?`, key).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("loading alert resolution: %w", err)
+	}
+	t, err := parseTS(at)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("parsing alert resolution: %w", err)
+	}
+	return t, true, nil
+}
+
+// SetResolved records that the anomaly with the dedup key was seen ended at at, keeping the latest time (KIN-99).
+// tsFormat has a fixed width, so the text comparison orders times.
+func (r *Repository) SetResolved(ctx context.Context, key string, at time.Time) error {
+	if _, err := r.conn(ctx).ExecContext(ctx, `INSERT INTO alert_resolutions(dedup_key, observed_at) VALUES (?, ?)
+		ON CONFLICT(dedup_key) DO UPDATE SET observed_at = max(observed_at, excluded.observed_at)`, key, ts(at)); err != nil {
+		return fmt.Errorf("saving alert resolution: %w", err)
+	}
+	return nil
+}
+
 // Get returns an alert by id.
 func (r *Repository) Get(ctx context.Context, id string) (domain.Alert, error) {
 	return one(r.conn(ctx).QueryRowContext(ctx, `SELECT `+columns+` FROM alerts WHERE id = ?`, id))

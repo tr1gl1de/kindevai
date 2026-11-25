@@ -331,3 +331,52 @@ func TestCLIReadyOlderThanTheLastHoldKeepsTheAlert(t *testing.T) {
 		t.Fatal("the Owner's ready did not resolve the alert")
 	}
 }
+
+// KIN-99: the reverse of KIN-88. A cli_held (at T1) delivered after the cli_ready (at T2 > T1) that ended it, with
+// no alert active, opens no alert; a hold observed after the ready still does. Payloads without at behave as before.
+func TestCLIHeldOlderThanTheLastReadyOpensNoAlert(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	t0 := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	key := events.CLIDedupKey("r1", "claude")
+	held := func(at string) {
+		t.Helper()
+		p := map[string]any{"runnerId": "r1", "agent": "claude", "cause": "auth", "strikes": 1}
+		if at != "" {
+			p["at"] = at
+		}
+		if err := e.deliver(t, e.h.CLIHeld, "alerts.cli_held", p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ready := func(at time.Time) {
+		t.Helper()
+		if err := e.deliver(t, e.h.CLIReady, "alerts.cli_ready", map[string]any{"runnerId": "r1", "agent": "claude",
+			"at": at.Format(time.RFC3339Nano)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ready(t0.Add(time.Hour)) // no alert yet: the ready still leaves its time behind
+	held(t0.Format(time.RFC3339Nano))
+	if a, ok := e.active(t, key); ok {
+		t.Fatalf("a stale cli_held opened %+v", a)
+	}
+	held(t0.Add(time.Hour).Format(time.RFC3339Nano)) // at the ready's time: still ended
+	if _, ok := e.active(t, key); ok {
+		t.Fatal("a cli_held observed at the ready's time opened an alert")
+	}
+	ready(t0) // an older ready does not move the tombstone back
+	held(t0.Add(30 * time.Minute).Format(time.RFC3339Nano))
+	if _, ok := e.active(t, key); ok {
+		t.Fatal("an older ready lowered the tombstone")
+	}
+	held("") // untimed: as before KIN-99
+	if _, ok := e.active(t, key); !ok {
+		t.Fatal("an untimed cli_held opened no alert")
+	}
+	ready(t0.Add(2 * time.Hour))
+	held(t0.Add(3 * time.Hour).Format(time.RFC3339Nano)) // a newer hold opens a new alert
+	if _, ok := e.active(t, key); !ok {
+		t.Fatal("a cli_held after the ready opened no alert")
+	}
+}

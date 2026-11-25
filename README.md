@@ -171,6 +171,16 @@ ai-runner fingerprint                                    # compare with the runn
   prefers a CLI other than the author's). The scheduler runs a step on the first permitted CLI that an eligible runner
   has installed and is not cooling down on after a usage limit; otherwise the task is `BLOCKED` with the reason
   (`agent`, `cli_limit` or `runner`). Disabling lets running sessions finish; **Emergency stop** cancels them too.
+- AI planner (KIN-34): "Plan with AI" on the task page (`POST /api/tasks/{id}/plan`, Owner / project admin) runs
+  the CLI bound to the planner role on a runner, read-only in a worktree of the project's first repository (no scope,
+  never the permission bypass). Its context package holds the task, the YouTrack issue text and up to 3 linked
+  Knowledge Base articles (read through the outbox, bounded, fenced as untrusted text that cannot change the rules,
+  scope or permissions) and the plan JSON Schema (`internal/workflow/domain/plan.schema.json`, v1: steps DAG, repos,
+  scope, risk, contracts, migrations, tests, docs). The answer is parsed strictly; a valid plan becomes the next plan
+  revision through the risk policy (L0/L1 READY, L2/L3 approval), an invalid one gets one repeat told why, then the
+  task FAILS with the reason. The planner's native session is kept: a repeat or replan on the same runner and the plan
+  chat continue it. `KINDEV_REAL_CLI_SMOKE=1 go test -run TestRealCLIPlannerSmoke ./cmd/ai-platform/` asks the
+  installed Claude CLI for a real plan.
 - AI CLIs (runner, KIN-79): an assignment for `claude` or `codex` (chosen by routing) runs the CLI found on the
   runner's PATH with the runner user's HOME (its local login) and a clean environment, as `ai-runner agent-exec` in the
   attempt's process group: the prompt/context package is a file in the attempt's state directory (outside the

@@ -53,15 +53,24 @@ const (
 	MaxPlanBytes     = 256 << 10
 	maxSummaryLen    = 4000
 	maxListItems     = 64
+	maxImpactItemLen = 500 // runes of one impact description
 )
 
 // Plan is the planner's output for a task: a DAG of steps. Fields are declared in key order so that the JSON
 // encoding of a normalized plan is canonical (sorted keys, no insignificant whitespace).
+//
+// The impact lists (KIN-34, schema v1: API/protocol contracts the plan changes, documentation it affects,
+// database migrations it adds, tests that prove it) are sets of short descriptions. They are omitted when empty,
+// so plans without them keep their canonical JSON and hash.
 type Plan struct {
+	Contracts   []string   `json:"contracts,omitempty"`
+	Docs        []string   `json:"docs,omitempty"`
 	MaxParallel int        `json:"maxParallel"` // steps that may hold a runner at once; 0 means 1
-	Risk        Risk       `json:"risk"`        // the risk the planner proposed; policy may only raise it
-	Steps       []PlanStep `json:"steps"`       // presentation order; execution order comes from dependsOn
+	Migrations  []string   `json:"migrations,omitempty"`
+	Risk        Risk       `json:"risk"`  // the risk the planner proposed; policy may only raise it
+	Steps       []PlanStep `json:"steps"` // presentation order; execution order comes from dependsOn
 	Summary     string     `json:"summary"`
+	Tests       []string   `json:"tests,omitempty"`
 }
 
 // PlanStep is one node of the plan DAG.
@@ -104,7 +113,8 @@ func normSet(xs []string) []string {
 // 0 replaced by 1. Equivalent plans normalize to the same value.
 func (p Plan) Normalize() Plan {
 	n := Plan{MaxParallel: p.MaxParallel, Risk: p.Risk, Summary: strings.TrimSpace(p.Summary),
-		Steps: make([]PlanStep, 0, len(p.Steps))}
+		Steps: make([]PlanStep, 0, len(p.Steps)), Contracts: normSet(p.Contracts), Docs: normSet(p.Docs),
+		Migrations: normSet(p.Migrations), Tests: normSet(p.Tests)}
 	if n.MaxParallel == 0 {
 		n.MaxParallel = 1
 	}
@@ -185,6 +195,17 @@ func ValidatePlan(p Plan, projectRepos []string) error {
 		return invalid("steps", "steps_required")
 	case len(n.Steps) > MaxPlanSteps:
 		return invalid("steps", "too_many_steps")
+	}
+	for _, l := range []struct {
+		field string
+		xs    []string
+	}{{"contracts", n.Contracts}, {"docs", n.Docs}, {"migrations", n.Migrations}, {"tests", n.Tests}} {
+		field, xs := l.field, l.xs
+		if len(xs) > maxListItems || slices.ContainsFunc(xs, func(x string) bool {
+			return x == "" || strings.ContainsAny(x, "\n\t") || !printable(x, maxImpactItemLen)
+		}) {
+			return invalid(field, "impact_format")
+		}
 	}
 	keys := make(map[string]bool, len(n.Steps))
 	for i, s := range n.Steps {

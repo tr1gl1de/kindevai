@@ -132,20 +132,91 @@ type ExecutionView struct {
 	Usage        *UsageView    `json:"usage,omitempty"` // the AI CLI usage of all attempts (KIN-79)
 }
 
-// RevisionView is the task's current plan revision.
+// RevisionView is the task's current plan revision: the DAG of steps and the plan's declared impact (KIN-34).
 type RevisionView struct {
-	Number    int       `json:"number"`
-	Hash      string    `json:"hash"`
-	Risk      string    `json:"risk"`
-	Summary   string    `json:"summary"`
-	CreatedBy string    `json:"createdBy"`
-	CreatedAt time.Time `json:"createdAt"`
+	Number      int            `json:"number"`
+	Hash        string         `json:"hash"`
+	Risk        string         `json:"risk"`
+	Summary     string         `json:"summary"`
+	MaxParallel int            `json:"maxParallel"`
+	Steps       []PlanStepView `json:"steps"`
+	Contracts   []string       `json:"contracts"`
+	Migrations  []string       `json:"migrations"`
+	Tests       []string       `json:"tests"`
+	Docs        []string       `json:"docs"`
+	CreatedBy   string         `json:"createdBy"`
+	CreatedAt   time.Time      `json:"createdAt"`
+}
+
+// PlanStepView is one step of a plan revision.
+type PlanStepView struct {
+	Key          string   `json:"key"`
+	Title        string   `json:"title"`
+	Repository   string   `json:"repository"`
+	Role         string   `json:"role"`
+	Scope        []string `json:"scope"`
+	DependsOn    []string `json:"dependsOn"`
+	Capabilities []string `json:"capabilities"`
+}
+
+// PlanningView is the task's latest planner run (KIN-34). The context package's text is not served: only which
+// parts it had.
+type PlanningView struct {
+	ID          string     `json:"id"`
+	State       string     `json:"state"`
+	StepID      string     `json:"stepId"`  // the attempts' step id: their events and workspace reports
+	Attempt     int64      `json:"attempt"` // the current or last attempt (fence); 0 before the first
+	Used        int        `json:"used"`    // attempts that gave no plan
+	MaxAttempts int        `json:"maxAttempts"`
+	Agent       string     `json:"agent,omitempty"`
+	Model       string     `json:"model,omitempty"`
+	RunnerID    string     `json:"runnerId,omitempty"`
+	HasSession  bool       `json:"hasSession"` // the plan chat (KIN-43) can continue the planner's session
+	WaitReason  string     `json:"waitReason,omitempty"`
+	WaitDetail  string     `json:"waitDetail,omitempty"`
+	NotBefore   *time.Time `json:"notBefore"`
+	Feedback    string     `json:"feedback,omitempty"` // why the last answer was refused
+	Reason      string     `json:"reason,omitempty"`
+	Revision    int        `json:"revision"`
+	IssueText   bool       `json:"issueText"`
+	Articles    []string   `json:"articles"`
+	ContextNote string     `json:"contextNote,omitempty"`
+	Truncated   bool       `json:"truncated,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	UpdatedAt   time.Time  `json:"updatedAt"`
+}
+
+func planningView(r domain.PlanningRun) *PlanningView {
+	v := &PlanningView{ID: r.ID, State: string(r.State), StepID: r.StepID(), Attempt: r.Fence, Used: r.Used,
+		MaxAttempts: domain.MaxPlanningAttempts, Agent: r.Agent, Model: r.Model, RunnerID: r.RunnerID,
+		HasSession: r.Session != "", WaitReason: string(r.WaitReason), WaitDetail: r.WaitDetail, NotBefore: r.NotBefore,
+		Feedback: r.Feedback, Reason: r.Reason, Revision: r.Revision, IssueText: r.Context.IssueText != "",
+		Articles: []string{}, ContextNote: r.Context.Note, Truncated: r.Context.Truncated, CreatedAt: r.CreatedAt,
+		UpdatedAt: r.UpdatedAt}
+	for _, a := range r.Context.Articles {
+		v.Articles = append(v.Articles, a.ID)
+	}
+	return v
+}
+
+func revisionView(rev domain.PlanRevision) *RevisionView {
+	p := rev.Plan()
+	v := &RevisionView{Number: rev.Number(), Hash: rev.Hash(), Risk: string(rev.Risk()), Summary: p.Summary,
+		MaxParallel: p.MaxParallel, Steps: make([]PlanStepView, 0, len(p.Steps)), Contracts: orEmpty(p.Contracts),
+		Migrations: orEmpty(p.Migrations), Tests: orEmpty(p.Tests), Docs: orEmpty(p.Docs), CreatedBy: rev.CreatedBy(),
+		CreatedAt: rev.CreatedAt()}
+	for _, s := range p.Steps {
+		v.Steps = append(v.Steps, PlanStepView{Key: s.Key, Title: s.Title, Repository: s.Repository, Role: s.StepRole(),
+			Scope: orEmpty(s.Scope), DependsOn: orEmpty(s.DependsOn), Capabilities: orEmpty(s.Capabilities)})
+	}
+	return v
 }
 
 // DetailView is GET /api/tasks/{id}.
 type DetailView struct {
 	Task      TaskView       `json:"task"`
 	Revision  *RevisionView  `json:"revision"`
+	Planning  *PlanningView  `json:"planning"`
 	Execution *ExecutionView `json:"execution"`
 	CanManage bool           `json:"canManage"`
 	Time      TimeView       `json:"time"`
@@ -256,6 +327,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/tasks", h.create)
 	mux.HandleFunc("GET /api/tasks/{id}", h.get)
 	mux.HandleFunc("POST /api/tasks/{id}/mock-run", h.mockRun)
+	mux.HandleFunc("POST /api/tasks/{id}/plan", h.plan)
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", h.cancel)
 	mux.HandleFunc("POST /api/tasks/{id}/retry", h.retry)
 	mux.HandleFunc("GET /api/tasks/{id}/steps/{step}/attempts/{fence}/events", h.events)
@@ -291,6 +363,8 @@ func (h *Handler) fail(w http.ResponseWriter, err error) {
 		httpx.WriteError(w, http.StatusConflict, "invalid_state", "the task's state does not allow this")
 	case errors.As(err, &ve):
 		httpx.WriteJSON(w, http.StatusUnprocessableEntity, httpx.ErrorBody{Error: "validation", Message: ve.Code, Field: ve.Field})
+	case errors.Is(err, app.ErrPlannerUnavailable):
+		httpx.WriteError(w, http.StatusServiceUnavailable, "planner_unavailable", "the AI planner is not configured")
 	default:
 		h.logger().Error("tasks API", "err", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal", "internal error")
@@ -366,9 +440,10 @@ func (h *Handler) detail(w http.ResponseWriter, r *http.Request, p auth.Principa
 	}
 	v := DetailView{Task: taskView(d.Task), CanManage: d.CanManage, Time: timeView(d.Time)}
 	if d.Revision != nil {
-		rev := d.Revision
-		v.Revision = &RevisionView{Number: rev.Number(), Hash: rev.Hash(), Risk: string(rev.Risk()),
-			Summary: rev.Plan().Summary, CreatedBy: rev.CreatedBy(), CreatedAt: rev.CreatedAt()}
+		v.Revision = revisionView(*d.Revision)
+	}
+	if d.Planning != nil {
+		v.Planning = planningView(*d.Planning)
 	}
 	if d.Execution != nil {
 		v.Execution = executionView(*d.Execution, h.now())
@@ -411,6 +486,19 @@ func (h *Handler) mockRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := h.Service.RunMock(r.Context(), p, r.PathValue("id"), req.Scenario); err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.detail(w, r, p, r.PathValue("id"), http.StatusAccepted)
+}
+
+// plan starts the AI planner (KIN-34): 202 with the task ANALYZING and its planning run.
+func (h *Handler) plan(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	if _, err := h.Service.StartPlanning(r.Context(), p, r.PathValue("id")); err != nil {
 		h.fail(w, err)
 		return
 	}

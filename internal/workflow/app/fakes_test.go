@@ -355,3 +355,83 @@ func (r *memRepo) LatestExecution(_ context.Context, taskID string) (domain.Exec
 	}
 	return *best, nil
 }
+
+// memPlanning is an in-memory PlanningRepository.
+type memPlanning struct {
+	mu   sync.Mutex
+	runs map[string]domain.PlanningRun
+	ord  []string // creation order
+}
+
+func newMemPlanning() *memPlanning { return &memPlanning{runs: map[string]domain.PlanningRun{}} }
+
+func (m *memPlanning) CreatePlanningRun(_ context.Context, r *domain.PlanningRun) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, o := range m.runs {
+		if o.TaskID == r.TaskID && o.State.Active() {
+			return domain.ErrConflict
+		}
+	}
+	r.Version = 1
+	m.runs[r.ID] = *r
+	m.ord = append(m.ord, r.ID)
+	return nil
+}
+
+func (m *memPlanning) PlanningRun(_ context.Context, id string) (domain.PlanningRun, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.runs[id]
+	if !ok {
+		return r, domain.ErrNotFound
+	}
+	return r, nil
+}
+
+func (m *memPlanning) LatestPlanningRun(_ context.Context, taskID string) (domain.PlanningRun, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := len(m.ord) - 1; i >= 0; i-- {
+		if r := m.runs[m.ord[i]]; r.TaskID == taskID {
+			return r, nil
+		}
+	}
+	return domain.PlanningRun{}, domain.ErrNotFound
+}
+
+func (m *memPlanning) SavePlanningRun(_ context.Context, r *domain.PlanningRun) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	old, ok := m.runs[r.ID]
+	if !ok || old.Version != r.Version {
+		return domain.ErrConflict
+	}
+	r.Version++
+	m.runs[r.ID] = *r
+	return nil
+}
+
+func (m *memPlanning) ActivePlanningRuns(context.Context) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []string
+	for _, id := range m.ord {
+		if m.runs[id].State.Active() {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+func (m *memPlanning) PlanningRunsHeldBy(_ context.Context, runnerID string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []string
+	for _, id := range m.ord {
+		if r := m.runs[id]; r.State == domain.PlanningRunning && r.RunnerID == runnerID {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}

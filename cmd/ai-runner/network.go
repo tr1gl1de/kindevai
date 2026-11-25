@@ -149,6 +149,9 @@ type confiner struct {
 
 var _ sessionapp.Confiner = confiner{}
 
+// The namespace sandbox launches the session context's processes (Confine and Reattach assert it at run time).
+var _ sessionapp.Sandbox = (*nsbox.Box)(nil)
+
 func (c confiner) Confine(ctx context.Context, a sessiondomain.Assignment, dir, workdir string) (sessionapp.Sandbox, error) {
 	r := egress.BoxRequest{Dir: dir, Workdir: workdir}
 	if c.sessions != nil && a.CLI() {

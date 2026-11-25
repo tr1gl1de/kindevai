@@ -31,6 +31,7 @@ func (s *fakeSandbox) Command([]string, []string, string) (*exec.Cmd, error) {
 	return nil, errors.New("unused")
 }
 func (s *fakeSandbox) Await(context.Context) error { return nil }
+func (s *fakeSandbox) Cancel()                     {}
 func (s *fakeSandbox) Release() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

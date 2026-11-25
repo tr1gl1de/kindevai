@@ -103,6 +103,15 @@ func agentMain() int {
 		return nil
 	})
 	check("run-hidden", len(visible) == 0, strings.Join(visible, ","))
+	// The helper's pipes with the runner (verdict, spec, cancel: fds 3-5) stay with the helper.
+	var pipes []string
+	for fd := 3; fd <= 5; fd++ {
+		var st syscall.Stat_t
+		if syscall.Fstat(fd, &st) == nil && st.Mode&syscall.S_IFMT == syscall.S_IFIFO {
+			pipes = append(pipes, strconv.Itoa(fd))
+		}
+	}
+	check("no-helper-pipes", len(pipes) == 0, strings.Join(pipes, ","))
 	sigIgn := ""
 	for l := range strings.SplitSeq(string(st), "\n") {
 		if v, ok := strings.CutPrefix(l, "SigIgn:"); ok {
@@ -401,7 +410,7 @@ func TestSandboxVerifiesThenConfinesTheAgent(t *testing.T) {
 	if werr != nil || strings.Contains(out, "FAIL") {
 		t.Fatalf("agent: %v\n%s", werr, out)
 	}
-	for _, want := range []string{"ok no-capabilities", "ok direct-tcp-blocked", "ok host-socket-hidden", "ok run-hidden",
+	for _, want := range []string{"ok no-capabilities", "ok direct-tcp-blocked", "ok host-socket-hidden", "ok run-hidden", "ok no-helper-pipes",
 		"ok through-proxy", "ok host-processes-hidden",
 		"ok signals-not-ignored", "ok vsock-refused", "ok sibling-adapter-hidden", "ok runner-data-hidden",
 		"ok helper-not-readable", "ok worktree-writable", "ok home-hidden", "ok home-history-hidden",
@@ -506,11 +515,10 @@ func (f *fixture) agentCopy(t *testing.T) string {
 	return agent
 }
 
-// A cancel ends a sandboxed run promptly whether it arrives while the sandbox is being built or once the agent runs.
-// The executor sends SIGTERM to the attempt's process group and SIGKILL after its grace period: a running agent ends
-// on the SIGTERM (the helper relays it); during the build the helper, the PID namespace's init, may not handle
-// SIGTERM yet, and the SIGKILL ends the whole sandbox. (Moved from the removed `sandbox-run` launcher's tests,
-// KIN-102: Box.Command is the one way a CLI starts.)
+// A cancel ends a sandboxed run promptly whether it arrives while the sandbox is being built or once the agent runs,
+// and never with the executor's SIGKILL: a running agent ends on the SIGTERM (the helper relays it); a cancel during
+// the build ends the helper before it starts the agent (KIN-103). (Moved from the removed `sandbox-run` launcher's
+// tests, KIN-102: Box.Command is the one way a CLI starts.)
 func TestSandboxRunCancel(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
@@ -555,24 +563,22 @@ func TestSandboxRunCancel(t *testing.T) {
 				}
 				waitOutput(t, out, "agent hanging", 1)
 			}
+			// As the launcher cancels an attempt (process.attached.Signal): the box first, then the group. Before its
+			// Go runtime runs, the helper (the PID namespace's init) drops the SIGTERM; the box's cancel is not lost.
+			b.Cancel()
 			_ = syscall.Kill(-pid, syscall.SIGTERM)
-			if delay == 0 { // the executor's SIGKILL after its grace period
-				escalate := time.AfterFunc(2*time.Second, func() {
-					select {
-					case <-done:
-					default:
-						_ = syscall.Kill(-pid, syscall.SIGKILL)
-					}
-				})
-				defer escalate.Stop()
-			}
 			select {
 			case <-done:
 			case <-time.After(30 * time.Second):
 				t.Fatalf("the run ignored the cancel\n%s", out.String())
 			}
-			if code := cmd.ProcessState.ExitCode(); code == 0 {
-				t.Fatalf("a cancelled run exited 0\n%s", out.String())
+			ws, _ := cmd.ProcessState.Sys().(syscall.WaitStatus)
+			if ws.Signaled() || ws.ExitStatus() != 128+int(syscall.SIGTERM) {
+				t.Fatalf("a cancelled run ended with %v, want exit %d (the SIGTERM, handled)\n%s", ws,
+					128+int(syscall.SIGTERM), out.String())
+			}
+			if delay == 0 && strings.Contains(out.String(), "agent hanging") {
+				t.Fatalf("the agent started although the run was cancelled during the build\n%s", out.String())
 			}
 		})
 	}

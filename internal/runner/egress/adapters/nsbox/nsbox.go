@@ -273,6 +273,8 @@ type Box struct {
 	verdictR *os.File
 	verdictW *os.File
 	specR    *os.File // the helper's fd 4; the parent's copy is closed once it started
+	cancelR  *os.File // the helper's fd 5 (as specR)
+	cancelW  *os.File // Cancel writes a byte to it: the helper then never starts the agent
 }
 
 // Open starts the attempt's proxy adapter and prepares the sandbox; the agent starts with Command.
@@ -514,12 +516,17 @@ func (m *Manager) command(b *Box, s Spec) (*exec.Cmd, error) {
 		_, _ = r.Close(), w.Close()
 		return nil, err
 	}
+	cr, cw, err := os.Pipe()
+	if err != nil {
+		_, _, _, _ = r.Close(), w.Close(), sr.Close(), sw.Close()
+		return nil, err
+	}
 	go func() { // the helper reads it at once; a helper that never starts closes the pipe (EPIPE)
 		_, _ = sw.Write(data)
 		_ = sw.Close()
 	}()
 	b.mu.Lock()
-	b.verdictR, b.verdictW, b.specR = r, w, sr
+	b.verdictR, b.verdictW, b.specR, b.cancelR, b.cancelW = r, w, sr, cr, cw
 	b.mu.Unlock()
 	//nolint:noctx,gosec // must outlive ctx like any attempt process; fixed program
 	cmd := exec.Command(m.Program, m.Args...)
@@ -528,7 +535,7 @@ func (m *Manager) command(b *Box, s Spec) (*exec.Cmd, error) {
 		cmd.Env = []string{}
 	}
 	cmd.Dir = "/"
-	cmd.ExtraFiles = []*os.File{w, sr} // fd 3: the verdict, fd 4: the spec
+	cmd.ExtraFiles = []*os.File{w, sr, cr} // fd 3: the verdict, fd 4: the spec, fd 5: the cancel
 	cmd.SysProcAttr = sysProcAttr()
 	return cmd, nil
 }
@@ -539,21 +546,42 @@ var ErrVerdict = errors.New("strict egress sandbox not verified")
 // Await reads the helper's verdict after the command started: nil once the sandbox verified (the agent then
 // runs), else why not (the helper exits without starting the agent).
 func (b *Box) Await(ctx context.Context) error {
-	r, w, sr := b.take()
+	r := b.take()
 	if r == nil {
 		return errors.New("the sandbox command was not prepared")
 	}
-	_, _ = w.Close(), sr.Close() // the helper holds the only other ends now: EOF when it ends
 	defer func() { _ = r.Close() }()
 	return readVerdict(ctx, r, b.m.verifyTimeout(), false)
 }
 
-func (b *Box) take() (r, w, sr *os.File) {
+// take returns the verdict's read end and closes the parent's copies of the helper's ends (the helper holds the
+// only others now: EOF when it ends). nil when no command was prepared.
+func (b *Box) take() *os.File {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	r, w, sr = b.verdictR, b.verdictW, b.specR
-	b.verdictR, b.verdictW, b.specR = nil, nil, nil
-	return r, w, sr
+	r := b.verdictR
+	for _, f := range []*os.File{b.verdictW, b.specR, b.cancelR} {
+		if f != nil {
+			_ = f.Close()
+		}
+	}
+	b.verdictR, b.verdictW, b.specR, b.cancelR = nil, nil, nil, nil
+	return r
+}
+
+// Cancel marks the started command cancelled before the launcher sends SIGTERM to its process group (KIN-103):
+// the helper, its PID namespace's init, drops a signal that arrives before its Go runtime handles it, but checks
+// the mark before it starts the agent, and then exits like a SIGTERM ended it. Without a prepared command, or
+// once called, it does nothing.
+func (b *Box) Cancel() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.cancelW == nil {
+		return
+	}
+	_, _ = b.cancelW.Write([]byte{1}) // an empty pipe: never blocks
+	_ = b.cancelW.Close()
+	b.cancelW = nil
 }
 
 func readVerdict(ctx context.Context, r *os.File, timeout time.Duration, selfTest bool) error {
@@ -593,11 +621,12 @@ func (b *Box) Release() {
 		<-b.served
 		b.watching.Wait()
 		b.mu.Lock()
-		for _, f := range []*os.File{b.verdictR, b.verdictW, b.specR} {
+		for _, f := range []*os.File{b.verdictR, b.verdictW, b.specR, b.cancelR, b.cancelW} {
 			if f != nil {
 				_ = f.Close()
 			}
 		}
+		b.verdictR, b.verdictW, b.specR, b.cancelR, b.cancelW = nil, nil, nil, nil, nil
 		b.mu.Unlock()
 		_ = os.RemoveAll(filepath.Dir(b.spec.Socket))
 	})
@@ -643,8 +672,7 @@ func (m *Manager) selfTest(ctx context.Context) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting the self-test sandbox: %w", err)
 	}
-	r, w, sr := b.take()
-	_, _ = w.Close(), sr.Close()
+	r := b.take()
 	verr := readVerdict(ctx, r, m.verifyTimeout(), true)
 	_ = r.Close()
 	if verr != nil {

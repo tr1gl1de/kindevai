@@ -51,16 +51,13 @@ func TestMigration0033KeepsStepPhases(t *testing.T) {
 		t.Fatal(err)
 	}
 	var phases []string
-	rows, err := d.QueryContext(ctx, "SELECT phase FROM workflow_steps ORDER BY id")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for rows.Next() {
+	for _, id := range []string{"s1", "s2"} {
 		var p string
-		_ = rows.Scan(&p)
+		if err := d.QueryRowContext(ctx, "SELECT phase FROM workflow_steps WHERE id = ?", id).Scan(&p); err != nil {
+			t.Fatal(err)
+		}
 		phases = append(phases, p)
 	}
-	_ = rows.Close()
 	if strings.Join(phases, ",") != ",review" {
 		t.Fatalf("phases %q", phases)
 	}

@@ -10,8 +10,10 @@ import (
 )
 
 // Socket directories of killed launchers are swept; a fresh one or one still served is kept.
+//
+// Not parallel: the "dead" socket's listener fd lives in this process, and a parallel test that forks a sandbox
+// helper holds a copy of every fd while the child waits for its uid_map; a connect would then still succeed.
 func TestSweepStale(t *testing.T) {
-	t.Parallel()
 	base := t.TempDir()
 	mk := func(name string, age time.Duration, serve bool) string {
 		d := filepath.Join(base, name)

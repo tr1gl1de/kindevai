@@ -214,3 +214,40 @@ func isValidation(err error, field, code string) bool {
 	var ve *ValidationError
 	return errors.As(err, &ve) && ve.Field == field && ve.Code == code
 }
+
+// KIN-116: the Owner's per-runner parallel-step limit is 1..MaxParallelSteps, or 0 to use the runner's flag; a
+// revoked runner keeps none.
+func TestTheOwnerSetsARunnersParallelStepLimit(t *testing.T) {
+	t.Parallel()
+	r := pendingRunner(t)
+	for _, n := range []int{1, MaxParallelSteps, 0} {
+		if err := r.SetMaxParallelSteps(n); err != nil || r.MaxParallelSteps != n {
+			t.Fatalf("set %d: %v %+v", n, err, r.MaxParallelSteps)
+		}
+	}
+	for _, n := range []int{-1, MaxParallelSteps + 1} {
+		var ve *ValidationError
+		if err := r.SetMaxParallelSteps(n); !errors.As(err, &ve) || ve.Field != "maxParallelSteps" {
+			t.Fatalf("set %d: %v", n, err)
+		}
+	}
+	if err := r.Revoke("owner1", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetMaxParallelSteps(2); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("revoked: %v", err)
+	}
+}
+
+// KIN-116: the effective limit is the lower of the Owner's value and the runner's --max-parallel-steps; 0 on
+// either side means "no limit from that side", so an empty UI value uses the flag and the UI never lifts it.
+func TestTheEffectiveParallelStepLimitIsTheLowerOfUIAndFlag(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct{ ui, flag, want int }{
+		{0, 0, 0}, {0, 3, 3}, {2, 0, 2}, {1, 4, 1}, {3, 2, 2}, {5, 5, 5},
+	} {
+		if got := EffectiveMaxParallelSteps(c.ui, c.flag); got != c.want {
+			t.Errorf("ui %d flag %d: %d, want %d", c.ui, c.flag, got, c.want)
+		}
+	}
+}

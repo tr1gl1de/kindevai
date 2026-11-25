@@ -203,6 +203,9 @@ type Runner struct {
 	RevokedAt         *time.Time
 	LastSeenAt        *time.Time // set by the gateway (KIN-19/20)
 	ProjectIDs        []string   // sorted, unique
+	// MaxParallelSteps is the Owner's parallel-step limit for this runner (KIN-116); 0 = use the runner's own
+	// --max-parallel-steps. It only ever lowers the runner's flag: see EffectiveMaxParallelSteps.
+	MaxParallelSteps int
 }
 
 // Enroll registers a pending runner for a usable token (the caller checks Usable and consumes the token).
@@ -250,6 +253,32 @@ func (r *Runner) SetProjects(projectIDs []string) error {
 	}
 	r.ProjectIDs = ps
 	return nil
+}
+
+// SetMaxParallelSteps sets the Owner's parallel-step limit (1..MaxParallelSteps) or clears it (0: the runner's flag
+// applies). A revoked runner keeps none.
+func (r *Runner) SetMaxParallelSteps(n int) error {
+	if r.Status == StatusRevoked {
+		return ErrInvalidTransition
+	}
+	if n < 0 || n > MaxParallelSteps {
+		return &ValidationError{Field: "maxParallelSteps", Code: "out_of_range"}
+	}
+	r.MaxParallelSteps = n
+	return nil
+}
+
+// EffectiveMaxParallelSteps is the parallel-step limit the scheduler applies (KIN-116): the lower of the Owner's
+// value and the runner's declared flag, where 0 on either side sets no limit from that side. An empty Owner value
+// uses the flag; the Owner can only lower the flag the runner's operator set, never lift it.
+func EffectiveMaxParallelSteps(owner, flag int) int {
+	switch {
+	case owner <= 0:
+		return max(flag, 0)
+	case flag <= 0:
+		return owner
+	}
+	return min(owner, flag)
 }
 
 // Disable blocks an approved runner until it is enabled again.

@@ -189,11 +189,32 @@ func TestEnrollmentFlowOverHTTP(t *testing.T) {
 	if w := e.do(t, "owner", "POST", "/api/runners/"+res.RunnerID+"/approve", ProjectsRequest{ProjectIDs: []string{"p1"}}); w.Code != http.StatusConflict {
 		t.Fatalf("approve twice = %d %s", w.Code, w.Body)
 	}
+	// KIN-116: the Owner sets (1..64) or clears (null) the runner's parallel-step limit.
+	limit := "/api/runners/" + res.RunnerID + "/max-parallel-steps"
+	w = e.do(t, "owner", "PUT", limit, map[string]any{"maxParallelSteps": 2})
+	if v := decode[RunnerView](t, w); w.Code != http.StatusOK || v.MaxParallelSteps == nil || *v.MaxParallelSteps != 2 {
+		t.Fatalf("set limit = %d %s", w.Code, w.Body)
+	}
+	if v := decode[RunnerView](t, e.do(t, "owner", "GET", "/api/runners/"+res.RunnerID, nil)); v.MaxParallelSteps == nil || *v.MaxParallelSteps != 2 {
+		t.Fatalf("stored limit = %+v", v.MaxParallelSteps)
+	}
+	for _, bad := range []any{0, 65, -1, "2"} {
+		if w := e.do(t, "owner", "PUT", limit, map[string]any{"maxParallelSteps": bad}); w.Code != http.StatusUnprocessableEntity && w.Code != http.StatusBadRequest {
+			t.Errorf("limit %v = %d %s", bad, w.Code, w.Body)
+		}
+	}
+	w = e.do(t, "owner", "PUT", limit, map[string]any{"maxParallelSteps": nil})
+	if v := decode[RunnerView](t, w); w.Code != http.StatusOK || v.MaxParallelSteps != nil {
+		t.Fatalf("clear limit = %d %s", w.Code, w.Body)
+	}
 	for _, step := range []struct{ path, status string }{{"disable", "disabled"}, {"enable", "approved"}, {"revoke", "revoked"}} {
 		w := e.do(t, "owner", "POST", "/api/runners/"+res.RunnerID+"/"+step.path, nil)
 		if v := decode[RunnerView](t, w); w.Code != http.StatusOK || v.Status != step.status {
 			t.Fatalf("%s = %d %s", step.path, w.Code, w.Body)
 		}
+	}
+	if w := e.do(t, "owner", "PUT", limit, map[string]any{"maxParallelSteps": 2}); w.Code != http.StatusConflict {
+		t.Fatalf("limit of a revoked runner = %d %s", w.Code, w.Body) // KIN-116
 	}
 	if w := e.do(t, "owner", "GET", "/api/runners/nope", nil); w.Code != http.StatusNotFound {
 		t.Fatalf("missing runner = %d", w.Code)
@@ -263,6 +284,7 @@ func TestOnlyTheOwnerManagesRunners(t *testing.T) {
 		{"GET", "/api/runners/x"},
 		{"POST", "/api/runners/x/approve"},
 		{"PUT", "/api/runners/x/projects"},
+		{"PUT", "/api/runners/x/max-parallel-steps"},
 		{"POST", "/api/runners/x/disable"},
 		{"POST", "/api/runners/x/enable"},
 		{"POST", "/api/runners/x/revoke"},

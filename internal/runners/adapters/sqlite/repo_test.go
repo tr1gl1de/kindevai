@@ -105,6 +105,9 @@ func TestTokenAndRunnerRoundTrip(t *testing.T) {
 	if err := run.Approve([]string{"p2", "p1"}, "owner1", t0.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
+	if err := run.SetMaxParallelSteps(3); err != nil { // KIN-116
+		t.Fatal(err)
+	}
 	if err := r.SaveRunner(ctx, run); err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +117,8 @@ func TestTokenAndRunnerRoundTrip(t *testing.T) {
 	}
 	if loaded.Status != domain.StatusApproved || loaded.ApprovedBy != "owner1" || loaded.ApprovedAt == nil ||
 		len(loaded.ProjectIDs) != 2 || loaded.ProjectIDs[0] != "p1" || string(loaded.PublicKey) != string(key) ||
-		loaded.Fingerprint != key.Fingerprint() || loaded.Metadata != run.Metadata || loaded.CreatedBy != "owner1" {
+		loaded.Fingerprint != key.Fingerprint() || loaded.Metadata != run.Metadata || loaded.CreatedBy != "owner1" ||
+		loaded.MaxParallelSteps != 3 {
 		t.Fatalf("loaded = %+v", loaded)
 	}
 	bad := loaded

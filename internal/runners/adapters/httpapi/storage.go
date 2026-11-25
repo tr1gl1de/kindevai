@@ -27,6 +27,8 @@ type CapabilitiesView struct {
 	StrictEgress bool       `json:"strictEgress"`
 	Tools        []ToolView `json:"tools"`
 	ReportedAt   time.Time  `json:"reportedAt"`
+	// MaxParallelSteps is the runner's --max-parallel-steps (KIN-76); 0 = no limit.
+	MaxParallelSteps int `json:"maxParallelSteps"`
 }
 
 func capabilitiesView(c *domain.Capabilities) *CapabilitiesView {
@@ -34,7 +36,7 @@ func capabilitiesView(c *domain.Capabilities) *CapabilitiesView {
 		return nil
 	}
 	v := &CapabilitiesView{OS: c.OS, Arch: c.Arch, WSL: c.WSL, StrictEgress: c.StrictEgress, ReportedAt: c.ReportedAt,
-		Tools: make([]ToolView, 0, len(c.Tools))}
+		Tools: make([]ToolView, 0, len(c.Tools)), MaxParallelSteps: c.MaxParallelSteps}
 	for _, t := range c.Tools {
 		v.Tools = append(v.Tools, ToolView(t))
 	}
@@ -60,6 +62,14 @@ func withPresence(v RunnerView, p map[string]app.Presence) RunnerView {
 	if ok {
 		v.Availability, v.LastHeartbeatAt, v.Capabilities = string(x.Availability), x.LastHeartbeatAt, capabilitiesView(x.Capabilities)
 	}
+	owner, flag := 0, 0
+	if v.MaxParallelSteps != nil {
+		owner = *v.MaxParallelSteps
+	}
+	if v.Capabilities != nil {
+		flag = v.Capabilities.MaxParallelSteps
+	}
+	v.EffectiveMaxParallelSteps = domain.EffectiveMaxParallelSteps(owner, flag)
 	return v
 }
 

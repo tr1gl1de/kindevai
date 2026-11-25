@@ -56,6 +56,7 @@ export function useRevokeEnrollmentToken() {
 export type RunnerAction =
   | { kind: "approve"; projectIds: string[] }
   | { kind: "projects"; projectIds: string[] }
+  | { kind: "maxParallel"; maxParallelSteps: number | null }
   | { kind: "disable" | "enable" | "revoke" };
 
 /** One mutation for every Owner action on a runner; the response is the updated runner. */
@@ -65,6 +66,8 @@ export function useRunnerAction(id: string) {
     mutationFn: (a: RunnerAction) => {
       if (a.kind === "approve") return api<Runner>("POST", `${path(id)}/approve`, { projectIds: a.projectIds });
       if (a.kind === "projects") return api<Runner>("PUT", `${path(id)}/projects`, { projectIds: a.projectIds });
+      if (a.kind === "maxParallel")
+        return api<Runner>("PUT", `${path(id)}/max-parallel-steps`, { maxParallelSteps: a.maxParallelSteps });
       return api<Runner>("POST", `${path(id)}/${a.kind}`);
     },
     onSuccess: (r) => {

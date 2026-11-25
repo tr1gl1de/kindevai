@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -469,6 +470,52 @@ func TestStepHeldForNetworkIsRetriedAfterTheDelay(t *testing.T) {
 	}
 	if _, ex = e.state(t, task.ID); ex.Steps[0].State != domain.StepClaimed {
 		t.Fatalf("step %+v", ex.Steps[0])
+	}
+}
+
+// KIN-81: repeated network holds on the same runner back off (2, 4, 8 minutes...) and from the third one in a row
+// the Owner gets an egress alert for that runner.
+func TestRepeatedNetworkHoldsBackOffAndAlert(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	out := &alertOutbox{}
+	e.svc.Outbox = out
+	task := e.task(t, onlyStep())
+	e.pool.set("p1", Candidate{ID: "r1", DiskHeavyAllowed: true})
+	e.schedule(t)
+	for i := range 3 {
+		_, ex := e.state(t, task.ID)
+		st := ex.Steps[0]
+		_ = e.disp.take()
+		if err := e.svc.HoldStepForNetwork(t.Context(), st.ID, "r1", st.Fence, "strict egress sandbox not verified", e.clock.Now()); err != nil {
+			t.Fatal(err)
+		}
+		delay := domain.NetworkRetryDelay << i
+		e.clock.Add(delay - time.Second)
+		e.schedule(t)
+		if c := e.disp.take(); len(c) != 0 {
+			t.Fatalf("hold %d: retried before %v: %v", i+1, delay, c)
+		}
+		e.clock.Add(time.Second)
+		e.schedule(t)
+		if c := e.disp.take(); len(c) != 1 {
+			t.Fatalf("hold %d: not retried after %v: %v", i+1, delay, c)
+		}
+		alerts := 0
+		for _, m := range out.msgs {
+			if m.Topic == TopicEgressCheckFailed {
+				alerts++
+			}
+		}
+		if want := max(0, i-1); alerts != want {
+			t.Fatalf("hold %d: %d egress alerts, want %d", i+1, alerts, want)
+		}
+	}
+	m := out.msgs[len(out.msgs)-1]
+	var p struct{ RunnerID, Code string }
+	if err := json.Unmarshal(m.Payload, &p); err != nil || p.RunnerID != "r1" || p.Code != "network_hold_repeated" ||
+		m.Adapter != AdapterAlerts {
+		t.Fatalf("alert %s %s", m.Topic, m.Payload)
 	}
 }
 

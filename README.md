@@ -328,12 +328,16 @@ CONNECT, HTTPS proxy or SOCKS5 with remote DNS; the credentials never enter the 
 preflight inside the sandbox must pass: proxy reachable, egress IP as expected, and direct TCP (IPv4/IPv6), DNS, a
 client ignoring `HTTP_PROXY` and host sockets all blocked, the runner's `HOME` and data directory invisible, and `/`
 and the system directories unwritable. Otherwise the CLI never starts and the step waits
-(WAITING, reason `network`) and is retried after two minutes; there is no direct fallback. The runner reports
+(WAITING, reason `network`) and is retried after two minutes, doubling with every further hold in a row on the
+same runner (up to 30 minutes; from the third one the Owner gets an egress alert for that runner); there is no direct
+fallback. While the CLI runs, the runner checks the egress IP again every 5 minutes: a wrong IP (or two failed checks
+in a row) makes the adapter cut every connection and the step waits for the network the same way. Connections the
+allowlist denied are counted and reported at the end of the attempt's output. After a runner restart an adopted
+strict attempt gets its proxy adapter back on the same socket, or is stopped and waits for the network. The runner reports
 `strictEgress` only after a self-test sandbox verified, and the scheduler gives strict steps only to such runners
 (macOS: unsupported). CLI permission bypass (`--dangerously-skip-permissions` and the like) is allowed only inside this
 sandbox. Requirements: `nft` installed and unprivileged user namespaces enabled (Ubuntu 24.04:
-`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`). Known limits: an attempt adopted after a runner
-restart has no network (its proxy adapter is gone); inside the sandbox `git add`/`git commit` by the agent fail (the mirror's
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`). Known limits: inside the sandbox `git add`/`git commit` by the agent fail (the mirror's
 objects are read-only; the runner commits after the run); `--resume` across sandboxed attempts does not find the
 earlier session (each attempt has a fresh `HOME`); a CLI login refreshed inside the sandbox is not kept (prefer a
 long-lived token such as `claude setup-token` for runners); Linux 5.12+ is required. **Without the sandbox** (macOS, no user namespaces, or a profile

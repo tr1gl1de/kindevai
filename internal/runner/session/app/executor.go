@@ -425,7 +425,7 @@ func (x *Executor) prepareAgent(a domain.Assignment, dir, workdir string, sandbo
 		return AgentCommand{}, err
 	}
 	req := domain.AgentRequest{Agent: a.Adapter, Workdir: workdir, Resume: a.Resume, Model: a.Model,
-		BypassPermissions: a.BypassPermissions, Timeout: a.AgentTimeout()}
+		BypassPermissions: a.BypassPermissions, Timeout: a.AgentTimeout(), Confined: sandbox != nil}
 	return x.Agents.Prepare(dir, req, a.Prompt, perms)
 }
 
@@ -521,8 +521,11 @@ func (x *Executor) launchFailed(r *run, a domain.Assignment, err error) error {
 	x.logger().Error("launching the attempt", "step", a.Step, "fence", a.Fence, "err", err)
 	x.releaseWorkspace(r)
 	f := protocol.Failure{Reason: r.mask("launch failed: " + err.Error())}
-	if errors.Is(err, ErrNetwork) {
+	switch {
+	case errors.Is(err, ErrNetwork):
 		f = protocol.Failure{Reason: r.mask(err.Error()), Code: protocol.FailureNetwork}
+	case errors.Is(err, ErrAgentLoggedOut):
+		f = protocol.Failure{Reason: r.mask(err.Error()), Code: protocol.FailureCLILimit, Cause: domain.CauseAuth}
 	}
 	if err := r.stream.Emit(protocol.EventFailed, f); err != nil {
 		return x.abandon(r, err) // the re-sent command tries again

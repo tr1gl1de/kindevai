@@ -120,13 +120,28 @@ func strictEgress(d *datadir.Dir, exe string, logger *slog.Logger) *egress.Sandb
 	}
 }
 
-// confiner gives the session context the egress context's sandboxes.
-type confiner struct{ s *egress.Sandboxes }
+// confiner gives the session context the egress context's sandboxes. sessions, when set, returns the CLI session
+// store of an AI CLI attempt's task, bound into the agent's HOME so a later attempt can resume (KIN-86).
+type confiner struct {
+	s        *egress.Sandboxes
+	sessions func(sessiondomain.Assignment) ([]egress.HomeBind, error)
+}
 
 var _ sessionapp.Confiner = confiner{}
 
 func (c confiner) Confine(ctx context.Context, a sessiondomain.Assignment, dir, workdir string) (sessionapp.Sandbox, error) {
-	b, err := c.s.Confine(ctx, a.Project, a.Adapter, dir, workdir)
+	r := egress.BoxRequest{Dir: dir, Workdir: workdir}
+	if c.sessions != nil && a.CLI() {
+		// Only a sandboxed run uses the store (on the host the CLI keeps its sessions in its own home).
+		if _, strict, err := c.s.StrictProfile(ctx, a.Project, a.Adapter); err == nil && strict {
+			binds, err := c.sessions(a)
+			if err != nil {
+				return nil, err
+			}
+			r.HomeBinds = binds
+		}
+	}
+	b, err := c.s.Confine(ctx, a.Project, a.Adapter, r)
 	if err != nil || b == nil {
 		return nil, err
 	}

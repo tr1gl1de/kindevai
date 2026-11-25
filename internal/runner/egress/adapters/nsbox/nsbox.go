@@ -64,8 +64,10 @@ type Spec struct {
 	Argv []string `json:"argv,omitempty"`
 	Env  []string `json:"env,omitempty"`
 	Dir  string   `json:"dir,omitempty"`
-	UID  int      `json:"uid"` // the runner's uid and gid, which the agent keeps (without capabilities)
-	GID  int      `json:"gid"`
+	// HomeBinds are bound read-write below the agent's HOME (the task's CLI session store, KIN-86).
+	HomeBinds []egress.HomeBind `json:"homeBinds,omitempty"`
+	UID       int               `json:"uid"` // the runner's uid and gid, which the agent keeps (without capabilities)
+	GID       int               `json:"gid"`
 }
 
 // ProbeSpec is the proxy and egress IP check of the preflight.
@@ -275,8 +277,9 @@ func (m *Manager) open(r egress.BoxRequest) (*Box, error) {
 		keep = append(keep, r.Workdir)
 	}
 	b.spec = Spec{Socket: sock, Ruleset: rules, NFT: nft, Keep: keep, Home: m.home(), DataDir: m.DataDir, Sockets: m.Sockets,
-		Probe: &ProbeSpec{DiagnosticURL: p.DiagnosticURL, ExpectedIPv4: p.ExpectedIPv4, ExpectedIPv6: p.ExpectedIPv6},
-		UID:   os.Getuid(), GID: os.Getgid()}
+		HomeBinds: r.HomeBinds,
+		Probe:     &ProbeSpec{DiagnosticURL: p.DiagnosticURL, ExpectedIPv4: p.ExpectedIPv4, ExpectedIPv6: p.ExpectedIPv6},
+		UID:       os.Getuid(), GID: os.Getgid()}
 	return b, nil
 }
 

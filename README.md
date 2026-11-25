@@ -22,7 +22,7 @@ Base (project `KIN`, root article `KIN-A-1`).
 | `cmd/ai-runner` | Runner daemon (`enroll`, `fingerprint`, `run`, `version`) |
 | `internal/` | Go packages of the Control Plane (`internal/runner/...`: the runner, `internal/protocol`: shared wire messages) |
 | `web/` | React + TypeScript Dashboard (Vite); `web/embed.go` embeds the build |
-| `scripts/` | Developer helpers (task worktrees, time tracking) |
+| `scripts/` | Developer helpers (task worktrees, time tracking, `measure-cp.sh` load measurement) |
 | `.claude/` | Claude Code rules, agents and skills used to develop this repo |
 
 ## Requirements
@@ -38,6 +38,8 @@ make build            # builds web/dist/app, then bin/ai-platform with the UI em
 
 `ai-platform serve --addr 127.0.0.1:9000` changes the listen address. A binary built without the web UI
 still starts and serves a placeholder page.
+
+To deploy on a server, follow [Installation](#installation).
 
 ### Data directory and encryption key
 
@@ -477,6 +479,182 @@ that loses its record stops.
 5. **Start** the new Control Plane, point DNS/`--public-url` at it and switch maintenance mode off. Runners reconnect
    by themselves; every Control Plane start uses a new command-channel epoch, so a restored (older) database never makes
    a runner skip new commands.
+
+## Installation
+
+A step-by-step deployment. The sections above describe each part in detail.
+
+### 1. Choose the delivery profile
+
+| Profile | Command | Use |
+|---|---|---|
+| Compose + HTTPS (Caddy) | `DOMAIN=ai.example.com docker compose --profile https up -d` | **A server.** The only public profile in the MVP. |
+| Compose, plain HTTP | `docker compose up -d` | This machine only: `http://127.0.0.1:8080`. |
+| Standalone, plain HTTP | `ai-platform serve` | This machine only, without Docker. |
+| Standalone HTTPS (built-in TLS/ACME) | — | Not in the MVP. Use the Compose HTTPS profile. |
+
+Public access, the Telegram Mini App and **remote runners need HTTPS**. Plain HTTP (and `ws://` for runners) is only
+for a browser and a runner on the same host. Never publish the plain-HTTP port: Compose binds it to `127.0.0.1`.
+
+**Control Plane host:** a Linux VPS with 1 vCPU and 1 GB RAM is enough. It needs Docker with Compose v2, a DNS
+name pointing to it, and ports 80/443 open for the ACME certificate. Do not run runners, AI CLIs or other heavy
+services there: agents work on the runners. Measured under `--cpus=1 --memory=1g` (KIN-42), with 8 runners running
+1000 mock tasks in 33 s, the Control Plane used at most 50 MiB of RAM and 67% of the vCPU (about 11 MiB at idle).
+Real AI tasks are far slower, so the load is lower. Repeat the measurement with `scripts/measure-cp.sh`.
+
+### 2. Start the Control Plane
+
+```bash
+git clone https://github.com/tr1gl1de/kindevai.git && cd kindevai
+export KINDEV_IMAGE_TAG=X.Y.Z                       # a release from the GitHub Releases page
+export DOMAIN=ai.example.com KINDEV_PUBLIC_URL=https://ai.example.com
+docker compose --profile https pull && docker compose --profile https up -d
+docker compose exec cp ai-platform setup-token     # one-time setup token, valid 1 h
+```
+
+Open `https://ai.example.com`, enter the token, and create the Owner (password: 12+ characters). `KINDEV_PUBLIC_URL`
+pins the origin runners may dial, and it is the link the YouTrack comments use. Keep both variables in your shell
+profile or in a systemd unit, because every later `docker compose` command needs the same values. Back up the
+encryption key right away. It is generated on first start, and nothing can be decrypted without it (step 9).
+
+### 3. Protect `main`/`master` on GitHub (required)
+
+> **Required in every deployment.** For each repository the platform works in, a GitHub ruleset or branch protection
+> must block direct pushes to `main`/`master` and merges into them. Only you may bypass it.
+
+Why the platform cannot do this alone:
+
+- A runner gets a short-lived GitHub App installation token with **Contents: write** for the repository it works
+  on. GitHub scopes that token to the repository, not to a branch, so a runner or agent that leaks it can push to any
+  branch, `main` included.
+- GitHub's merge API (`PUT /repos/{owner}/{repo}/pulls/{n}/merge`) takes only the pull request number and does not
+  pin the base branch. If someone retargets the pull request at `main` between the platform's check and the merge,
+  the merge lands on `main`.
+- The platform refuses every write to `main`/`master` in code (the main/master guard, the integration branch is
+  never `main`/`master`), and the runner refuses to push there. Those checks protect the platform's own requests,
+  but only GitHub can stop a leaked token.
+
+Settings for each repository (**Settings → Rules → Rulesets → New branch ruleset**):
+
+1. Target branches: `main` and `master` (add "Include default branch" if your default branch is one of them).
+   Enforcement status: **Active**.
+2. Rules: **Restrict updates**, **Restrict deletions**, **Block force pushes**, and **Require a pull request before
+   merging**.
+3. Bypass list: only you (or the repository admin role). **Never add the GitHub App.**
+4. If you release from the repository, add a tag ruleset for `v*` that only you may create, update or delete, and a
+   `production` environment with you as the required reviewer.
+
+On a plan without rulesets, classic branch protection on `main`/`master` (require a pull request, restrict who can
+push to you, do not allow bypassing) does the same job. After **Refresh** on the Integrations page, the repository
+must no longer show the "main/master not protected" warning.
+
+### 4. Connect GitHub (GitHub App)
+
+1. **GitHub → Settings → Developer settings → GitHub Apps → New GitHub App**:
+   - webhook URL `https://ai.example.com/api/webhooks/github`, with a random webhook secret of 16+ characters;
+   - only the permissions listed in [GitHub App](#github-app) (Contents and Pull requests read and write, Checks and
+     Metadata read; **no** Administration or Workflows);
+   - events Push, Pull request, Check suite and Check run.
+2. Generate a private key (`.pem`), then install the App **only on the repositories** the platform works in.
+3. **Integrations** page: enter the App ID, the private key and the webhook secret.
+4. Per project: register each repository as `owner/name`. The integration branch is `dev` and must exist, never
+   `main`/`master`. Add the test command (e.g. `make test`). Keep CI on the repository: the merge into `dev` is
+   decided by its check runs.
+
+### 5. Connect YouTrack
+
+1. Create a dedicated YouTrack user for the platform and a permanent token for it. The user needs to read issues
+   and Knowledge Base articles, comment, apply commands (state changes), and update articles if you want KB
+   write-back.
+2. **Integrations** page: enter the YouTrack base URL and the token, then **Test connection**.
+3. Per project: link the YouTrack project by short name and choose the trigger tag (`kindevai`). Map platform users
+   to their YouTrack logins: only the account of whoever applied the tag can start a task. Optionally map task
+   states to YouTrack states (`PUT /api/projects/{id}/integrations/youtrack/states`) and set up the webhook. Polling
+   works without it.
+
+### 6. Telegram (optional)
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) (`/newbot`) and note its token.
+2. Create the Mini App with `/newapp` and the site's HTTPS address, `https://ai.example.com/`. Telegram accepts
+   only HTTPS.
+3. **Settings → Telegram** (`/settings/telegram`, Owner): enter the bot username, the Mini App short name and the
+   bot token. The token is stored encrypted.
+4. Each user links their own Telegram account on the **Account** page (a one-time link plus a 6-digit code). Alerts
+   reach linked users in Telegram.
+
+### 7. Add a runner
+
+**Runner host:** Linux x86_64/aarch64, WSL2 with systemd, or macOS arm64/x86_64. It needs `git` and the AI CLIs
+(`claude`, `codex`) on the PATH, and at least 2 GiB free per workspace. **Strict egress** (the sandbox that the CLI
+permission bypass requires) is Linux/WSL2 only and needs kernel 5.12+, `nft` and unprivileged user namespaces.
+Ubuntu 24.04 restricts those, so allow them persistently:
+
+```bash
+echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/60-kindevai-userns.conf
+sudo sysctl --system
+```
+
+1. Download `kindevai-runner_<version>_<os>_<arch>.tar.gz` and `SHA256SUMS` from the same GitHub Release, verify,
+   and install:
+   ```bash
+   sha256sum --check --ignore-missing SHA256SUMS
+   tar -xzf kindevai-runner_*_linux_amd64.tar.gz ai-runner && sudo install -m 0755 ai-runner /usr/local/bin/
+   ```
+2. **Runners → Add runner** shows a one-time token (valid 10 minutes). Enroll with the commands at the top of
+   `deploy/runner/kindevai-runner.service` (systemd, its own user), `kindevai-runner-user.service` (WSL2 or your own
+   user) or `io.kindevai.runner.plist` (macOS). The token is read from a hidden prompt or a 0600 file, never from
+   the command line.
+3. Compare `ai-runner fingerprint` with the runner's card, then approve it for its projects.
+4. Log the CLIs in where the runner runs, as the runner's user. The credentials stay on that host:
+   ```bash
+   claude setup-token                               # on any machine with a browser
+   ai-runner cli-login claude                       # paste the token (hidden prompt)
+   ai-runner cli-login codex -- --with-api-key      # Codex: an API key
+   ai-runner cli-login status
+   ```
+5. `ai-runner test-network` checks the egress and whether strict egress is available. Start the service with
+   `ai-runner run --measure-space` if the Storage page should show the runner's space consumers.
+
+Remote runners connect only over `wss://` (the HTTPS profile). A WSL2 machine or a laptop that sleeps is fine: its
+attempts become `UNKNOWN` and are reconciled when it returns. Upgrade the Control Plane and the runners together,
+to the same release.
+
+### 8. Network profiles and proxy (optional)
+
+**Network** page (Owner): create a profile with the upstream proxy, the expected egress IP and the allowlist, and
+assign it to the installation, a runner, a project or a CLI. A `strict` profile runs the CLI in the sandbox, which
+can reach only the allowlist through the proxy. It needs `api.anthropic.com` for Claude Code, plus your GitHub and
+YouTrack hosts. **Test Network** checks the profile from a runner before you rely on it.
+
+### 9. Backups and upgrades
+
+There are no automatic backups in the MVP. Copy the encryption key once and keep it apart from the archives (it
+never changes), then export regularly. Export works while the Control Plane is serving:
+
+```bash
+docker compose cp cp:/data/secrets/master.key ./kindevai-master.key && chmod 600 ./kindevai-master.key  # once
+f=backup-$(date +%F).tar.gz
+docker compose exec cp ai-platform export --data-dir /data --out /data/$f --without-key
+docker compose cp cp:/data/$f .
+docker run --rm -v kindevai_data:/data busybox rm /data/$f   # the image has no shell: remove the copy from the volume
+```
+
+To move or restore, follow [Backup, restore and moving the installation](#backup-restore-and-moving-the-installation),
+and never run two Control Planes on the same data. To upgrade, export first, then set the new `KINDEV_IMAGE_TAG`,
+`docker compose --profile https pull && docker compose --profile https up -d`. Migrations run on start. Then
+upgrade the runners.
+
+### Checklist
+
+- [ ] Compose HTTPS profile with a real `DOMAIN`, `KINDEV_PUBLIC_URL` set, plain-HTTP port not public.
+- [ ] Encryption key exported and stored apart from the backups.
+- [ ] **Rulesets or branch protection on `main`/`master` in every repository**, bypass only you, the App not
+      listed. The Integrations page shows no protection warning.
+- [ ] GitHub App with the minimal permissions, installed on the platform's repositories only. `dev` exists, and CI
+      runs on pull requests.
+- [ ] YouTrack integration user with a permanent token, projects linked, users mapped.
+- [ ] Runners verified by fingerprint, approved for explicit projects, CLIs logged in, `ai-runner test-network` passes.
+- [ ] Regular `ai-platform export`.
 
 ## Docker Compose
 

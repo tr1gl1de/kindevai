@@ -22,7 +22,7 @@ ZCode) на внешних runners. Проект в активной разра�
 | `cmd/ai-runner` | Демон раннера (`enroll`, `fingerprint`, `run`, `version`) |
 | `internal/` | Go-пакеты Control Plane (`internal/runner/...` — раннер, `internal/protocol` — общие wire-сообщения) |
 | `web/` | Dashboard на React + TypeScript (Vite); `web/embed.go` встраивает сборку |
-| `scripts/` | Вспомогательные скрипты (worktree задач, учёт времени) |
+| `scripts/` | Вспомогательные скрипты (worktree задач, учёт времени, замер нагрузки `measure-cp.sh`) |
 | `.claude/` | Правила, агенты и skills Claude Code для разработки репозитория |
 
 ## Требования
@@ -38,6 +38,8 @@ make build            # собирает web/dist/app, затем bin/ai-platfor
 
 `ai-platform serve --addr 127.0.0.1:9000` меняет адрес. Бинарник, собранный без web UI, тоже запускается
 и показывает страницу-заглушку.
+
+Для развёртывания на сервере следуйте разделу [Установка](#установка).
 
 ### Каталог данных и ключ шифрования
 
@@ -483,6 +485,185 @@ ai-runner cli-login status --cli-home <dir>                    # чем зало
 5. **Запустите** новый Control Plane, направьте на него DNS/`--public-url` и выключите режим обслуживания. Раннеры
    переподключатся сами; каждый запуск Control Plane использует новую эпоху канала команд, поэтому восстановленная
    (более старая) база не заставит раннер пропустить новые команды.
+
+## Установка
+
+Пошаговое развёртывание. Подробности по каждой части — в разделах выше.
+
+### 1. Выберите профиль поставки
+
+| Профиль | Команда | Для чего |
+|---|---|---|
+| Compose + HTTPS (Caddy) | `DOMAIN=ai.example.com docker compose --profile https up -d` | **Сервер.** Единственный публичный профиль в MVP. |
+| Compose, обычный HTTP | `docker compose up -d` | Только эта машина: `http://127.0.0.1:8080`. |
+| Standalone, обычный HTTP | `ai-platform serve` | Только эта машина, без Docker. |
+| Standalone HTTPS (встроенный TLS/ACME) | — | Не входит в MVP. Используйте профиль Compose HTTPS. |
+
+Для публичного доступа, Telegram Mini App и **удалённых runners нужен HTTPS**. Обычный HTTP (и `ws://` для runners)
+подходит только для браузера и runner на том же хосте. Не публикуйте порт обычного HTTP: Compose привязывает его
+к `127.0.0.1`.
+
+**Хост Control Plane:** достаточно Linux VPS с 1 vCPU и 1 ГБ RAM. Нужны Docker с Compose v2, DNS-имя, указывающее
+на хост, и открытые порты 80/443 для сертификата ACME. Не запускайте там runners, AI CLI и другие тяжёлые сервисы:
+агенты работают на runners. Замер под `--cpus=1 --memory=1g` (KIN-42): 8 runners выполнили 1000 mock-задач за 33 с,
+Control Plane занял не больше 50 МиБ RAM и 67% vCPU (около 11 МиБ в простое). Настоящие AI-задачи идут гораздо
+медленнее, поэтому нагрузка ниже. Повторить замер можно через `scripts/measure-cp.sh`.
+
+### 2. Запустите Control Plane
+
+```bash
+git clone https://github.com/tr1gl1de/kindevai.git && cd kindevai
+export KINDEV_IMAGE_TAG=X.Y.Z                       # релиз со страницы GitHub Releases
+export DOMAIN=ai.example.com KINDEV_PUBLIC_URL=https://ai.example.com
+docker compose --profile https pull && docker compose --profile https up -d
+docker compose exec cp ai-platform setup-token     # одноразовый токен настройки, действует 1 ч
+```
+
+Откройте `https://ai.example.com`, введите токен и создайте Owner (пароль от 12 символов). `KINDEV_PUBLIC_URL`
+закрепляет origin, к которому подключаются runners, и используется в ссылках комментариев YouTrack. Сохраните обе
+переменные в профиле shell или в unit systemd: каждой следующей команде `docker compose` нужны те же значения.
+Сразу сделайте копию ключа шифрования. Он создаётся при первом запуске, и без него ничего не расшифровать (шаг 9).
+
+### 3. Защитите `main`/`master` на GitHub (обязательно)
+
+> **Обязательно в любой установке.** В каждом репозитории, с которым работает платформа, ruleset или branch
+> protection GitHub должны запрещать прямой push в `main`/`master` и merge в них. Обходить их можете только вы.
+
+Почему платформа не справится с этим сама:
+
+- Runner получает короткоживущий installation token GitHub App с правом **Contents: write** на репозиторий, в котором
+  работает. GitHub ограничивает такой токен репозиторием, а не веткой, поэтому runner или агент, у которого токен
+  утёк, может сделать push в любую ветку, включая `main`.
+- Merge API GitHub (`PUT /repos/{owner}/{repo}/pulls/{n}/merge`) принимает только номер pull request и не фиксирует
+  базовую ветку. Если между проверкой платформы и merge кто-то перенаправит pull request на `main`, merge попадёт
+  в `main`.
+- Платформа отказывает в коде любой записи в `main`/`master` (main/master guard; integration branch никогда не бывает
+  `main`/`master`), runner тоже не делает туда push. Эти проверки защищают запросы самой платформы, но утёкший
+  токен может остановить только GitHub.
+
+Настройка каждого репозитория (**Settings → Rules → Rulesets → New branch ruleset**):
+
+1. Целевые ветки: `main` и `master` (добавьте «Include default branch», если ветка по умолчанию — одна из них).
+   Enforcement status: **Active**.
+2. Правила: **Restrict updates**, **Restrict deletions**, **Block force pushes** и **Require a pull request before
+   merging**.
+3. Bypass list: только вы (или роль администратора репозитория). **GitHub App туда не добавляйте никогда.**
+4. Если вы выпускаете релизы из репозитория, добавьте ruleset тегов `v*`, где создавать, менять и удалять теги можете
+   только вы, и environment `production`, где вы — обязательный reviewer.
+
+На тарифе без rulesets то же делает классическая branch protection для `main`/`master` (обязательный pull request,
+push только для вас, без обхода). После **Refresh** на странице Integrations у репозитория не должно остаться
+предупреждения «main/master не защищены».
+
+### 4. Подключите GitHub (GitHub App)
+
+1. **GitHub → Settings → Developer settings → GitHub Apps → New GitHub App**:
+   - webhook URL `https://ai.example.com/api/webhooks/github`, случайный webhook secret от 16 символов;
+   - только права из раздела [GitHub App](#github-app) (Contents и Pull requests на чтение и запись, Checks и
+     Metadata на чтение; **без** Administration и Workflows);
+   - события Push, Pull request, Check suite и Check run.
+2. Создайте private key (`.pem`) и установите App **только на репозитории**, с которыми работает платформа.
+3. Страница **Integrations**: введите App ID, private key и webhook secret.
+4. В каждом проекте зарегистрируйте репозитории как `owner/name`. Integration branch — `dev`, она должна
+   существовать и никогда не бывает `main`/`master`. Укажите тестовую команду (например, `make test`). Держите в
+   репозитории CI: merge в `dev` решается по его check runs.
+
+### 5. Подключите YouTrack
+
+1. Создайте для платформы отдельного пользователя YouTrack и постоянный токен для него. Пользователю нужно читать
+   задачи и статьи Knowledge Base, комментировать, применять команды (смена состояния) и, если нужна запись в KB,
+   изменять статьи.
+2. Страница **Integrations**: введите базовый URL YouTrack и токен, затем **Test connection**.
+3. В каждом проекте свяжите проект YouTrack по short name и выберите тег запуска (`kindevai`). Сопоставьте
+   пользователей платформы с их логинами YouTrack: задачу запускает только учётная запись того, кто поставил тег.
+   При желании сопоставьте состояния задач с состояниями YouTrack
+   (`PUT /api/projects/{id}/integrations/youtrack/states`) и настройте webhook. Polling работает и без него.
+
+### 6. Telegram (необязательно)
+
+1. Создайте бота через [@BotFather](https://t.me/BotFather) (`/newbot`) и сохраните его токен.
+2. Создайте Mini App командой `/newapp` с HTTPS-адресом сайта, `https://ai.example.com/`. Telegram принимает
+   только HTTPS.
+3. **Settings → Telegram** (`/settings/telegram`, Owner): введите username бота, short name Mini App и токен бота.
+   Токен хранится зашифрованным.
+4. Каждый пользователь сам привязывает свой Telegram на странице **Account** (одноразовая ссылка и 6-значный код).
+   Алерты приходят привязанным пользователям в Telegram.
+
+### 7. Добавьте runner
+
+**Хост runner:** Linux x86_64/aarch64, WSL2 с systemd или macOS arm64/x86_64. Нужны `git` и AI CLI (`claude`, `codex`)
+в PATH и минимум 2 ГиБ свободного места на каждый workspace. **Strict egress** (песочница, без которой CLI не получает
+обход разрешений) работает только на Linux/WSL2 и требует ядро 5.12+, `nft` и непривилегированные user namespaces.
+Ubuntu 24.04 их ограничивает, поэтому разрешите их постоянно:
+
+```bash
+echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/60-kindevai-userns.conf
+sudo sysctl --system
+```
+
+1. Скачайте `kindevai-runner_<version>_<os>_<arch>.tar.gz` и `SHA256SUMS` из одного GitHub Release, проверьте и
+   установите:
+   ```bash
+   sha256sum --check --ignore-missing SHA256SUMS
+   tar -xzf kindevai-runner_*_linux_amd64.tar.gz ai-runner && sudo install -m 0755 ai-runner /usr/local/bin/
+   ```
+2. **Runners → Add runner** показывает одноразовый токен (действует 10 минут). Зарегистрируйте runner командами из
+   начала `deploy/runner/kindevai-runner.service` (systemd, отдельный пользователь), `kindevai-runner-user.service`
+   (WSL2 или ваш пользователь) или `io.kindevai.runner.plist` (macOS). Токен читается из скрытого ввода или файла
+   0600, никогда из командной строки.
+3. Сравните `ai-runner fingerprint` с карточкой runner и одобрите его для нужных проектов.
+4. Залогиньте CLI там, где работает runner, от пользователя runner. Учётные данные остаются на этом хосте:
+   ```bash
+   claude setup-token                               # на любой машине с браузером
+   ai-runner cli-login claude                       # вставьте токен (скрытый ввод)
+   ai-runner cli-login codex -- --with-api-key      # Codex: API-ключ
+   ai-runner cli-login status
+   ```
+5. `ai-runner test-network` проверяет выход в сеть и доступность strict egress. Запускайте сервис с
+   `ai-runner run --measure-space`, если страница Storage должна показывать, что занимает место на runner.
+
+Удалённые runners подключаются только по `wss://` (профиль HTTPS). Машина WSL2 или ноутбук, который засыпает, — это
+нормально: их попытки становятся `UNKNOWN` и сверяются, когда машина вернётся. Обновляйте Control Plane и runners
+вместе, до одного релиза.
+
+### 8. Сетевые профили и прокси (необязательно)
+
+Страница **Network** (Owner): создайте профиль с upstream-прокси, ожидаемым выходным IP и allowlist и назначьте его
+установке, runner, проекту или CLI. Профиль `strict` запускает CLI в песочнице, которая через прокси достаёт только
+до allowlist. Для Claude Code там нужен `api.anthropic.com`, плюс ваши хосты GitHub и YouTrack. **Test Network**
+проверяет профиль с runner, прежде чем на него полагаться.
+
+### 9. Резервные копии и обновления
+
+Автоматических резервных копий в MVP нет. Один раз скопируйте ключ шифрования и храните его отдельно от архивов
+(он не меняется), затем регулярно делайте export. Export работает, пока Control Plane обслуживает запросы:
+
+```bash
+docker compose cp cp:/data/secrets/master.key ./kindevai-master.key && chmod 600 ./kindevai-master.key  # один раз
+f=backup-$(date +%F).tar.gz
+docker compose exec cp ai-platform export --data-dir /data --out /data/$f --without-key
+docker compose cp cp:/data/$f .
+docker run --rm -v kindevai_data:/data busybox rm /data/$f   # в образе нет shell: удалите копию из volume
+```
+
+Для переноса или восстановления следуйте разделу
+[Резервное копирование, восстановление и перенос](#резервное-копирование-восстановление-и-перенос) и никогда не
+запускайте два Control Plane на одних данных. Для обновления сначала сделайте export, затем задайте новый
+`KINDEV_IMAGE_TAG` и выполните `docker compose --profile https pull && docker compose --profile https up -d`.
+Миграции применяются при запуске. Затем обновите runners.
+
+### Чек-лист
+
+- [ ] Профиль Compose HTTPS с настоящим `DOMAIN`, задан `KINDEV_PUBLIC_URL`, порт обычного HTTP не публичный.
+- [ ] Ключ шифрования скопирован и хранится отдельно от резервных копий.
+- [ ] **Rulesets или branch protection на `main`/`master` в каждом репозитории**, обход только у вас, App в списке
+      нет. Страница Integrations не показывает предупреждения о защите.
+- [ ] GitHub App с минимальными правами, установлен только на репозитории платформы. Ветка `dev` есть, CI запускается
+      на pull requests.
+- [ ] Пользователь интеграции YouTrack с постоянным токеном, проекты связаны, пользователи сопоставлены.
+- [ ] Runners проверены по fingerprint, одобрены для конкретных проектов, CLI залогинены, `ai-runner test-network`
+      проходит.
+- [ ] Регулярный `ai-platform export`.
 
 ## Docker Compose
 

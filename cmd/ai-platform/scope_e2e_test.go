@@ -138,7 +138,7 @@ func TestChangesBeyondTheScopeStopTheRunningStep(t *testing.T) {
 	e2eSlot(t)
 	cp, r := scopeEnv(t, 50*time.Millisecond)
 	task := cp.mockTask(t, "p1", "scope")
-	d := cp.waitTask(t, task, 30*time.Second, heldForApproval)
+	d := cp.waitTask(t, task, heldForApproval)
 	st := d.Execution.Steps[0]
 	if len(st.Attempts) != 1 || st.Attempts[0].State != workflow.AttemptCancelled {
 		t.Fatalf("attempts %+v", st.Attempts)
@@ -148,7 +148,7 @@ func TestChangesBeyondTheScopeStopTheRunningStep(t *testing.T) {
 		t.Fatalf("approval %+v", req.Approval)
 	}
 	// The process was stopped without being released: its end reaches the Control Plane as a stale report.
-	waitFor(t, "the first attempt's end", 10*time.Second, func() (bool, string) {
+	waitFor(t, "the first attempt's end", func() (bool, string) {
 		var n int
 		_ = cp.inst.DB.QueryRowContext(t.Context(), `SELECT count(*) FROM runner_attempt_events WHERE step_id = ? AND
 			fence = 1 AND kind IN ('execution.completed', 'execution.failed') AND outcome = 'rejected'`, st.ID).Scan(&n)
@@ -165,7 +165,7 @@ func TestChangesBeyondTheScopeStopTheRunningStep(t *testing.T) {
 		Revision: req.Revision, PlanHash: req.PlanHash}); err != nil {
 		t.Fatal(err)
 	}
-	d = cp.waitTask(t, task, 30*time.Second, succeeded)
+	d = cp.waitTask(t, task, succeeded)
 	if a := d.Execution.Steps[0].Attempts; len(a) != 2 || a[1].State != workflow.AttemptSucceeded {
 		t.Fatalf("attempts %+v", a)
 	}
@@ -183,8 +183,8 @@ func TestChangesBeyondTheScopeAtTheEndOfTheStep(t *testing.T) {
 	e2eSlot(t)
 	cp, r := scopeEnv(t, 0)
 	task := cp.mockTask(t, "p1", "scope")
-	cp.waitTask(t, task, 30*time.Second, stepRunning)
-	waitFor(t, "the agent's files", 10*time.Second, func() (bool, string) {
+	cp.waitTask(t, task, stepRunning)
+	waitFor(t, "the agent's files", func() (bool, string) {
 		m, _ := filepath.Glob(filepath.Join(r.dir, "workspaces", "acme", "app", "*", "outside.txt"))
 		return len(m) == 1, ""
 	})
@@ -194,7 +194,7 @@ func TestChangesBeyondTheScopeAtTheEndOfTheStep(t *testing.T) {
 		t.Fatalf("step stopped before its end: %s", describe(d))
 	}
 	release(t, attemptDir(r, d))
-	cp.waitTask(t, task, 30*time.Second, heldForApproval)
+	cp.waitTask(t, task, heldForApproval)
 	req := cp.scopeRequest(t, task)
 	if !slices.Equal(req.Paths, []string{"outside.txt"}) {
 		t.Fatalf("approval %+v", req.Approval)
@@ -203,5 +203,5 @@ func TestChangesBeyondTheScopeAtTheEndOfTheStep(t *testing.T) {
 		Revision: req.Revision, PlanHash: req.PlanHash, Comment: "no"}); err != nil {
 		t.Fatal(err)
 	}
-	cp.waitTask(t, task, 30*time.Second, func(d workflowapp.TaskDetail) bool { return d.Task.State == workflow.TaskCancelled })
+	cp.waitTask(t, task, func(d workflowapp.TaskDetail) bool { return d.Task.State == workflow.TaskCancelled })
 }

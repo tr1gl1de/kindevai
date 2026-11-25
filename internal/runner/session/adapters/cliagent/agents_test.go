@@ -333,3 +333,36 @@ func TestExecStopsTestsThatRunTooLong(t *testing.T) {
 		t.Fatalf("tests %+v %q %v", end, out, ok)
 	}
 }
+
+// KIN-35: the test command goes to a file outside the worktree; the follower reports the run (a run that left no
+// result is a failed one) and nothing for an attempt without a test command.
+func TestPrepareWritesTheTestCommandAndTheResultIsRead(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	dir := t.TempDir()
+	g := agentsFor(f, Claude{})
+	req := domain.AgentRequest{Agent: domain.AgentClaude, Workdir: f.workdir, Timeout: time.Minute, TestCommand: "make test",
+		TestsTimeout: time.Minute}
+	cmd, err := g.Prepare(dir, req, "x", domain.PermissionsSafe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(cmd.TestsFile); string(b) != "make test" || filepath.Dir(cmd.TestsFile) != dir || cmd.TestsTimeout != time.Minute {
+		t.Fatalf("tests file %q: %q", cmd.TestsFile, b)
+	}
+	if r := readTestsRun(dir); r == nil || r.Code != -1 || r.Command != "make test" {
+		t.Fatalf("unfinished run %+v", r)
+	}
+	if err := writeJSON(dir, TestsEndFile, TestsEnd{Code: 0, DurationMS: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, TestsOutputFile), []byte(strings.Repeat("y", 2*MaxTestsTail)+"PASS"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := readTestsRun(dir); r == nil || r.Code != 0 || r.DurationMS != 7 || len(r.Output) != MaxTestsTail || !strings.HasSuffix(r.Output, "PASS") {
+		t.Fatalf("run %+v", r)
+	}
+	if r := readTestsRun(t.TempDir()); r != nil {
+		t.Fatalf("run without a test command %+v", r)
+	}
+}

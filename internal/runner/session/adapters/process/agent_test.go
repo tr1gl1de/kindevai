@@ -19,6 +19,12 @@ import (
 // runs the fake CLI replaying a recorded stream into the attempt's output files.
 func agentRun(t *testing.T, stream string, env ...string) (*cliagent.Agents, string, app.AgentCommand) {
 	t.Helper()
+	return agentRunWith(t, stream, "", env...)
+}
+
+// agentRunWith is agentRun with the repository's test command (KIN-35).
+func agentRunWith(t *testing.T, stream, testCommand string, env ...string) (*cliagent.Agents, string, app.AgentCommand) {
+	t.Helper()
 	root := t.TempDir()
 	state, work, home, out := filepath.Join(root, "S1-1"), filepath.Join(root, "ws"), filepath.Join(root, "home"),
 		filepath.Join(root, "out")
@@ -32,8 +38,8 @@ func agentRun(t *testing.T, stream string, env ...string) (*cliagent.Agents, str
 	g := &cliagent.Agents{Poll: 5 * time.Millisecond, Save: time.Millisecond, Adapters: map[string]*cliagent.Adapter{
 		domain.AgentClaude: {Dialect: cliagent.Claude{}, Config: cliagent.Config{Binary: bin, Home: home, Path: "/usr/bin:/bin",
 			Env: append([]string{"FAKE_OUT=" + out, "FAKE_STREAM=" + st}, env...)}}}}
-	cmd, err := g.Prepare(state, domain.AgentRequest{Agent: domain.AgentClaude, Workdir: work, Timeout: time.Minute},
-		"Fix the bug", domain.PermissionsSafe)
+	cmd, err := g.Prepare(state, domain.AgentRequest{Agent: domain.AgentClaude, Workdir: work, Timeout: time.Minute,
+		TestCommand: testCommand}, "Fix the bug", domain.PermissionsSafe)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,5 +161,27 @@ func TestRealCLISmokeThroughAgentExec(t *testing.T) {
 	t.Logf("session %s, version %s, usage %+v, result %q", res.Session, res.Version, res.Usage, res.Text)
 	if res.Session == "" || res.Version == "" || res.Usage.OutputTokens == 0 {
 		t.Fatalf("incomplete report %+v", res)
+	}
+}
+
+// KIN-35: the launcher passes the test command to agent-exec, which runs it in the worktree after the CLI; the
+// follower's result carries the runner-measured exit code and output.
+func TestLaunchRunsTheTestsAfterTheCLI(t *testing.T) {
+	t.Parallel()
+	g, state, cmd := agentRunWith(t, "../cliagent/testdata/claude/read.jsonl", "echo testing in $(basename $PWD); exit 4")
+	l := launcher(t)
+	out := &syncBuf{}
+	p, err := l.Launch(t.Context(), app.LaunchSpec{Dir: state, Workdir: cmd.Dir, Attempt: 1, Stdout: out, Stderr: out, Agent: &cmd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Signal(true) })
+	fl, err := g.Follow(domain.AgentClaude, state, app.AgentFollow{Stdout: out})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := fl.Finish(p.Wait(), "")
+	if res.Failure != nil || res.Tests == nil || res.Tests.Code != 4 || !strings.Contains(res.Tests.Output, "testing in ws") {
+		t.Fatalf("result %+v tests %+v (wrapper output %q)", res.Failure, res.Tests, out.String())
 	}
 }

@@ -32,10 +32,11 @@ func translate(err error) error {
 // Snapshot converts a workflow plan to the approvals view of it.
 func Snapshot(p wf.Plan) domain.PlanSnapshot {
 	out := domain.PlanSnapshot{Summary: p.Summary, Risk: domain.Risk(p.Risk), MaxParallel: p.MaxParallel,
-		Steps: make([]domain.StepSnapshot, 0, len(p.Steps))}
+		Steps: make([]domain.StepSnapshot, 0, len(p.Steps)), Tests: p.Tests, Contracts: p.Contracts,
+		Migrations: p.Migrations, Docs: p.Docs}
 	for _, s := range p.Steps {
 		out.Steps = append(out.Steps, domain.StepSnapshot{Key: s.Key, Title: s.Title, Repository: s.Repository,
-			Scope: s.Scope, DependsOn: s.DependsOn, Capabilities: s.Capabilities})
+			Role: s.Role, Scope: s.Scope, DependsOn: s.DependsOn, Capabilities: s.Capabilities})
 	}
 	return out
 }

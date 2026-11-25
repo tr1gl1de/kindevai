@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
-import type { Approval, AttemptEventPage, AttemptWorkspace, MockScenario, TaskDetail, TaskList, TaskState } from "../../api/types";
+import type { Approval, AttemptEventPage, AttemptWorkspace, MockScenario, RevisionDiff, TaskDetail, TaskList, TaskState } from "../../api/types";
 
 export interface TaskFilter {
   projectId: string; // "" = every visible project
@@ -13,6 +13,7 @@ const keys = {
   list: (f: TaskFilter) => ["tasks", "list", f.projectId, f.state] as const,
   one: (id: string) => ["tasks", "one", id] as const,
   approvals: (id: string) => ["approvals", "task", id] as const,
+  revision: (id: string, n: number, base: number) => ["tasks", "revision", id, n, base] as const,
   workspace: (id: string, step: string, fence: number) => ["tasks", "workspace", id, step, fence] as const,
 };
 
@@ -48,6 +49,19 @@ export function useTask(id: string) {
     queryKey: keys.one(id),
     queryFn: ({ signal }) => api<TaskDetail>("GET", path(id), undefined, signal),
     refetchInterval: (q) => (live(q.state.data) ? LIVE_REFRESH_MS : false),
+  });
+}
+
+/** The page of plan revision n of a task and its diff (KIN-97). */
+export const revisionPath = (taskId: string, n: number) => `/tasks/${encodeURIComponent(taskId)}/plan/revisions/${n}`;
+
+/** Plan revision n of a task compared with revision base (0 = the previous one). */
+export function useRevisionDiff(id: string, n: number, base: number) {
+  const qs = base > 0 ? `?base=${base}` : "";
+  return useQuery({
+    queryKey: keys.revision(id, n, base),
+    enabled: n > 0,
+    queryFn: ({ signal }) => api<RevisionDiff>("GET", `${path(id)}/revisions/${n}${qs}`, undefined, signal),
   });
 }
 

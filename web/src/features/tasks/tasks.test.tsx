@@ -166,6 +166,7 @@ describe("task detail", () => {
     const user = userEvent.setup();
     expect(await screen.findByRole("heading", { level: 1, name: "Add login" })).toBeInTheDocument();
     expect(screen.getByText("Login API and page")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Revision details" })).toHaveAttribute("href", "/tasks/t1/plan/revisions/1");
     expect(screen.getByRole("heading", { name: "Stage 1" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Stage 2" })).toBeInTheDocument();
     expect(screen.getByText(/After: backend/)).toBeInTheDocument();

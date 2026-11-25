@@ -125,14 +125,17 @@ type GitArtifact struct {
 	Error       string
 	// CI on HeadSHA and the merge into PRBase (KIN-37, ci.go): CIHeadSHA is the head CI was last reported for,
 	// CIDetail the failed checks; MergeSHA the merge commit, MergeError why the gate holds or refused it.
-	CI         CIState
-	CIHeadSHA  string
-	CIDetail   string
-	Merge      MergeState
-	MergeSHA   string
-	MergeError string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	CI        CIState
+	CIHeadSHA string
+	CIDetail  string
+	// NoChecksSince is when CI first found no check run at all on CIHeadSHA (a repository without CI, KIN-105);
+	// zero once a check run appeared, the head moved or the Owner resumed the task.
+	NoChecksSince time.Time
+	Merge         MergeState
+	MergeSHA      string
+	MergeError    string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 // NewGitArtifact records step s's publication in e's change set, its pull request still to be opened.

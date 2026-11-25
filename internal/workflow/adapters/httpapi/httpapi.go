@@ -5,6 +5,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -368,14 +369,18 @@ type PullRequestView struct {
 	Error      string `json:"error,omitempty"`
 	// KIN-37: CI on the head (pending | passed | failed, "" before a result) with the failed checks, the step's CI
 	// fix rounds of MaxCIFixRounds, and the merge into the base (waiting | merged | failed) with why.
-	CI          string    `json:"ci,omitempty"`
-	CIDetail    string    `json:"ciDetail,omitempty"`
-	CIRound     int       `json:"ciRound"`
-	CIMaxRounds int       `json:"ciMaxRounds"`
-	Merge       string    `json:"merge,omitempty"`
-	MergeSHA    string    `json:"mergeSha,omitempty"`
-	MergeError  string    `json:"mergeError,omitempty"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	CI          string `json:"ci,omitempty"`
+	CIDetail    string `json:"ciDetail,omitempty"`
+	CIRound     int    `json:"ciRound"`
+	CIMaxRounds int    `json:"ciMaxRounds"`
+	// CINoChecksSince: the head has had no check run at all since then (a repository without CI, KIN-105); the task
+	// is blocked after CINoChecksBlockMinutes without one.
+	CINoChecksSince        *time.Time `json:"ciNoChecksSince,omitempty"`
+	CINoChecksBlockMinutes int        `json:"ciNoChecksBlockMinutes"`
+	Merge                  string     `json:"merge,omitempty"`
+	MergeSHA               string     `json:"mergeSha,omitempty"`
+	MergeError             string     `json:"mergeError,omitempty"`
+	UpdatedAt              time.Time  `json:"updatedAt"`
 }
 
 func pullRequestViews(arts []domain.GitArtifact, e *domain.Execution) []PullRequestView {
@@ -384,9 +389,11 @@ func pullRequestViews(arts []domain.GitArtifact, e *domain.Execution) []PullRequ
 		v := PullRequestView{Repository: a.Repository, Branch: a.Branch, HeadSHA: a.HeadSHA, State: string(a.State),
 			Number: a.PRNumber, Base: a.PRBase, Error: a.Error, CI: string(a.CI), CIDetail: a.CIDetail,
 			CIMaxRounds: domain.MaxCIFixRounds, Merge: string(a.Merge), MergeSHA: a.MergeSHA, MergeError: a.MergeError,
-			UpdatedAt: a.UpdatedAt}
+			CINoChecksBlockMinutes: int(domain.NoCIBlockAfter / time.Minute), UpdatedAt: a.UpdatedAt}
 		if a.CIHeadSHA != a.HeadSHA { // a result of an older head is no result of this one
 			v.CI, v.CIDetail = "", ""
+		} else if since := a.NoChecksSince; !since.IsZero() && a.CI == domain.CIPending {
+			v.CINoChecksSince = &since
 		}
 		if e != nil && e.ID == a.ExecutionID {
 			if s := e.Step(a.StepID); s != nil {
@@ -509,6 +516,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/tasks/{id}/plan", h.plan)
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", h.cancel)
 	mux.HandleFunc("POST /api/tasks/{id}/retry", h.retry)
+	mux.HandleFunc("POST /api/tasks/{id}/resume", h.resumeCI)
+	mux.HandleFunc("POST /api/tasks/{id}/retry-merge", h.retryMerge)
 	mux.HandleFunc("GET /api/tasks/{id}/steps/{step}/attempts/{fence}/events", h.events)
 	mux.HandleFunc("GET /api/tasks/{id}/steps/{step}/attempts/{fence}/workspace", h.workspace)
 	h.registerDiscussion(mux)
@@ -710,6 +719,29 @@ func (h *Handler) retry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := h.Service.RetryTask(r.Context(), p, r.PathValue("id")); err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.detail(w, r, p, r.PathValue("id"), http.StatusOK)
+}
+
+// resumeCI resumes a task BLOCKED on CI (KIN-105).
+func (h *Handler) resumeCI(w http.ResponseWriter, r *http.Request) {
+	h.taskAction(w, r, h.Service.ResumeCIAs)
+}
+
+// retryMerge retries the refused merge of a task BLOCKED on CI (KIN-105).
+func (h *Handler) retryMerge(w http.ResponseWriter, r *http.Request) {
+	h.taskAction(w, r, h.Service.RetryMergeAs)
+}
+
+func (h *Handler) taskAction(w http.ResponseWriter, r *http.Request,
+	act func(context.Context, auth.Principal, string) (domain.Task, error)) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	if _, err := act(r.Context(), p, r.PathValue("id")); err != nil {
 		h.fail(w, err)
 		return
 	}

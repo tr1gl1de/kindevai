@@ -39,6 +39,11 @@ func TestCIAndMergeResultsAreTranslated(t *testing.T) {
 			t.Errorf("%s → %+v %v", state, st, err)
 		}
 	}
+	// KIN-105: a commit without any check run is pending with NoChecks (a repository without CI).
+	st, err := workflowCI{gh: &fakeCIGitHub{state: integrations.CIStateNone}}.CIStatus(t.Context(), "p", "r", "h")
+	if err != nil || st.State != workflow.CIPending || !st.NoChecks {
+		t.Errorf("none → %+v %v", st, err)
+	}
 	for _, c := range []struct {
 		err                         error
 		permanent, protected, moved bool

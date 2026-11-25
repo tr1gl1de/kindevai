@@ -15,7 +15,7 @@ func TestCombineChecks(t *testing.T) {
 		state  string
 		detail string
 	}{
-		"none":    {nil, CIStatePending, ""},
+		"none":    {nil, CIStateNone, ""},
 		"running": {[]CheckRun{done("lint", "success"), {Name: "test", Status: "in_progress"}}, CIStatePending, ""},
 		"green":   {[]CheckRun{done("lint", "success"), done("docs", "skipped"), done("x", "neutral")}, CIStatePassed, ""},
 		"red":     {[]CheckRun{done("lint", "success"), done("test", "failure"), {Name: "e2e", Status: "queued"}}, CIStateFailed, "test (failure)"},
@@ -25,6 +25,10 @@ func TestCombineChecks(t *testing.T) {
 		if state != tc.state || !strings.Contains(detail, tc.detail) {
 			t.Errorf("%s: %s %q", name, state, detail)
 		}
+	}
+	// KIN-105: no check run read while GitHub reports some is pending, not "no CI".
+	if st, _ := CombineChecks(nil, 3); st != CIStatePending {
+		t.Errorf("unread runs: %s", st)
 	}
 	// Review: a partial page of green runs is never green; a failure on it still fails.
 	green := []CheckRun{done("lint", "success")}

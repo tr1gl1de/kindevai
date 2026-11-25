@@ -206,6 +206,12 @@ ai-runner fingerprint                                    # compare with the runn
   merge commit with the expected head SHA (a moved head, a conflict or a protected base is never merged: the task is
   BLOCKED with the reason); a multi-repository change set merges in order and stops at the first failure. When every
   PR is merged the task is COMPLETED. `main`/`master` are never a merge target.
+- CI-blocked tasks and repositories without CI (KIN-105): a repository without CI is never merged automatically — a
+  head with no check run at all shows "No CI checks", and after 30 minutes without one the task is BLOCKED (reason
+  `ci`). On a task blocked on CI the Owner or a project admin can **Resume** (`POST /api/tasks/{id}/resume`: CI is
+  checked at once, red CI blocks again, a repository without CI gets another 30 minutes) or **Retry merge**
+  (`POST /api/tasks/{id}/retry-merge`, after a refused merge). Neither skips the merge gate. Legacy commit statuses
+  are not read: CI must report check runs (GitHub Actions does).
 - Plan discussion API (KIN-43; the chat UI is KIN-44): the Owner and project admins write about the current plan
   revision of a task awaiting approval or ready (`POST /api/tasks/{id}/discussion/messages`, 202; members and viewers
   read `GET /api/tasks/{id}/discussion`). Each message is one turn run by the planner role's CLI like a planner

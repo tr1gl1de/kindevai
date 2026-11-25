@@ -647,15 +647,16 @@ func attemptJSON(a domain.Attempt) (sql.NullString, string, error) {
 func (r *Repository) SaveArtifact(ctx context.Context, a domain.GitArtifact) error {
 	_, err := db.Conn(ctx, r.db).ExecContext(ctx, `INSERT INTO change_set_artifacts(execution_id, repository, branch,
 		task_id, step_id, base_sha, head_sha, state, pr_number, pr_url, pr_base, error, ci_state, ci_head_sha, ci_detail,
-		merge_state, merge_sha, merge_error, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ci_no_checks_since, merge_state, merge_sha, merge_error, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(execution_id, repository, branch) DO UPDATE SET step_id = excluded.step_id,
 		base_sha = excluded.base_sha, head_sha = excluded.head_sha, state = excluded.state, pr_number = excluded.pr_number,
 		pr_url = excluded.pr_url, pr_base = excluded.pr_base, error = excluded.error, ci_state = excluded.ci_state,
-		ci_head_sha = excluded.ci_head_sha, ci_detail = excluded.ci_detail, merge_state = excluded.merge_state,
+		ci_head_sha = excluded.ci_head_sha, ci_detail = excluded.ci_detail,
+		ci_no_checks_since = excluded.ci_no_checks_since, merge_state = excluded.merge_state,
 		merge_sha = excluded.merge_sha, merge_error = excluded.merge_error, updated_at = excluded.updated_at`,
 		a.ExecutionID, a.Repository, a.Branch, a.TaskID, a.StepID, a.BaseSHA, a.HeadSHA, a.State, max(a.PRNumber, 0),
-		a.PRURL, a.PRBase, a.Error, a.CI, a.CIHeadSHA, a.CIDetail, a.Merge, a.MergeSHA, a.MergeError, ts(a.CreatedAt),
+		a.PRURL, a.PRBase, a.Error, a.CI, a.CIHeadSHA, a.CIDetail, optTS(a.NoChecksSince), a.Merge, a.MergeSHA, a.MergeError, ts(a.CreatedAt),
 		ts(a.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("saving the change set artifact: %w", err)
@@ -664,13 +665,14 @@ func (r *Repository) SaveArtifact(ctx context.Context, a domain.GitArtifact) err
 }
 
 const artifactCols = `execution_id, repository, branch, task_id, step_id, base_sha, head_sha, state, pr_number, pr_url,
-	pr_base, error, ci_state, ci_head_sha, ci_detail, merge_state, merge_sha, merge_error, created_at, updated_at`
+	pr_base, error, ci_state, ci_head_sha, ci_detail, ci_no_checks_since, merge_state, merge_sha, merge_error, created_at,
+	updated_at`
 
 func scanArtifact(row scanner) (domain.GitArtifact, error) {
 	var a domain.GitArtifact
-	var created, updated string
+	var created, updated, noChecks string
 	if err := row.Scan(&a.ExecutionID, &a.Repository, &a.Branch, &a.TaskID, &a.StepID, &a.BaseSHA, &a.HeadSHA, &a.State,
-		&a.PRNumber, &a.PRURL, &a.PRBase, &a.Error, &a.CI, &a.CIHeadSHA, &a.CIDetail, &a.Merge, &a.MergeSHA, &a.MergeError,
+		&a.PRNumber, &a.PRURL, &a.PRBase, &a.Error, &a.CI, &a.CIHeadSHA, &a.CIDetail, &noChecks, &a.Merge, &a.MergeSHA, &a.MergeError,
 		&created, &updated); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return a, domain.ErrNotFound
@@ -681,8 +683,21 @@ func scanArtifact(row scanner) (domain.GitArtifact, error) {
 	if a.CreatedAt, err = parseTS(created); err != nil {
 		return a, err
 	}
+	if noChecks != "" {
+		if a.NoChecksSince, err = parseTS(noChecks); err != nil {
+			return a, err
+		}
+	}
 	a.UpdatedAt, err = parseTS(updated)
 	return a, err
+}
+
+// optTS stores a zero time as ”.
+func optTS(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return ts(t)
 }
 
 // Artifact implements app.ChangeSets.

@@ -108,6 +108,22 @@ func TestPullRequestsViewShowsCIAndMerge(t *testing.T) {
 	if v[1].CI != "passed" || v[1].Merge != "merged" || v[1].MergeSHA != "m1" || v[1].CIRound != 0 {
 		t.Fatalf("second %+v", v[1])
 	}
+	if v[0].CINoChecksSince != nil || v[1].CINoChecksSince != nil {
+		t.Fatalf("no-checks window shown for heads with checks: %+v", v)
+	}
+}
+
+// KIN-105: a head without any check run shows since when, and after how long the task is blocked without CI.
+func TestPullRequestsViewShowsAHeadWithoutCheckRuns(t *testing.T) {
+	t.Parallel()
+	since := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+	arts := []domain.GitArtifact{{ExecutionID: "e1", StepID: "s1", Repository: "acme/app", Branch: "feature/t1--s1",
+		HeadSHA: "h1", State: domain.ArtifactOpen, CI: domain.CIPending, CIHeadSHA: "h1", NoChecksSince: since}}
+	v := pullRequestViews(arts, nil)
+	if v[0].CI != "pending" || v[0].CINoChecksSince == nil || !v[0].CINoChecksSince.Equal(since) ||
+		v[0].CINoChecksBlockMinutes != 30 {
+		t.Fatalf("view %+v", v[0])
+	}
 }
 
 // KIN-38: the task page gets the YouTrack write-back (pending = "awaiting publication", failed with the error) and

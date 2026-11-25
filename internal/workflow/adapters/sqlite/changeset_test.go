@@ -118,8 +118,17 @@ func TestCIAndMergeStateAreStored(t *testing.T) {
 	if err := repo.SaveTask(ctx, &task); err != nil {
 		t.Fatal(err)
 	}
-	if v, err := repo.VerifyingArtifacts(ctx, 10); err != nil || len(v) != 1 || v[0].PRNumber != 7 {
+	if v, err := repo.VerifyingArtifacts(ctx, 10); err != nil || len(v) != 1 || v[0].PRNumber != 7 || !v[0].NoChecksSince.IsZero() {
 		t.Fatalf("verifying %+v %v", v, err)
+	}
+	// KIN-105: the start of the no-CI window is kept.
+	since := t0.Add(90 * time.Second)
+	a.RecordNoChecks("h1", since)
+	if err := repo.SaveArtifact(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := repo.Artifact(ctx, a.ExecutionID, a.Repository, a.Branch); err != nil || !got.NoChecksSince.Equal(since) {
+		t.Fatalf("no-checks window %+v %v", got.NoChecksSince, err)
 	}
 	a.Merged("m1", t0)
 	if err := repo.SaveArtifact(ctx, a); err != nil {

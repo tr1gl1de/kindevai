@@ -545,3 +545,29 @@ func TestTestNetworkRunsOnTheRunner(t *testing.T) {
 		t.Fatal("test on an inactive runner accepted")
 	}
 }
+
+// KIN-31: the scheduler gives strict steps only to runners with a verified sandbox; StrictFor says which runners'
+// effective profile for a project is strict with any CLI role.
+func TestStrictFor(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	strict := e.create(t, app.ProfileRequest{Name: "Strict", ProxyURL: "socks5://proxy.example:1080", Enforcement: "strict"})
+	for _, a := range [][2]string{{"runner", "r1"}, {"role", "codex"}} {
+		if err := e.svc.Assign(t.Context(), ownerP, a[0], a[1], strict.Profile.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	isStrict, err := e.svc.StrictFor(t.Context(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// r1: strict at the runner level; r2: strict only for the codex role, which still counts.
+	if !isStrict("r1") || !isStrict("r2") {
+		t.Fatalf("r1 %v r2 %v", isStrict("r1"), isStrict("r2"))
+	}
+	e2 := newEnv(t)
+	none, err := e2.svc.StrictFor(t.Context(), "p1")
+	if err != nil || none("r1") {
+		t.Fatalf("no profiles: strict %v, %v", none("r1"), err)
+	}
+}

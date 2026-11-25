@@ -34,24 +34,40 @@ type Launcher struct {
 
 var _ app.Launcher = (*Launcher)(nil)
 
-// Launch starts the attempt's process as the leader of a new process group.
-func (l *Launcher) Launch(_ context.Context, s app.LaunchSpec) (app.Process, error) {
+// Launch starts the attempt's process as the leader of a new process group. With a sandbox (strict egress,
+// KIN-31) the process is the sandbox's helper, and Launch returns only once the sandbox verified; otherwise the
+// helper is stopped and the error wraps app.ErrNetwork (the agent never ran).
+func (l *Launcher) Launch(ctx context.Context, s app.LaunchSpec) (app.Process, error) {
 	// Not CommandContext: the process must outlive this runner process (it is adopted after a restart) and is
 	// only stopped by an explicit cancel.
 	args := append(append([]string{}, l.Args...), "--scenario", s.Scenario, "--attempt", strconv.FormatInt(s.Attempt, 10),
 		"--state", s.Dir)
-	//nolint:noctx,gosec // must outlive ctx (adopted after a restart); fixed program, validated scenario
-	cmd := exec.Command(l.Program, args...)
-	cmd.Dir, cmd.Stdout, cmd.Stderr = s.Dir, s.Stdout, s.Stderr
+	dir := s.Dir
 	if s.Workdir != "" {
-		cmd.Dir = s.Workdir
+		dir = s.Workdir
 	}
-	cmd.Env = l.Env
-	if cmd.Env == nil {
-		cmd.Env = []string{}
+	env := l.Env
+	if env == nil {
+		env = []string{}
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var cmd *exec.Cmd
+	if s.Sandbox != nil {
+		c, err := s.Sandbox.Command(append([]string{l.Program}, args...), env, dir)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", app.ErrNetwork, err)
+		}
+		cmd = c
+	} else {
+		//nolint:noctx,gosec // must outlive ctx (adopted after a restart); fixed program, validated scenario
+		cmd = exec.Command(l.Program, args...)
+		cmd.Dir, cmd.Env = dir, env
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
+	cmd.Stdout, cmd.Stderr = s.Stdout, s.Stderr
 	if err := cmd.Start(); err != nil {
+		if s.Sandbox != nil {
+			return nil, fmt.Errorf("%w: starting the sandbox: %w", app.ErrNetwork, err)
+		}
 		return nil, fmt.Errorf("starting %s: %w", l.Program, err)
 	}
 	p := &attached{cmd: cmd, done: make(chan struct{})}
@@ -59,6 +75,13 @@ func (l *Launcher) Launch(_ context.Context, s app.LaunchSpec) (app.Process, err
 	// no start time and adoption falls back to the process group check (the executor logs a warning).
 	p.start, _ = StartTime(cmd.Process.Pid)
 	go p.wait()
+	if s.Sandbox != nil {
+		if err := s.Sandbox.Await(ctx); err != nil {
+			_ = p.Signal(true)
+			<-p.done
+			return nil, fmt.Errorf("%w: %w", app.ErrNetwork, err)
+		}
+	}
 	return p, nil
 }
 

@@ -143,6 +143,14 @@ func (r runnerExecutions) FailAttempt(ctx context.Context, runnerID, step string
 	return attemptError(r.wf.FailStepAt(ctx, step, runnerID, fence, reason, at))
 }
 
+var _ runnersapp.NetworkHolder = runnerExecutions{}
+
+// HoldAttemptForNetwork parks the step WAITING(network): the runner refused to run it without a verified strict
+// egress sandbox (KIN-31).
+func (r runnerExecutions) HoldAttemptForNetwork(ctx context.Context, runnerID, step string, fence int64, reason string, at time.Time) error {
+	return attemptError(r.wf.HoldStepForNetwork(ctx, step, runnerID, fence, reason, at))
+}
+
 func attemptError(err error) error {
 	switch {
 	case err == nil:

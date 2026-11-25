@@ -190,10 +190,16 @@ type Started struct {
 	Agent string `json:"agent,omitempty"`
 }
 
-// Failure is the body of execution.failed.
+// Failure is the body of execution.failed. Code classifies a failure the Control Plane treats specially.
 type Failure struct {
 	Reason string `json:"reason"`
+	Code   string `json:"code,omitempty"`
 }
+
+// FailureNetwork: the attempt did not run because its strict egress sandbox could not be built or verified
+// (KIN-31, fail-closed). The step waits for the network (WAITING, reason network) instead of using its retry
+// budget.
+const FailureNetwork = "network"
 
 // Reconcile is the payload of runner.reconcile: the Control Plane asks for the runner's process and spool state
 // whenever a session opens (a lost heartbeat means "unknown", never "stopped": reconcile before any retry).

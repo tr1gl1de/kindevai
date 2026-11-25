@@ -482,6 +482,30 @@ func (s *Service) Effective(ctx context.Context, a auth.Principal, runnerID, pro
 	return st.resolve(runnerID, projectID, role), nil
 }
 
+// StrictFor returns, for steps of projectID, whether a runner's effective profile is strict with any CLI role
+// (KIN-31): such steps go only to runners that verified their strict egress sandbox. Internal (the scheduler), no
+// principal.
+func (s *Service) StrictFor(ctx context.Context, projectID string) (func(runnerID string) bool, error) {
+	st, err := s.load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	roles := []string{""}
+	for sc := range st.assigned {
+		if sc.Level == domain.LevelRole {
+			roles = append(roles, sc.Target)
+		}
+	}
+	return func(runnerID string) bool {
+		for _, role := range roles {
+			if st.resolve(runnerID, projectID, role).Enforcement == domain.EnforcementStrict {
+				return true
+			}
+		}
+		return false
+	}, nil
+}
+
 func (s *Service) endpoints(ctx context.Context) []protocol.NetworkEndpoint {
 	yt := ""
 	if s.YouTrackURL != nil {

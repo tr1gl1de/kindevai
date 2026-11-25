@@ -37,6 +37,8 @@ type Probe struct {
 	Run          func(ctx context.Context, path string, args ...string) ([]byte, error)
 	IsWSL        func() bool
 	Stat         func(path string) (diskusage.Usage, error)
+	// StrictEgress reports whether the strict egress sandbox verified on this machine (KIN-31); nil: false.
+	StrictEgress func(ctx context.Context) bool
 }
 
 // New probes this machine; dataDir is runner-data (repos, worktrees, sessions live on its filesystem).
@@ -99,6 +101,9 @@ func versionLine(out []byte) string {
 // (it exists), with an empty version.
 func (p *Probe) Capabilities(ctx context.Context) protocol.Capabilities {
 	c := protocol.Capabilities{OS: p.GOOS, Arch: p.GOARCH, WSL: p.IsWSL(), Tools: []protocol.Tool{}}
+	if p.StrictEgress != nil {
+		c.StrictEgress = p.StrictEgress(ctx)
+	}
 	for _, name := range Tools {
 		path, err := p.LookPath(name)
 		if err != nil {

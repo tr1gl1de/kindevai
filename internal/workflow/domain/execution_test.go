@@ -393,7 +393,11 @@ func TestExecutionInvariantsUnderRandomOperations(t *testing.T) {
 			case 7:
 				_ = e.ResumeStep(s.ID, now)
 			case 8:
-				_ = e.HoldForApproval(s.ID, s.RunnerID, fence, "scope", now)
+				if rng.IntN(2) == 0 {
+					_ = e.HoldForApproval(s.ID, s.RunnerID, fence, "scope", now)
+				} else {
+					_ = e.HoldForNetwork(s.ID, s.RunnerID, fence, "sandbox", now)
+				}
 			case 9:
 				e.ReleaseRunner(r, "runner disabled", now, 2)
 			}
@@ -584,5 +588,44 @@ func TestReleaseRunnerFailsAnUnknownAttemptAndRespectsTheBudget(t *testing.T) {
 	}
 	if s := e.StepByKey("backend"); s.State != StepFailed || s.Attempts[0].State != AttemptFailed || e.State != ExecutionFailed {
 		t.Fatalf("step = %+v, execution %s", s, e.State)
+	}
+}
+
+// KIN-31: a runner that could not build or verify the strict egress sandbox parks the step WAITING(network): the
+// attempt is cancelled (no retry budget), the claim released, and the scheduler may retry after the delay.
+func TestHoldForNetworkWaitsWithoutUsingTheRetryBudget(t *testing.T) {
+	t.Parallel()
+	e := newExecution(t, 1)
+	id := e.StepByKey("backend").ID
+	for i := range 3 { // more holds than the budget of 1
+		l, err := e.Claim(id, "r1", t0, ttl)
+		if err != nil {
+			t.Fatalf("claim %d: %v", i, err)
+		}
+		if err := e.HoldForNetwork(id, "r2", l.Fence, "x", t0); !errors.Is(err, ErrStaleFence) {
+			t.Fatalf("hold by a runner without the claim = %v", err)
+		}
+		if err := e.HoldForNetwork(id, "r1", l.Fence, "strict egress sandbox not verified", t0); err != nil {
+			t.Fatal(err)
+		}
+		s := e.StepByKey("backend")
+		if !s.WaitingForNetwork() || s.RunnerID != "" || s.Attempts[len(s.Attempts)-1].State != AttemptCancelled {
+			t.Fatalf("held step = %+v", s)
+		}
+		if s.NetworkRetryDue(t0.Add(NetworkRetryDelay - time.Second)) {
+			t.Fatal("retry due before the delay")
+		}
+		if !s.NetworkRetryDue(t0.Add(NetworkRetryDelay)) {
+			t.Fatal("retry not due after the delay")
+		}
+		if err := e.ResumeStep(id, t0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if e.State != ExecutionRunning {
+		t.Fatalf("network holds failed the execution: %s", e.State)
+	}
+	if (&Step{State: StepWaiting, WaitReason: WaitApproval}).NetworkRetryDue(t0.Add(time.Hour)) {
+		t.Fatal("a step waiting for approval is not a network retry")
 	}
 }

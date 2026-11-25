@@ -67,6 +67,22 @@ jobs:
           path: coverage.out
           retention-days: 14
 
+  # Integration tests (//go:build integration), e.g. the strict egress sandbox (KIN-31): real user, network and
+  # mount namespaces with nftables, so the job enables unprivileged user namespaces and installs nft.
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - name: Enable unprivileged user namespaces and install nftables
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo apt-get update -q && sudo apt-get install -y -q nftables
+      - run: make test-integration
+
   vuln:
     runs-on: ubuntu-latest
     timeout-minutes: 15

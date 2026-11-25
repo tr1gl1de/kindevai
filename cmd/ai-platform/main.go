@@ -161,6 +161,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	netSvc, netHTTP := newNetwork(inst, audit, integ, channel, logger) // KIN-30 network profiles
 	attachCheckoutSource(channel, integ.GitHub)                        // KIN-29 worktree base + repository token
 	attachNetwork(gateway, netSvc, logger)
+	wireStrictEgress(apv.Workflow, netSvc.StrictFor) // KIN-31 strict steps only on verified runners
 	modules = append(modules, netHTTP)
 	maint, err := newMaintenance(ctx, inst, audit, apv.Workflow, logger) // KIN-41 maintenance mode
 	if err != nil {

@@ -26,6 +26,7 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/adapters/spool"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/app"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/domain"
+	"github.com/tr1gl1de/kindevai/internal/runner/egress/adapters/nsbox"
 	"github.com/tr1gl1de/kindevai/internal/runner/platform/datadir"
 	"github.com/tr1gl1de/kindevai/internal/runner/platform/secfile"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/adapters/journal"
@@ -133,6 +134,11 @@ func run(ctx context.Context, args []string, e *env) error {
 		return daemon(ctx, args[1:], e)
 	case "mock-agent": // the MockAgentAdapter's child process (KIN-23); started by the daemon, not by users
 		if code := mockagent.Main(args[1:], e.stdout, e.stderr); code != 0 {
+			return exitError(code)
+		}
+		return nil
+	case "sandbox-exec": // the strict egress sandbox's helper (KIN-31); started by the daemon, not by users
+		if code := nsbox.Main(args[1:], e.stderr); code != 0 {
 			return exitError(code)
 		}
 		return nil
@@ -334,8 +340,12 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	agent := networkAgent(d, logger) // KIN-30 network profiles and Test Network
 	agent.Context = ctx
 	ch.Commands = withNetwork(agent, ch.Commands)
-	rep := &app.Reporter{Probe: probe.New(d.Path())} // KIN-20 heartbeat, capabilities, storage
-	if *measureSpace {                               // KIN-55: only with the operator's explicit permission
+	strict := strictEgress(d, exe, logger) // KIN-31: strict profiles run only in a verified sandbox
+	x.Egress = confiner{strict}
+	pr := probe.New(d.Path())
+	pr.StrictEgress = func(ctx context.Context) bool { ok, _ := strict.Supported(ctx); return ok }
+	rep := &app.Reporter{Probe: pr} // KIN-20 heartbeat, capabilities, storage
+	if *measureSpace {              // KIN-55: only with the operator's explicit permission
 		rep.Meter = probe.NewSpaceMeter(d.Path()).Measure
 	}
 	conn := &app.Connector{Dialer: controlplane.New(), Logger: logger, Handlers: []app.LinkHandler{ch, rep, networkLink{agent}},

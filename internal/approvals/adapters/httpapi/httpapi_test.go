@@ -31,6 +31,7 @@ var people = map[string]auth.Principal{
 	"owner": {UserID: "u-owner", Login: "owner", Owner: true},
 	"alice": {UserID: "u-alice", Login: "alice"}, // project admin of p1
 	"bob":   {UserID: "u-bob", Login: "bob"},     // member of p1
+	"carol": {UserID: "u-carol", Login: "carol"}, // no projects
 }
 
 type projects struct{}
@@ -363,5 +364,88 @@ func TestScopeViolationStopsTheStep(t *testing.T) {
 	got, _ = s.wf.Execution(ctx, ex.ID)
 	if got.Step(step).State != wf.StepReady {
 		t.Fatalf("step after approval = %s", got.Step(step).State)
+	}
+}
+
+// KIN-97: GET /api/tasks/{id}/revisions/{n} returns any revision with the previous one (or ?base=) and the
+// structured diff, for every role that sees the task; another project's task or a bad revision is 404.
+func TestRevisionDiffAPI(t *testing.T) {
+	t.Parallel()
+	s := newStack(t)
+	ctx := t.Context()
+	task, err := s.wf.CreateTask(ctx, "p1", "Add billing tables", "", "u-bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.wf.StartAnalysis(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	p1 := plan(wf.RiskL0, "v1", "docs")
+	p1.Tests = []string{"go test ./..."}
+	if _, err := s.wf.SubmitPlan(ctx, task.ID, p1, "planner"); err != nil {
+		t.Fatal(err)
+	}
+	p2 := plan(wf.RiskL0, "v2", "docs", "README.md")
+	p2.Tests = []string{"go test ./...", "make lint"}
+	if _, err := s.wf.SubmitPlan(ctx, task.ID, p2, "chat"); err != nil {
+		t.Fatal(err)
+	}
+	url := "/api/tasks/" + task.ID + "/revisions/"
+
+	for _, u := range []string{"owner", "alice", "bob"} {
+		w, body := s.do(t, u, http.MethodGet, url+"2", nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", u, w.Code, w.Body)
+		}
+		rev, prev := body["revision"].(map[string]any), body["previous"].(map[string]any)
+		if rev["number"].(float64) != 2 || prev["number"].(float64) != 1 || body["task"].(map[string]any)["planRevision"].(float64) != 2 {
+			t.Fatalf("%s: body = %v", u, body)
+		}
+		if tests := rev["plan"].(map[string]any)["tests"].([]any); len(tests) != 2 {
+			t.Fatalf("%s: plan tests = %v", u, tests)
+		}
+	}
+	_, body := s.do(t, "bob", http.MethodGet, url+"2", nil)
+	changes := body["changes"].([]any)
+	byField := map[string]map[string]any{}
+	for _, c := range changes {
+		byField[c.(map[string]any)["field"].(string)] = c.(map[string]any)
+	}
+	if len(changes) != 3 || byField["summary"]["after"] != "v2" {
+		t.Fatalf("changes = %v", changes)
+	}
+	if added := byField["scope"]["added"].([]any); len(added) != 1 || added[0] != "README.md" || byField["scope"]["stepKey"] != "backend" {
+		t.Fatalf("scope change = %v", byField["scope"])
+	}
+	if added := byField["tests"]["added"].([]any); len(added) != 1 || added[0] != "make lint" {
+		t.Fatalf("tests change = %v", byField["tests"])
+	}
+	if removed := byField["tests"]["removed"].([]any); len(removed) != 0 {
+		t.Fatalf("tests removed = %v", removed)
+	}
+
+	// Revision 1 has no previous revision; ?base= compares any two.
+	if w, body := s.do(t, "bob", http.MethodGet, url+"1", nil); w.Code != http.StatusOK || body["previous"] != nil || len(body["changes"].([]any)) != 0 {
+		t.Fatalf("revision 1 = %d %v", w.Code, body)
+	}
+	if w, body := s.do(t, "owner", http.MethodGet, url+"1?base=2", nil); w.Code != http.StatusOK || body["previous"].(map[string]any)["number"].(float64) != 2 {
+		t.Fatalf("1 against 2 = %d %v", w.Code, body)
+	}
+	for _, q := range []string{"2?base=2", "2?base=x", "2?base=-1"} {
+		if w, body := s.do(t, "owner", http.MethodGet, url+q, nil); w.Code != http.StatusUnprocessableEntity || body["field"] != "base" {
+			t.Fatalf("%s = %d %v", q, w.Code, body)
+		}
+	}
+	for _, c := range []struct{ user, path string }{
+		{"carol", url + "2"},                     // not a member of p1
+		{"owner", url + "3"},                     // no such revision
+		{"owner", url + "0"},                     // revisions start at 1
+		{"owner", url + "two"},                   // not a number
+		{"owner", url + "1?base=7"},              // no such base
+		{"owner", "/api/tasks/nope/revisions/1"}, // no such task
+	} {
+		if w, body := s.do(t, c.user, http.MethodGet, c.path, nil); w.Code != http.StatusNotFound || body["error"] != "not_found" {
+			t.Fatalf("%s %s = %d %v", c.user, c.path, w.Code, body)
+		}
 	}
 }

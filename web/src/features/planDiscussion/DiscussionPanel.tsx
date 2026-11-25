@@ -10,6 +10,7 @@ import { errorMessage } from "../../ui/errors";
 import { formatDateTime } from "../../ui/format";
 import { useNotify } from "../../ui/notify";
 import { useMe } from "../identity/api";
+import { revisionPath } from "../tasks/api";
 import { isOpen, limitHit, useDiscussion, usePostMessage, useRetryMessage, type LimitHit } from "./api";
 import { RichText } from "./RichText";
 import "./planDiscussion.css";
@@ -186,7 +187,7 @@ function noticeText(t: TFunction, m: DiscussionMessage): string {
   }
 }
 
-/** The revision an answer created: what it means for the approval and where its diff is. */
+/** The revision an answer created: what it means for the approval, and a link to its diff page (KIN-97). */
 function RevisionCard({ level, taskId, revision, currentRevision, approvals, at }: {
   level: 2 | 3;
   taskId: string;
@@ -212,11 +213,9 @@ function RevisionCard({ level, taskId, revision, currentRevision, approvals, at 
         </p>
       ) : null}
       <p className="discussion-meta">
-        {approval && revision > 1 ? (
-          <Link to={`/approvals/${encodeURIComponent(approval.id)}`}>{t("planDiscussion.diffLink", { n: revision - 1 })}</Link>
-        ) : (
-          !replaced && <Link to={`/tasks/${encodeURIComponent(taskId)}#task-plan`}>{t("planDiscussion.planLink", { n: revision })}</Link>
-        )}
+        <Link to={revisionPath(taskId, revision)}>
+          {revision > 1 ? t("planDiscussion.diffLink", { n: revision - 1 }) : t("planDiscussion.planLink", { n: revision })}
+        </Link>
         <span className="muted">{at}</span>
       </p>
     </article>

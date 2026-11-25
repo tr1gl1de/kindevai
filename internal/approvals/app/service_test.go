@@ -553,3 +553,51 @@ func TestMissingChangesReportStopsTheStep(t *testing.T) {
 		t.Fatalf("scope_exceeded request paths %v", paths)
 	}
 }
+
+// KIN-97: any revision of a task with its diff, for everyone who sees the task (Members included, unlike approvals);
+// another project's task is not found.
+func TestRevisionDiffFollowsTaskAccess(t *testing.T) {
+	t.Parallel()
+	e := newEnv()
+	ctx := t.Context()
+	e.submit(t, 1, snapshot(domain.RiskL0, "docs"))
+	e.submit(t, 2, snapshot(domain.RiskL0, "docs", "web"))
+	e.submit(t, 3, snapshot(domain.RiskL1, "web"))
+
+	for _, p := range []auth.Principal{owner, admin, member} {
+		d, err := e.svc.RevisionDiff(ctx, p, "t1", 3, 0)
+		if err != nil || d.Task.ID != "t1" || d.Revision.Number != 3 || d.Previous == nil || d.Previous.Number != 2 {
+			t.Fatalf("%s: diff = %+v, %v", p.Login, d, err)
+		}
+		if len(d.Changes) != 2 { // risk L0 -> L1, scope -docs
+			t.Fatalf("%s: changes = %+v", p.Login, d.Changes)
+		}
+	}
+	// Any two revisions: 3 against 1.
+	d, err := e.svc.RevisionDiff(ctx, owner, "t1", 3, 1)
+	if err != nil || d.Previous.Number != 1 {
+		t.Fatalf("diff against 1 = %+v, %v", d, err)
+	}
+	// The first revision has nothing to compare with.
+	d, err = e.svc.RevisionDiff(ctx, member, "t1", 1, 0)
+	if err != nil || d.Previous != nil || len(d.Changes) != 0 || d.Revision.Number != 1 {
+		t.Fatalf("first revision = %+v, %v", d, err)
+	}
+
+	stranger := auth.Principal{UserID: "u-x", Login: "x"}
+	for name, call := range map[string]func() error{
+		"stranger":     func() error { _, err := e.svc.RevisionDiff(ctx, stranger, "t1", 2, 0); return err },
+		"unknown task": func() error { _, err := e.svc.RevisionDiff(ctx, owner, "nope", 1, 0); return err },
+		"revision 0":   func() error { _, err := e.svc.RevisionDiff(ctx, owner, "t1", 0, 0); return err },
+		"revision 4":   func() error { _, err := e.svc.RevisionDiff(ctx, owner, "t1", 4, 0); return err },
+		"base 9":       func() error { _, err := e.svc.RevisionDiff(ctx, owner, "t1", 2, 9); return err },
+	} {
+		if err := call(); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("%s: err = %v, want not found", name, err)
+		}
+	}
+	var ve *domain.ValidationError
+	if _, err := e.svc.RevisionDiff(ctx, owner, "t1", 2, 2); !errors.As(err, &ve) || ve.Field != "base" {
+		t.Fatalf("base = revision: err = %v", err)
+	}
+}

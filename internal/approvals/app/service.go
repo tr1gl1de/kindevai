@@ -532,6 +532,56 @@ func (s *Service) Get(ctx context.Context, p auth.Principal, id string) (Detail,
 	return d, nil
 }
 
+// RevisionDiff is one plan revision of a task with the revision it is compared with (the previous one by
+// default; nil for revision 1) and what changed (KIN-97).
+type RevisionDiff struct {
+	Task     TaskRef
+	Revision RevisionRef
+	Previous *RevisionRef
+	Changes  []domain.Change
+}
+
+// RevisionDiff returns revision n of a task p may see, compared with revision base (0 = n-1). Unlike approvals,
+// every role that sees the task sees its revisions, like the task page. A task outside p's projects, or a missing
+// revision, is domain.ErrNotFound; base == n is a validation error.
+func (s *Service) RevisionDiff(ctx context.Context, p auth.Principal, taskID string, n, base int) (RevisionDiff, error) {
+	if n < 1 {
+		return RevisionDiff{}, domain.ErrNotFound
+	}
+	if base == n || base < 0 {
+		return RevisionDiff{}, &domain.ValidationError{Field: "base", Code: "base_invalid"}
+	}
+	ps, err := s.Projects.Visible(ctx, p)
+	if err != nil {
+		return RevisionDiff{}, err
+	}
+	t, err := s.Workflow.Task(ctx, taskID)
+	if err != nil {
+		return RevisionDiff{}, err
+	}
+	if !slices.ContainsFunc(ps, func(pr ProjectRef) bool { return pr.ID == t.ProjectID }) {
+		return RevisionDiff{}, domain.ErrNotFound
+	}
+	rev, err := s.Workflow.Revision(ctx, taskID, n)
+	if err != nil {
+		return RevisionDiff{}, err
+	}
+	d := RevisionDiff{Task: t, Revision: rev}
+	if base == 0 {
+		base = n - 1
+	}
+	if base < 1 {
+		return d, nil
+	}
+	prev, err := s.Workflow.Revision(ctx, taskID, base)
+	if err != nil {
+		return RevisionDiff{}, err
+	}
+	d.Previous = &prev
+	d.Changes = domain.DiffPlans(prev.Plan, rev.Plan)
+	return d, nil
+}
+
 // DecideInput is the Owner's decision on the revision and hash they reviewed.
 type DecideInput struct {
 	Approve  bool

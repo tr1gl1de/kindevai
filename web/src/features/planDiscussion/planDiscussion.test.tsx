@@ -104,7 +104,7 @@ describe("plan discussion on the task page", () => {
 
     const card = within(log).getByRole("article", { name: "Revision 2" });
     expect(within(card).getByText("The AI created revision 2 of the plan from this answer.")).toBeInTheDocument();
-    expect(within(card).getByRole("link", { name: "Changes since revision 1" })).toHaveAttribute("href", "/approvals/a2");
+    expect(within(card).getByRole("link", { name: "Changes since revision 1" })).toHaveAttribute("href", "/tasks/t1/plan/revisions/2");
     expect(within(card).getByText(/needs approval again/i)).toBeInTheDocument();
     expect(within(panel).getByText("1 of 20 messages used")).toBeInTheDocument();
     await expectAccessible(container);
@@ -287,7 +287,8 @@ describe("plan discussion on the task page", () => {
 const rev = (n: number, hash: string): PlanRevision => ({
   number: n, hash, risk: "L2", createdBy: "planner/claude", createdAt: "2026-11-24T10:00:00Z",
   plan: { summary: "Login", risk: "L2", maxParallel: 1,
-    steps: [{ key: "api", title: "API", repository: "acme/api", scope: [], dependsOn: [], capabilities: [] }] },
+    steps: [{ key: "api", title: "API", repository: "acme/api", scope: [], dependsOn: [], capabilities: [] }],
+    tests: [], contracts: [], migrations: [], docs: [] },
 });
 
 describe("plan discussion in the approval center", () => {

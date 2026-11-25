@@ -223,16 +223,16 @@ func logCLILogins(g *cliagent.Agents, logger *slog.Logger, now time.Time) {
 }
 
 // sessionBinds returns, for an AI CLI attempt with a task, its task's session store bound where the CLI keeps its
-// sessions (KIN-86).
-func sessionBinds(s *cliagent.SessionStore) func(sessiondomain.Assignment) ([]egress.HomeBind, error) {
-	return func(a sessiondomain.Assignment) ([]egress.HomeBind, error) {
+// sessions (KIN-86), and the notice of session files removed to keep the store within its limit (KIN-96).
+func sessionBinds(s *cliagent.SessionStore) func(sessiondomain.Assignment) ([]egress.HomeBind, string, error) {
+	return func(a sessiondomain.Assignment) ([]egress.HomeBind, string, error) {
 		if a.Task == "" || !a.CLI() {
-			return nil, nil
+			return nil, "", nil
 		}
-		src, rel, err := s.Prepare(a.Project, a.Task, a.Adapter)
+		st, err := s.Prepare(a.Project, a.Task, a.Adapter)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		return []egress.HomeBind{{Source: src, Rel: rel}}, nil
+		return []egress.HomeBind{{Source: st.Source, Rel: st.Rel}}, st.Notice, nil
 	}
 }

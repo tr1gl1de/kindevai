@@ -141,10 +141,11 @@ func journalledSandboxes(j journal.Dir) func() ([]string, error) {
 }
 
 // confiner gives the session context the egress context's sandboxes. sessions, when set, returns the CLI session
-// store of an AI CLI attempt's task, bound into the agent's HOME so a later attempt can resume (KIN-86).
+// store of an AI CLI attempt's task, bound into the agent's HOME so a later attempt can resume (KIN-86), and a
+// notice for the attempt's output when files were removed to keep the store within its limit (KIN-96).
 type confiner struct {
 	s        *egress.Sandboxes
-	sessions func(sessiondomain.Assignment) ([]egress.HomeBind, error)
+	sessions func(sessiondomain.Assignment) ([]egress.HomeBind, string, error)
 }
 
 var _ sessionapp.Confiner = confiner{}
@@ -154,14 +155,15 @@ var _ sessionapp.Sandbox = (*nsbox.Box)(nil)
 
 func (c confiner) Confine(ctx context.Context, a sessiondomain.Assignment, dir, workdir string) (sessionapp.Sandbox, error) {
 	r := egress.BoxRequest{Dir: dir, Workdir: workdir}
+	var notice string
 	if c.sessions != nil && a.CLI() {
 		// Only a sandboxed run uses the store (on the host the CLI keeps its sessions in its own home).
 		if _, strict, err := c.s.StrictProfile(ctx, a.Project, a.Adapter); err == nil && strict {
-			binds, err := c.sessions(a)
+			binds, n, err := c.sessions(a)
 			if err != nil {
 				return nil, err
 			}
-			r.HomeBinds = binds
+			r.HomeBinds, notice = binds, n
 		}
 	}
 	b, err := c.s.Confine(ctx, a.Project, a.Adapter, r)
@@ -173,7 +175,28 @@ func (c confiner) Confine(ctx context.Context, a sessiondomain.Assignment, dir, 
 		b.Release()
 		return nil, errors.New("the sandbox cannot launch processes")
 	}
-	return sb, nil
+	return withNotice(sb, notice), nil
+}
+
+// withNotice puts notice ahead of the sandbox's summary, which the attempt's output shows once it ended; sb itself
+// when there is none.
+func withNotice(sb sessionapp.Sandbox, notice string) sessionapp.Sandbox {
+	if notice == "" {
+		return sb
+	}
+	return noticedSandbox{sb, notice}
+}
+
+type noticedSandbox struct {
+	sessionapp.Sandbox
+	notice string
+}
+
+func (n noticedSandbox) Summary() string {
+	if s := n.Sandbox.Summary(); s != "" {
+		return n.notice + "\n" + s
+	}
+	return n.notice
 }
 
 // Reattach serves the sandbox of an attempt adopted after a restart again (KIN-81), with the profile of its project

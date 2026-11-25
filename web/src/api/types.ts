@@ -688,7 +688,7 @@ export type TaskState =
   | "BLOCKED"
   | "FAILED"
   | "CANCELLED";
-export type WaitReason = "runner" | "network" | "approval" | "cli_limit";
+export type WaitReason = "runner" | "network" | "approval" | "cli_limit" | "agent";
 export type StepState = "PENDING" | "READY" | "CLAIMED" | "RUNNING" | "SUCCEEDED" | "WAITING" | "FAILED" | "CANCELLED";
 export type AttemptState = "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "UNKNOWN";
 /** How far agent time is known: no CLI ran, still running, recorded, or a period lacks an end or a usable time. */
@@ -885,4 +885,67 @@ export interface MaintenanceStatus {
   by: string;
   /** Claimed or running steps still draining. */
   activeAttempts: number;
+}
+
+/** Agent router (KIN-33): AI CLIs, platform roles and their bindings. */
+export type AgentCli = "claude" | "codex";
+export type AgentRole = "planner" | "implementer" | "reviewer";
+export type BindingStrategy = "ordered" | "different-from-author";
+export type BindingSource = "default" | "global" | "project";
+
+export interface AgentChoice {
+  agent: AgentCli;
+  /** "" = the CLI's default model. */
+  model: string;
+}
+
+export interface AgentBinding {
+  role: AgentRole;
+  primary: AgentChoice;
+  fallback: AgentChoice[];
+  strategy: BindingStrategy;
+  source: BindingSource;
+  updatedBy: string;
+  updatedAt: string | null;
+}
+
+export interface AgentBindingRequest {
+  primary: AgentChoice;
+  fallback: AgentChoice[];
+  strategy: BindingStrategy;
+}
+
+export interface AgentSwitch {
+  agent: AgentCli;
+  enabled: boolean;
+  /** False while the switch has its default (enabled). */
+  set: boolean;
+  updatedBy: string;
+  updatedAt: string | null;
+}
+
+export interface AgentCooldown {
+  runnerId: string;
+  agent: AgentCli;
+  until: string;
+  reason: string;
+}
+
+export interface AgentSettings {
+  switches: AgentSwitch[];
+  bindings: AgentBinding[];
+  cooldowns: AgentCooldown[];
+}
+
+export interface ProjectAgentState {
+  agent: AgentCli;
+  global: boolean;
+  project: AgentSwitch;
+  effective: boolean;
+}
+
+export interface ProjectAgentSettings {
+  projectId: string;
+  agents: ProjectAgentState[];
+  bindings: AgentBinding[];
 }

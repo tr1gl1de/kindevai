@@ -128,6 +128,7 @@ func TestValidatePlanDAG(t *testing.T) {
 		{"parallelism too high", func(p *Plan) { p.MaxParallel = MaxParallelLimit + 1 }, "maxParallel", "parallelism_limit"},
 		{"negative parallelism", func(p *Plan) { p.MaxParallel = -1 }, "maxParallel", "parallelism_limit"},
 		{"unknown risk", func(p *Plan) { p.Risk = "L4" }, "risk", "risk_level"},
+		{"unknown step role", func(p *Plan) { p.Steps[1].Role = "architect" }, "steps[1].role", "role_unknown"},
 		{"absolute scope", func(p *Plan) { p.Steps[0].Scope = []string{"/etc/passwd"} }, "steps[0].scope", "scope_path"},
 		{"escaping scope", func(p *Plan) { p.Steps[0].Scope = []string{"src/../../x"} }, "steps[0].scope", "scope_path"},
 		{"bad capability", func(p *Plan) { p.Steps[0].Capabilities = []string{"rm -rf"} }, "steps[0].capabilities", "capability_format"},
@@ -206,5 +207,34 @@ func TestRestorePlanRevisionVerifiesTheHash(t *testing.T) {
 	}
 	if _, err := RestorePlanRevision("t1", 3, c, strings.Repeat("0", 64), RiskL1, "u1", t0); !errors.Is(err, ErrPlanHashMismatch) {
 		t.Fatalf("tampered hash = %v", err)
+	}
+}
+
+// KIN-33: a step may name its platform role (implementer by default, reviewer); a plan without roles keeps its
+// canonical JSON and hash.
+func TestPlanStepRole(t *testing.T) {
+	t.Parallel()
+	p := samplePlan()
+	before, err := p.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(before), "role") {
+		t.Fatalf("a plan without roles encodes a role: %s", before)
+	}
+	p.Steps[2].Role = " reviewer "
+	if err := ValidatePlan(p, repos); err != nil {
+		t.Fatalf("reviewer step: %v", err)
+	}
+	n := p.Normalize()
+	if n.Steps[2].Role != StepRoleReviewer || n.Steps[0].StepRole() != StepRoleImplementer {
+		t.Fatalf("roles: %q, %q", n.Steps[2].Role, n.Steps[0].StepRole())
+	}
+	got, _ := p.CanonicalJSON()
+	if !strings.Contains(string(got), `"repository":"web","role":"reviewer","scope"`) {
+		t.Fatalf("role not in canonical key order: %s", got)
+	}
+	if _, err := ParsePlan(got); err != nil {
+		t.Fatalf("parsing a plan with a role: %v", err)
 	}
 }

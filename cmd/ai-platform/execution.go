@@ -137,20 +137,23 @@ func mockScenario(stepKey string) string {
 }
 
 func (d runnerDispatcher) Assign(ctx context.Context, runnerID string, a workflowapp.Assignment) error {
+	return d.ch.Send(ctx, runnerID, protocol.AssignCommandID(a.StepID, a.Fence), protocol.CommandAssign, assignBody(a))
+}
+
+// assignBody is the execution.assign of an assignment: the AI CLI, model and role routing chose (KIN-33), or the
+// mock agent with the scenario named by the step for mock plans (and without routing).
+func assignBody(a workflowapp.Assignment) protocol.Assign {
 	scope := a.Scope
 	if scope == nil {
 		scope = []string{}
 	}
-	return d.ch.Send(ctx, runnerID, protocol.AssignCommandID(a.StepID, a.Fence), protocol.CommandAssign, assignBody(a, scope))
-}
-
-func assignBody(a workflowapp.Assignment, scope []string) protocol.Assign {
-	as := protocol.Assign{Step: a.StepID, Fence: a.Fence, Execution: a.ExecutionID, Task: a.TaskID, Project: a.ProjectID,
-		Repository: a.Repository, Scope: scope, Adapter: protocol.AdapterMock, Scenario: mockScenario(a.StepKey)}
-	if protocol.CLIAdapter(a.Agent) {
-		as.Adapter, as.Scenario, as.Model, as.Role, as.Prompt = a.Agent, "", a.Model, a.Role, a.Prompt
+	body := protocol.Assign{Step: a.StepID, Fence: a.Fence, Execution: a.ExecutionID, Task: a.TaskID,
+		Project: a.ProjectID, Repository: a.Repository, Scope: scope, Adapter: a.Agent, Model: a.Model, Role: a.Role,
+		Prompt: a.Prompt} // the CLI run's prompt/context package (KIN-79)
+	if a.Agent == "" || a.Agent == workflowapp.AgentMock {
+		body.Adapter, body.Model, body.Prompt, body.Scenario = protocol.AdapterMock, "", "", mockScenario(a.StepKey)
 	}
-	return as
+	return body
 }
 
 func (d runnerDispatcher) Cancel(ctx context.Context, runnerID, stepID string, fence int64, reason string) error {

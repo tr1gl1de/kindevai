@@ -245,3 +245,49 @@ func TestCheckReportsPendingWithoutWriting(t *testing.T) {
 		t.Fatalf("newer database: %v", err)
 	}
 }
+
+// KIN-33: a migration marked foreign-keys-off may rebuild a parent table (SQLite's 12-step ALTER procedure) without
+// cascading deletes into its children; a rebuild that leaves a dangling reference fails and rolls back.
+func TestMigrateRebuildsParentTableWithForeignKeysOff(t *testing.T) {
+	t.Parallel()
+	base := fstest.MapFS{
+		"0001_init.sql": {Data: []byte(`CREATE TABLE p (id INTEGER PRIMARY KEY, kind TEXT CHECK (kind IN ('a')));
+			CREATE TABLE c (id INTEGER PRIMARY KEY, p_id INTEGER NOT NULL REFERENCES p(id) ON DELETE CASCADE);
+			INSERT INTO p VALUES (1, 'a'); INSERT INTO c VALUES (10, 1);`)},
+	}
+	rebuild := func(extra string) fstest.MapFS {
+		m := fstest.MapFS{"0001_init.sql": base["0001_init.sql"]}
+		m["0002_rebuild.sql"] = &fstest.MapFile{Data: []byte(ForeignKeysOff + `
+			CREATE TABLE p_new (id INTEGER PRIMARY KEY, kind TEXT CHECK (kind IN ('a', 'b')));
+			INSERT INTO p_new SELECT * FROM p ` + extra + `;
+			DROP TABLE p;
+			ALTER TABLE p_new RENAME TO p;`)}
+		return m
+	}
+	d := openTemp(t)
+	if _, err := Migrate(t.Context(), d, rebuild("")); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	var n int
+	if err := d.QueryRowContext(t.Context(), "SELECT count(*) FROM c").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("child rows after the rebuild = %d, %v; want 1 (no cascade)", n, err)
+	}
+	if _, err := d.ExecContext(t.Context(), "INSERT INTO p VALUES (2, 'b')"); err != nil {
+		t.Fatalf("new check not applied: %v", err)
+	}
+	if _, err := d.ExecContext(t.Context(), "INSERT INTO c VALUES (11, 99)"); err == nil {
+		t.Fatal("foreign keys are off after the migration")
+	}
+
+	d = openTemp(t)
+	_, err := Migrate(t.Context(), d, rebuild("WHERE id <> 1"))
+	if err == nil || !strings.Contains(err.Error(), "foreign key") {
+		t.Fatalf("a rebuild that drops a referenced row: %v, want a foreign key error", err)
+	}
+	if v, _ := Version(t.Context(), d); v != 1 {
+		t.Fatalf("Version = %d, want 1 (rolled back)", v)
+	}
+	if err := d.QueryRowContext(t.Context(), "SELECT count(*) FROM p").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("parent rows after the failed rebuild = %d, %v", n, err)
+	}
+}

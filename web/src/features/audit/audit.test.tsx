@@ -4,7 +4,7 @@ import { http } from "msw";
 import { describe, expect, it } from "vitest";
 import type { AuditEvent, AuditPage, Me, Project } from "../../api/types";
 import { apiError, json, owner, server } from "../../test/msw";
-import { expectAccessible, renderApp } from "../../test/render";
+import { expectAccessible, fill, renderApp } from "../../test/render";
 
 const alpha: Project = { id: "p1", slug: "alpha", name: "Alpha", createdAt: "2026-11-24T10:00:00Z", myRole: "owner" };
 
@@ -69,7 +69,7 @@ describe("audit log (owner)", () => {
     const form = screen.getByRole("form", { name: "Filter events" });
     await user.selectOptions(within(form).getByLabelText("Project"), "Alpha");
     await user.selectOptions(within(form).getByLabelText("Event"), "Invitation created");
-    await user.type(within(form).getByLabelText("Actor"), "owner");
+    await fill(user, within(form).getByLabelText("Actor"), "owner");
     await user.click(within(form).getByRole("button", { name: "Apply filters" }));
     expect(await screen.findByText("1 event shown.")).toBeInTheDocument();
     const last = queries.at(-1)!;
@@ -107,13 +107,13 @@ describe("audit log (owner)", () => {
     const user = userEvent.setup();
     expect(await screen.findByText("Nothing has been recorded yet.")).toBeInTheDocument();
     const form = screen.getByRole("form", { name: "Filter events" });
-    await user.type(within(form).getByLabelText("From"), "2026-11-24");
-    await user.type(within(form).getByLabelText("To"), "2026-11-20");
+    await fill(user, within(form).getByLabelText("From"), "2026-11-24");
+    await fill(user, within(form).getByLabelText("To"), "2026-11-20");
     await user.click(within(form).getByRole("button", { name: "Apply filters" }));
     expect(within(form).getByLabelText("To")).toHaveAccessibleDescription(/not be before/i);
     expect(within(form).getByLabelText("To")).toHaveFocus();
     await user.clear(within(form).getByLabelText("To"));
-    await user.type(within(form).getByLabelText("To"), "2026-11-24");
+    await fill(user, within(form).getByLabelText("To"), "2026-11-24");
     await user.click(within(form).getByRole("button", { name: "Apply filters" }));
     expect(await screen.findByText("No events match these filters.")).toBeInTheDocument();
     const q = queries.at(-1)!;

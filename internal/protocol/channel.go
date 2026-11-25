@@ -113,17 +113,19 @@ type Assign struct {
 	Project    string   `json:"project"`
 	Repository string   `json:"repository"` // "owner/name"
 	Scope      []string `json:"scope"`      // repository-relative paths the step may change
-	Adapter    string   `json:"adapter"`    // the agent: AdapterMock, AdapterClaude or AdapterCodex (KIN-79)
-	Scenario   string   `json:"scenario,omitempty"`
-	// The CLI run (KIN-79; adapters claude and codex only). Model is the CLI's model name or alias (empty: its
-	// default) and Role the role the step runs as (KIN-33's role binding; the runner applies its network profile).
-	// Prompt is the prompt/context package: the runner writes it to a file in the attempt's state directory, outside
-	// the worktree, and the CLI reads it on stdin. Resume is the native session id to continue (empty: a new
-	// session). BypassPermissions asks for the CLI's permission bypass, which the runner grants only inside the
-	// verified strict egress sandbox (KIN-31) and refuses elsewhere. TimeoutSec bounds the run (0: the runner's
-	// default).
-	Model             string `json:"model,omitempty"`
-	Role              string `json:"role,omitempty"`
+	// Adapter is the agent to run: AdapterMock, or the AI CLI routing chose (KIN-33: "claude", "codex"; run by the
+	// CLI adapters, KIN-79).
+	Adapter  string `json:"adapter"`
+	Scenario string `json:"scenario,omitempty"`
+	// Model is the CLI's model routing chose from the role binding ("" = the CLI's default); Role the step's
+	// platform role (planner, implementer, reviewer), informational (KIN-33).
+	Model string `json:"model,omitempty"`
+	Role  string `json:"role,omitempty"`
+	// The CLI run (KIN-79; adapters claude and codex only). Prompt is the prompt/context package: the runner writes it
+	// to a file in the attempt's state directory, outside the worktree, and the CLI reads it on stdin. Resume is the
+	// native session id to continue (empty: a new session). BypassPermissions asks for the CLI's permission bypass,
+	// which the runner grants only inside the verified strict egress sandbox (KIN-31) and refuses elsewhere.
+	// TimeoutSec bounds the run (0: the runner's default).
 	Prompt            string `json:"prompt,omitempty"`
 	Resume            string `json:"resume,omitempty"`
 	BypassPermissions bool   `json:"bypassPermissions,omitempty"`

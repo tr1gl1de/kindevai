@@ -34,13 +34,15 @@ func (p *fakePool) set(projectID string, cs ...Candidate) {
 }
 
 type fakeDispatcher struct {
-	mu   sync.Mutex
-	cmds []string
+	mu       sync.Mutex
+	cmds     []string
+	assigned []Assignment
 }
 
 func (d *fakeDispatcher) Assign(_ context.Context, runnerID string, a Assignment) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.assigned = append(d.assigned, a)
 	d.cmds = append(d.cmds, fmt.Sprintf("assign %s %s/%d %s %s", runnerID, a.StepKey, a.Fence, a.ProjectID, a.Repository))
 	return nil
 }
@@ -581,4 +583,16 @@ type fakeCLILimits struct{ got []string }
 func (f *fakeCLILimits) CLILimitHit(_ context.Context, runnerID, agent string, until time.Time, _ string) error {
 	f.got = append(f.got, strings.TrimSpace(runnerID+" "+agent)+" "+until.UTC().Format(time.RFC3339))
 	return nil
+}
+
+// KIN-79 with KIN-33: a step held for its CLI's limit waits for the reset, unless routing may pick another CLI or
+// runner (the held runner's CLI cools down there).
+func TestCLILimitHoldIsSchedulableAtOnceWhenRouted(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	until := now.Add(time.Hour)
+	st := &domain.Step{State: domain.StepWaiting, WaitReason: domain.WaitCLILimit, WaitUntil: &until}
+	if schedulable(st, now, false) || !schedulable(st, until, false) || !schedulable(st, now, true) {
+		t.Fatal("cli_limit hold scheduling wrong")
+	}
 }

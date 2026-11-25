@@ -4,7 +4,7 @@ import { http } from "msw";
 import { describe, expect, it } from "vitest";
 import type { Member, Me, Project } from "../../api/types";
 import { apiError, json, owner, server } from "../../test/msw";
-import { expectAccessible, expectStatus, renderApp } from "../../test/render";
+import { expectAccessible, expectStatus, fill, renderApp } from "../../test/render";
 
 const web: Project = { id: "p1", slug: "web", name: "Web", myRole: "owner", createdAt: "2026-11-24T10:00:00Z" };
 
@@ -38,7 +38,7 @@ describe("projects", () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "New project" }));
     const form = screen.getByRole("form", { name: "New project" });
-    await user.type(within(form).getByLabelText("Name"), "Web App 2");
+    await fill(user, within(form).getByLabelText("Name"), "Web App 2");
     expect(within(form).getByLabelText("Slug")).toHaveValue("web-app-2");
     await user.click(within(form).getByRole("button", { name: "Create project" }));
     expect(await screen.findByRole("link", { name: "Web App 2" })).toBeInTheDocument();
@@ -52,7 +52,7 @@ describe("projects", () => {
     await renderApp("/projects");
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "New project" }));
-    await user.type(screen.getByLabelText("Name"), "Web");
+    await fill(user, screen.getByLabelText("Name"), "Web");
     await user.click(screen.getByRole("button", { name: "Create project" }));
     expect(await screen.findByLabelText("Slug")).toHaveAccessibleDescription(/already used/i);
   });
@@ -91,12 +91,12 @@ describe("projects", () => {
     await expectAccessible(container);
 
     const add = screen.getByRole("form", { name: "Add member" });
-    await user.type(within(add).getByLabelText("Login"), "ghost");
+    await fill(user, within(add).getByLabelText("Login"), "ghost");
     await user.click(within(add).getByRole("button", { name: "Add member" }));
     expect(await within(add).findByLabelText("Login")).toHaveAccessibleDescription(/no user with this login/i);
 
     await user.clear(within(add).getByLabelText("Login"));
-    await user.type(within(add).getByLabelText("Login"), "bob");
+    await fill(user, within(add).getByLabelText("Login"), "bob");
     await user.selectOptions(within(add).getByLabelText("Role"), "member");
     await user.click(within(add).getByRole("button", { name: "Add member" }));
     expect(await screen.findByRole("cell", { name: "bob" })).toBeInTheDocument();

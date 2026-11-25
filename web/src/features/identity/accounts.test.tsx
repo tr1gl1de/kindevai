@@ -4,7 +4,7 @@ import { http } from "msw";
 import { describe, expect, it } from "vitest";
 import type { Account, Me } from "../../api/types";
 import { apiError, json, owner, server } from "../../test/msw";
-import { expectAccessible, expectStatus, renderApp } from "../../test/render";
+import { expectAccessible, expectStatus, fill, renderApp } from "../../test/render";
 
 const carol: Account = {
   id: "u2", login: "carol", role: "user", mustChangePassword: false, disabled: false, createdAt: "2026-11-24T10:00:00Z",
@@ -27,9 +27,9 @@ describe("forced password change", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Set your password" })).toBeInTheDocument();
     expect(screen.queryByRole("navigation", { name: "Main" })).not.toBeInTheDocument();
     await expectAccessible(container);
-    await user.type(screen.getByLabelText("Current (temporary) password"), "temp-pass-12345");
-    await user.type(screen.getByLabelText("New password"), "carol's own phrase");
-    await user.type(screen.getByLabelText("Repeat new password"), "carol's own phrase!");
+    await fill(user, screen.getByLabelText("Current (temporary) password"), "temp-pass-12345");
+    await fill(user, screen.getByLabelText("New password"), "carol's own phrase");
+    await fill(user, screen.getByLabelText("Repeat new password"), "carol's own phrase!");
     await user.click(screen.getByRole("button", { name: "Save password" }));
     expect(screen.getByLabelText("Repeat new password")).toHaveAccessibleDescription(/do not match/i);
     await user.type(screen.getByLabelText("Repeat new password"), "{Backspace}");
@@ -45,9 +45,9 @@ describe("forced password change", () => {
     );
     await renderApp("/");
     const user = userEvent.setup();
-    await user.type(await screen.findByLabelText("Current (temporary) password"), "nope");
-    await user.type(screen.getByLabelText("New password"), "a brand new phrase");
-    await user.type(screen.getByLabelText("Repeat new password"), "a brand new phrase");
+    await fill(user, await screen.findByLabelText("Current (temporary) password"), "nope");
+    await fill(user, screen.getByLabelText("New password"), "a brand new phrase");
+    await fill(user, screen.getByLabelText("Repeat new password"), "a brand new phrase");
     await user.click(screen.getByRole("button", { name: "Save password" }));
     expect(await screen.findByLabelText("Current (temporary) password")).toHaveAccessibleDescription(/current password is wrong/i);
   });
@@ -72,11 +72,11 @@ describe("users page (owner)", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Users" })).toBeInTheDocument();
     await expectAccessible(container);
     const form = screen.getByRole("form", { name: "New user" });
-    await user.type(within(form).getByLabelText("Login"), "owner");
+    await fill(user, within(form).getByLabelText("Login"), "owner");
     await user.click(within(form).getByRole("button", { name: "Create user" }));
     expect(await within(form).findByLabelText("Login")).toHaveAccessibleDescription(/already taken/i);
     await user.clear(within(form).getByLabelText("Login"));
-    await user.type(within(form).getByLabelText("Login"), "carol");
+    await fill(user, within(form).getByLabelText("Login"), "carol");
     await user.click(within(form).getByRole("button", { name: "Create user" }));
     const secret = await screen.findByRole("region", { name: "Temporary password for carol" });
     expect(within(secret).getByText("Tmp7pass8word9xy")).toBeInTheDocument();
@@ -132,9 +132,9 @@ describe("change password from the menu", () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole("link", { name: "Account" }));
     expect(await screen.findByRole("heading", { level: 1, name: "Account" })).toBeInTheDocument();
-    await user.type(screen.getByLabelText("Current password"), "correct horse battery");
-    await user.type(screen.getByLabelText("New password"), "an even better phrase");
-    await user.type(screen.getByLabelText("Repeat new password"), "an even better phrase");
+    await fill(user, screen.getByLabelText("Current password"), "correct horse battery");
+    await fill(user, screen.getByLabelText("New password"), "an even better phrase");
+    await fill(user, screen.getByLabelText("Repeat new password"), "an even better phrase");
     await user.click(screen.getByRole("button", { name: "Save password" }));
     await expectStatus("Password changed. Other sessions were signed out.");
   });
@@ -150,7 +150,7 @@ it("tells the owner when copying is not possible", async () => {
   const user = userEvent.setup();
   // user-event installs its own clipboard stub in setup(); remove it afterwards to simulate an insecure context.
   Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
-  await user.type(await screen.findByLabelText("Login"), "carol");
+  await fill(user, await screen.findByLabelText("Login"), "carol");
   await user.click(screen.getByRole("button", { name: "Create user" }));
   await user.click(await screen.findByRole("button", { name: "Copy" }));
   await expectStatus(/select the password and copy it manually/i);

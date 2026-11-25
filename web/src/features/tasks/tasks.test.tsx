@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { TelegramLaunch } from "../telegram/webapp";
 import type { Approval, AttemptWorkspace, Me, Project, Step, TaskDetail, TaskList, TaskListItem } from "../../api/types";
 import { apiError, json, owner, server } from "../../test/msw";
-import { expectAccessible, expectStatus, renderApp } from "../../test/render";
+import { expectAccessible, expectStatus, fill, renderApp } from "../../test/render";
 import { stages } from "./TaskPage";
 
 const member: Me = { id: "u2", login: "bob", role: "user", mustChangePassword: false };
@@ -121,7 +121,7 @@ describe("task list", () => {
     await user.click(await screen.findByRole("button", { name: "Create task" }));
     expect(screen.getByLabelText("Title")).toHaveAccessibleDescription("Fill in this field.");
     expect(screen.getByLabelText("Title")).toHaveFocus();
-    await user.type(screen.getByLabelText("Title"), "Try it");
+    await fill(user, screen.getByLabelText("Title"), "Try it");
     await user.click(screen.getByRole("button", { name: "Create task" }));
     await expectStatus("Task “Try it” created.");
     expect(body).toEqual({ projectId: "p1", title: "Try it" });

@@ -102,11 +102,14 @@ const (
 	WaitRunner   WaitReason = "runner"
 	WaitApproval WaitReason = "approval"
 	WaitCLILimit WaitReason = "cli_limit"
+	// WaitAgent: no AI CLI is permitted for the step's role in its project (disabled globally or in the project,
+	// KIN-33).
+	WaitAgent WaitReason = "agent"
 )
 
 // Valid reports a known wait reason.
 func (r WaitReason) Valid() bool {
-	return r == WaitNetwork || r == WaitRunner || r == WaitApproval || r == WaitCLILimit
+	return r == WaitNetwork || r == WaitRunner || r == WaitApproval || r == WaitCLILimit || r == WaitAgent
 }
 
 // MaxReasonLen bounds the free-text detail of a reason (runes).

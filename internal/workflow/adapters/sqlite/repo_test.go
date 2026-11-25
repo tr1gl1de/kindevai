@@ -625,6 +625,40 @@ func TestHeldSteps(t *testing.T) {
 	}
 }
 
+// KIN-33: a step keeps the AI CLI and model of its claim, and a step or task may wait for an agent.
+func TestStepAgentAndAgentWaitAreStored(t *testing.T) {
+	t.Parallel()
+	d, _ := testDB(t)
+	svc := service(d, fixed)
+	ctx := t.Context()
+	_, e := running(t, svc)
+	repo := sqlite.New(d)
+	e, err := repo.Execution(ctx, e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, l := e.StepByKey("backend").ID, e.StepByKey("lint").ID
+	if _, err := e.ClaimWith(b, "r1", domain.AgentChoice{Agent: "codex", Model: "gpt-5"}, t0, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.WaitStep(l, domain.WaitAgent, t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveExecution(ctx, &e); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.Execution(ctx, e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := got.StepByKey("backend"); s.Agent != "codex" || s.Model != "gpt-5" {
+		t.Fatalf("backend agent %q model %q", s.Agent, s.Model)
+	}
+	if s := got.StepByKey("lint"); s.State != domain.StepWaiting || s.WaitReason != domain.WaitAgent {
+		t.Fatalf("lint = %s/%s", s.State, s.WaitReason)
+	}
+}
+
 // KIN-79: the CLI's report (session, model, version, usage) is stored with the attempt and the cli_limit wait
 // keeps its retry time; both survive a save and load.
 func TestAgentReportAndCLILimitWaitAreStored(t *testing.T) {

@@ -10,8 +10,10 @@ import (
 )
 
 // Socket directories of killed launchers are swept; a fresh one or one still served is kept.
+//
+// Not parallel: the "dead" socket's listener fd lives in this process, and a parallel test that forks a sandbox
+// helper holds a copy of every fd while the child waits for its uid_map; a connect would then still succeed.
 func TestSweepStale(t *testing.T) {
-	t.Parallel()
 	base := t.TempDir()
 	mk := func(name string, age time.Duration, serve bool) string {
 		d := filepath.Join(base, name)
@@ -36,14 +38,20 @@ func TestSweepStale(t *testing.T) {
 		}
 		return d
 	}
-	stale := mk("kindev-egress-stale", time.Hour, false)
-	fresh := mk("kindev-egress-fresh", 0, false)
+	stale := mk("kindev-egress-stale", 0, false) // a dead socket: abandoned whatever its age
 	served := mk("kindev-egress-served", time.Hour, true)
-	sweepStale(base, time.Now())
-	if _, err := os.Stat(stale); !os.IsNotExist(err) {
-		t.Fatalf("stale directory kept: %v", err)
+	empty := filepath.Join(base, "kindev-egress-empty") // no socket yet: kept while young
+	if err := os.Mkdir(empty, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	for _, d := range []string{fresh, served} {
+	removed := sweepStale(base, time.Now())
+	if len(removed) != 1 || removed[0] != stale {
+		t.Fatalf("removed %v, want only %s", removed, stale)
+	}
+	if got := sweepStale(base, time.Now().Add(staleAge)); len(got) != 1 || got[0] != empty {
+		t.Fatalf("later sweep removed %v, want the empty directory", got)
+	}
+	for _, d := range []string{served} {
 		if _, err := os.Stat(d); err != nil {
 			t.Fatalf("%s removed: %v", filepath.Base(d), err)
 		}

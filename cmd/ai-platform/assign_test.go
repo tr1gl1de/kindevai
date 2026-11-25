@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
@@ -14,14 +15,14 @@ func TestAssignBodyCarriesTheCLIRun(t *testing.T) {
 	t.Parallel()
 	a := workflowapp.Assignment{StepID: "s1", StepKey: "api", Fence: 2, Agent: "claude", Model: "sonnet", Role: "implementer",
 		Prompt: "# Task"}
-	got := assignBody(a, []string{})
+	got := assignBody(a)
 	if got.Adapter != protocol.AdapterClaude || got.Scenario != "" || got.Model != "sonnet" || got.Role != "implementer" ||
 		got.Prompt != "# Task" {
 		t.Fatalf("assign %+v", got)
 	}
-	for _, agent := range []string{"", "mock", "zcode"} {
+	for _, agent := range []string{"", "mock"} {
 		a.Agent = agent
-		if got := assignBody(a, nil); got.Adapter != protocol.AdapterMock || got.Prompt != "" || got.Scenario != protocol.ScenarioSuccess {
+		if got := assignBody(a); got.Adapter != protocol.AdapterMock || got.Prompt != "" || got.Scenario != protocol.ScenarioSuccess {
 			t.Fatalf("%q: assign %+v", agent, got)
 		}
 	}
@@ -46,5 +47,13 @@ func TestAgentSummaryIsOneBoundedLine(t *testing.T) {
 	long := agentSummary(protocol.AgentEvent{Kind: "text", Text: strings.Repeat("é", 1000)})
 	if len(long) > maxAgentSummary+len("…") || !utf8.ValidString(long) {
 		t.Fatalf("summary of %d bytes", len(long))
+	}
+}
+
+// KIN-79: only a CLI's limit cools a runner's CLI down; the mock agent has none.
+func TestCLICooldownsIgnoreTheMockAgent(t *testing.T) {
+	t.Parallel()
+	if err := (cliCooldowns{}).CLILimitHit(t.Context(), "r1", "mock", time.Now().Add(time.Hour), "x"); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -26,6 +26,8 @@ type PlanningRepository interface {
 	CreatePlanningRun(ctx context.Context, r *domain.PlanningRun) error // domain.ErrConflict: the task has an active run
 	PlanningRun(ctx context.Context, id string) (domain.PlanningRun, error)
 	LatestPlanningRun(ctx context.Context, taskID string) (domain.PlanningRun, error) // domain.ErrNotFound
+	// LatestPlanRun is the task's newest run of kind plan (not a chat turn); domain.ErrNotFound.
+	LatestPlanRun(ctx context.Context, taskID string) (domain.PlanningRun, error)
 	SavePlanningRun(ctx context.Context, r *domain.PlanningRun) error
 	// ActivePlanningRuns lists the runs that have not ended (the scheduler's work).
 	ActivePlanningRuns(ctx context.Context) ([]string, error)
@@ -197,6 +199,9 @@ func (s *Service) schedulePlanningRun(ctx context.Context, id string) error {
 			return err
 		}
 		now := s.now()
+		if run.Kind == domain.PlanningKindDiscussion {
+			return s.scheduleDiscussionRun(ctx, &run, now)
+		}
 		if run.State == domain.PlanningPreparing {
 			if now.Sub(run.CreatedAt) < MaxContextWait {
 				return nil
@@ -319,8 +324,12 @@ func (s *Service) blockPlanning(ctx context.Context, t *domain.Task, reason doma
 	return s.saveTask(ctx, t)
 }
 
-// endPlanningAttempt ends the current attempt without a plan: a repeat is queued, or the task FAILS.
+// endPlanningAttempt ends the current attempt without a plan: a repeat is queued, or the task FAILS. A chat turn
+// FAILS at once with its message.
 func (s *Service) endPlanningAttempt(ctx context.Context, run *domain.PlanningRun, why string, now time.Time) error {
+	if run.Kind == domain.PlanningKindDiscussion {
+		return s.failTurn(ctx, run, why+"; send it again", now)
+	}
 	if !run.Retry(why, now) {
 		return s.Planning.SavePlanningRun(ctx, run)
 	}
@@ -412,7 +421,13 @@ func (s *Service) CheckPlanningAttempt(ctx context.Context, stepID, runnerID str
 func (s *Service) StartPlanningAttempt(ctx context.Context, stepID, runnerID string, fence int64) error {
 	return s.updatePlanningAttempt(ctx, stepID, runnerID, fence, func(ctx context.Context, run *domain.PlanningRun, now time.Time) error {
 		run.Renew(now, s.leaseTTL())
-		return s.Planning.SavePlanningRun(ctx, run)
+		if err := s.Planning.SavePlanningRun(ctx, run); err != nil {
+			return err
+		}
+		if run.Kind == domain.PlanningKindDiscussion {
+			return s.deliverTurn(ctx, run, now)
+		}
+		return nil
 	})
 }
 
@@ -423,6 +438,7 @@ func (s *Service) RecordPlanningReport(ctx context.Context, stepID, runnerID str
 		if err := run.Report(runnerID, fence, r.Session, result); err != nil {
 			return err
 		}
+		run.Usage = r.Usage
 		return s.Planning.SavePlanningRun(ctx, run)
 	})
 }
@@ -432,6 +448,9 @@ func (s *Service) RecordPlanningReport(ctx context.Context, stepID, runnerID str
 // that is no valid plan queues the repeat with the reason, or FAILS the task after the last attempt.
 func (s *Service) CompletePlanningAttempt(ctx context.Context, stepID, runnerID string, fence int64) error {
 	return s.updatePlanningAttempt(ctx, stepID, runnerID, fence, func(ctx context.Context, run *domain.PlanningRun, now time.Time) error {
+		if run.Kind == domain.PlanningKindDiscussion {
+			return s.completeDiscussion(ctx, run, now)
+		}
 		if err := s.resumeAnalysis(ctx, run.TaskID, now); err != nil {
 			return err
 		}
@@ -539,6 +558,9 @@ func (s *Service) HoldPlanningForCLILimit(ctx context.Context, stepID, runnerID 
 		}
 		if err := s.Planning.SavePlanningRun(ctx, run); err != nil {
 			return err
+		}
+		if run.Kind == domain.PlanningKindDiscussion {
+			return nil // the turn waits for the CLI (or its timeout); the task is not blocked
 		}
 		t, err := s.Repo.Task(ctx, run.TaskID)
 		if err != nil {
@@ -671,6 +693,11 @@ func (s *Service) cancelPlanning(ctx context.Context, taskID, reason string, now
 	}
 	if err := s.Planning.SavePlanningRun(ctx, &run); err != nil {
 		return err
+	}
+	if run.Kind == domain.PlanningKindDiscussion && s.Discussion != nil {
+		if err := s.failMessage(ctx, &run, "the task was closed: "+reason, now); err != nil {
+			return err
+		}
 	}
 	if !running || s.Dispatcher == nil {
 		return nil

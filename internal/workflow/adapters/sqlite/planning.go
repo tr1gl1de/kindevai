@@ -16,15 +16,15 @@ var _ app.PlanningRepository = (*Repository)(nil)
 
 const planningCols = `id, task_id, state, fence, used, runner_id, agent, model, session, session_runner, session_agent,
 	feedback, result, context_json, wait_reason, wait_detail, not_before, lease_expires, reason, revision, created_by,
-	created_at, updated_at, version`
+	created_at, updated_at, version, kind, message_id, usage_json`
 
 func scanPlanningRun(row scanner) (domain.PlanningRun, error) {
 	var r domain.PlanningRun
-	var ctxJSON, created, updated string
+	var ctxJSON, created, updated, usage string
 	var notBefore, lease sql.NullString
 	err := row.Scan(&r.ID, &r.TaskID, &r.State, &r.Fence, &r.Used, &r.RunnerID, &r.Agent, &r.Model, &r.Session,
 		&r.SessionRunner, &r.SessionAgent, &r.Feedback, &r.Result, &ctxJSON, &r.WaitReason, &r.WaitDetail, &notBefore,
-		&lease, &r.Reason, &r.Revision, &r.CreatedBy, &created, &updated, &r.Version)
+		&lease, &r.Reason, &r.Revision, &r.CreatedBy, &created, &updated, &r.Version, &r.Kind, &r.MessageID, &usage)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, domain.ErrNotFound
 	}
@@ -33,6 +33,9 @@ func scanPlanningRun(row scanner) (domain.PlanningRun, error) {
 	}
 	if err := json.Unmarshal([]byte(ctxJSON), &r.Context); err != nil {
 		return r, fmt.Errorf("planning run %s context: %w", r.ID, err)
+	}
+	if err := json.Unmarshal([]byte(usage), &r.Usage); err != nil {
+		return r, fmt.Errorf("planning run %s usage: %w", r.ID, err)
 	}
 	if r.NotBefore, err = parseNullTS(notBefore); err == nil {
 		if r.LeaseExpires, err = parseNullTS(lease); err == nil {
@@ -52,7 +55,11 @@ func planningArgs(r *domain.PlanningRun) ([]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encoding the planning context: %w", err)
 	}
-	return []any{r.State, r.Fence, r.Used, r.RunnerID, r.Agent, r.Model, r.Session, r.SessionRunner, r.SessionAgent,
+	u, err := json.Marshal(r.Usage)
+	if err != nil {
+		return nil, fmt.Errorf("encoding the planning usage: %w", err)
+	}
+	return []any{string(u), r.State, r.Fence, r.Used, r.RunnerID, r.Agent, r.Model, r.Session, r.SessionRunner, r.SessionAgent,
 		r.Feedback, r.Result, string(c), r.WaitReason, r.WaitDetail, nullTS(r.NotBefore), nullTS(r.LeaseExpires),
 		r.Reason, r.Revision}, nil
 }
@@ -63,10 +70,15 @@ func (r *Repository) CreatePlanningRun(ctx context.Context, p *domain.PlanningRu
 	if err != nil {
 		return err
 	}
-	args = append([]any{p.ID, p.TaskID}, args...)
-	args = append(args, p.CreatedBy, ts(p.CreatedAt), ts(p.UpdatedAt))
+	kind := p.Kind
+	if kind == "" {
+		kind = domain.PlanningKindPlan
+	}
+	usage := args[0]
+	args = append([]any{p.ID, p.TaskID}, args[1:]...)
+	args = append(args, p.CreatedBy, ts(p.CreatedAt), ts(p.UpdatedAt), kind, p.MessageID, usage)
 	_, err = db.Conn(ctx, r.db).ExecContext(ctx, `INSERT INTO planning_runs(`+planningCols+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`, args...)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`, args...)
 	switch {
 	case db.IsUniqueViolation(err):
 		return domain.ErrConflict
@@ -90,6 +102,12 @@ func (r *Repository) LatestPlanningRun(ctx context.Context, taskID string) (doma
 		" FROM planning_runs WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", taskID))
 }
 
+// LatestPlanRun loads the task's newest run of kind plan (the planner, not a chat turn).
+func (r *Repository) LatestPlanRun(ctx context.Context, taskID string) (domain.PlanningRun, error) {
+	return scanPlanningRun(db.Conn(ctx, r.db).QueryRowContext(ctx, "SELECT "+planningCols+
+		" FROM planning_runs WHERE task_id = ? AND kind = 'plan' ORDER BY created_at DESC, rowid DESC LIMIT 1", taskID))
+}
+
 // SavePlanningRun writes the run's mutable fields if its version is unchanged and increments the version.
 func (r *Repository) SavePlanningRun(ctx context.Context, p *domain.PlanningRun) error {
 	args, err := planningArgs(p)
@@ -97,7 +115,7 @@ func (r *Repository) SavePlanningRun(ctx context.Context, p *domain.PlanningRun)
 		return err
 	}
 	args = append(args, ts(p.UpdatedAt), p.ID, p.Version)
-	res, err := db.Conn(ctx, r.db).ExecContext(ctx, `UPDATE planning_runs SET state = ?, fence = ?, used = ?,
+	res, err := db.Conn(ctx, r.db).ExecContext(ctx, `UPDATE planning_runs SET usage_json = ?, state = ?, fence = ?, used = ?,
 		runner_id = ?, agent = ?, model = ?, session = ?, session_runner = ?, session_agent = ?, feedback = ?, result = ?,
 		context_json = ?, wait_reason = ?, wait_detail = ?, not_before = ?, lease_expires = ?, reason = ?, revision = ?,
 		updated_at = ?, version = version + 1 WHERE id = ? AND version = ?`, args...)

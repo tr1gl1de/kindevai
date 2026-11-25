@@ -400,6 +400,17 @@ func (m *memPlanning) LatestPlanningRun(_ context.Context, taskID string) (domai
 	return domain.PlanningRun{}, domain.ErrNotFound
 }
 
+func (m *memPlanning) LatestPlanRun(_ context.Context, taskID string) (domain.PlanningRun, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := len(m.ord) - 1; i >= 0; i-- {
+		if r := m.runs[m.ord[i]]; r.TaskID == taskID && r.Kind != domain.PlanningKindDiscussion {
+			return r, nil
+		}
+	}
+	return domain.PlanningRun{}, domain.ErrNotFound
+}
+
 func (m *memPlanning) SavePlanningRun(_ context.Context, r *domain.PlanningRun) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

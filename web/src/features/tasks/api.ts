@@ -98,6 +98,11 @@ export const usePlanTask = (id: string) => useTaskAction(id, () => api<TaskDetai
 export const useCancelTask = (id: string) =>
   useTaskAction(id, (reason: string) => api<TaskDetail>("POST", `${path(id)}/cancel`, { reason }));
 export const useRetryTask = (id: string) => useTaskAction(id, () => api<TaskDetail>("POST", `${path(id)}/retry`, {}));
+/** Resumes a task BLOCKED on CI (KIN-105): it verifies again and CI is checked at once. */
+export const useResumeCI = (id: string) => useTaskAction(id, () => api<TaskDetail>("POST", `${path(id)}/resume`, {}));
+/** Retries the refused merge of a task BLOCKED on CI (KIN-105); the merge gate still applies. */
+export const useRetryMerge = (id: string) =>
+  useTaskAction(id, () => api<TaskDetail>("POST", `${path(id)}/retry-merge`, {}));
 
 /** A running attempt's workspace reports change rarely (prepared once, changes at the end): poll them gently. */
 export const WORKSPACE_REFRESH_MS = 10_000;

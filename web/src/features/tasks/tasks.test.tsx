@@ -352,6 +352,60 @@ describe("task detail", () => {
     expect(screen.getByText(/Ждёт Owner: CI или мерж в dev/)).toBeInTheDocument();
   });
 
+  it("resumes a task blocked on CI and retries its refused merge (KIN-105)", async () => {
+    let state: TaskDetail["task"]["state"] = "BLOCKED";
+    const calls: string[] = [];
+    const blocked = () => detail({ task: { ...detail().task, state, blockReason: state === "BLOCKED" ? "ci" : undefined },
+      pullRequests: [{ repository: "acme/app", branch: "feature/t1--s1", headSha: "bbbbbbbbbbbb", state: "open", number: 7,
+        url: "https://github.com/acme/app/pull/7", base: "dev", ci: "passed", ciRound: 0, ciMaxRounds: 3, merge: "failed",
+        mergeError: "head moved", ciNoChecksBlockMinutes: 30, updatedAt: "2026-11-24T10:06:00Z" }] });
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/approvals", () => json([])),
+      http.get("/api/tasks/t1", () => json(blocked())),
+      http.post("/api/tasks/t1/resume", () => {
+        calls.push("resume");
+        return json(blocked());
+      }),
+      http.post("/api/tasks/t1/retry-merge", () => {
+        calls.push("retry-merge");
+        state = "VERIFYING";
+        return json(blocked());
+      }),
+    );
+    const { container } = await renderApp("/tasks/t1");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Resume" }));
+    await expectStatus("Task resumed: CI is checked again.");
+    await user.click(screen.getByRole("button", { name: "Retry merge" }));
+    await expectStatus("Merge retried.");
+    expect(calls).toEqual(["resume", "retry-merge"]);
+    expect(screen.queryByRole("button", { name: "Retry merge" })).not.toBeInTheDocument();
+    await expectAccessible(container);
+  });
+
+  it("shows a head without CI check runs, in English and Russian (KIN-105)", async () => {
+    const noCI = detail({ pullRequests: [{ repository: "acme/app", branch: "feature/t1--s1", headSha: "bbbbbbbbbbbb",
+      state: "open", number: 7, url: "https://github.com/acme/app/pull/7", base: "dev", ci: "pending", ciRound: 0,
+      ciMaxRounds: 3, ciNoChecksSince: "2026-11-24T10:06:00Z", ciNoChecksBlockMinutes: 30, updatedAt: "2026-11-24T10:06:00Z" }] });
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/tasks/t1", () => json(noCI)),
+      http.get("/api/approvals", () => json([])),
+    );
+    const { unmount } = await renderApp("/tasks/t1");
+    let prs = await screen.findByRole("region", { name: "Pull requests" });
+    expect(within(prs).getByText("No CI checks")).toBeInTheDocument();
+    expect(within(prs).getByText(/No check run on this commit yet\. Without CI nothing is merged: the task waits for you after 30 minutes\./)).toBeInTheDocument();
+    unmount();
+    await renderApp("/tasks/t1", "ru");
+    prs = await screen.findByRole("region", { name: "Пул-реквесты" });
+    expect(within(prs).getByText("Нет проверок CI")).toBeInTheDocument();
+    expect(within(prs).getByText(/Без CI ничего не мержится: через 30 мин задача ждёт вас\./)).toBeInTheDocument();
+  });
+
   it("names the pull requests in Russian", async () => {
     server.use(
       http.get("/api/auth/me", () => json(owner)),

@@ -82,17 +82,65 @@ const (
 	MergeFailed  MergeState = "failed" // the merge was refused (head moved, not mergeable, protected base)
 )
 
+// NoCIBlockAfter is how long a head may have no check run at all before its task is BLOCKED (reason ci) instead of
+// waiting forever: a repository without CI is never merged automatically (KIN-105).
+const NoCIBlockAfter = 30 * time.Minute
+
 // RecordCI stores the CI result of head; a result of another head than the artifact's current one, or of an
 // artifact whose pull request is not open, is ignored. It reports whether the artifact changed.
 func (a *GitArtifact) RecordCI(head string, st CIState, detail string, now time.Time) bool {
+	return a.recordCI(head, st, detail, false, now)
+}
+
+// RecordNoChecks stores that head has no check run at all (pending): the no-CI window starts with the first such
+// result of the head and keeps running while none appears.
+func (a *GitArtifact) RecordNoChecks(head string, now time.Time) bool {
+	return a.recordCI(head, CIPending, "", true, now)
+}
+
+func (a *GitArtifact) recordCI(head string, st CIState, detail string, noChecks bool, now time.Time) bool {
 	if a.State != ArtifactOpen || head == "" || head != a.HeadSHA || a.Merge == MergeMerged {
 		return false
 	}
 	detail = cutUTF8(detail, maxCIFeedback)
-	if a.CI == st && a.CIHeadSHA == head && a.CIDetail == detail {
+	var since time.Time
+	if noChecks {
+		if since = a.NoChecksSince; since.IsZero() || a.CIHeadSHA != head {
+			since = now
+		}
+	}
+	if a.CI == st && a.CIHeadSHA == head && a.CIDetail == detail && a.NoChecksSince.Equal(since) {
 		return false
 	}
-	a.CI, a.CIHeadSHA, a.CIDetail, a.UpdatedAt = st, head, detail, now
+	a.CI, a.CIHeadSHA, a.CIDetail, a.NoChecksSince, a.UpdatedAt = st, head, detail, since, now
+	return true
+}
+
+// NoChecksFor is how long the current head has had no check run at all (0: it has some, or no result yet).
+func (a *GitArtifact) NoChecksFor(now time.Time) time.Duration {
+	if a.NoChecksSince.IsZero() || a.CI != CIPending || a.CIHeadSHA != a.HeadSHA || a.HeadSHA == "" {
+		return 0
+	}
+	return now.Sub(a.NoChecksSince)
+}
+
+// RestartNoChecksWindow forgets when the no-CI window started (the Owner resumed the task): the next result
+// without check runs starts a new one. It reports whether the artifact changed.
+func (a *GitArtifact) RestartNoChecksWindow() bool {
+	if a.NoChecksSince.IsZero() {
+		return false
+	}
+	a.NoChecksSince = time.Time{}
+	return true
+}
+
+// RetryMerge clears a refused merge so the merge gate runs again (the Owner's "Retry merge"); it reports whether
+// there was one.
+func (a *GitArtifact) RetryMerge(now time.Time) bool {
+	if a.Merge != MergeFailed {
+		return false
+	}
+	a.Merge, a.MergeError, a.UpdatedAt = "", "", now
 	return true
 }
 

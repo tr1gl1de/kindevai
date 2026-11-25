@@ -16,7 +16,17 @@ import { AttemptWorkspace } from "./AttemptWorkspace";
 import { PlanSection } from "./PlanSection";
 import { ReviewSection } from "./ReviewSection";
 import { PullRequestsSection } from "./PullRequestsSection";
-import { isTerminal, useCancelTask, useMockRun, usePlanTask, useRetryTask, useTask, useTaskApprovals } from "./api";
+import {
+  isTerminal,
+  useCancelTask,
+  useMockRun,
+  usePlanTask,
+  useResumeCI,
+  useRetryMerge,
+  useRetryTask,
+  useTask,
+  useTaskApprovals,
+} from "./api";
 import { AgentTimeValue, AttemptStateBadge, CalendarValue, StepStateBadge, TaskStateBadge } from "./badges";
 import "./tasks.css";
 
@@ -133,6 +143,8 @@ function Actions({ d }: { d: TaskDetail }) {
   const planAI = usePlanTask(task.id);
   const cancel = useCancelTask(task.id);
   const retry = useRetryTask(task.id);
+  const resumeCI = useResumeCI(task.id);
+  const retryMerge = useRetryMerge(task.id);
   const [scenario, setScenario] = useState<MockScenario>("success");
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string>();
@@ -142,7 +154,9 @@ function Actions({ d }: { d: TaskDetail }) {
   const canCancel = !isTerminal(task.state);
   const planning = d.planning && ["PREPARING", "QUEUED", "RUNNING"].includes(d.planning.state);
   const canPlanAI = !planning && ["CREATED", "FAILED", "READY", "AWAITING_APPROVAL", "ANALYZING"].includes(task.state);
-  if (!canPlan && !canRetry && !canCancel && !canPlanAI) return null;
+  const blockedOnCI = task.state === "BLOCKED" && task.blockReason === "ci";
+  const canRetryMerge = blockedOnCI && (d.pullRequests ?? []).some((p) => p.merge === "failed");
+  if (!canPlan && !canRetry && !canCancel && !canPlanAI && !blockedOnCI) return null;
 
   const plan = (e: FormEvent) => {
     e.preventDefault();
@@ -182,6 +196,30 @@ function Actions({ d }: { d: TaskDetail }) {
               {planAI.isPending ? t("tasks.planAIStarting") : d.revision ? t("tasks.replanAI") : t("tasks.planAI")}
             </button>
             <p className="muted">{d.revision ? t("tasks.replanAIHint") : t("tasks.planAIHint")}</p>
+          </div>
+        )}
+        {blockedOnCI && (
+          <div>
+            <button type="button" className="button primary" disabled={resumeCI.isPending}
+              onClick={() => {
+                setError(undefined);
+                resumeCI.mutate(undefined, { onSuccess: () => notify(t("tasks.resumeCIDone")), onError: fail });
+              }}>
+              {resumeCI.isPending ? t("tasks.resumingCI") : t("tasks.resumeCI")}
+            </button>
+            <p className="muted">{t("tasks.resumeCIHint")}</p>
+          </div>
+        )}
+        {canRetryMerge && (
+          <div>
+            <button type="button" className="button" disabled={retryMerge.isPending}
+              onClick={() => {
+                setError(undefined);
+                retryMerge.mutate(undefined, { onSuccess: () => notify(t("tasks.retryMergeDone")), onError: fail });
+              }}>
+              {retryMerge.isPending ? t("tasks.retryingMerge") : t("tasks.retryMerge")}
+            </button>
+            <p className="muted">{t("tasks.retryMergeHint")}</p>
           </div>
         )}
         {canRetry && (

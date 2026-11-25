@@ -71,14 +71,18 @@ func TestBindingsRoundTrip(t *testing.T) {
 	}
 }
 
+func hold(cause string, strikes int, until time.Time, parked bool) domain.Hold {
+	return domain.Hold{Cause: cause, Strikes: strikes, Until: until, Parked: parked}
+}
+
 func TestCooldownsExpire(t *testing.T) {
 	t.Parallel()
 	r, ctx := sqlite.New(testDB(t)), t.Context()
 	for _, c := range []app.Cooldown{
-		{RunnerID: "r1", Agent: "claude", Until: t0.Add(time.Hour), Reason: "limit"},
-		{RunnerID: "r1", Agent: "codex", Until: t0.Add(-time.Second)},
-		{RunnerID: "r2", Agent: "claude", Until: t0.Add(time.Minute)},
-		{RunnerID: "r2", Agent: "claude", Until: t0.Add(2 * time.Hour), Reason: "again"},
+		{RunnerID: "r1", Agent: "claude", Reason: "limit", Hold: hold(domain.CauseRateLimit, 1, t0.Add(time.Hour), false)},
+		{RunnerID: "r1", Agent: "codex", Hold: hold(domain.CauseRateLimit, 1, t0.Add(-time.Second), false)},
+		{RunnerID: "r2", Agent: "claude", Hold: hold(domain.CauseRateLimit, 1, t0.Add(time.Minute), false)},
+		{RunnerID: "r2", Agent: "claude", Reason: "again", Hold: hold(domain.CauseRateLimit, 1, t0.Add(2*time.Hour), false)},
 	} {
 		if err := r.SetCooldown(ctx, c); err != nil {
 			t.Fatal(err)
@@ -87,5 +91,37 @@ func TestCooldownsExpire(t *testing.T) {
 	got, err := r.Cooldowns(ctx, t0)
 	if err != nil || len(got) != 2 || got[0].Reason != "limit" || got[1].Reason != "again" || !got[1].Until.Equal(t0.Add(2*time.Hour)) {
 		t.Fatalf("cooldowns %+v, %v", got, err)
+	}
+}
+
+// KIN-83: a hold keeps its cause, streak and parked flag; an expired one is still read for the streak, a parked one
+// is listed whatever its end; deleting forgets it.
+func TestCooldownHoldsRoundTrip(t *testing.T) {
+	t.Parallel()
+	r, ctx := sqlite.New(testDB(t)), t.Context()
+	parked := app.Cooldown{RunnerID: "r1", Agent: "claude", Reason: "not logged in", Hold: hold(domain.CauseAuth, 4, t0.Add(-time.Hour), true)}
+	expired := app.Cooldown{RunnerID: "r1", Agent: "codex", Hold: hold(domain.CauseBilling, 2, t0.Add(-time.Hour), false)}
+	for _, c := range []app.Cooldown{parked, expired} {
+		if err := r.SetCooldown(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := r.Cooldowns(ctx, t0); err != nil || len(got) != 1 || !reflect.DeepEqual(got[0], parked) {
+		t.Fatalf("cooldowns %+v, %v", got, err)
+	}
+	if got, ok, err := r.Cooldown(ctx, "r1", "codex"); err != nil || !ok || !reflect.DeepEqual(got, expired) {
+		t.Fatalf("cooldown %+v %v %v", got, ok, err)
+	}
+	if had, err := r.DeleteCooldown(ctx, "r1", "codex"); err != nil || !had {
+		t.Fatalf("delete %v %v", had, err)
+	}
+	if had, err := r.DeleteCooldown(ctx, "r1", "codex"); err != nil || had {
+		t.Fatalf("second delete %v %v", had, err)
+	}
+	if _, ok, err := r.Cooldown(ctx, "r1", "codex"); err != nil || ok {
+		t.Fatalf("deleted cooldown still there: %v %v", ok, err)
+	}
+	if err := r.SetCooldown(ctx, app.Cooldown{RunnerID: "r1", Agent: "claude", Hold: hold("weird", 1, t0, false)}); err == nil {
+		t.Fatal("an unknown cause was stored")
 	}
 }

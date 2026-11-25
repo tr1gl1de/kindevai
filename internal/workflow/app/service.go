@@ -448,9 +448,20 @@ func (s *Service) CompleteStepAt(ctx context.Context, stepID, runnerID string, f
 			return refusedReport{err}
 		}
 		e.MarkWorkEnd(stepID, runnerID, fence, at, now)
-		return nil
+		return s.cliWorked(ctx, e.Step(stepID), runnerID)
 	})
 	return s.lateWorkEnd(ctx, err, stepID, runnerID, fence, at)
+}
+
+// cliWorked tells routing that the step's CLI worked on the runner (KIN-83: its hold streak is over).
+func (s *Service) cliWorked(ctx context.Context, st *domain.Step, runnerID string) error {
+	if s.CLILimits == nil || st == nil || len(st.Attempts) == 0 {
+		return nil
+	}
+	if agent := st.Attempts[len(st.Attempts)-1].Agent; agent != "" {
+		return s.CLILimits.CLIWorked(ctx, runnerID, agent)
+	}
+	return nil
 }
 
 // FailStep records a failed attempt; the step is retried within the attempt budget, else the task fails.
@@ -484,30 +495,49 @@ func (s *Service) HoldStepForNetwork(ctx context.Context, stepID, runnerID strin
 	return s.lateWorkEnd(ctx, err, stepID, runnerID, fence, at)
 }
 
-// CLILimits hears of a runner's CLI that hit its limit (KIN-79), e.g. routing's per-runner cool-down (KIN-33), in
-// the report's transaction.
+// CLILimits is routing's per-runner CLI hold (KIN-33, KIN-79, KIN-83), in the report's transaction: CLILimitHit
+// records a cli_limit report (cause rate_limit | auth | billing, the reset the CLI named or zero) and returns the
+// pair's hold; CLIWorked ends the pair's streak after a successful attempt.
 type CLILimits interface {
-	CLILimitHit(ctx context.Context, runnerID, agent string, until time.Time, reason string) error
+	CLILimitHit(ctx context.Context, runnerID, agent, cause string, resetsAt time.Time, reason string) (CLIHold, error)
+	CLIWorked(ctx context.Context, runnerID, agent string) error
+}
+
+// CLIHold is a runner's CLI hold as routing decided it: until when, or (NeedsOwner) until the Owner marks the CLI
+// ready again. Known is false when routing keeps no hold for the attempt's agent (the mock adapter).
+type CLIHold struct {
+	Known      bool
+	Until      time.Time
+	NeedsOwner bool
 }
 
 // HoldStepForCLILimit parks a step whose AI CLI hit its subscription/rate limit or is logged out (KIN-79): the
-// attempt never counts against the retry budget, the step WAITs with reason cli_limit until resetsAt (see
-// domain.Execution.HoldForCLILimit) and the task is BLOCKED(cli_limit) (an alert for the Owner) until the scheduler
-// assigns the step again. at ends the attempt's agent time.
-func (s *Service) HoldStepForCLILimit(ctx context.Context, stepID, runnerID string, fence int64, msg string, resetsAt, at time.Time) error {
+// attempt never counts against the retry budget, the step WAITs with reason cli_limit (until resetsAt, see
+// domain.Execution.HoldForCLILimit, or the hold routing decided: a logged-out or billing-refused CLI backs off and
+// finally waits for the Owner, KIN-83) and the task is BLOCKED(cli_limit) (an alert for the Owner) until the
+// scheduler assigns the step again. cause is the runner's (rate_limit | auth | billing). at ends the attempt's
+// agent time.
+func (s *Service) HoldStepForCLILimit(ctx context.Context, stepID, runnerID string, fence int64, cause, msg string, resetsAt, at time.Time) error {
 	err := s.updateExecution(ctx, stepID, func(ctx context.Context, e *domain.Execution, now time.Time) error {
 		if err := e.HoldForCLILimit(stepID, runnerID, fence, msg, resetsAt, now); err != nil {
 			return refusedReport{err}
 		}
 		e.MarkWorkEnd(stepID, runnerID, fence, at, now)
 		st := e.Step(stepID)
-		if s.CLILimits != nil && st != nil && st.WaitUntil != nil {
+		var hold CLIHold
+		if s.CLILimits != nil && st != nil {
 			agent := ""
 			if a := st.Attempts; len(a) > 0 {
 				agent = a[len(a)-1].Agent
 			}
-			if err := s.CLILimits.CLILimitHit(ctx, runnerID, agent, *st.WaitUntil, msg); err != nil {
+			h, err := s.CLILimits.CLILimitHit(ctx, runnerID, agent, cause, resetsAt, msg)
+			if err != nil {
 				return err
+			}
+			if hold = h; h.Known {
+				if err := e.RetryCLILimitAt(stepID, h.Until); err != nil {
+					return err
+				}
 			}
 		}
 		t, err := s.Repo.Task(ctx, e.TaskID)
@@ -518,7 +548,11 @@ func (s *Service) HoldStepForCLILimit(ctx context.Context, stepID, runnerID stri
 			return nil
 		}
 		detail := msg
-		if st != nil && st.WaitUntil != nil {
+		switch {
+		case hold.NeedsOwner:
+			detail += " (waiting for the Owner: log the CLI in on runner " + runnerID +
+				" or fix its billing, then mark it ready again on the Agents page)"
+		case st != nil && st.WaitUntil != nil:
 			detail += " (retry at " + st.WaitUntil.Format(time.RFC3339) + ")"
 		}
 		if err := t.Transition(domain.TaskBlocked, domain.Reason{Code: domain.WaitCLILimit, Detail: detail}, now); err != nil {

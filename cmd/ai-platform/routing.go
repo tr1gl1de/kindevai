@@ -29,6 +29,7 @@ func newRouting(inst *bootstrap.Installation, audit *auditModule, wf *workflowap
 		Audit:    audit.Service,
 		Access:   taskAccess{&projectsapp.Service{Repo: projectsdb.New(inst.DB)}},
 		Workflow: wf,
+		Outbox:   wf.Outbox, // KIN-83: held CLIs raise alerts
 		Now:      time.Now,
 	}
 	wf.Agents = workflowRouter{svc: svc}
@@ -44,21 +45,37 @@ func (r workflowRouter) Route(ctx context.Context, projectID, role, author strin
 	if err != nil {
 		return workflowapp.AgentRoute{}, err
 	}
-	out := workflowapp.AgentRoute{Blocked: rt.Blocked, Cooling: rt.Cooling,
-		Chain: make([]domain.AgentChoice, 0, len(rt.Chain))}
+	out := workflowapp.AgentRoute{Blocked: rt.Blocked, Chain: make([]domain.AgentChoice, 0, len(rt.Chain)),
+		Cooling: func(runnerID, agent string) (domain.Cooling, bool) {
+			h, ok := rt.Cooling(runnerID, agent)
+			return domain.Cooling{Until: h.Until, NeedsOwner: h.NeedsOwner()}, ok
+		}}
 	for _, c := range rt.Chain {
 		out.Chain = append(out.Chain, domain.AgentChoice{Agent: c.Agent, Model: c.Model})
 	}
 	return out, nil
 }
 
-// cliCooldowns records a runner's CLI that hit its limit as a routing cool-down (KIN-79), in the report's
-// transaction. An attempt without a known CLI (the mock agent) has nothing to cool down.
+// cliCooldowns records a runner's CLI that hit its limit as a routing hold (KIN-79, KIN-83: backoff and the
+// Owner's "ready again" for logged-out or billing-refused CLIs), in the report's transaction, and ends the pair's
+// streak after a success. An attempt without a known CLI (the mock agent) has nothing to hold.
 type cliCooldowns struct{ svc *routingapp.Service }
 
-func (c cliCooldowns) CLILimitHit(ctx context.Context, runnerID, agent string, until time.Time, reason string) error {
+func (c cliCooldowns) CLILimitHit(ctx context.Context, runnerID, agent, cause string, resetsAt time.Time,
+	reason string) (workflowapp.CLIHold, error) {
+	if !protocol.CLIAdapter(agent) {
+		return workflowapp.CLIHold{}, nil
+	}
+	h, err := c.svc.CoolDown(ctx, runnerID, agent, cause, resetsAt, reason)
+	if err != nil {
+		return workflowapp.CLIHold{}, err
+	}
+	return workflowapp.CLIHold{Known: true, Until: h.Until, NeedsOwner: h.NeedsOwner()}, nil
+}
+
+func (c cliCooldowns) CLIWorked(ctx context.Context, runnerID, agent string) error {
 	if !protocol.CLIAdapter(agent) {
 		return nil
 	}
-	return c.svc.CoolDown(ctx, runnerID, agent, until, reason)
+	return c.svc.Recovered(ctx, runnerID, agent)
 }

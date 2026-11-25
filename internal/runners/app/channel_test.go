@@ -928,8 +928,8 @@ type agentWorkflow struct {
 	reports *[]string
 }
 
-func (w agentWorkflow) HoldAttemptForCLILimit(_ context.Context, _, step string, fence int64, reason string, resetsAt, at time.Time) error {
-	w.mark("hold-cli-limit "+resetsAt.UTC().Format(time.RFC3339)+" "+reason, at, "")
+func (w agentWorkflow) HoldAttemptForCLILimit(_ context.Context, _, step string, fence int64, cause, reason string, resetsAt, at time.Time) error {
+	w.mark("hold-cli-limit "+cause+" "+resetsAt.UTC().Format(time.RFC3339)+" "+reason, at, "")
 	return w.op("hold-cli-limit", step, fence, "", "waiting-cli-limit")
 }
 
@@ -941,7 +941,7 @@ func (w agentWorkflow) RecordAgentReport(_ context.Context, _, step string, fenc
 	return nil
 }
 
-// KIN-79: a failure with code cli_limit holds the step for the CLI's limit (with its reset time); the CLI's report
+// KIN-79: a failure with code cli_limit holds the step for the CLI's limit (with its cause, KIN-83, and reset time); the CLI's report
 // on a completed or failed attempt is stored before the attempt's end is applied.
 func TestCLILimitHoldsTheStepAndReportsAreStored(t *testing.T) {
 	t.Parallel()
@@ -953,7 +953,7 @@ func TestCLILimitHoldsTheStepAndReportsAreStored(t *testing.T) {
 	sess, _ := newSession("r1")
 	rep := &protocol.AgentReport{Session: "sess-1", Version: "2.1.0", Usage: &protocol.AgentUsage{InputTokens: 10, CostUSD: 0.5}}
 	limit, _ := json.Marshal(protocol.Failure{Reason: "cli_limit: rate_limit: usage limit reached", Code: protocol.FailureCLILimit,
-		Cause: "rate_limit", ResetsAt: 1_795_575_600_000, Agent: rep})
+		Cause: "billing", ResetsAt: 1_795_575_600_000, Agent: rep})
 	done, _ := json.Marshal(protocol.Completed{Agent: rep})
 	evs := []protocol.Event{
 		{Epoch: "sp", Seq: 1, Step: "s1", Fence: 1, AttemptSeq: 1, Kind: protocol.EventFailed, At: 1_000, Body: limit},
@@ -969,7 +969,7 @@ func TestCLILimitHoldsTheStepAndReportsAreStored(t *testing.T) {
 	if e.wf.state["s1"] != "waiting-cli-limit" || e.wf.state["s2"] != "done" {
 		t.Fatalf("states %v", e.wf.state)
 	}
-	if !slices.Contains(e.wf.marks, "hold-cli-limit 2026-11-25T03:00:00Z cli_limit: rate_limit: usage limit reached 1000 ") {
+	if !slices.Contains(e.wf.marks, "hold-cli-limit billing 2026-11-25T03:00:00Z cli_limit: rate_limit: usage limit reached 1000 ") {
 		t.Fatalf("marks %q", e.wf.marks)
 	}
 	if !slices.Equal(reports, []string{"s1/1 sess-1 2.1.0 10 0.50", "s2/1 sess-1 2.1.0 10 0.50"}) {

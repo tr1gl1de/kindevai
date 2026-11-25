@@ -158,9 +158,9 @@ var (
 
 // HoldAttemptForCLILimit parks the step WAITING(cli_limit) and the task BLOCKED(cli_limit) until the CLI's limit
 // resets (KIN-79).
-func (r runnerExecutions) HoldAttemptForCLILimit(ctx context.Context, runnerID, step string, fence int64, reason string,
+func (r runnerExecutions) HoldAttemptForCLILimit(ctx context.Context, runnerID, step string, fence int64, cause, reason string,
 	resetsAt, at time.Time) error {
-	return attemptError(r.wf.HoldStepForCLILimit(ctx, step, runnerID, fence, reason, resetsAt, at))
+	return attemptError(r.wf.HoldStepForCLILimit(ctx, step, runnerID, fence, cause, reason, resetsAt, at))
 }
 
 // RecordAgentReport stores the CLI's usage, session, model and version with the attempt (KIN-79).

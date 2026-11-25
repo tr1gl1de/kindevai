@@ -364,6 +364,53 @@ func (h Handlers) TaskUnblocked(ctx context.Context, d messaging.Delivery) error
 	return h.Svc.ResolveKey(ctx, TaskDedupKey(p.TaskID))
 }
 
+// CLIDedupKey groups a runner's CLI hold alerts until it works again or the Owner marks it ready (KIN-83).
+func CLIDedupKey(runnerID, agent string) string { return "cli/" + runnerID + "/" + agent }
+
+// CLIHeld handles alerts.cli_held {runnerId, agent, cause, strikes, escalated, parked, until}: a platform alert
+// naming the runner and the CLI; escalated (EscalateAfter holds of the same cause in a row) it is critical and
+// notifies again.
+func (h Handlers) CLIHeld(ctx context.Context, d messaging.Delivery) error {
+	var p struct {
+		RunnerID  string `json:"runnerId"`
+		Agent     string `json:"agent"`
+		Cause     string `json:"cause"`
+		Strikes   int    `json:"strikes"`
+		Escalated bool   `json:"escalated"`
+		Parked    bool   `json:"parked"`
+		Until     string `json:"until"`
+	}
+	if err := decode(d, &p); err != nil {
+		return err
+	}
+	if p.RunnerID == "" || p.Agent == "" {
+		return messaging.Permanent(errors.New("cli_held: no runnerId or agent"))
+	}
+	sev := domain.SeverityWarning
+	if p.Escalated {
+		sev = domain.SeverityCritical
+	}
+	return permanent(h.Svc.Raise(ctx, d.Key, domain.Occurrence{Kind: domain.KindCLIHeld, Severity: sev,
+		DedupKey: CLIDedupKey(clip(p.RunnerID), clip(p.Agent)), Subject: clip(p.Agent + " @ " + p.RunnerID),
+		Details: map[string]string{"runnerId": clip(p.RunnerID), "agent": clip(p.Agent), "cause": clip(p.Cause),
+			"strikes": strconv.Itoa(p.Strikes), "parked": strconv.FormatBool(p.Parked), "until": clip(p.Until)}}))
+}
+
+// CLIReady handles alerts.cli_ready {runnerId, agent}: the CLI worked again or the Owner marked it ready.
+func (h Handlers) CLIReady(ctx context.Context, d messaging.Delivery) error {
+	var p struct {
+		RunnerID string `json:"runnerId"`
+		Agent    string `json:"agent"`
+	}
+	if err := decode(d, &p); err != nil {
+		return err
+	}
+	if p.RunnerID == "" || p.Agent == "" {
+		return messaging.Permanent(errors.New("cli_ready: no runnerId or agent"))
+	}
+	return h.Svc.ResolveKey(ctx, CLIDedupKey(clip(p.RunnerID), clip(p.Agent)))
+}
+
 // clip bounds a free-form value from a monitor to what an alert stores (domain.Occurrence rejects longer values).
 func clip(s string) string {
 	const maxBytes = 200

@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -134,34 +135,70 @@ func (r *Repository) DeleteBinding(ctx context.Context, projectID string, role d
 
 // SetCooldown stores a runner's CLI cool-down (replacing an earlier one).
 func (r *Repository) SetCooldown(ctx context.Context, c app.Cooldown) error {
-	if _, err := db.Conn(ctx, r.db).ExecContext(ctx, `INSERT INTO agent_cooldowns(runner_id, agent, until_at, reason)
-		VALUES (?, ?, ?, ?) ON CONFLICT(runner_id, agent) DO UPDATE SET until_at = excluded.until_at,
-		reason = excluded.reason`, c.RunnerID, c.Agent, ts(c.Until), c.Reason); err != nil {
+	if _, err := db.Conn(ctx, r.db).ExecContext(ctx, `INSERT INTO agent_cooldowns(runner_id, agent, until_at, reason,
+		cause, strikes, parked) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(runner_id, agent) DO UPDATE SET
+		until_at = excluded.until_at, reason = excluded.reason, cause = excluded.cause, strikes = excluded.strikes,
+		parked = excluded.parked`, c.RunnerID, c.Agent, ts(c.Until), c.Reason, c.Cause, c.Strikes, c.Parked); err != nil {
 		return fmt.Errorf("saving a CLI cool-down: %w", err)
 	}
 	return nil
 }
 
-// Cooldowns lists the cool-downs running at now, by runner and CLI.
+const cooldownCols = `runner_id, agent, until_at, reason, cause, strikes, parked`
+
+func scanCooldown(row interface{ Scan(...any) error }) (app.Cooldown, error) {
+	var cd app.Cooldown
+	var until string
+	if err := row.Scan(&cd.RunnerID, &cd.Agent, &until, &cd.Reason, &cd.Cause, &cd.Strikes, &cd.Parked); err != nil {
+		return app.Cooldown{}, err
+	}
+	var err error
+	if cd.Until, err = parseTS(until); err != nil {
+		return app.Cooldown{}, fmt.Errorf("reading a CLI cool-down: %w", err)
+	}
+	return cd, nil
+}
+
+// Cooldowns lists the cool-downs running at now (parked ones whatever their end), by runner and CLI.
 func (r *Repository) Cooldowns(ctx context.Context, now time.Time) ([]app.Cooldown, error) {
 	c := db.Conn(ctx, r.db)
-	rows, err := c.QueryContext(ctx, `SELECT runner_id, agent, until_at, reason FROM agent_cooldowns
-		WHERE until_at > ? ORDER BY runner_id, agent`, ts(now))
+	rows, err := c.QueryContext(ctx, `SELECT `+cooldownCols+` FROM agent_cooldowns
+		WHERE until_at > ? OR parked = 1 ORDER BY runner_id, agent`, ts(now))
 	if err != nil {
 		return nil, fmt.Errorf("listing CLI cool-downs: %w", err)
 	}
 	defer rows.Close()
 	var out []app.Cooldown
 	for rows.Next() {
-		var cd app.Cooldown
-		var until string
-		if err := rows.Scan(&cd.RunnerID, &cd.Agent, &until, &cd.Reason); err != nil {
-			return nil, fmt.Errorf("reading a CLI cool-down: %w", err)
-		}
-		if cd.Until, err = parseTS(until); err != nil {
+		cd, err := scanCooldown(rows)
+		if err != nil {
 			return nil, fmt.Errorf("reading a CLI cool-down: %w", err)
 		}
 		out = append(out, cd)
 	}
 	return out, rows.Err()
+}
+
+// Cooldown returns the pair's last cool-down, expired or not.
+func (r *Repository) Cooldown(ctx context.Context, runnerID, agent string) (app.Cooldown, bool, error) {
+	cd, err := scanCooldown(db.Conn(ctx, r.db).QueryRowContext(ctx, `SELECT `+cooldownCols+` FROM agent_cooldowns
+		WHERE runner_id = ? AND agent = ?`, runnerID, agent))
+	if errors.Is(err, sql.ErrNoRows) {
+		return app.Cooldown{}, false, nil
+	}
+	if err != nil {
+		return app.Cooldown{}, false, fmt.Errorf("loading a CLI cool-down: %w", err)
+	}
+	return cd, true, nil
+}
+
+// DeleteCooldown forgets the pair's cool-down; it reports whether there was one.
+func (r *Repository) DeleteCooldown(ctx context.Context, runnerID, agent string) (bool, error) {
+	res, err := db.Conn(ctx, r.db).ExecContext(ctx, `DELETE FROM agent_cooldowns WHERE runner_id = ? AND agent = ?`,
+		runnerID, agent)
+	if err != nil {
+		return false, fmt.Errorf("deleting a CLI cool-down: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }

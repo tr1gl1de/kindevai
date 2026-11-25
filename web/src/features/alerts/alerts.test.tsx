@@ -48,6 +48,20 @@ describe("alert center", () => {
     expect(await screen.findByText("Хранилище вывода раннеров заполнено: новый вывод отбрасывается")).toBeInTheDocument();
   });
 
+  // KIN-83: a held CLI names the CLI, the runner, the cause and the Owner's action.
+  it("describes a held CLI in English and Russian", async () => {
+    const held: Alert = { ...runner, id: "A8", kind: "cli_held", severity: "critical", subject: "claude @ r1",
+      details: { runnerId: "r1", agent: "claude", cause: "auth", strikes: "3", parked: "false" } };
+    server.use(http.get("/api/auth/me", () => json(owner)), http.get("/api/alerts", () => json([held])));
+    const { unmount } = await renderApp("/alerts");
+    expect(await screen.findByText(
+      "claude on runner r1: Logged out. Fix it on the runner, then mark it ready on the Agents page")).toBeInTheDocument();
+    unmount();
+    await renderApp("/alerts", "ru");
+    expect(await screen.findByText(
+      "claude на раннере r1: Нет входа. Исправьте на раннере и отметьте готовым на странице «Агенты»")).toBeInTheDocument();
+  });
+
   it("lists active alerts with severity and acknowledges one", async () => {
     let action = "";
     server.use(

@@ -2,6 +2,8 @@ package domain
 
 import (
 	"errors"
+	"path"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -219,5 +221,44 @@ func TestHostPort(t *testing.T) {
 				t.Fatalf("HostPort(%q) = %q, %d, %v", tc.in, h, p, err)
 			}
 		})
+	}
+}
+
+func TestFilesystemLeakTestsAreRequired(t *testing.T) {
+	t.Parallel()
+	for _, test := range []string{LeakFSHome, LeakFSData, LeakFSWrite} {
+		if !slices.Contains(LeakTests, test) {
+			t.Fatalf("%s is not a leak test", test)
+		}
+		var ls []Leak
+		for _, l := range allBlocked() {
+			if l.Test != test {
+				ls = append(ls, l)
+			}
+		}
+		if err := (Verdict{Leaks: ls}).Verified(true); err == nil || !strings.Contains(err.Error(), test) {
+			t.Fatalf("a verdict without %s verified: %v", test, err)
+		}
+		ls = append(ls, Leak{Test: test, Target: "/home/u/.ssh"})
+		if err := (Verdict{Leaks: ls}).Verified(true); err == nil || !strings.Contains(err.Error(), "/home/u/.ssh") {
+			t.Fatalf("a verdict with a visible %s verified: %v", test, err)
+		}
+	}
+}
+
+func TestCLIHomeFiles(t *testing.T) {
+	t.Parallel()
+	for _, f := range CLIHomeFiles {
+		if f == "" || path.IsAbs(f) || path.Clean(f) != f || strings.HasPrefix(f, "..") {
+			t.Errorf("%q is not a clean path relative to HOME", f)
+		}
+		if strings.Contains(f, ".ssh") || strings.Contains(f, "kindevai") {
+			t.Errorf("%s must never be copied into the sandbox", f)
+		}
+	}
+	for _, want := range []string{".claude/.credentials.json", ".codex/auth.json"} {
+		if !slices.Contains(CLIHomeFiles, want) {
+			t.Errorf("the CLI login %s is not copied", want)
+		}
 	}
 }

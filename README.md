@@ -314,19 +314,32 @@ machine itself: `ai-runner test-network` (it also says whether strict egress is 
 
 **Strict egress** (Linux and WSL2): a step whose effective profile is `strict` runs only in a per-attempt sandbox —
 new user, network and mount namespaces created by the runner without root. Inside, the only interface is the
-sandbox's own loopback; nftables rejects everything else (IPv4, IPv6, DNS, UDP); `/run`, `/tmp`, the WSL mounts and
-the runner's data directory are hidden (no Docker daemon, D-Bus or WSL interop socket); the only way out is the
+sandbox's own loopback; nftables rejects everything else (IPv4, IPv6, DNS, UDP). The filesystem is a minimal view
+(KIN-80): system directories (`/usr`, `/etc`, `/lib`, …) read-only, the attempt's worktree and state directory
+writable, the repository mirror read-only (only the worktree's own index/HEAD writable), a private `/tmp`, and a
+private per-attempt `HOME` holding copies of the CLI's login files only (`~/.claude/.credentials.json`,
+`~/.claude.json`, `~/.claude/settings.json`, `~/.codex/auth.json`, `~/.codex/config.toml`; nothing is copied back,
+so an agent cannot change the login or settings of later runs). Of `/etc` only what programs need (users, name
+resolution, TLS roots, time zone, linker) is shown. The runner's real `HOME` (SSH keys, other repositories), its data
+directory (Ed25519 key, other attempts), `/opt`, `/run` (Docker, D-Bus, WSL interop), `/mnt` (Windows drives) and
+everything else are absent; a CLI installed outside the system directories is exposed read-only. The only way out is the
 runner's local proxy adapter, which applies the profile's allowlist and connects through the upstream proxy (HTTP
 CONNECT, HTTPS proxy or SOCKS5 with remote DNS; the credentials never enter the sandbox). Before the CLI starts, a
 preflight inside the sandbox must pass: proxy reachable, egress IP as expected, and direct TCP (IPv4/IPv6), DNS, a
-client ignoring `HTTP_PROXY` and host sockets all blocked. Otherwise the CLI never starts and the step waits
+client ignoring `HTTP_PROXY` and host sockets all blocked, the runner's `HOME` and data directory invisible, and `/`
+and the system directories unwritable. Otherwise the CLI never starts and the step waits
 (WAITING, reason `network`) and is retried after two minutes; there is no direct fallback. The runner reports
 `strictEgress` only after a self-test sandbox verified, and the scheduler gives strict steps only to such runners
 (macOS: unsupported). CLI permission bypass (`--dangerously-skip-permissions` and the like) is allowed only inside this
 sandbox. Requirements: `nft` installed and unprivileged user namespaces enabled (Ubuntu 24.04:
 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`). Known limits: an attempt adopted after a runner
-restart has no network (its proxy adapter is gone); files outside the hidden directories stay readable by the CLI
-(it runs with the runner's uid).
+restart has no network (its proxy adapter is gone); inside the sandbox `git add`/`git commit` by the agent fail (the mirror's
+objects are read-only; the runner commits after the run); `--resume` across sandboxed attempts does not find the
+earlier session (each attempt has a fresh `HOME`); a CLI login refreshed inside the sandbox is not kept (prefer a
+long-lived token such as `claude setup-token` for runners); Linux 5.12+ is required. **Without the sandbox** (macOS, no user namespaces, or a profile
+that is not `strict`) the CLI runs on the host with the runner's uid and its real `HOME`: it can read everything the
+runner user can (SSH keys, the runner's key and data directory, other repositories). That is why the permission bypass
+stays off there and the CLI keeps asking before acting; use strict egress for untrusted tasks.
 
 ### Approvals and risk policy
 

@@ -80,7 +80,7 @@ func (r *Reporter) Report(ctx context.Context, s Sender) error {
 				return err
 			}
 			if running--; running == 0 {
-				probeErr = nil // probes stopped cleanly (ctx ended); keep beating until it is noticed
+				probeErr = nil // both probes finished (capabilities sent, storage stopped by ctx); keep beating
 			}
 		case <-hb.C:
 			if err := beat(); err != nil {

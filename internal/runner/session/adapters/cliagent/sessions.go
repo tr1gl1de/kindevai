@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"sync"
 	"time"
 
@@ -22,15 +23,30 @@ import (
 // project × task × CLI gets its own directory under Root (in the runner's data directory), bound read-write at the
 // CLI's SessionDir below the agent's HOME: an attempt sees its own task's sessions only, never another task's or the
 // host's. The store holds transcripts only: the CLI's login stays a copy (or the runner's token) and is never written
-// back. Stores no attempt used for MaxAge are removed.
+// back. Stores no attempt used for MaxAge are removed. A task's store (all its CLIs together) is kept within Limit
+// (KIN-96): before each attempt, and in the hourly sweep, its oldest session files are removed until it fits again.
 type SessionStore struct {
 	Root   string
 	MaxAge time.Duration    // DefaultSessionMaxAge when zero
+	Limit  int64            // bytes of session files per task; DefaultSessionLimit when zero
 	Now    func() time.Time // time.Now when nil
+
+	remove func(string) error // os.Remove when nil (tests make it fail)
 
 	mu        sync.Mutex
 	lastSweep time.Time
 }
+
+// Store is a task's session store prepared for an attempt.
+type Store struct {
+	Source string // the directory in the runner's data directory
+	Rel    string // where it is bound below the agent's HOME
+	Notice string // why session files were removed before the attempt ("" when none were): for its output
+}
+
+// DefaultSessionLimit bounds the session files of one task: a transcript is a few MiB at most, so this keeps many
+// sessions while an agent cannot fill the runner's data directory through its store.
+const DefaultSessionLimit = 256 << 20
 
 // DefaultSessionMaxAge is how long a task's sessions are kept after its last attempt.
 const DefaultSessionMaxAge = 30 * 24 * time.Hour
@@ -54,30 +70,127 @@ func (s *SessionStore) maxAge() time.Duration {
 	return s.MaxAge
 }
 
+func (s *SessionStore) limit() int64 {
+	if s.Limit <= 0 {
+		return DefaultSessionLimit
+	}
+	return s.Limit
+}
+
 // Prepare creates (or reuses) the store of agent for task of project and returns it with the path below HOME it is
-// bound at. It marks the task's store as used now.
-func (s *SessionStore) Prepare(project, task, agent string) (source, rel string, err error) {
+// bound at. It marks the task's store as used now and brings it within Limit; a store that cannot be brought within
+// it is an error (the attempt does not run over the limit).
+func (s *SessionStore) Prepare(project, task, agent string) (Store, error) {
 	d, err := DialectFor(agent)
 	if err != nil {
-		return "", "", err
+		return Store{}, err
 	}
 	if project == "" || task == "" {
-		return "", "", errors.New("session store: no project or task")
+		return Store{}, errors.New("session store: no project or task")
 	}
 	s.maybeSweep()
 	taskDir := filepath.Join(s.Root, storeName(project), storeName(task))
-	source = filepath.Join(taskDir, agent)
+	source := filepath.Join(taskDir, agent)
 	// Every level owner-only and no symlink (EnsureDir refuses one): the runner binds exactly this directory.
 	for _, dir := range []string{s.Root, filepath.Dir(taskDir), taskDir, source} {
 		if err := secfile.EnsureDir(dir); err != nil {
-			return "", "", fmt.Errorf("session store: %w", err)
+			return Store{}, fmt.Errorf("session store: %w", err)
 		}
 	}
 	now := s.now()
 	if err := os.Chtimes(taskDir, now, now); err != nil {
-		return "", "", fmt.Errorf("session store: %w", err)
+		return Store{}, fmt.Errorf("session store: %w", err)
 	}
-	return source, d.SessionDir(), nil
+	notice, err := s.shrink(taskDir)
+	if err != nil {
+		return Store{}, err
+	}
+	return Store{Source: source, Rel: d.SessionDir(), Notice: notice}, nil
+}
+
+type sessionFile struct {
+	path string
+	size int64
+	mod  time.Time
+}
+
+// shrink removes the oldest session files of the task's store at taskDir until it is within Limit and says what it
+// removed ("" when the store was within it). Only regular files count; symlinks are neither followed nor counted.
+func (s *SessionStore) shrink(taskDir string) (string, error) {
+	var files []sessionFile
+	var total int64
+	err := filepath.WalkDir(taskDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		fi, err := d.Info() // lstat
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		files = append(files, sessionFile{p, fi.Size(), fi.ModTime()})
+		total += fi.Size()
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("session store: measuring %s: %w", filepath.Base(taskDir), err)
+	}
+	limit := s.limit()
+	if total <= limit {
+		return "", nil
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if !files[i].mod.Equal(files[j].mod) {
+			return files[i].mod.Before(files[j].mod)
+		}
+		return files[i].path < files[j].path
+	})
+	unlock(taskDir) // an agent may have made a directory read-only
+	remove := s.remove
+	if remove == nil {
+		remove = os.Remove
+	}
+	was := total
+	var n int
+	var freed int64
+	var lastErr error
+	for _, f := range files {
+		if total <= limit {
+			break
+		}
+		if err := remove(f.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			lastErr = err
+			continue
+		}
+		total -= f.size
+		freed += f.size
+		n++
+	}
+	if total > limit {
+		return "", fmt.Errorf("session store of the task is over its limit (%s > %s) and could not be shrunk: %w",
+			byteSize(total), byteSize(limit), lastErr)
+	}
+	return fmt.Sprintf("session store of the task was over its limit (%s > %s): removed %d oldest session files "+
+		"(%s); sessions in them can no longer be resumed", byteSize(was), byteSize(limit), n, byteSize(freed)), nil
+}
+
+// byteSize formats n bytes for a person.
+func byteSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 // storeName is an id as a directory name: itself when it is a plain name, else a hash of it (never a path).
@@ -101,7 +214,7 @@ func (s *SessionStore) maybeSweep() {
 	}
 }
 
-// Sweep removes the stores of tasks no attempt used for MaxAge and returns them.
+// Sweep removes the stores of tasks no attempt used for MaxAge and returns them; it brings the others within Limit.
 func (s *SessionStore) Sweep() []string {
 	cutoff := s.now().Add(-s.maxAge())
 	var removed []string
@@ -114,10 +227,14 @@ func (s *SessionStore) Sweep() []string {
 		tasks, _ := os.ReadDir(pd)
 		for _, t := range tasks {
 			fi, err := t.Info()
-			if err != nil || !fi.ModTime().Before(cutoff) {
+			if err != nil || !fi.IsDir() {
 				continue
 			}
 			td := filepath.Join(pd, t.Name())
+			if !fi.ModTime().Before(cutoff) {
+				_, _ = s.shrink(td) // best effort: the next attempt of the task retries and reports
+				continue
+			}
 			unlock(td)
 			if os.RemoveAll(td) == nil { // RemoveAll never follows a symlink inside
 				removed = append(removed, td)

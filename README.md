@@ -432,7 +432,8 @@ token) fails before the CLI starts as a logged-out CLI: the step is held and the
 `auth`); the runner also warns at start-up and a month before the token expires. For `--resume` between attempts,
 each task gets its own session store in the data directory (`cli-sessions/<project>/<task>/<cli>`), bound at
 `~/.claude/projects` / `~/.codex/sessions` in the sandbox: an attempt sees its own task's sessions only, never another
-task's or yours; stores unused for 30 days are removed. A strict profile needs `api.anthropic.com` in its allowlist
+task's or yours; stores unused for 30 days are removed, and a task's store is kept within 256 MiB (before each
+attempt the oldest session files go, and the attempt's output says so). A strict profile needs `api.anthropic.com` in its allowlist
 for Claude Code (telemetry to `*.datadoghq.com` is optional).
 
 ### Approvals and risk policy

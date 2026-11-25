@@ -163,6 +163,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	attachCheckoutSource(channel, integ.GitHub)                        // KIN-29 worktree base + repository token
 	attachScopeCheck(channel, apv.Approvals)                           // KIN-51 changed files vs the approved scope
 	attachNetwork(gateway, netSvc, logger)
+	wireStrictEgress(apv.Workflow, netSvc.StrictFor) // KIN-31 strict steps only on verified runners
 	modules = append(modules, netHTTP)
 	maint, err := newMaintenance(ctx, inst, audit, apv.Workflow, logger) // KIN-41 maintenance mode
 	if err != nil {

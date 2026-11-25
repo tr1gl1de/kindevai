@@ -282,7 +282,23 @@ session; the runner keeps it in a `0600` file and never logs it).
 **Test Network** runs a preflight on a runner — proxy reachability and authentication, the observed egress IP from the
 diagnostic endpoint (default `https://api64.ipify.org`, configurable per profile) compared with the expected one, and
 reachability of the AI providers, GitHub and YouTrack — and shows the result, failure reason and time. On the runner
-machine itself: `ai-runner test-network`. Enforcing strict egress in a sandbox comes with KIN-31.
+machine itself: `ai-runner test-network` (it also says whether strict egress is available there and why not).
+
+**Strict egress** (Linux and WSL2): a step whose effective profile is `strict` runs only in a per-attempt sandbox —
+new user, network and mount namespaces created by the runner without root. Inside, the only interface is the
+sandbox's own loopback; nftables rejects everything else (IPv4, IPv6, DNS, UDP); `/run`, `/tmp`, the WSL mounts and
+the runner's data directory are hidden (no Docker daemon, D-Bus or WSL interop socket); the only way out is the
+runner's local proxy adapter, which applies the profile's allowlist and connects through the upstream proxy (HTTP
+CONNECT, HTTPS proxy or SOCKS5 with remote DNS; the credentials never enter the sandbox). Before the CLI starts, a
+preflight inside the sandbox must pass: proxy reachable, egress IP as expected, and direct TCP (IPv4/IPv6), DNS, a
+client ignoring `HTTP_PROXY` and host sockets all blocked. Otherwise the CLI never starts and the step waits
+(WAITING, reason `network`) and is retried after two minutes; there is no direct fallback. The runner reports
+`strictEgress` only after a self-test sandbox verified, and the scheduler gives strict steps only to such runners
+(macOS: unsupported). CLI permission bypass (`--dangerously-skip-permissions` and the like) is allowed only inside this
+sandbox. Requirements: `nft` installed and unprivileged user namespaces enabled (Ubuntu 24.04:
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`). Known limits: an attempt adopted after a runner
+restart has no network (its proxy adapter is gone); files outside the hidden directories stay readable by the CLI
+(it runs with the runner's uid).
 
 ### Approvals and risk policy
 

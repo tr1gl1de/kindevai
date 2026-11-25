@@ -96,10 +96,12 @@ func (s *Service) Schedule(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// schedulable: READY, or WAITING for a runner without an unknown attempt.
-func schedulable(st *domain.Step) bool {
+// schedulable: READY, WAITING for a runner without an unknown attempt, or WAITING for the network once its retry
+// is due (KIN-31).
+func schedulable(st *domain.Step, now time.Time) bool {
 	return st.State == domain.StepReady ||
-		st.State == domain.StepWaiting && st.WaitReason == domain.WaitRunner && !st.AttemptUnknown()
+		st.State == domain.StepWaiting && st.WaitReason == domain.WaitRunner && !st.AttemptUnknown() ||
+		st.NetworkRetryDue(now)
 }
 
 func (s *Service) scheduleExecution(ctx context.Context, id string) error {
@@ -125,7 +127,7 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 		for _, ps := range rev.Plan().Steps {
 			caps[ps.Key] = ps
 		}
-		if !slices.ContainsFunc(e.Steps, func(st domain.Step) bool { return schedulable(&st) }) &&
+		if !slices.ContainsFunc(e.Steps, func(st domain.Step) bool { return schedulable(&st, s.now()) }) &&
 			!blockedForRunner && t.State == domain.TaskRunning {
 			return s.blockIfStuck(ctx, &e, &t) // nothing to assign: only the task's block state may change
 		}
@@ -144,7 +146,7 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 		before := e.Clone()
 		for i := range e.Steps {
 			st := &e.Steps[i]
-			if !schedulable(st) {
+			if !schedulable(st, now) {
 				continue
 			}
 			ps := caps[st.Key]

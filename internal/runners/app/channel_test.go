@@ -886,3 +886,38 @@ func TestLifecycleEventsCarryTheRunnerTimeAndAgent(t *testing.T) {
 		t.Fatalf("marks %q", e.wf.marks)
 	}
 }
+
+// holdingWorkflow also parks steps for the network (the real workflow does).
+type holdingWorkflow struct{ *fakeWorkflow }
+
+func (w holdingWorkflow) HoldAttemptForNetwork(_ context.Context, _, step string, fence int64, _ string, at time.Time) error {
+	w.mark("hold-network", at, "")
+	return w.op("hold-network", step, fence, "", "waiting-network")
+}
+
+// KIN-31: a failure with code network (strict egress sandbox not verified) parks the step for the network; any
+// other failure stays an ordinary failure.
+func TestNetworkFailureHoldsTheStep(t *testing.T) {
+	t.Parallel()
+	e := newChannelEnv()
+	e.ch.Executions = holdingWorkflow{e.wf}
+	e.wf.fence["s1"], e.wf.state["s1"] = 1, "running"
+	e.wf.fence["s2"], e.wf.state["s2"] = 1, "running"
+	sess, _ := newSession("r1")
+	network, _ := json.Marshal(protocol.Failure{Reason: "strict egress sandbox not verified", Code: protocol.FailureNetwork})
+	plain, _ := json.Marshal(protocol.Failure{Reason: "exit status 1"})
+	evs := []protocol.Event{
+		{Epoch: "sp", Seq: 1, Step: "s1", Fence: 1, AttemptSeq: 1, Kind: protocol.EventFailed, At: 1_000, Body: network},
+		{Epoch: "sp", Seq: 2, Base: 1, Step: "s2", Fence: 1, AttemptSeq: 1, Kind: protocol.EventFailed, At: 2_000, Body: plain},
+	}
+	for _, ev := range evs {
+		if err := handle(t, e.ch, sess, protocol.TypeEvent, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.wf.mu.Lock()
+	defer e.wf.mu.Unlock()
+	if e.wf.state["s1"] != "waiting-network" || e.wf.state["s2"] != "failed" {
+		t.Fatalf("states %v", e.wf.state)
+	}
+}

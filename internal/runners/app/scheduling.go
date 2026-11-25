@@ -13,6 +13,7 @@ type Candidate struct {
 	ID               string
 	Tools            []string // names of the tools it reported (capabilities)
 	DiskHeavyAllowed bool     // false while a volume of the runner is critical (KIN-20)
+	StrictEgress     bool     // its strict egress sandbox verified (KIN-31)
 }
 
 // Candidates lists, by id, the runners that may receive the project's steps now: APPROVED and granted the project
@@ -40,6 +41,7 @@ func (t *Telemetry) Candidates(ctx context.Context, projectID string, online fun
 		c := Candidate{ID: r.ID, Tools: []string{}, DiskHeavyAllowed: !slices.ContainsFunc(vols[r.ID],
 			func(v domain.Volume) bool { return !v.DiskHeavyAllowed() })}
 		if p.Capabilities != nil {
+			c.StrictEgress = p.Capabilities.StrictEgress
 			for _, tool := range p.Capabilities.Tools {
 				c.Tools = append(c.Tools, tool.Name)
 			}

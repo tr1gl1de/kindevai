@@ -41,6 +41,18 @@ func fakeProbe(wsl bool) *Probe {
 	}
 }
 
+// KIN-31: strictEgress is reported only when the sandbox self-test verified.
+func TestCapabilitiesReportStrictEgress(t *testing.T) {
+	t.Parallel()
+	for _, verified := range []bool{false, true} {
+		p := fakeProbe(false)
+		p.StrictEgress = func(context.Context) bool { return verified }
+		if c := p.Capabilities(t.Context()); c.StrictEgress != verified {
+			t.Fatalf("verified %v: strictEgress %v", verified, c.StrictEgress)
+		}
+	}
+}
+
 func TestCapabilitiesListFoundToolsWithSanitizedVersions(t *testing.T) {
 	t.Parallel()
 	c := fakeProbe(true).Capabilities(t.Context())

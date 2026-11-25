@@ -29,6 +29,8 @@ type LaunchSpec struct {
 	Attempt  int64 // the fencing token: distinct for every attempt of a step
 	Stdout   io.Writer
 	Stderr   io.Writer
+	// Sandbox is set when the attempt's network profile is strict (KIN-31): the process runs only through it.
+	Sandbox Sandbox
 }
 
 // Process is a running attempt process (the leader of its own process group).
@@ -112,7 +114,9 @@ type Executor struct {
 	// Workspaces prepares the git worktree of an assignment with a Base (KIN-29); without it such an assignment
 	// fails.
 	Workspaces Workspaces
-	Grace      time.Duration // DefaultGrace when zero
+	// Egress confines attempts whose network profile is strict (KIN-31); nil: no attempt is confined.
+	Egress Confiner
+	Grace  time.Duration // DefaultGrace when zero
 	// ChangesEvery is how often a running attempt's worktree changes are reported (KIN-51; only when they differ
 	// from the last report); zero reports them only at the attempt's end.
 	ChangesEvery time.Duration
@@ -140,6 +144,7 @@ type run struct {
 	output    []*redact.Stream // stdout, stderr: flushed before the terminal event
 	known     []string         // secret values masked in the attempt's output and failure reasons (KIN-77)
 	cancelled string
+	sandbox   Sandbox // released once the process ended
 	done      chan struct{}
 	// result is the terminal event kind once the process ended but reporting it failed; the run stays listed
 	// (with the result) and the report is retried.
@@ -307,18 +312,24 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 		}
 		workdir = wd
 	}
+	var sandbox Sandbox
+	if x.Egress != nil {
+		sb, err := x.Egress.Confine(ctx, a, dir, workdir)
+		if err != nil {
+			return x.launchFailed(r, a, fmt.Errorf("%w: %w", ErrNetwork, err))
+		}
+		sandbox = sb
+	}
 	stdout, stderr := x.redacted(r, "stdout"), x.redacted(r, "stderr")
 	proc, err := x.Launcher.Launch(ctx, LaunchSpec{Dir: dir, Workdir: workdir, Scenario: a.ScenarioOrDefault(),
-		Attempt: a.Fence, Stdout: stdout, Stderr: stderr})
+		Attempt: a.Fence, Stdout: stdout, Stderr: stderr, Sandbox: sandbox})
 	if err != nil {
-		x.logger().Error("launching the attempt", "step", a.Step, "fence", a.Fence, "err", err)
-		x.releaseWorkspace(r)
-		if err := r.stream.Emit(protocol.EventFailed, protocol.Failure{Reason: r.mask("launch failed: " + err.Error())}); err != nil {
-			return x.abandon(r, err) // the re-sent command tries again
+		if sandbox != nil {
+			sandbox.Release()
 		}
-		return x.Journal.Finish(a.Step, a.Fence)
+		return x.launchFailed(r, a, err)
 	}
-	r.proc = proc
+	r.proc, r.sandbox = proc, sandbox
 	if proc.StartTime() == "" {
 		x.logger().Warn("process start time unknown: after a restart a reused pid cannot be told apart", "step", a.Step,
 			"pid", proc.PID())
@@ -332,6 +343,21 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 	}
 	x.watch(r)
 	return nil
+}
+
+// launchFailed reports an attempt that could not start. A strict egress failure (ErrNetwork) carries the code
+// network: the step waits for the network instead of using its retry budget, and nothing ran unconfined.
+func (x *Executor) launchFailed(r *run, a domain.Assignment, err error) error {
+	x.logger().Error("launching the attempt", "step", a.Step, "fence", a.Fence, "err", err)
+	x.releaseWorkspace(r)
+	f := protocol.Failure{Reason: r.mask("launch failed: " + err.Error())}
+	if errors.Is(err, ErrNetwork) {
+		f = protocol.Failure{Reason: r.mask(err.Error()), Code: protocol.FailureNetwork}
+	}
+	if err := r.stream.Emit(protocol.EventFailed, f); err != nil {
+		return x.abandon(r, err) // the re-sent command tries again
+	}
+	return x.Journal.Finish(a.Step, a.Fence)
 }
 
 func ended(r *run) bool {
@@ -538,6 +564,9 @@ func (x *Executor) watch(r *run) {
 	stopReports := x.reportChanges(r)
 	x.wg.Go(func() {
 		exit := r.proc.Wait()
+		if r.sandbox != nil {
+			r.sandbox.Release()
+		}
 		for _, s := range r.output { // the pipes are drained: send the held-back partial lines before the end
 			if err := s.Flush(); err != nil {
 				x.logger().Warn("sending the attempt's last output", "step", r.rec.Step, "err", err)

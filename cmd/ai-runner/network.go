@@ -6,14 +6,18 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/app"
 	"github.com/tr1gl1de/kindevai/internal/runner/egress/adapters/configstore"
 	"github.com/tr1gl1de/kindevai/internal/runner/egress/adapters/httpprobe"
+	"github.com/tr1gl1de/kindevai/internal/runner/egress/adapters/nsbox"
 	egress "github.com/tr1gl1de/kindevai/internal/runner/egress/app"
 	"github.com/tr1gl1de/kindevai/internal/runner/platform/datadir"
+	sessionapp "github.com/tr1gl1de/kindevai/internal/runner/session/app"
+	sessiondomain "github.com/tr1gl1de/kindevai/internal/runner/session/domain"
 )
 
 // networkConfigPath is where the Control Plane's network configuration is kept (0600: it holds proxy passwords).
@@ -68,6 +72,9 @@ func testNetwork(ctx context.Context, args []string, e *env) error {
 	}
 	r := (&httpprobe.Prober{}).Probe(ctx, cu.Network.Default, cu.Network.Endpoints)
 	printNetworkResult(e.stdout, cu.Network.Default, r)
+	if exe, err := os.Executable(); err == nil {
+		printStrictEgress(ctx, e.stdout, strictEgress(d, exe, slog.New(slog.DiscardHandler)))
+	}
 	if !r.OK {
 		return fmt.Errorf("network test failed: %s", r.Code)
 	}
@@ -101,4 +108,41 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// strictEgress wires strict egress (KIN-31): sandboxes are built by re-executing this binary as
+// `ai-runner sandbox-exec` in new namespaces, with the profiles the Control Plane delivered.
+func strictEgress(d *datadir.Dir, exe string, logger *slog.Logger) *egress.Sandboxes {
+	return &egress.Sandboxes{
+		Config: configstore.File{Path: networkConfigPath(d)}.Load,
+		Boxes:  &nsbox.Manager{Program: exe, Args: []string{"sandbox-exec"}, DataDir: d.Path(), Logger: logger},
+		Logger: logger,
+	}
+}
+
+// confiner gives the session context the egress context's sandboxes.
+type confiner struct{ s *egress.Sandboxes }
+
+var _ sessionapp.Confiner = confiner{}
+
+func (c confiner) Confine(ctx context.Context, a sessiondomain.Assignment, dir, workdir string) (sessionapp.Sandbox, error) {
+	b, err := c.s.Confine(ctx, a.Project, a.Adapter, dir, workdir)
+	if err != nil || b == nil {
+		return nil, err
+	}
+	sb, ok := b.(sessionapp.Sandbox)
+	if !ok {
+		b.Release()
+		return nil, errors.New("the sandbox cannot launch processes")
+	}
+	return sb, nil
+}
+
+// printStrictEgress reports whether this machine can enforce strict egress, and why not.
+func printStrictEgress(ctx context.Context, w io.Writer, s *egress.Sandboxes) {
+	if ok, why := s.Supported(ctx); ok {
+		fmt.Fprintln(w, "strict egress: available (the sandbox self-test verified)")
+	} else {
+		fmt.Fprintf(w, "strict egress: unavailable: %s\n", why)
+	}
 }

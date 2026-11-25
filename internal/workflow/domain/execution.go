@@ -513,6 +513,30 @@ func (e *Execution) ReleaseRunner(runnerID, msg string, now time.Time, maxAttemp
 // attempt is cancelled (it does not use the retry budget), the claim is released so the old process's later
 // reports are stale, and the step WAITs with reason approval until ResumeStep after a new approval.
 func (e *Execution) HoldForApproval(stepID, runnerID string, fence int64, msg string, now time.Time) error {
+	return e.hold(stepID, runnerID, fence, msg, WaitApproval, now)
+}
+
+// HoldForNetwork parks a CLAIMED or RUNNING step whose runner could not build or verify the strict egress sandbox
+// (KIN-31, fail-closed: the attempt never ran unconfined). Like a hold for approval the attempt is cancelled (no
+// retry budget used) and the claim released; the step WAITs with reason network until the scheduler retries it
+// (NetworkRetryDelay after the attempt ended).
+func (e *Execution) HoldForNetwork(stepID, runnerID string, fence int64, msg string, now time.Time) error {
+	return e.hold(stepID, runnerID, fence, msg, WaitNetwork, now)
+}
+
+// NetworkRetryDelay is how long a step held for the network waits before the scheduler assigns it again.
+const NetworkRetryDelay = 2 * time.Minute
+
+// NetworkRetryDue reports a step WAITING for the network whose last attempt ended at least NetworkRetryDelay ago.
+func (s *Step) NetworkRetryDue(now time.Time) bool {
+	if !s.WaitingForNetwork() {
+		return false
+	}
+	a := s.lastAttempt()
+	return a == nil || a.FinishedAt == nil || !now.Before(a.FinishedAt.Add(NetworkRetryDelay))
+}
+
+func (e *Execution) hold(stepID, runnerID string, fence int64, msg string, reason WaitReason, now time.Time) error {
 	s, err := e.holder(stepID, runnerID, fence, "hold")
 	if err != nil {
 		return err
@@ -527,7 +551,7 @@ func (e *Execution) HoldForApproval(stepID, runnerID string, fence int64, msg st
 	}
 	s.finishAttempt(AttemptCancelled, msg, now)
 	s.move(StepWaiting)
-	s.WaitReason, s.RunnerID = WaitApproval, ""
+	s.WaitReason, s.RunnerID = reason, ""
 	return nil
 }
 

@@ -37,7 +37,7 @@ type IssueWrite struct {
 	TaskID    string
 	IssueID   string
 	Kind      WriteKind
-	Target    string // the article id of an article write
+	Target    string // an article write's "<article>#<section>" (KIN-117; the article id alone before)
 	Status    WriteStatus
 	Attempts  int
 	Error     string // last error code ("http_503", "conflict", ...)
@@ -47,10 +47,13 @@ type IssueWrite struct {
 
 // Publication sums a task's writes for the task page.
 type Publication struct {
-	Pending   int    `json:"pending"`
-	Failed    int    `json:"failed"`
-	Published int    `json:"published"`
-	LastError string `json:"lastError,omitempty"` // of the newest pending or failed write that has one
+	Pending   int `json:"pending"`
+	Failed    int `json:"failed"`
+	Published int `json:"published"`
+	// Superseded counts state and article writes skipped because a newer write of the same issue state or article
+	// section came after them (KIN-117); they are not in Published.
+	Superseded int    `json:"superseded"`
+	LastError  string `json:"lastError,omitempty"` // of the newest pending or failed write that has one
 }
 
 // WriteMarker is the token a comment carries so that a retry after a lost response finds it instead of posting it

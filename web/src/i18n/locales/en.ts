@@ -567,6 +567,7 @@ export const en = {
     publicationPending: "Awaiting publication to YouTrack ({{n}})",
     publicationFailed: "Not published to YouTrack ({{n}})",
     publicationDone: "Published to YouTrack",
+    publicationSuperseded: "Outdated writes skipped: {{n}} (newer ones replaced them)",
     publicationTitle: "YouTrack sync",
     publicationError_conflict: "the article changed while writing",
     publicationError_unauthorized: "YouTrack refused the integration token",

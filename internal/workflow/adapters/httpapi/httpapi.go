@@ -318,10 +318,12 @@ type DetailView struct {
 // PublicationView is the task's YouTrack write-back: pending writes are awaiting publication (retried while
 // YouTrack is unavailable), failed ones were given up (lastError says why).
 type PublicationView struct {
-	Pending   int    `json:"pending"`
-	Failed    int    `json:"failed"`
-	Published int    `json:"published"`
-	LastError string `json:"lastError,omitempty"`
+	Pending   int `json:"pending"`
+	Failed    int `json:"failed"`
+	Published int `json:"published"`
+	// Superseded counts outdated state/article writes skipped because a newer one replaced them (KIN-117).
+	Superseded int    `json:"superseded,omitempty"`
+	LastError  string `json:"lastError,omitempty"`
 }
 
 // DocsView is the documentation decision of the latest completed run: updated | not_applicable (with the reason)
@@ -343,7 +345,8 @@ func publicationView(p *app.Publication) *PublicationView {
 	if p == nil {
 		return nil
 	}
-	return &PublicationView{Pending: p.Pending, Failed: p.Failed, Published: p.Published, LastError: p.LastError}
+	return &PublicationView{Pending: p.Pending, Failed: p.Failed, Published: p.Published, Superseded: p.Superseded,
+		LastError: p.LastError}
 }
 
 func docsView(d *domain.DocsDecision) *DocsView {

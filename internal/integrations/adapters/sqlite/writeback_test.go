@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/integrations/adapters/sqlite"
+	"github.com/tr1gl1de/kindevai/internal/integrations/app"
 	"github.com/tr1gl1de/kindevai/internal/integrations/domain"
 )
 
@@ -108,7 +109,15 @@ func TestFollowsFailure(t *testing.T) {
 	save("other", "t2", domain.WritePublished) // another task's write does not count
 	save("next", "t1", domain.WritePublished)
 	save("later", "t1", domain.WritePublished)
-	for key, want := range map[string]bool{"before": false, "next": true, "later": false, "other": false, "nope": false} {
+	// KIN-117: a write skipped as superseded published nothing, so the next real publication still closes the alert.
+	save("fail2", "t3", domain.WriteFailed)
+	save("skipped", "t3", domain.WritePending)
+	if err := r.MarkIssueWrite(ctx, "skipped", domain.WritePublished, app.SupersededCode, 1, t0); err != nil {
+		t.Fatal(err)
+	}
+	save("after", "t3", domain.WritePublished)
+	for key, want := range map[string]bool{"before": false, "next": true, "later": false, "other": false, "nope": false,
+		"after": true} {
 		if got, err := r.FollowsFailure(ctx, key); err != nil || got != want {
 			t.Errorf("FollowsFailure(%s) = %v, %v; want %v", key, got, err, want)
 		}
@@ -148,5 +157,55 @@ func TestMoveIssueWrite(t *testing.T) {
 		if err != nil || w.Status != s.want || w.Error != s.wantCode || w.Attempts != 10 {
 			t.Fatalf("step %d: write = %+v, %v", i, w, err)
 		}
+	}
+}
+
+// KIN-117: a state write is superseded by a later state write of its issue, an article write by a later write of the
+// same article section (any task); a write is overtaken once a later write of its issue was published (a superseded
+// one does not count). The task's publication counts superseded writes apart from the published ones.
+func TestNewerWrites(t *testing.T) {
+	t.Parallel()
+	r := sqlite.New(testDB(t))
+	ctx := t.Context()
+	save := func(key, issue string, kind domain.WriteKind, target string, s domain.WriteStatus, code string) {
+		t.Helper()
+		if err := r.SaveIssueWrite(ctx, domain.IssueWrite{Key: key, TaskID: "t1", IssueID: issue, Kind: kind,
+			Target: target, CreatedAt: t0}); err != nil {
+			t.Fatal(err)
+		}
+		if s != domain.WritePending {
+			if err := r.MarkIssueWrite(ctx, key, s, code, 1, t0); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	save("state1", "KIN-7", domain.WriteState, "", domain.WriteFailed, "dead")
+	save("comment1", "KIN-7", domain.WriteComment, "", domain.WritePending, "")
+	save("artS1", "KIN-7", domain.WriteArticle, "KIN-A-1#S", domain.WritePending, "")
+	save("artT", "KIN-7", domain.WriteArticle, "KIN-A-1#T", domain.WritePending, "")
+	save("state8", "KIN-8", domain.WriteState, "", domain.WritePublished, "")
+	save("artS2", "KIN-8", domain.WriteArticle, "KIN-A-1#S", domain.WritePublished, app.SupersededCode)
+	save("state2", "KIN-7", domain.WriteState, "", domain.WritePending, "")
+	save("comment2", "KIN-7", domain.WriteComment, "", domain.WritePublished, "")
+	save("comment9", "KIN-9", domain.WriteComment, "", domain.WritePending, "")
+	save("art9", "KIN-9", domain.WriteArticle, "KIN-A-2#S", domain.WritePublished, "") // ordered apart from the issue
+	// Written before KIN-117, an article write's target has no section: it is never superseded.
+	save("legacy1", "KIN-9", domain.WriteArticle, "KIN-A-3", domain.WritePending, "")
+	save("legacy2", "KIN-9", domain.WriteArticle, "KIN-A-3", domain.WritePending, "")
+	// A newer write that failed (rejected, given up) never reaches YouTrack: it supersedes nothing.
+	save("art4a", "KIN-9", domain.WriteArticle, "KIN-A-4#S", domain.WritePending, "")
+	save("art4b", "KIN-9", domain.WriteArticle, "KIN-A-4#S", domain.WriteFailed, "invalid_content")
+	for key, want := range map[string][2]bool{
+		"state1": {true, true}, "comment1": {false, true}, "artS1": {true, true}, "artT": {false, true},
+		"state8": {false, false}, "state2": {false, true}, "comment2": {false, false}, "comment9": {false, false}, "legacy1": {false, false}, "art4a": {false, false},
+		"nope": {false, false},
+	} {
+		sup, over, err := r.NewerWrites(ctx, key)
+		if err != nil || sup != want[0] || over != want[1] {
+			t.Errorf("NewerWrites(%s) = %v %v %v, want %v", key, sup, over, err, want)
+		}
+	}
+	if p, _ := r.TaskPublication(ctx, "t1"); p.Superseded != 1 || p.Published != 3 || p.Pending != 8 || p.Failed != 2 {
+		t.Fatalf("publication = %+v", p)
 	}
 }

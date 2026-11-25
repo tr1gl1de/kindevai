@@ -567,6 +567,7 @@ export const ru: Messages = {
     publicationPending: "Ожидает публикации в YouTrack ({{n}})",
     publicationFailed: "Не опубликовано в YouTrack ({{n}})",
     publicationDone: "Опубликовано в YouTrack",
+    publicationSuperseded: "Пропущено устаревших записей: {{n}} — их заменили более новые",
     publicationTitle: "Синхронизация с YouTrack",
     publicationError_conflict: "статья изменилась во время записи",
     publicationError_unauthorized: "YouTrack отклонил токен интеграции",

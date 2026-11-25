@@ -291,6 +291,26 @@ func TestTaskTimeEventsAndRetryAPI(t *testing.T) {
 			t.Errorf("%s of a ready task %d", action, c)
 		}
 	}
+	// KIN-113: merge without CI needs an explicit confirmation, is the Owner's only and acts only on a task
+	// BLOCKED on CI whose pull requests have no check run; the detail tells the UI who may.
+	if c := call(t, srv, "member", "POST", "/api/tasks/"+id+"/merge-without-ci", `{"confirm":true}`, nil); c != http.StatusForbidden {
+		t.Errorf("member merge without CI %d", c)
+	}
+	var ve map[string]string
+	for _, body := range []string{`{}`, `{"confirm":false}`} {
+		if c := call(t, srv, "owner", "POST", "/api/tasks/"+id+"/merge-without-ci", body, &ve); c != http.StatusUnprocessableEntity || ve["field"] != "confirm" {
+			t.Errorf("unconfirmed %s: %d %v", body, c, ve)
+		}
+	}
+	if c := call(t, srv, "owner", "POST", "/api/tasks/"+id+"/merge-without-ci", `{"confirm":true}`, nil); c != http.StatusConflict {
+		t.Errorf("merge without CI of a ready task %d", c)
+	}
+	if call(t, srv, "owner", "GET", "/api/tasks/"+id, "", &d); !d.CanMergeWithoutCI {
+		t.Error("the Owner may merge without CI")
+	}
+	if call(t, srv, "member", "GET", "/api/tasks/"+id, "", &d); d.CanMergeWithoutCI {
+		t.Error("a member may not merge without CI")
+	}
 }
 
 // An attempt's workspace endpoint serves the latest workspace.prepared and workspace.changes reports as typed data

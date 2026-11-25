@@ -245,3 +245,86 @@ func TestThePublishedHeadOutlivesACIFixRound(t *testing.T) {
 		t.Fatalf("after a runner loss %q", s.PublishedHead())
 	}
 }
+
+// KIN-113: the Owner may waive CI only for a head that has no check run at all; the waiver makes that head
+// mergeable, never one with red or running CI, a newer head or a main/master base.
+func TestCIIsWaivedOnlyForAHeadWithoutCheckRuns(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		prep     func(a *GitArtifact)
+		waivable bool
+	}{
+		{"no result yet", func(a *GitArtifact) {}, false},
+		{"no check runs", func(a *GitArtifact) { a.RecordNoChecks("h1", t0) }, true},
+		{"running checks", func(a *GitArtifact) { a.RecordCI("h1", CIPending, "", t0) }, false},
+		{"red CI", func(a *GitArtifact) { a.RecordCI("h1", CIFailed, "lint", t0) }, false},
+		{"green CI", func(a *GitArtifact) { a.RecordCI("h1", CIPassed, "", t0) }, false},
+		{"merged", func(a *GitArtifact) { a.RecordNoChecks("h1", t0); a.Merged("m1", t0) }, false},
+		{"protected base", func(a *GitArtifact) { a.RecordNoChecks("h1", t0); a.PRBase = "master" }, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			a := openArtifact(t, "h1")
+			c.prep(&a)
+			err := a.WaiveCI(t0)
+			if (err == nil) != c.waivable {
+				t.Fatalf("waive: %v", err)
+			}
+			if c.waivable && (a.CIWaivedHead != "h1" || !a.CIWaivedOnHead() || a.CheckMergeable() != nil) {
+				t.Fatalf("waived head not mergeable: %+v %v", a, a.CheckMergeable())
+			}
+			if !c.waivable && a.CIWaivedOnHead() {
+				t.Fatalf("waived: %+v", a)
+			}
+		})
+	}
+}
+
+// KIN-113: a waiver holds only while its head still has no check run: a check run that appears, or a new head,
+// ends it, and main/master stay refused.
+func TestACIWaiverEndsWithChecksOrANewHead(t *testing.T) {
+	t.Parallel()
+	a := openArtifact(t, "h1")
+	a.RecordNoChecks("h1", t0)
+	if err := a.WaiveCI(t0); err != nil {
+		t.Fatal(err)
+	}
+	a.RecordCI("h1", CIPending, "", t0.Add(time.Minute))
+	if a.CIWaivedOnHead() || a.CheckMergeable() == nil {
+		t.Fatal("a waiver survived a running check")
+	}
+	a.RecordCI("h1", CIFailed, "lint", t0.Add(2*time.Minute))
+	if a.CheckMergeable() == nil {
+		t.Fatal("red CI mergeable after a waiver")
+	}
+	a.RecordNoChecks("h1", t0.Add(3*time.Minute)) // the check runs are gone again: the ended waiver stays ended
+	if a.CIWaivedOnHead() || a.CIWaivedHead != "" {
+		t.Fatalf("an ended waiver came back: %+v", a)
+	}
+	b := openArtifact(t, "h1")
+	b.RecordNoChecks("h1", t0)
+	if err := b.WaiveCI(t0); err != nil {
+		t.Fatal(err)
+	}
+	b.HeadSHA = "h2"
+	b.RecordNoChecks("h2", t0)
+	if b.CIWaivedOnHead() || b.CheckMergeable() == nil {
+		t.Fatal("a waiver of an older head counted")
+	}
+	b.HeadSHA = "h1" // the branch was reset to the waived commit: a new confirmation is needed
+	b.RecordNoChecks("h1", t0)
+	if b.CIWaivedOnHead() {
+		t.Fatal("a waiver came back with its head")
+	}
+	c := openArtifact(t, "h1")
+	c.RecordNoChecks("h1", t0)
+	if err := c.WaiveCI(t0); err != nil {
+		t.Fatal(err)
+	}
+	c.PRBase = "main"
+	if err := c.CheckMergeable(); !errors.Is(err, ErrProtectedBranch) {
+		t.Fatalf("protected base: %v", err)
+	}
+}

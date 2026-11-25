@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useParams } from "react-router";
 import { isApiError } from "../../api/client";
-import type { AgentUsage, Attempt, MockScenario, Step, TaskDetail } from "../../api/types";
+import type { AgentUsage, Attempt, MockScenario, PullRequest, Step, TaskDetail } from "../../api/types";
 import { ConfirmDialog } from "../../ui/ConfirmDialog";
 import { SelectField } from "../../ui/Field";
 import { ErrorState, FormAlert, Loading, PageHeading } from "../../ui/feedback";
@@ -24,6 +24,7 @@ import {
   usePlanTask,
   useResumeCI,
   useRetryMerge,
+  useMergeWithoutCI,
   useRetryTask,
   useTask,
   useTaskApprovals,
@@ -149,6 +150,8 @@ function Actions({ d }: { d: TaskDetail }) {
   const retry = useRetryTask(task.id);
   const resumeCI = useResumeCI(task.id);
   const retryMerge = useRetryMerge(task.id);
+  const mergeWithoutCI = useMergeWithoutCI(task.id);
+  const [confirmingNoCI, setConfirmingNoCI] = useState(false);
   const [scenario, setScenario] = useState<MockScenario>("success");
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string>();
@@ -160,6 +163,7 @@ function Actions({ d }: { d: TaskDetail }) {
   const canPlanAI = !planning && ["CREATED", "FAILED", "READY", "AWAITING_APPROVAL", "ANALYZING"].includes(task.state);
   const blockedOnCI = task.state === "BLOCKED" && task.blockReason === "ci";
   const canRetryMerge = blockedOnCI && (d.pullRequests ?? []).some((p) => p.merge === "failed");
+  const canMergeWithoutCI = blockedOnCI && !!d.canMergeWithoutCI && withoutCI(d.pullRequests ?? []);
   if (!canPlan && !canRetry && !canCancel && !canPlanAI && !blockedOnCI) return null;
 
   const plan = (e: FormEvent) => {
@@ -226,6 +230,15 @@ function Actions({ d }: { d: TaskDetail }) {
             <p className="muted">{t("tasks.retryMergeHint")}</p>
           </div>
         )}
+        {canMergeWithoutCI && (
+          <div>
+            <button type="button" className="button" disabled={mergeWithoutCI.isPending}
+              onClick={() => setConfirmingNoCI(true)}>
+              {mergeWithoutCI.isPending ? t("tasks.mergingWithoutCI") : t("tasks.mergeWithoutCI")}
+            </button>
+            <p className="muted">{t("tasks.mergeWithoutCIHint")}</p>
+          </div>
+        )}
         {canRetry && (
           <div>
             <button type="button" className="button primary" disabled={retry.isPending}
@@ -244,6 +257,24 @@ function Actions({ d }: { d: TaskDetail }) {
           </button>
         )}
       </div>
+      {confirmingNoCI && (
+        <ConfirmDialog
+          title={t("tasks.mergeWithoutCITitle")}
+          text={t("tasks.mergeWithoutCIText")}
+          confirmLabel={t("tasks.mergeWithoutCI")}
+          cancelLabel={t("tasks.mergeWithoutCIKeep")}
+          busy={mergeWithoutCI.isPending}
+          onCancel={() => setConfirmingNoCI(false)}
+          onConfirm={() => {
+            setError(undefined);
+            mergeWithoutCI.mutate(undefined, {
+              onSuccess: () => notify(t("tasks.mergeWithoutCIDone")),
+              onError: fail,
+              onSettled: () => setConfirmingNoCI(false),
+            });
+          }}
+        />
+      )}
       {confirming && (
         <ConfirmDialog
           title={t("tasks.cancelTitle", { title: task.title })}
@@ -264,6 +295,16 @@ function Actions({ d }: { d: TaskDetail }) {
       )}
     </section>
   );
+}
+
+/**
+ * The "No CI checks" case of KIN-113: every open, unmerged pull request has green CI or no check run at all on its
+ * head (at least one without), and no merge was refused. Red or running CI never offers a merge without CI.
+ */
+function withoutCI(prs: PullRequest[]): boolean {
+  const open = prs.filter((p) => p.state === "open" && p.merge !== "merged");
+  const none = (p: PullRequest) => p.ci === "pending" && !!p.ciNoChecksSince;
+  return open.some(none) && open.every((p) => p.merge !== "failed" && (none(p) || p.ci === "passed"));
 }
 
 /** Steps grouped into stages by dependency depth: a stage's steps can run in parallel once earlier stages succeeded. */

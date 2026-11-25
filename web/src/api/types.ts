@@ -968,6 +968,8 @@ export interface TaskDetail {
   planning: PlanningRun | null;
   execution: Execution | null;
   canManage: boolean;
+  /** The caller may merge pull requests without CI checks (KIN-113: the Owner only). */
+  canMergeWithoutCI?: boolean;
   time: TaskTime;
   /** The task's change set (KIN-36): published branches and their pull requests. */
   pullRequests?: PullRequest[];
@@ -1012,6 +1014,8 @@ export interface PullRequest {
   ciNoChecksSince?: string;
   /** Minutes without any check run after which the task is blocked rather than merged. */
   ciNoChecksBlockMinutes?: number;
+  /** The Owner merges this head without CI (KIN-113); it holds while the head has no check run. */
+  ciWaived?: boolean;
   merge?: "waiting" | "merged" | "failed";
   mergeSha?: string;
   mergeError?: string;

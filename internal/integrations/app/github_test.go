@@ -38,6 +38,8 @@ type githubAPI struct {
 	read   domain.SyncResult
 	calls  []string
 	tokens int
+	runs   []domain.CheckRun       // KIN-37: check runs of any commit
+	pr     domain.PullRequestState // KIN-37: the pull request read before a merge
 }
 
 func (g *githubAPI) CheckApp(_ context.Context, c app.AppCredentials) domain.CheckResult {

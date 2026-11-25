@@ -70,6 +70,11 @@ type GitHubAPI interface {
 	// OpenPullRequest opens in.Head into in.Base with the installation token, or returns the open pull request of
 	// the head branch (KIN-36).
 	OpenPullRequest(ctx context.Context, tok domain.Secret, owner, name string, in domain.PullRequestInput) (domain.PullRequestRef, error)
+	// CheckRuns lists a commit's latest check runs; PullRequest reads one; MergePullRequest merges it into base
+	// (merge commit) only while its head is sha: domain.ErrHeadMoved, domain.ErrNotMergeable (KIN-37).
+	CheckRuns(ctx context.Context, tok domain.Secret, owner, name, sha string) (runs []domain.CheckRun, total int, err error)
+	PullRequest(ctx context.Context, tok domain.Secret, owner, name string, number int) (domain.PullRequestState, error)
+	MergePullRequest(ctx context.Context, tok domain.Secret, owner, name string, number int, sha, base string) (string, error)
 }
 
 // Inbox stores verified webhook deliveries durably, deduplicated by delivery id (messaging.Inbox).
@@ -96,6 +101,10 @@ type GitHubService struct {
 	Logger   *slog.Logger
 	// Handlers receive webhook events of registered repositories (CI handling, PR tracking of later tasks).
 	Handlers []GitHubEventHandler
+	// PlatformCI takes a completed check suite on a branch of a registered repository (in the inbox transaction) and
+	// reports whether the platform published that branch: its CI then belongs to the execution (KIN-37), not the
+	// Alert Center. nil: every branch is someone else's.
+	PlatformCI func(ctx context.Context, repository, branch, headSHA, delivery string) (bool, error)
 }
 
 // GitHubView is the App as the Owner sees it: credentials only as metadata.
@@ -691,4 +700,92 @@ func (s *GitHubService) OpenPullRequest(ctx context.Context, in PullRequestInput
 	}
 	return s.API.OpenPullRequest(ctx, tok, r.Owner, r.Name, domain.PullRequestInput{Base: base, Head: in.Head,
 		Title: in.Title, Body: in.Body})
+}
+
+// CIStatus is the combined CI state of commit sha of the project's registered repository (KIN-37): its latest check
+// runs, domain.CombineChecks.
+func (s *GitHubService) CIStatus(ctx context.Context, projectID, repository, sha string) (state, detail string, err error) {
+	r, err := s.projectRepository(ctx, projectID, repository)
+	if err != nil {
+		return "", "", err
+	}
+	tok, err := s.RepositoryToken(ctx, projectID, repository)
+	if err != nil {
+		return "", "", err
+	}
+	runs, total, err := s.API.CheckRuns(ctx, tok, r.Owner, r.Name, sha)
+	if err != nil {
+		return "", "", err
+	}
+	state, detail = domain.CombineChecks(runs, total)
+	return state, detail, nil
+}
+
+// MergeInput asks to merge pull request Number of the project's Repository while its head is HeadSHA (KIN-37).
+type MergeInput struct {
+	ProjectID  string
+	Repository string
+	Number     int
+	HeadSHA    string
+}
+
+// MergePullRequest merges a platform pull request into the repository's integration branch with a merge commit and
+// returns the merge commit. It reads the pull request first and merges only when it is open, its head is a
+// feature/ branch at HeadSHA (else domain.ErrHeadMoved) and its base is the integration branch, never main/master
+// (domain.ErrProtectedBranch; another base is domain.ErrNotMergeable). A pull request already merged at HeadSHA
+// returns its merge commit (an outbox redelivery).
+func (s *GitHubService) MergePullRequest(ctx context.Context, in MergeInput) (string, error) {
+	r, err := s.projectRepository(ctx, in.ProjectID, in.Repository)
+	if err != nil {
+		return "", err
+	}
+	base := r.IntegrationBranch
+	if base == "" {
+		base = domain.DefaultIntegrationBranch
+	}
+	if err := domain.GuardBranch(base); err != nil {
+		return "", fmt.Errorf("integration branch %q: %w", base, err)
+	}
+	tok, err := s.RepositoryToken(ctx, in.ProjectID, in.Repository)
+	if err != nil {
+		return "", err
+	}
+	pr, err := s.API.PullRequest(ctx, tok, r.Owner, r.Name, in.Number)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case domain.IsProtectedBranch(pr.Base):
+		return "", fmt.Errorf("pull request #%d into %q: %w", in.Number, pr.Base, domain.ErrProtectedBranch)
+	case pr.Merged && pr.HeadSHA == in.HeadSHA:
+		return pr.MergeCommitSHA, nil
+	case pr.HeadSHA != in.HeadSHA:
+		return "", fmt.Errorf("pull request #%d is at %s, not %s: %w", in.Number, short(pr.HeadSHA), short(in.HeadSHA), domain.ErrHeadMoved)
+	case pr.State != "open" || pr.Merged:
+		return "", fmt.Errorf("pull request #%d is %s: %w", in.Number, pr.State, domain.ErrNotMergeable)
+	case pr.Base != base:
+		return "", fmt.Errorf("pull request #%d targets %q, not the integration branch %q: %w", in.Number, pr.Base, base, domain.ErrNotMergeable)
+	case !strings.HasPrefix(pr.HeadRef, "feature/"):
+		return "", fmt.Errorf("pull request #%d head %q is no feature branch: %w", in.Number, pr.HeadRef, domain.ErrNotMergeable)
+	}
+	return s.API.MergePullRequest(ctx, tok, r.Owner, r.Name, in.Number, in.HeadSHA, pr.Base)
+}
+
+// projectRepository returns the registered repository ("owner/name") of the project (domain.ErrNotFound otherwise).
+func (s *GitHubService) projectRepository(ctx context.Context, projectID, repository string) (domain.Repository, error) {
+	r, err := s.Store.RepositoryByFullName(ctx, repository)
+	if err != nil {
+		return r, err
+	}
+	if r.ProjectID != projectID {
+		return domain.Repository{}, domain.ErrNotFound
+	}
+	return r, nil
+}
+
+func short(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }

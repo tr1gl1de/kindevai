@@ -218,6 +218,7 @@ func (s *Step) LastReview() (Attempt, Review, bool) {
 // and why the previous attempt of the same phase failed.
 func (s *Step) RetryFeedback() string {
 	var b strings.Builder
+	b.WriteString(s.ciFeedback())
 	if s.Phase == PhaseImplement && s.Round > 0 {
 		if _, r, ok := s.LastReview(); ok {
 			b.WriteString(r.Render())

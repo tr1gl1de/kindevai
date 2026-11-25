@@ -105,11 +105,14 @@ const (
 	// WaitAgent: no AI CLI is permitted for the step's role in its project (disabled globally or in the project,
 	// KIN-33).
 	WaitAgent WaitReason = "agent"
+	// WaitCI: CI keeps failing on the task's pull request after the last CI fix round, or its merge into the
+	// integration branch failed (KIN-37); the Owner decides.
+	WaitCI WaitReason = "ci"
 )
 
 // Valid reports a known wait reason.
 func (r WaitReason) Valid() bool {
-	return r == WaitNetwork || r == WaitRunner || r == WaitApproval || r == WaitCLILimit || r == WaitAgent
+	return r == WaitNetwork || r == WaitRunner || r == WaitApproval || r == WaitCLILimit || r == WaitAgent || r == WaitCI
 }
 
 // MaxReasonLen bounds the free-text detail of a reason (runes).

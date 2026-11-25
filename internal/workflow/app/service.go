@@ -125,6 +125,10 @@ type Service struct {
 	// Both are required once a review-loop step publishes: without them its publish cannot be recorded.
 	ChangeSets   ChangeSets
 	PullRequests PullRequests
+	// CI reads CI on the change set's heads and merges pull requests; Integrate is the integrate_dev gate (KIN-37;
+	// with ChangeSets and Outbox). Without them CI is not followed and nothing is merged.
+	CI        CIChecks
+	Integrate IntegrateGate
 }
 
 // Pause reports whether the scheduler must not hand out new work (maintenance mode, KIN-41). Running attempts

@@ -212,3 +212,9 @@ td.ws-path {
 .diff-items ins {
   overflow-wrap: anywhere;
 }
+/* KIN-37: CI and merge of a pull request; the text names the state, the colour only repeats it. */
+.badge.ci-failed,
+.badge.merge-failed {
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+}

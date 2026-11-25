@@ -53,6 +53,31 @@ func (m *memChangeSets) TaskArtifacts(_ context.Context, taskID string) ([]domai
 	return out, nil
 }
 
+func (m *memChangeSets) BranchArtifacts(_ context.Context, repo, branch string) ([]domain.GitArtifact, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []domain.GitArtifact
+	for _, x := range m.arts {
+		if x.Repository == repo && x.Branch == branch {
+			out = append(out, x)
+		}
+	}
+	return out, nil
+}
+
+// VerifyingArtifacts lists the open, unmerged artifacts (the handlers check the task's state themselves).
+func (m *memChangeSets) VerifyingArtifacts(_ context.Context, limit int) ([]domain.GitArtifact, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []domain.GitArtifact
+	for _, x := range m.arts {
+		if x.State == domain.ArtifactOpen && x.Merge != domain.MergeMerged && len(out) < limit {
+			out = append(out, x)
+		}
+	}
+	return out, nil
+}
+
 // fakeGitHub keeps the open pull requests per repository and branch, like GitHub: opening one twice reuses it.
 type fakeGitHub struct {
 	mu    sync.Mutex

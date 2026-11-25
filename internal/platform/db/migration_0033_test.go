@@ -13,19 +13,22 @@ func TestMigration0033KeepsStepPhases(t *testing.T) {
 	t.Parallel()
 	d := openTemp(t)
 	ctx := t.Context()
-	upTo := fstest.MapFS{}
+	upTo, through := fstest.MapFS{}, fstest.MapFS{} // later migrations check foreign keys the fake steps lack
 	all := Migrations()
 	names, err := fs.Glob(all, "*.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, n := range names {
+		b, err := fs.ReadFile(all, n)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if n < "0033" {
-			b, err := fs.ReadFile(all, n)
-			if err != nil {
-				t.Fatal(err)
-			}
 			upTo[n] = &fstest.MapFile{Data: b}
+		}
+		if n < "0034" {
+			through[n] = &fstest.MapFile{Data: b}
 		}
 	}
 	if _, err := Migrate(ctx, d, upTo); err != nil {
@@ -47,7 +50,7 @@ func TestMigration0033KeepsStepPhases(t *testing.T) {
 		}
 	}
 	_ = c.Close()
-	if _, err := Migrate(ctx, d, all); err != nil {
+	if _, err := Migrate(ctx, d, through); err != nil {
 		t.Fatal(err)
 	}
 	var phases []string

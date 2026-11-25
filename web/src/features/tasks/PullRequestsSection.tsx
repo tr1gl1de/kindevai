@@ -1,7 +1,10 @@
 import { useTranslation } from "react-i18next";
 import type { PullRequest } from "../../api/types";
 
-/** The task's change set (KIN-36): each published branch and its pull request into the integration branch. */
+/**
+ * The task's change set (KIN-36): each published branch and its pull request into the integration branch, with CI
+ * on its head, the CI fix rounds and the merge (KIN-37).
+ */
 export function PullRequestsSection({ prs }: { prs: PullRequest[] }) {
   const { t } = useTranslation();
   if (prs.length === 0) return null;
@@ -26,6 +29,23 @@ export function PullRequestsSection({ prs }: { prs: PullRequest[] }) {
             </p>
             {p.state === "opening" && <p className="muted">{t("tasks.prOpening")}</p>}
             {p.state === "failed" && <p>{t("tasks.prFailed", { error: p.error ?? "" })}</p>}
+            {p.state === "open" && (
+              <p>
+                <span className={`badge ci-${p.ci ?? "none"}`}>{t(`tasks.ci_${p.ci ?? "none"}`)}</span>
+                {(p.ciRound ?? 0) > 0 && <> · {t("tasks.ciRound", { n: p.ciRound ?? 0, max: p.ciMaxRounds ?? 0 })}</>}
+                {p.merge && (
+                  <>
+                    {" "}
+                    · <span className={`badge merge-${p.merge}`}>{t(`tasks.merge_${p.merge}`)}</span>
+                  </>
+                )}
+              </p>
+            )}
+            {p.ci === "failed" && p.ciDetail && <p className="muted">{p.ciDetail}</p>}
+            {p.merge === "merged" && p.mergeSha && (
+              <p className="muted">{t("tasks.mergedAs", { base: p.base ?? "", sha: p.mergeSha.slice(0, 10) })}</p>
+            )}
+            {(p.merge === "waiting" || p.merge === "failed") && p.mergeError && <p>{p.mergeError}</p>}
           </li>
         ))}
       </ul>

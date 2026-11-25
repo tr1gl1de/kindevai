@@ -41,9 +41,10 @@ const (
 	KindMerged            = "workflow.merged"
 	KindMergeRefused      = "workflow.merge_refused"
 	KindMergeFailed       = "workflow.merge_failed"
-	KindCIMissing         = "workflow.ci_missing"    // KIN-105: no check run on the head within NoCIBlockAfter
-	KindCIResumed         = "workflow.ci_resumed"    // KIN-105: the Owner resumed a task blocked on CI
-	KindMergeRetried      = "workflow.merge_retried" // KIN-105: the Owner retried a refused merge
+	KindCIMissing         = "workflow.ci_missing"       // KIN-105: no check run on the head within NoCIBlockAfter
+	KindCIResumed         = "workflow.ci_resumed"       // KIN-105: the Owner resumed a task blocked on CI
+	KindMergeRetried      = "workflow.merge_retried"    // KIN-105: the Owner retried a refused merge
+	KindMergedWithoutCI   = "workflow.merge_without_ci" // KIN-113: the Owner merges pull requests without CI checks
 )
 
 // ReconcileCIEvery is the period of the CI reconciliation; reconcileBatch bounds the artifacts checked per pass.
@@ -253,12 +254,16 @@ func (s *Service) HandleCICheck(ctx context.Context, d messaging.Delivery) error
 			}
 			return s.enqueue(ctx, TopicMerge, hashKey("merge/", d.Key), mergePayload{cur.ExecutionID})
 		case domain.CIPending:
+			if t.State == domain.TaskVerifying && cur.CIWaivedOnHead() {
+				// The Owner merges this head without CI (KIN-113): the merge gate, not another block.
+				return s.enqueue(ctx, TopicMerge, hashKey("merge/", d.Key), mergePayload{cur.ExecutionID})
+			}
 			if t.State != domain.TaskVerifying || cur.NoChecksFor(now) < domain.NoCIBlockAfter {
 				return nil
 			}
 			// A repository without CI: nothing is merged without a green check, the Owner decides.
 			why := fmt.Sprintf("no CI check runs on %s (%s) for %s: the repository seems to have no CI, and nothing is "+
-				"merged without it; add CI and resume, or merge the pull request yourself", cur.Branch, cur.HeadSHA,
+				"merged without it; add CI and resume, or the Owner merges it without CI", cur.Branch, cur.HeadSHA,
 				domain.NoCIBlockAfter)
 			if err := s.blockOnCI(ctx, &t, why); err != nil {
 				return err
@@ -379,6 +384,20 @@ func (s *Service) HandleMerge(ctx context.Context, d messaging.Delivery) error {
 	if err != nil || req.Number == 0 {
 		return err
 	}
+	if waived := !target.CIPassedOnHead(); waived {
+		// Merge without CI (KIN-113): only while the head still has no check run at all. CI that appeared meanwhile
+		// is followed instead (a CI check records it: red → fix round, green → this gate again).
+		st, err := s.CI.CIStatus(ctx, req.ProjectID, req.Repository, req.HeadSHA)
+		if err != nil {
+			return err
+		}
+		if !st.NoChecks || st.State != domain.CIPending {
+			key := hashKey("ci-check/", "waiver", d.Key, target.Repository, target.Branch, target.HeadSHA)
+			return s.Tx.InTx(ctx, func(ctx context.Context) error {
+				return s.enqueue(ctx, TopicCICheck, key, artifactRef{target.ExecutionID, target.Repository, target.Branch})
+			})
+		}
+	}
 	sha, err := s.CI.MergePullRequest(ctx, req)
 	refused := errors.Is(err, domain.ErrProtectedBranch)
 	if err != nil && !refused && !errors.Is(err, ErrHeadMoved) && !messaging.IsPermanent(err) {
@@ -426,6 +445,9 @@ func (s *Service) HandleMerge(ctx context.Context, d messaging.Delivery) error {
 		}
 		entry := mergeEntry(t, *a, KindMerged, "")
 		entry.Details["mergeCommit"] = a.MergeSHA
+		if !target.CIPassedOnHead() {
+			entry.Details["ciWaived"] = "true"
+		}
 		if serr := s.record(ctx, entry); serr != nil {
 			return serr
 		}

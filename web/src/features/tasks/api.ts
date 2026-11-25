@@ -104,6 +104,10 @@ export const useResumeCI = (id: string) => useTaskAction(id, () => api<TaskDetai
 export const useRetryMerge = (id: string) =>
   useTaskAction(id, () => api<TaskDetail>("POST", `${path(id)}/retry-merge`, {}));
 
+/** The Owner's explicit merge of pull requests without CI checks (KIN-113); the merge gate still applies. */
+export const useMergeWithoutCI = (id: string) =>
+  useTaskAction(id, () => api<TaskDetail>("POST", `${path(id)}/merge-without-ci`, { confirm: true }));
+
 /** A running attempt's workspace reports change rarely (prepared once, changes at the end): poll them gently. */
 export const WORKSPACE_REFRESH_MS = 10_000;
 

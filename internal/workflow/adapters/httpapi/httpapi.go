@@ -305,7 +305,9 @@ type DetailView struct {
 	Planning  *PlanningView  `json:"planning"`
 	Execution *ExecutionView `json:"execution"`
 	CanManage bool           `json:"canManage"`
-	Time      TimeView       `json:"time"`
+	// CanMergeWithoutCI: the caller may merge a task's pull requests without CI checks (KIN-113: the Owner).
+	CanMergeWithoutCI bool     `json:"canMergeWithoutCI"`
+	Time              TimeView `json:"time"`
 	// PullRequests is the task's change set (KIN-36): each published branch and its pull request.
 	PullRequests []PullRequestView `json:"pullRequests"`
 	// KIN-38: the YouTrack write-back (null without an issue) and the documentation decision (null when none).
@@ -377,10 +379,12 @@ type PullRequestView struct {
 	// is blocked after CINoChecksBlockMinutes without one.
 	CINoChecksSince        *time.Time `json:"ciNoChecksSince,omitempty"`
 	CINoChecksBlockMinutes int        `json:"ciNoChecksBlockMinutes"`
-	Merge                  string     `json:"merge,omitempty"`
-	MergeSHA               string     `json:"mergeSha,omitempty"`
-	MergeError             string     `json:"mergeError,omitempty"`
-	UpdatedAt              time.Time  `json:"updatedAt"`
+	// CIWaived: the Owner merges this head without CI (KIN-113); it holds while the head has no check run.
+	CIWaived   bool      `json:"ciWaived,omitempty"`
+	Merge      string    `json:"merge,omitempty"`
+	MergeSHA   string    `json:"mergeSha,omitempty"`
+	MergeError string    `json:"mergeError,omitempty"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
 func pullRequestViews(arts []domain.GitArtifact, e *domain.Execution) []PullRequestView {
@@ -389,7 +393,8 @@ func pullRequestViews(arts []domain.GitArtifact, e *domain.Execution) []PullRequ
 		v := PullRequestView{Repository: a.Repository, Branch: a.Branch, HeadSHA: a.HeadSHA, State: string(a.State),
 			Number: a.PRNumber, Base: a.PRBase, Error: a.Error, CI: string(a.CI), CIDetail: a.CIDetail,
 			CIMaxRounds: domain.MaxCIFixRounds, Merge: string(a.Merge), MergeSHA: a.MergeSHA, MergeError: a.MergeError,
-			CINoChecksBlockMinutes: int(domain.NoCIBlockAfter / time.Minute), UpdatedAt: a.UpdatedAt}
+			CINoChecksBlockMinutes: int(domain.NoCIBlockAfter / time.Minute), CIWaived: a.CIWaivedOnHead(),
+			UpdatedAt: a.UpdatedAt}
 		if a.CIHeadSHA != a.HeadSHA { // a result of an older head is no result of this one
 			v.CI, v.CIDetail = "", ""
 		} else if since := a.NoChecksSince; !since.IsZero() && a.CI == domain.CIPending {
@@ -518,6 +523,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/tasks/{id}/retry", h.retry)
 	mux.HandleFunc("POST /api/tasks/{id}/resume", h.resumeCI)
 	mux.HandleFunc("POST /api/tasks/{id}/retry-merge", h.retryMerge)
+	mux.HandleFunc("POST /api/tasks/{id}/merge-without-ci", h.mergeWithoutCI)
 	mux.HandleFunc("GET /api/tasks/{id}/steps/{step}/attempts/{fence}/events", h.events)
 	mux.HandleFunc("GET /api/tasks/{id}/steps/{step}/attempts/{fence}/workspace", h.workspace)
 	h.registerDiscussion(mux)
@@ -628,7 +634,7 @@ func (h *Handler) detail(w http.ResponseWriter, r *http.Request, p auth.Principa
 		h.fail(w, err)
 		return
 	}
-	v := DetailView{Task: taskView(d.Task), CanManage: d.CanManage, Time: timeView(d.Time),
+	v := DetailView{Task: taskView(d.Task), CanManage: d.CanManage, CanMergeWithoutCI: d.CanMergeWithoutCI, Time: timeView(d.Time),
 		PullRequests: pullRequestViews(d.ChangeSet, d.Execution), Publication: publicationView(d.Publication),
 		Docs: docsView(d.Docs)}
 	if d.Revision != nil {
@@ -733,6 +739,29 @@ func (h *Handler) resumeCI(w http.ResponseWriter, r *http.Request) {
 // retryMerge retries the refused merge of a task BLOCKED on CI (KIN-105).
 func (h *Handler) retryMerge(w http.ResponseWriter, r *http.Request) {
 	h.taskAction(w, r, h.Service.RetryMergeAs)
+}
+
+// MergeWithoutCIRequest is POST /api/tasks/{id}/merge-without-ci: Confirm must be true (KIN-113).
+type MergeWithoutCIRequest struct {
+	Confirm bool `json:"confirm"`
+}
+
+// mergeWithoutCI is the Owner's explicit merge of a task BLOCKED on CI whose pull requests have no CI checks
+// (KIN-113); it needs {"confirm": true}.
+func (h *Handler) mergeWithoutCI(w http.ResponseWriter, r *http.Request) {
+	if _, ok := principal(w, r); !ok {
+		return
+	}
+	var req MergeWithoutCIRequest
+	if !httpx.DecodeJSON(w, r, &req) {
+		return
+	}
+	if !req.Confirm {
+		httpx.WriteJSON(w, http.StatusUnprocessableEntity, httpx.ErrorBody{Error: "validation",
+			Message: "confirm the merge without CI", Field: "confirm"})
+		return
+	}
+	h.taskAction(w, r, h.Service.MergeWithoutCIAs)
 }
 
 func (h *Handler) taskAction(w http.ResponseWriter, r *http.Request,

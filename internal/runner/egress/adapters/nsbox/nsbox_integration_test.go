@@ -516,52 +516,65 @@ func TestSandboxRunCancel(t *testing.T) {
 	f := newFixture(t)
 	agent := f.agentCopy(t)
 	for _, delay := range []time.Duration{0, 5 * time.Second} {
-		box, err := f.m.Open(t.Context(), egress.BoxRequest{Dir: f.dir, Workdir: f.workdir, Profile: f.profile("203.0.113.7")})
-		if err != nil {
-			t.Fatal(err)
-		}
-		b := box.(*Box)
-		cmd, err := b.Command([]string{agent}, []string{"KINDEV_NSBOX_AGENT=hang"}, f.workdir)
-		if err != nil {
-			b.Release()
-			t.Fatal(err)
-		}
-		out := &syncBuf{}
-		cmd.Stdout, cmd.Stderr = out, out
-		if err := cmd.Start(); err != nil {
-			b.Release()
-			t.Fatal(err)
-		}
-		pid := cmd.Process.Pid
-		t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
-		verdict := make(chan error, 1)
-		go func() {
-			ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
-			defer cancel()
-			verdict <- b.Await(ctx)
-		}()
-		done := make(chan struct{})
-		go func() { _ = cmd.Wait(); close(done) }()
-		if delay > 0 {
-			if err := <-verdict; err != nil {
-				t.Fatalf("verdict: %v\n%s", err, out)
+		t.Run(delay.String(), func(t *testing.T) {
+			box, err := f.m.Open(t.Context(), egress.BoxRequest{Dir: f.dir, Workdir: f.workdir, Profile: f.profile("203.0.113.7")})
+			if err != nil {
+				t.Fatal(err)
 			}
-			waitOutput(t, out, "agent hanging", 1)
-		}
-		_ = syscall.Kill(-pid, syscall.SIGTERM)
-		if delay == 0 {
-			escalate := time.AfterFunc(2*time.Second, func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
-			defer escalate.Stop()
-		}
-		select {
-		case <-done:
-		case <-time.After(30 * time.Second):
-			t.Fatalf("delay %v: the run ignored the cancel\n%s", delay, out.String())
-		}
-		if code := cmd.ProcessState.ExitCode(); code == 0 {
-			t.Fatalf("delay %v: a cancelled run exited 0\n%s", delay, out.String())
-		}
-		b.Release()
+			b := box.(*Box)
+			t.Cleanup(b.Release)
+			cmd, err := b.Command([]string{agent}, []string{"KINDEV_NSBOX_AGENT=hang"}, f.workdir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := &syncBuf{}
+			cmd.Stdout, cmd.Stderr = out, out
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			pid := cmd.Process.Pid
+			done := make(chan struct{})
+			go func() { _ = cmd.Wait(); close(done) }()
+			t.Cleanup(func() { // only while the group is not reaped: its id may be reused afterwards
+				select {
+				case <-done:
+				default:
+					_ = syscall.Kill(-pid, syscall.SIGKILL)
+					<-done
+				}
+			})
+			verdict := make(chan error, 1)
+			go func() {
+				ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+				defer cancel()
+				verdict <- b.Await(ctx)
+			}()
+			if delay > 0 {
+				if err := <-verdict; err != nil {
+					t.Fatalf("verdict: %v\n%s", err, out)
+				}
+				waitOutput(t, out, "agent hanging", 1)
+			}
+			_ = syscall.Kill(-pid, syscall.SIGTERM)
+			if delay == 0 { // the executor's SIGKILL after its grace period
+				escalate := time.AfterFunc(2*time.Second, func() {
+					select {
+					case <-done:
+					default:
+						_ = syscall.Kill(-pid, syscall.SIGKILL)
+					}
+				})
+				defer escalate.Stop()
+			}
+			select {
+			case <-done:
+			case <-time.After(30 * time.Second):
+				t.Fatalf("the run ignored the cancel\n%s", out.String())
+			}
+			if code := cmd.ProcessState.ExitCode(); code == 0 {
+				t.Fatalf("a cancelled run exited 0\n%s", out.String())
+			}
+		})
 	}
 }
 

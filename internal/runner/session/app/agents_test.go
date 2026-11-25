@@ -15,16 +15,15 @@ import (
 
 // fakeAgents prepares fake CLI commands and replays scripted output for the follower.
 type fakeAgents struct {
-	mu        sync.Mutex
-	prepared  []domain.AgentRequest
-	prompts   []string
-	perms     []domain.Permissions
-	follows   []AgentFollow
-	events    []domain.AgentEvent // what the CLI's output parses into
-	stdout    string
-	result    domain.AgentResult
-	finishErr bool
-	err       error // Prepare fails
+	mu       sync.Mutex
+	prepared []domain.AgentRequest
+	prompts  []string
+	perms    []domain.Permissions
+	follows  []AgentFollow
+	events   []domain.AgentEvent // what the CLI's output parses into
+	stdout   string
+	result   domain.AgentResult
+	err      error // Prepare fails
 }
 
 func (f *fakeAgents) Prepare(dir string, req domain.AgentRequest, prompt string, p domain.Permissions) (AgentCommand, error) {

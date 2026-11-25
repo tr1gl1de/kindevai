@@ -543,17 +543,18 @@ func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Ev
 		if err := c.agentReport(ctx, runnerID, e, f.Agent); err != nil {
 			return err
 		}
+		reason := truncate(f.Reason, protocol.MaxReasonLen)
 		if h, ok := c.Executions.(CLILimitHolder); ok && f.Code == protocol.FailureCLILimit {
 			var resets time.Time
 			if f.ResetsAt > 0 {
 				resets = time.UnixMilli(f.ResetsAt).UTC()
 			}
-			return h.HoldAttemptForCLILimit(ctx, runnerID, e.Step, e.Fence, truncate(f.Reason, protocol.MaxReasonLen), resets, at)
+			return h.HoldAttemptForCLILimit(ctx, runnerID, e.Step, e.Fence, reason, resets, at)
 		}
 		if h, ok := c.Executions.(NetworkHolder); ok && f.Code == protocol.FailureNetwork {
-			return h.HoldAttemptForNetwork(ctx, runnerID, e.Step, e.Fence, truncate(f.Reason, protocol.MaxReasonLen), at)
+			return h.HoldAttemptForNetwork(ctx, runnerID, e.Step, e.Fence, reason, at)
 		}
-		return c.Executions.FailAttempt(ctx, runnerID, e.Step, e.Fence, truncate(f.Reason, protocol.MaxReasonLen), at)
+		return c.Executions.FailAttempt(ctx, runnerID, e.Step, e.Fence, reason, at)
 	}
 	if err := c.Executions.CheckAttempt(ctx, runnerID, e.Step, e.Fence); err != nil || e.Kind != protocol.EventWorkspaceChanges ||
 		c.Scope == nil {

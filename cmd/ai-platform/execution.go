@@ -95,17 +95,18 @@ func (w workflowPresence) Offline(ctx context.Context, runnerIDs []string) (map[
 	return offlineSince(runnerIDs, pres, w.online, w.started), nil
 }
 
-// offlineSince returns, for each runner without a live session or online heartbeats, the time it counts as offline
-// from: its last heartbeat, but never before started — the control plane's own downtime is not the runner's (it
+// offlineSince returns, for each runner without a live session, the time it counts as offline from: its last heartbeat, but never before started — the control plane's own downtime is not the runner's (it
 // had no way to reconnect), so a restart never moves work at once.
 func offlineSince(ids []string, pres map[string]runnersapp.Presence, online func(string) bool,
 	started time.Time) map[string]time.Time {
 	out := make(map[string]time.Time, len(ids))
 	for _, id := range ids {
-		p, ok := pres[id]
-		if ok && p.Availability == runnersdomain.AvailabilityOnline && online(id) {
+		if online(id) {
+			// A live session is online even before its first heartbeat (a runner that just reconnected after a long
+			// outage still shows its old heartbeat): its reconciliation decides about its attempts.
 			continue
 		}
+		p, ok := pres[id]
 		since := started
 		if ok && p.LastHeartbeatAt != nil && p.LastHeartbeatAt.After(started) {
 			since = *p.LastHeartbeatAt

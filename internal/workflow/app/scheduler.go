@@ -125,19 +125,18 @@ func (s *Service) Schedule(ctx context.Context) error {
 	if _, err := s.ExpireLeases(ctx); err != nil {
 		return err
 	}
-	if err := s.releaseOfflineRunners(ctx); err != nil {
-		return err
-	}
+	// A failed offline release is retried by the next pass; it never stops this one.
+	releaseErr := s.releaseOfflineRunners(ctx)
 	if s.Pause != nil {
 		paused, err := s.Pause.SchedulingPaused(ctx)
 		if err != nil {
 			return err
 		}
 		if paused {
-			return nil // maintenance mode: no new executions or step claims (KIN-41)
+			return releaseErr // maintenance mode: no new executions or step claims (KIN-41)
 		}
 	}
-	var errs []error
+	errs := []error{releaseErr}
 	if err := s.schedulePlanning(ctx); err != nil {
 		errs = append(errs, err)
 	}
@@ -681,8 +680,18 @@ func (s *Service) releaseOfflineRunners(ctx context.Context) error {
 		if !ok || s.now().Sub(since) < grace {
 			continue
 		}
-		err := s.releaseRunner(ctx, id, CancelReasonStale, func(e *domain.Execution, now time.Time) []domain.Released {
-			return e.ReleaseOfflineRunner(id, msg, now, s.maxAttempts())
+		err := s.Tx.InTx(ctx, func(ctx context.Context) error {
+			// Look again inside the transaction: a runner that reconnected meanwhile keeps its work.
+			again, err := s.Presence.Offline(ctx, []string{id})
+			if err != nil {
+				return fmt.Errorf("runner presence: %w", err)
+			}
+			if since, ok := again[id]; !ok || s.now().Sub(since) < grace {
+				return nil
+			}
+			return s.releaseRunner(ctx, id, CancelReasonStale, func(e *domain.Execution, now time.Time) []domain.Released {
+				return e.ReleaseOfflineRunner(id, msg, now, s.maxAttempts())
+			})
 		})
 		if err != nil && !errors.Is(err, domain.ErrConflict) {
 			errs = append(errs, fmt.Errorf("releasing offline runner %s: %w", id, err))

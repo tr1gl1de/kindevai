@@ -706,11 +706,21 @@ func TestCLILimitHoldIsSchedulableAtOnceWhenRouted(t *testing.T) {
 type fakePresence struct {
 	mu      sync.Mutex
 	offline map[string]time.Time
+	err     error
+	calls   int
+	onCall  func(n int) // runs after the n-th call's answer is taken (a reconnect between two looks)
 }
 
 func (p *fakePresence) Offline(_ context.Context, ids []string) (map[string]time.Time, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.calls++
+	if p.onCall != nil {
+		defer func(n int) { p.onCall(n) }(p.calls)
+	}
+	if p.err != nil {
+		return nil, p.err
+	}
 	out := map[string]time.Time{}
 	for _, id := range ids {
 		if since, ok := p.offline[id]; ok {
@@ -792,5 +802,54 @@ func TestAnOfflineRunnerLosesItsStepAfterTheGracePeriod(t *testing.T) {
 	e.schedule(t)
 	if c := e.disp.take(); len(c) != 0 {
 		t.Fatalf("released again: %v", c)
+	}
+}
+
+// Review finding (KIN-118): a runner that reconnects between the pass's look at presence and the release keeps its
+// work — presence is looked at again inside the release's transaction.
+func TestARunnerThatReconnectsBeforeTheReleaseKeepsItsWork(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	pres := &fakePresence{}
+	e.svc.Presence = pres
+	task := e.task(t, onlyStep())
+	e.pool.set("p1", Candidate{ID: "r1", DiskHeavyAllowed: true})
+	e.schedule(t)
+	_, ex := e.state(t, task.ID)
+	run(t, e, ex)
+	e.disp.take()
+	pres.set("r1", e.clock.Now())
+	e.pool.set("p1")
+	e.clock.Add(DefaultOfflineRunnerGrace)
+	pres.onCall = func(n int) {
+		if n == 1 {
+			delete(pres.offline, "r1") // back right after the first look (the lock is held)
+		}
+	}
+	e.schedule(t)
+	if c := e.disp.take(); len(c) != 0 {
+		t.Fatalf("released a runner that came back: %v", c)
+	}
+	if _, ex := e.state(t, task.ID); ex.Steps[0].RunnerID != "r1" || ex.Steps[0].Attempts[0].State != domain.AttemptUnknown {
+		t.Fatalf("step %+v", ex.Steps[0])
+	}
+}
+
+// Review finding (KIN-118): a failing offline release (presence unreadable) is reported but never stops the pass.
+func TestAFailedOfflineReleaseDoesNotStopScheduling(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	pres := &fakePresence{}
+	e.svc.Presence = pres
+	first := e.task(t, onlyStep())
+	e.pool.set("p1", Candidate{ID: "r1", DiskHeavyAllowed: true})
+	e.schedule(t) // r1 now holds a step: the next pass asks for presence
+	pres.err = errors.New("telemetry unavailable")
+	second := e.task(t, onlyStep())
+	if err := e.svc.Schedule(t.Context()); err == nil || !strings.Contains(err.Error(), "telemetry unavailable") {
+		t.Fatalf("schedule = %v", err)
+	}
+	if _, ex := e.state(t, second.ID); ex.Steps[0].RunnerID != "r1" {
+		t.Fatalf("the pass stopped: %+v (first %s)", ex.Steps[0], first.ID)
 	}
 }

@@ -16,6 +16,10 @@ type Sandbox interface {
 	// Await returns once the started command verified the sandbox (nil: the agent runs) or failed to (the agent
 	// never starts).
 	Await(ctx context.Context) error
+	// Cancel marks the started command cancelled; the launcher calls it before it sends SIGTERM to the command's
+	// process group. A command cancelled before its agent started never starts it, even when it missed the signal
+	// (KIN-103: the helper is its PID namespace's init, which drops a signal it does not handle yet).
+	Cancel()
 	// Release cuts the sandbox off from the network and removes its files (after the process ended).
 	Release()
 	// Endpoint is the sandbox's way out (its proxy adapter's socket), kept in the attempt's journal record so a

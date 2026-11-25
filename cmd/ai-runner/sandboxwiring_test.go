@@ -70,6 +70,7 @@ func (b *fakeBox) Command(argv, env []string, dir string) (*exec.Cmd, error) {
 	return cmd, nil
 }
 func (b *fakeBox) Await(context.Context) error { return nil }
+func (b *fakeBox) Cancel()                     {}
 func (b *fakeBox) Release()                    {}
 func (b *fakeBox) Endpoint() string            { return "" }
 func (b *fakeBox) Profile() string             { return "fp" }

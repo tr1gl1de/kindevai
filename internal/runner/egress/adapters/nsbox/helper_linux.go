@@ -73,17 +73,19 @@ var (
 const maxSpec = 4 << 20
 
 // Main is `ai-runner sandbox-exec`: it reads the spec from fd 4, builds the sandbox in the namespaces it was
-// started in, reports the verdict on fd 3 and, when verified, runs the agent and exits with its status.
+// started in, reports the verdict on fd 3 and, when verified, runs the agent and exits with its status. A byte on
+// fd 5 (Box.Cancel) cancels the run before the agent starts.
 func Main(args []string, stderr io.Writer) int {
 	if len(args) != 0 {
 		fmt.Fprintln(stderr, "usage: ai-runner sandbox-exec (started by the runner)")
 		return ExitUsage
 	}
-	verdict, specIn := os.NewFile(3, "verdict"), os.NewFile(4, "spec")
-	if verdict == nil || specIn == nil {
+	verdict, specIn, cancelIn := os.NewFile(3, "verdict"), os.NewFile(4, "spec"), os.NewFile(5, "cancel")
+	if verdict == nil || specIn == nil || cancelIn == nil {
 		return ExitUsage
 	}
 	unix.CloseOnExec(3)
+	unix.CloseOnExec(5)
 	data, err := io.ReadAll(io.LimitReader(specIn, maxSpec))
 	_ = specIn.Close()
 	if err != nil {
@@ -96,8 +98,10 @@ func Main(args []string, stderr io.Writer) int {
 	// Mounts, the loopback and the nft child act on this thread's namespaces (all threads share them here, but
 	// keep the thread anyway: Pdeathsig of the agent follows the thread that started it).
 	runtime.LockOSThread()
-	// As the PID namespace's init this process gets only the signals it handles: catch the cancel signals from the
-	// start, so a cancel during setup is not lost (the agent is then never started).
+	// As the PID namespace's init this process gets only the signals it handles: catch the cancel signals before
+	// the setup, so a cancel during it is not lost (the agent is then never started). One that arrived before the Go
+	// runtime ran is lost all the same (KIN-103): the launcher marks the cancel on fd 5 first, checked before the
+	// agent starts.
 	sigs := make(chan os.Signal, 8)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -122,7 +126,7 @@ func Main(args []string, stderr io.Writer) int {
 	if code := report(verdict, v, stderr); code != 0 || len(s.Argv) == 0 {
 		return code
 	}
-	return runAgent(s, port, sigs, stderr)
+	return runAgent(s, port, sigs, cancelIn, stderr)
 }
 
 func report(f *os.File, v domain.Verdict, stderr io.Writer) int {
@@ -384,7 +388,7 @@ func proxyEnv(env []string, port int) []string {
 
 // runAgent starts the agent in a nested user namespace where it keeps the runner's uid but has no capability
 // over the sandbox's namespaces, then waits for it and exits like it.
-func runAgent(s Spec, port int, sigs chan os.Signal, stderr io.Writer) int {
+func runAgent(s Spec, port int, sigs chan os.Signal, cancelIn *os.File, stderr io.Writer) int {
 	path := s.Argv[0]
 	if !filepath.IsAbs(path) {
 		p, err := exec.LookPath(path)
@@ -409,6 +413,13 @@ func runAgent(s Spec, port int, sigs chan os.Signal, stderr io.Writer) int {
 		return 128 + int(sig.(syscall.Signal))
 	default:
 	}
+	// The mark precedes the SIGTERM: it also covers a signal lost before the Go runtime ran, and one caught only
+	// after the select above.
+	if cancelMarked(cancelIn) {
+		fmt.Fprintln(stderr, "strict egress sandbox: cancelled before the agent started")
+		return 128 + int(syscall.SIGTERM)
+	}
+	_ = cancelIn.Close()
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintln(stderr, "strict egress sandbox: starting the agent:", err)
 		return ExitAgentStart
@@ -430,4 +441,16 @@ func runAgent(s Spec, port int, sigs chan os.Signal, stderr io.Writer) int {
 		return ExitAgentStart
 	}
 	return 0
+}
+
+// cancelMarked reports whether the runner marked the run cancelled: a byte waits on f. No byte, an end the runner
+// closed without one (it stopped) or no descriptor at all is no cancel.
+func cancelMarked(f *os.File) bool {
+	fds := []unix.PollFd{{Fd: int32(f.Fd()), Events: unix.POLLIN}} //nolint:gosec // G115: a small descriptor number
+	if n, err := unix.Poll(fds, 0); err != nil || n == 0 || fds[0].Revents&unix.POLLIN == 0 {
+		return false
+	}
+	var b [1]byte
+	n, _ := f.Read(b[:])
+	return n == 1
 }

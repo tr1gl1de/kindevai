@@ -88,7 +88,7 @@ func (l *Launcher) Launch(ctx context.Context, s app.LaunchSpec) (app.Process, e
 		}
 		return nil, fmt.Errorf("starting %s: %w", l.Program, err)
 	}
-	p := &attached{cmd: cmd, done: make(chan struct{})}
+	p := &attached{cmd: cmd, sandbox: s.Sandbox, done: make(chan struct{})}
 	// Read before anyone waits for the child: until it is reaped its pid cannot be reused. On failure the record has
 	// no start time and adoption falls back to the process group check (the executor logs a warning).
 	p.start, _ = StartTime(cmd.Process.Pid)
@@ -104,10 +104,11 @@ func (l *Launcher) Launch(ctx context.Context, s app.LaunchSpec) (app.Process, e
 }
 
 type attached struct {
-	cmd   *exec.Cmd
-	start string
-	done  chan struct{}
-	exit  domain.Exit
+	cmd     *exec.Cmd
+	sandbox app.Sandbox // nil without strict egress
+	start   string
+	done    chan struct{}
+	exit    domain.Exit
 }
 
 func (p *attached) wait() {
@@ -131,7 +132,12 @@ func (p *attached) PID() int          { return p.cmd.Process.Pid }
 func (p *attached) PGID() int         { return p.cmd.Process.Pid }
 func (p *attached) StartTime() string { return p.start }
 func (p *attached) Wait() domain.Exit { <-p.done; return p.exit }
+
+// Signal stops the process group: SIGTERM (a sandbox is marked cancelled first, KIN-103), or SIGKILL.
 func (p *attached) Signal(kill bool) error {
+	if !kill && p.sandbox != nil {
+		p.sandbox.Cancel()
+	}
 	return signalGroup(p.cmd.Process.Pid, kill)
 }
 

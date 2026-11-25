@@ -6,6 +6,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
+	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
 	"github.com/tr1gl1de/kindevai/internal/routing/domain"
 )
 
@@ -24,6 +26,7 @@ const (
 	KindEmergencyStop = "routing.cli_emergency_stop"
 	KindBound         = "routing.role_bound"
 	KindBindingReset  = "routing.role_binding_reset"
+	KindCLIReady      = "routing.cli_ready" // KIN-83: the Owner lifted a runner's CLI hold (logged in again)
 )
 
 // GlobalScope is the project id of the System level.
@@ -46,12 +49,13 @@ type StoredBinding struct {
 	UpdatedAt time.Time
 }
 
-// Cooldown: a runner's CLI hit its usage limit or is logged out (cli_limit); routing skips the pair until Until.
+// Cooldown: a runner's CLI hit its usage limit or is logged out (cli_limit); routing skips the pair while its hold
+// is active (until Until, or until the Owner marks it ready when the hold is parked, KIN-83).
 type Cooldown struct {
 	RunnerID string
 	Agent    string
-	Until    time.Time
 	Reason   string
+	domain.Hold
 }
 
 // Repo stores switches, bindings and cool-downs; every method runs on the caller's transaction (db.Conn).
@@ -62,8 +66,17 @@ type Repo interface {
 	SetBinding(ctx context.Context, b StoredBinding) error
 	DeleteBinding(ctx context.Context, projectID string, role domain.Role) error
 	SetCooldown(ctx context.Context, c Cooldown) error
-	// Cooldowns lists the cool-downs still running at now.
+	// Cooldowns lists the cool-downs still running at now (parked ones whatever their Until).
 	Cooldowns(ctx context.Context, now time.Time) ([]Cooldown, error)
+	// Cooldown returns the pair's last cool-down, expired or not (the streak of holds, KIN-83).
+	Cooldown(ctx context.Context, runnerID, agent string) (Cooldown, bool, error)
+	// DeleteCooldown forgets the pair's cool-down and streak; it reports whether there was one.
+	DeleteCooldown(ctx context.Context, runnerID, agent string) (bool, error)
+}
+
+// Outbox stores outgoing messages in the caller's transaction.
+type Outbox interface {
+	Enqueue(ctx context.Context, m messaging.Message) error
 }
 
 // TxRunner runs fn in one database transaction.
@@ -93,7 +106,7 @@ const (
 )
 
 // MaxCooldown bounds a cool-down (a reported reset far in the future is capped).
-const MaxCooldown = 7 * 24 * time.Hour
+const MaxCooldown = domain.MaxHold
 
 const maxCooldownReason = 500
 
@@ -104,7 +117,9 @@ type Service struct {
 	Audit    AuditLog
 	Access   Access
 	Workflow Workflow // emergency stop; required for EmergencyStop
-	Now      func() time.Time
+	// Outbox tells the Alert Center about held and recovered CLIs (KIN-83); nil: no alerts.
+	Outbox Outbox
+	Now    func() time.Time
 }
 
 func (s *Service) owner(p auth.Principal) error {
@@ -426,21 +441,18 @@ func (s *Service) ResetProjectBinding(ctx context.Context, p auth.Principal, pro
 	return s.resetBinding(ctx, p, projectID, role)
 }
 
-// CoolDown records that a runner's CLI hit its usage limit (or is logged out) until until (capped at MaxCooldown
-// from now); routing skips that CLI on that runner meanwhile. Internal: the runner protocol reports it (KIN-79).
-// reason is the runner's untrusted text: it is trimmed and bounded, and only shown.
-func (s *Service) CoolDown(ctx context.Context, runnerID, agent string, until time.Time, reason string) error {
+// CoolDown records that a runner's CLI reported cli_limit with cause (rate_limit | auth | billing; anything else
+// counts as a rate limit) and returns the pair's hold: routing skips that CLI on that runner meanwhile. A rate
+// limit waits for resetsAt (zero: 30 min; capped at MaxCooldown); a logged-out or billing-refused CLI backs off
+// 30 min, 2 h, 6 h and is then parked until the Owner marks it ready (MarkReady). Every new hold of a human cause,
+// and any streak of EscalateAfter holds, raises the CLI's alert (critical once escalated). Internal: the runner
+// protocol reports it (KIN-79). reason is the runner's untrusted text: it is trimmed and bounded, and only shown.
+func (s *Service) CoolDown(ctx context.Context, runnerID, agent, cause string, resetsAt time.Time, reason string) (domain.Hold, error) {
 	if !domain.KnownAgent(agent) {
-		return &domain.ValidationError{Field: "agent", Code: "agent_unknown"}
+		return domain.Hold{}, &domain.ValidationError{Field: "agent", Code: "agent_unknown"}
 	}
 	if runnerID == "" {
-		return &domain.ValidationError{Field: "runnerId", Code: "runner_required"}
-	}
-	if limit := s.Now().Add(MaxCooldown); until.After(limit) {
-		until = limit
-	}
-	if !until.After(s.Now()) {
-		return nil // already over: nothing to wait for
+		return domain.Hold{}, &domain.ValidationError{Field: "runnerId", Code: "runner_required"}
 	}
 	reason = strings.Join(strings.Fields(strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
@@ -451,9 +463,107 @@ func (s *Service) CoolDown(ctx context.Context, runnerID, agent string, until ti
 	if utf8.RuneCountInString(reason) > maxCooldownReason {
 		reason = string([]rune(reason)[:maxCooldownReason])
 	}
-	return s.Tx.InTx(ctx, func(ctx context.Context) error {
-		return s.Repo.SetCooldown(ctx, Cooldown{RunnerID: runnerID, Agent: agent, Until: until.UTC(), Reason: reason})
+	var h domain.Hold
+	err := s.Tx.InTx(ctx, func(ctx context.Context) error {
+		now := s.Now()
+		prev, found, err := s.Repo.Cooldown(ctx, runnerID, agent)
+		if err != nil {
+			return err
+		}
+		var last *domain.Hold
+		if found {
+			last = &prev.Hold
+		}
+		h = domain.NextHold(last, cause, resetsAt, now, MaxCooldown)
+		if err := s.Repo.SetCooldown(ctx, Cooldown{RunnerID: runnerID, Agent: agent, Reason: reason, Hold: h}); err != nil {
+			return err
+		}
+		if found && prev.Cause == h.Cause && prev.Strikes == h.Strikes || !domain.NeedsHuman(h.Cause) && !h.Escalated() {
+			return nil // the same hold again (attempts already running), or a plain rate limit: no new alert
+		}
+		return s.alert(ctx, TopicCLIHeld, runnerID, agent, &h, now)
 	})
+	return h, err
+}
+
+// Recovered forgets a runner's CLI hold and streak after an attempt with it succeeded (KIN-83) and resolves its
+// alert. A success while the hold is still active (an attempt that started before it) changes nothing: only a
+// retry after the wait proves the CLI works, and a parked hold is lifted only by the Owner. Internal (the workflow).
+func (s *Service) Recovered(ctx context.Context, runnerID, agent string) error {
+	return s.Tx.InTx(ctx, func(ctx context.Context) error {
+		c, found, err := s.Repo.Cooldown(ctx, runnerID, agent)
+		if err != nil || !found || c.Active(s.Now()) {
+			return err
+		}
+		if _, err := s.Repo.DeleteCooldown(ctx, runnerID, agent); err != nil {
+			return err
+		}
+		return s.alert(ctx, TopicCLIReady, runnerID, agent, nil, s.Now())
+	})
+}
+
+// MarkReady is the Owner's "CLI ready again" (KIN-83): after logging the runner's CLI in again or fixing its
+// billing, the hold is lifted at once (a parked one too), its streak is forgotten and its alert resolved; held
+// steps are routed to the pair on the next scheduler pass. Audited.
+func (s *Service) MarkReady(ctx context.Context, p auth.Principal, runnerID, agent string) error {
+	if err := s.owner(p); err != nil {
+		return err
+	}
+	if !domain.KnownAgent(agent) {
+		return &domain.ValidationError{Field: "agent", Code: "agent_unknown"}
+	}
+	return s.Tx.InTx(ctx, func(ctx context.Context) error {
+		had, err := s.Repo.DeleteCooldown(ctx, runnerID, agent)
+		if err != nil {
+			return err
+		}
+		if !had {
+			return domain.ErrNotFound
+		}
+		if err := s.alert(ctx, TopicCLIReady, runnerID, agent, nil, s.Now()); err != nil {
+			return err
+		}
+		return s.Audit.Record(ctx, auditapp.Entry{Actor: auditapp.UserActor(p), Kind: KindCLIReady,
+			Subject: "runner:" + runnerID, Details: map[string]string{"agent": agent}})
+	})
+}
+
+// Alert Center topics (KIN-83): a runner's CLI is held for a human cause or a long streak, and it works again.
+const (
+	AdapterAlerts = "alerts"
+	TopicCLIHeld  = "alerts.cli_held"
+	TopicCLIReady = "alerts.cli_ready"
+)
+
+// CLIHeldEvent is the payload of TopicCLIHeld (TopicCLIReady carries only runnerId and agent).
+type CLIHeldEvent struct {
+	RunnerID  string `json:"runnerId"`
+	Agent     string `json:"agent"`
+	Cause     string `json:"cause,omitempty"`
+	Strikes   int    `json:"strikes,omitempty"`
+	Escalated bool   `json:"escalated,omitempty"`
+	Parked    bool   `json:"parked,omitempty"`
+	Until     string `json:"until,omitempty"`
+}
+
+func (s *Service) alert(ctx context.Context, topic, runnerID, agent string, h *domain.Hold, now time.Time) error {
+	if s.Outbox == nil {
+		return nil
+	}
+	ev := CLIHeldEvent{RunnerID: runnerID, Agent: agent}
+	if h != nil {
+		ev.Cause, ev.Strikes, ev.Escalated, ev.Parked = h.Cause, h.Strikes, h.Escalated(), h.Parked
+		ev.Until = h.Until.UTC().Format(time.RFC3339)
+	}
+	b, err := json.Marshal(ev)
+	if err != nil {
+		return err
+	}
+	key := fmt.Sprintf("cli/%s/%s/%s/%d", runnerID, agent, topic, now.UnixNano())
+	if err := s.Outbox.Enqueue(ctx, messaging.Message{Adapter: AdapterAlerts, Topic: topic, Key: key, Payload: b}); err != nil {
+		return fmt.Errorf("enqueueing %s: %w", topic, err)
+	}
+	return nil
 }
 
 // Route is the permitted CLI chain for one step (KIN-A-15: System → Project → Role binding); the scheduler then
@@ -462,8 +572,8 @@ type Route struct {
 	Chain []domain.Choice
 	// Blocked explains an empty Chain: which CLIs of the binding are disabled and where.
 	Blocked string
-	// Cooling reports a runner's CLI cooling down after a usage limit, until the returned time.
-	Cooling func(runnerID, agent string) (time.Time, bool)
+	// Cooling reports a runner's CLI held after cli_limit, with its hold.
+	Cooling func(runnerID, agent string) (domain.Hold, bool)
 }
 
 // Route returns the chain for a step of role in the project; author is the CLI that did the work under review.
@@ -511,11 +621,11 @@ func (s *Service) Route(ctx context.Context, projectID, role, author string) (Ro
 		if err != nil {
 			return err
 		}
-		cool := make(map[[2]string]time.Time, len(cs))
+		cool := make(map[[2]string]domain.Hold, len(cs))
 		for _, c := range cs {
-			cool[[2]string{c.RunnerID, c.Agent}] = c.Until
+			cool[[2]string{c.RunnerID, c.Agent}] = c.Hold
 		}
-		out.Cooling = func(runnerID, agent string) (time.Time, bool) {
+		out.Cooling = func(runnerID, agent string) (domain.Hold, bool) {
 			u, ok := cool[[2]string{runnerID, agent}]
 			return u, ok
 		}

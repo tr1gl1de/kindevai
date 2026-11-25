@@ -238,3 +238,40 @@ func TestTaskFinishedRejectsBadEventsPermanently(t *testing.T) {
 		}
 	}
 }
+
+// KIN-83: a held CLI is one platform alert per runner and CLI; it escalates to critical with the streak and resolves
+// once the CLI works again (or the Owner marks it ready).
+func TestCLIHeldEscalatesAndResolves(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	held := func(strikes int, escalated bool) {
+		t.Helper()
+		if err := e.deliver(t, e.h.CLIHeld, "alerts.cli_held", map[string]any{"runnerId": "r1", "agent": "claude",
+			"cause": "auth", "strikes": strikes, "escalated": escalated}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	held(1, false)
+	a, ok := e.active(t, events.CLIDedupKey("r1", "claude"))
+	if !ok || a.Kind != domain.KindCLIHeld || a.Severity != domain.SeverityWarning || a.ProjectID != "" ||
+		a.Details["runnerId"] != "r1" || a.Details["agent"] != "claude" || a.Details["cause"] != "auth" {
+		t.Fatalf("alert %+v %v", a, ok)
+	}
+	held(2, false)
+	held(3, true)
+	if a, _ = e.active(t, events.CLIDedupKey("r1", "claude")); a.Severity != domain.SeverityCritical || a.Occurrences != 3 ||
+		a.Details["strikes"] != "3" {
+		t.Fatalf("escalated alert %+v", a)
+	}
+	if err := e.deliver(t, e.h.CLIReady, "alerts.cli_ready", map[string]any{"runnerId": "r1", "agent": "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := e.active(t, events.CLIDedupKey("r1", "claude")); ok {
+		t.Fatal("still active after the CLI is ready")
+	}
+	for _, fn := range []func(context.Context, messaging.Delivery) error{e.h.CLIHeld, e.h.CLIReady} {
+		if err := e.deliver(t, fn, "x", map[string]any{"runnerId": "r1"}); !messaging.IsPermanent(err) {
+			t.Fatalf("incomplete event: %v", err)
+		}
+	}
+}

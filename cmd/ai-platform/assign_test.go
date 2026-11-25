@@ -53,7 +53,10 @@ func TestAgentSummaryIsOneBoundedLine(t *testing.T) {
 // KIN-79: only a CLI's limit cools a runner's CLI down; the mock agent has none.
 func TestCLICooldownsIgnoreTheMockAgent(t *testing.T) {
 	t.Parallel()
-	if err := (cliCooldowns{}).CLILimitHit(t.Context(), "r1", "mock", time.Now().Add(time.Hour), "x"); err != nil {
+	if h, err := (cliCooldowns{}).CLILimitHit(t.Context(), "r1", "mock", "auth", time.Now().Add(time.Hour), "x"); err != nil || h.Known {
+		t.Fatal(h, err)
+	}
+	if err := (cliCooldowns{}).CLIWorked(t.Context(), "r1", "mock"); err != nil {
 		t.Fatal(err)
 	}
 }

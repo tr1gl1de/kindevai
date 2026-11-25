@@ -1,5 +1,7 @@
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import { ApiError } from "../../api/client";
 import type { AgentCli, AgentSettings } from "../../api/types";
 import { ConfirmDialog } from "../../ui/ConfirmDialog";
 import {
@@ -12,7 +14,12 @@ import {
 import { errorMessage } from "../../ui/errors";
 import { formatDateTime } from "../../ui/format";
 import { useNotify } from "../../ui/notify";
-import { useAgentSettings, useEmergencyStop, useSetAgentSwitch } from "./api";
+import {
+  useAgentSettings,
+  useEmergencyStop,
+  useMarkCLIReady,
+  useSetAgentSwitch,
+} from "./api";
 import { BindingsEditor } from "./BindingsEditor";
 
 /** Agent Management (Owner): global CLI switches, emergency stop, global role bindings and CLI cool-downs. */
@@ -159,38 +166,92 @@ function Switches({ settings }: { settings: AgentSettings }) {
 
 function Cooldowns({ settings }: { settings: AgentSettings }) {
   const { t, i18n } = useTranslation();
+  const notify = useNotify();
+  const ready = useMarkCLIReady();
+  const qc = useQueryClient();
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["agents"] });
+  const [error, setError] = useState<string>();
+
+  async function markReady(runnerId: string, agent: AgentCli) {
+    setError(undefined);
+    try {
+      await ready.mutateAsync({ runnerId, agent });
+      notify(
+        t("agents.readyNotice", {
+          cli: t(`agents.cli_${agent}`),
+          runner: runnerId,
+        }),
+      );
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        // Already lifted (the CLI worked again or another click won): the list refreshes.
+        await invalidate();
+        return;
+      }
+      setError(errorMessage(t, err));
+    }
+  }
+
   return (
     <section aria-labelledby="cooldowns-title" className="page-section">
       <h2 id="cooldowns-title">{t("agents.cooldownsTitle")}</h2>
+      <FormAlert message={error} />
       {settings.cooldowns.length === 0 ? (
         <EmptyState title={t("agents.noCooldowns")}>
           {t("agents.noCooldownsText")}
         </EmptyState>
       ) : (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th scope="col">{t("agents.runnerColumn")}</th>
-                <th scope="col">{t("agents.cliColumn")}</th>
-                <th scope="col">{t("agents.untilColumn")}</th>
-                <th scope="col">{t("agents.reasonColumn")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {settings.cooldowns.map((c) => (
-                <tr key={`${c.runnerId}/${c.agent}`}>
-                  <td>
-                    <code>{c.runnerId}</code>
-                  </td>
-                  <td>{t(`agents.cli_${c.agent}`)}</td>
-                  <td>{formatDateTime(c.until, i18n.language)}</td>
-                  <td>{c.reason}</td>
+        <>
+          <p className="muted">{t("agents.cooldownsIntro")}</p>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">{t("agents.runnerColumn")}</th>
+                  <th scope="col">{t("agents.cliColumn")}</th>
+                  <th scope="col">{t("agents.causeColumn")}</th>
+                  <th scope="col">{t("agents.untilColumn")}</th>
+                  <th scope="col">{t("agents.reasonColumn")}</th>
+                  <th scope="col">{t("agents.actionsColumn")}</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {settings.cooldowns.map((c) => {
+                  const cli = t(`agents.cli_${c.agent}`);
+                  return (
+                    <tr key={`${c.runnerId}/${c.agent}`}>
+                      <td>
+                        <code>{c.runnerId}</code>
+                      </td>
+                      <td>{cli}</td>
+                      <td>
+                        <span className="badge">
+                          {t(`agents.cause_${c.cause}`)}
+                        </span>
+                      </td>
+                      <td>
+                        {c.parked
+                          ? t("agents.waitingForYou", { count: c.strikes })
+                          : formatDateTime(c.until, i18n.language)}
+                      </td>
+                      <td>{c.reason}</td>
+                      <td className="row-actions">
+                        <button
+                          type="button"
+                          className="button subtle"
+                          disabled={ready.isPending}
+                          onClick={() => void markReady(c.runnerId, c.agent)}
+                        >
+                          {t("agents.markReady", { cli, runner: c.runnerId })}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
     </section>
   );

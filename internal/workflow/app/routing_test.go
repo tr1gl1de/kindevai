@@ -27,11 +27,14 @@ func (r *fakeRouter) Route(_ context.Context, projectID, role, author string) (A
 	r.calls = append(r.calls, projectID+" "+role+" "+author)
 	cool := maps(r.cooling)
 	return AgentRoute{Chain: slices.Clone(r.chains[role]), Blocked: r.blocked,
-		Cooling: func(runnerID, agent string) (time.Time, bool) {
+		Cooling: func(runnerID, agent string) (domain.Cooling, bool) {
 			u, ok := cool[runnerID+"/"+agent]
-			return u, ok
+			return domain.Cooling{Until: u, NeedsOwner: u.Equal(parkedUntil)}, ok
 		}}, nil
 }
+
+// parkedUntil marks a fakeRouter cool-down that waits for the Owner (KIN-83).
+var parkedUntil = t0.Add(7 * 24 * time.Hour)
 
 func maps(m map[string]time.Time) map[string]time.Time {
 	out := make(map[string]time.Time, len(m))
@@ -244,5 +247,70 @@ func TestStopAgentCancelsItsAttempts(t *testing.T) {
 	e.schedule(t)
 	if got := e.disp.takeAssigned(); len(got) != 1 || got[0].Agent != "claude" {
 		t.Fatalf("re-routed %+v", got)
+	}
+}
+
+// Acceptance (KIN-83): a step held because its CLI is logged out on one runner moves at once to another permitted
+// runner (or CLI); when only the Owner can bring the CLI back everywhere, the task is BLOCKED(cli_limit) saying so,
+// and a success on the pair ends routing's streak.
+func TestLoggedOutCLIHoldMovesTheStepOrWaitsForTheOwner(t *testing.T) {
+	t.Parallel()
+	e, r := newRoutedEnv()
+	r.set(func(r *fakeRouter) { r.chains["implementer"] = []domain.AgentChoice{{Agent: "claude"}} })
+	limits := &fakeCLILimits{hold: CLIHold{Known: true, Until: parkedUntil, NeedsOwner: true}}
+	e.svc.CLILimits = limits
+	task := e.task(t, onlyStep())
+	e.pool.set("p1", cliRunner("r1", "claude"))
+	e.schedule(t)
+	_, ex := e.state(t, task.ID)
+	st := ex.Steps[0]
+	e.disp.takeAssigned()
+	if err := e.svc.StartStep(t.Context(), st.ID, "r1", st.Fence); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.HoldStepForCLILimit(t.Context(), st.ID, "r1", st.Fence, "auth", "cli_limit: auth: not logged in",
+		time.Time{}, e.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got, ex := e.state(t, task.ID)
+	if !strings.Contains(got.Reason.Detail, "waiting for the Owner") || !strings.Contains(got.Reason.Detail, "runner r1") ||
+		ex.Steps[0].WaitUntil == nil || !ex.Steps[0].WaitUntil.Equal(parkedUntil) {
+		t.Fatalf("task %+v step %+v", got.Reason, ex.Steps[0])
+	}
+	if !slices.Equal(limits.got, []string{"r1 claude auth 0001-01-01T00:00:00Z"}) {
+		t.Fatalf("cli limit hits %v", limits.got)
+	}
+
+	// Only r1 has claude and it is parked: the task stays blocked and names the Owner's action.
+	r.set(func(r *fakeRouter) { r.cooling = map[string]time.Time{"r1/claude": parkedUntil} })
+	e.schedule(t)
+	if got, _ := e.state(t, task.ID); got.State != domain.TaskBlocked || got.BlockReason != domain.WaitCLILimit ||
+		!strings.Contains(got.Reason.Detail, "waiting for the Owner: claude on runner r1") {
+		t.Fatalf("task %s %+v", got.State, got.Reason)
+	}
+	if a := e.disp.takeAssigned(); len(a) != 0 {
+		t.Fatalf("assigned to a parked CLI: %+v", a)
+	}
+
+	// Another runner with claude: the step moves there at once and the task resumes.
+	e.pool.set("p1", cliRunner("r1", "claude"), cliRunner("r2", "claude"))
+	e.schedule(t)
+	a := e.disp.takeAssigned()
+	if len(a) != 1 || a[0].Agent != "claude" {
+		t.Fatalf("assignments %+v", a)
+	}
+	got, ex = e.state(t, task.ID)
+	if got.State != domain.TaskRunning || ex.Steps[0].RunnerID != "r2" {
+		t.Fatalf("task %s step %+v", got.State, ex.Steps[0])
+	}
+	st = ex.Steps[0]
+	if err := e.svc.StartStep(t.Context(), st.ID, "r2", st.Fence); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.CompleteStep(t.Context(), st.ID, "r2", st.Fence); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(limits.worked, []string{"r2 claude"}) {
+		t.Fatalf("worked %v", limits.worked)
 	}
 }

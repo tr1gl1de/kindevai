@@ -510,26 +510,35 @@ func (s *Service) PlannerChangedFiles(ctx context.Context, stepID, runnerID stri
 }
 
 // HoldPlanningForCLILimit returns the attempt to the queue until the CLI's limit resets (no attempt used), cools the
-// runner's CLI down in routing and BLOCKs the task with reason cli_limit.
-func (s *Service) HoldPlanningForCLILimit(ctx context.Context, stepID, runnerID string, fence int64, reason string, resetsAt time.Time) error {
+// runner's CLI down in routing and BLOCKs the task with reason cli_limit. cause is the runner's (rate_limit | auth |
+// billing): a logged-out or billing-refused CLI backs off and finally waits for the Owner (KIN-83), as for a step.
+func (s *Service) HoldPlanningForCLILimit(ctx context.Context, stepID, runnerID string, fence int64, cause, reason string, resetsAt time.Time) error {
 	return s.updatePlanningAttempt(ctx, stepID, runnerID, fence, func(ctx context.Context, run *domain.PlanningRun, now time.Time) error {
 		until := resetsAt.UTC()
 		if resetsAt.IsZero() || !resetsAt.After(now) {
 			until = now.Add(domain.CLILimitRetryDelay)
 		}
 		until = minTime(until, now.Add(domain.MaxCLILimitWait))
+		var hold CLIHold
+		if s.CLILimits != nil {
+			h, err := s.CLILimits.CLILimitHit(ctx, runnerID, run.Agent, cause, resetsAt, reason)
+			if err != nil {
+				return err
+			}
+			if hold = h; h.Known {
+				until = h.Until.UTC()
+			}
+		}
 		detail := reason + " (retry at " + until.Format(time.RFC3339) + ")"
-		agent := run.Agent
+		if hold.NeedsOwner {
+			detail = reason + " (waiting for the Owner: log the CLI in on runner " + runnerID +
+				" or fix its billing, then mark it ready again on the Agents page)"
+		}
 		if err := run.Hold(runnerID, fence, domain.WaitCLILimit, detail, until, now); err != nil {
 			return err
 		}
 		if err := s.Planning.SavePlanningRun(ctx, run); err != nil {
 			return err
-		}
-		if s.CLILimits != nil {
-			if err := s.CLILimits.CLILimitHit(ctx, runnerID, agent, until, reason); err != nil {
-				return err
-			}
 		}
 		t, err := s.Repo.Task(ctx, run.TaskID)
 		if err != nil {

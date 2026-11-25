@@ -61,6 +61,14 @@ export function useAlertText() {
         return t("alerts.kind_task_blocked", { subject: a.subject, reason: a.details.reason ?? "?" });
       case "runner_output_full":
         return t("alerts.kind_runner_output_full");
+      case "cli_held":
+        return t("alerts.kind_cli_held", {
+          agent: a.details.agent ?? "?",
+          runnerId: a.details.runnerId ?? "?",
+          cause: t(`agents.cause_${a.details.cause ?? "rate_limit"}`, {
+            defaultValue: a.details.cause ?? "?",
+          }),
+        });
       default:
         return t("alerts.kind_other", { kind: a.kind, subject: a.subject });
     }

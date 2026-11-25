@@ -13,6 +13,7 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/runner/egress/adapters/nsbox"
 	egress "github.com/tr1gl1de/kindevai/internal/runner/egress/app"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/adapters/cliagent"
+	"github.com/tr1gl1de/kindevai/internal/runner/session/domain"
 )
 
 func strictProfile() protocol.NetworkProfile {
@@ -93,5 +94,27 @@ func TestNewCLISandbox(t *testing.T) {
 	s = &egress.Sandboxes{Config: cfg("strict", false), Boxes: &nsbox.Manager{}}
 	if sb, err := newCLISandbox(t.Context(), s, "p1", "claude", "/d"); sb != nil || err == nil {
 		t.Fatalf("no configuration: %v, %v", sb, err)
+	}
+}
+
+// KIN-31 follow-up (KIN-83): only exit ExitUnverified with UnverifiedMarker on stderr is the sandbox refusing the
+// run (the step then waits for the network); a CLI exiting 121 on its own is a CLI error.
+func TestCLISandboxRecognisesAnUnverifiedRun(t *testing.T) {
+	t.Parallel()
+	s := cliSandbox{}
+	tail := "noise\n" + nsbox.UnverifiedMarker + ": egress ip mismatch\n"
+	for _, c := range []struct {
+		exit domain.Exit
+		tail string
+		want bool
+	}{
+		{domain.Exit{Code: nsbox.ExitUnverified}, tail, true},
+		{domain.Exit{Code: nsbox.ExitUnverified}, "error: something else", false},
+		{domain.Exit{Code: 1}, tail, false},
+		{domain.Exit{Signaled: true}, tail, false},
+	} {
+		if got := s.Refused(c.exit, c.tail); got != c.want {
+			t.Errorf("Refused(%+v, %q) = %v, want %v", c.exit, c.tail, got, c.want)
+		}
 	}
 }

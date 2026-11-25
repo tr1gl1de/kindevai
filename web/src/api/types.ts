@@ -967,11 +967,20 @@ export interface AgentSwitch {
   updatedAt: string | null;
 }
 
+/** Why a runner's CLI is held (KIN-79, KIN-83). */
+export type AgentHoldCause = "rate_limit" | "auth" | "billing";
+
 export interface AgentCooldown {
   runnerId: string;
   agent: AgentCli;
+  /** End of the hold; for a parked hold only an upper bound. */
   until: string;
   reason: string;
+  cause: AgentHoldCause;
+  /** Holds of this cause in a row. */
+  strikes: number;
+  /** Waits for the Owner's "ready again" (no automatic retry). */
+  parked: boolean;
 }
 
 export interface AgentSettings {

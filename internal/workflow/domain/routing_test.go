@@ -13,22 +13,31 @@ func TestPickRoute(t *testing.T) {
 		return RunnerCandidate{ID: id, Tools: append([]string{"git"}, tools...), DiskHeavyAllowed: true}
 	}
 	until := t0.Add(30 * time.Minute)
-	cool := func(pairs ...string) func(string, string) (time.Time, bool) {
-		return func(r, a string) (time.Time, bool) {
+	cool := func(pairs ...string) func(string, string) (Cooling, bool) {
+		return func(r, a string) (Cooling, bool) {
 			for i := 0; i < len(pairs); i += 2 {
 				if pairs[i] == r && pairs[i+1] == a {
-					return until, true
+					return Cooling{Until: until}, true
 				}
 			}
-			return time.Time{}, false
+			return Cooling{}, false
 		}
+	}
+	parked := func(r, a string) (Cooling, bool) {
+		return Cooling{Until: t0.Add(7 * 24 * time.Hour), NeedsOwner: true}, r == "r1" && a == "claude"
+	}
+	mixed := func(r, a string) (Cooling, bool) {
+		if r == "r2" {
+			return Cooling{Until: until}, a == "claude"
+		}
+		return parked(r, a)
 	}
 	claude, codex := AgentChoice{Agent: "claude", Model: "opus"}, AgentChoice{Agent: "codex"}
 	tests := []struct {
 		name       string
 		cands      []RunnerCandidate
 		chain      []AgentChoice
-		cooling    func(string, string) (time.Time, bool)
+		cooling    func(string, string) (Cooling, bool)
 		held       map[string]int
 		wantRunner string
 		wantAgent  string
@@ -45,6 +54,11 @@ func TestPickRoute(t *testing.T) {
 			[]AgentChoice{claude, codex}, cool("r1", "claude"), nil, "r1", "codex", "", ""},
 		{"every runner with the CLI cools down", []RunnerCandidate{runner("r1", "claude"), runner("r2")},
 			[]AgentChoice{claude}, cool("r1", "claude"), nil, "", "", WaitCLILimit, "claude: usage limit on every runner"},
+		// KIN-83: a CLI only the Owner can bring back is named with its runner; a reset elsewhere is still awaited.
+		{"every runner with the CLI waits for the Owner", []RunnerCandidate{runner("r1", "claude")},
+			[]AgentChoice{claude}, parked, nil, "", "", WaitCLILimit, "waiting for the Owner: claude on runner r1 logged out"},
+		{"a reset elsewhere wins over the Owner's action", []RunnerCandidate{runner("r1", "claude"), runner("r2", "claude")},
+			[]AgentChoice{claude}, mixed, nil, "", "", WaitCLILimit, "earliest reset " + until.Format("2006-01-02 15:04")},
 		{"no runner has any CLI of the chain", []RunnerCandidate{runner("r1")},
 			[]AgentChoice{claude, codex}, nil, nil, "", "", WaitRunner, "claude, codex"},
 		{"no runners", nil, []AgentChoice{claude}, nil, nil, "", "", WaitRunner, "no approved, online runner"},

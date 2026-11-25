@@ -361,6 +361,8 @@ type memPlanning struct {
 	mu   sync.Mutex
 	runs map[string]domain.PlanningRun
 	ord  []string // creation order
+	// tasks resolves a run's project for PlanningRunsSince; nil: every run counts.
+	tasks *memRepo
 }
 
 func newMemPlanning() *memPlanning { return &memPlanning{runs: map[string]domain.PlanningRun{}} }
@@ -445,4 +447,27 @@ func (m *memPlanning) PlanningRunsHeldBy(_ context.Context, runnerID string) ([]
 		}
 	}
 	return out, nil
+}
+
+func (m *memPlanning) PlanningRunsSince(ctx context.Context, projectID string, since time.Time) (int, error) {
+	m.mu.Lock()
+	runs := make([]domain.PlanningRun, 0, len(m.runs))
+	for _, r := range m.runs {
+		runs = append(runs, r)
+	}
+	m.mu.Unlock()
+	n := 0
+	for _, r := range runs {
+		if r.CreatedAt.Before(since) {
+			continue
+		}
+		if m.tasks != nil {
+			t, err := m.tasks.Task(ctx, r.TaskID)
+			if err != nil || t.ProjectID != projectID {
+				continue
+			}
+		}
+		n++
+	}
+	return n, nil
 }

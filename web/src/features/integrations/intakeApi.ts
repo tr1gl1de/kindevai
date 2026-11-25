@@ -21,10 +21,17 @@ export interface IntakeEntry {
   processedAt: string;
 }
 
+/** A project's YouTrack binding; autoPlan: intake tasks go to the AI planner at once (KIN-85). */
+export interface YouTrackBinding {
+  shortName: string;
+  triggerTag: string;
+  autoPlan: boolean;
+}
+
 /** GET /api/projects/{id}/youtrack (members who may start AI in the project). */
 export interface ProjectYouTrack {
   connected: boolean;
-  binding: { shortName: string; triggerTag: string } | null;
+  binding: YouTrackBinding | null;
   status: IntakeState;
   lastPolledAt: string | null;
   recent: IntakeEntry[];
@@ -128,7 +135,16 @@ export function useSaveTriggerTag(id: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (triggerTag: string) =>
-      api<{ shortName: string; triggerTag: string }>("PUT", `${projectPath(id)}/integrations/youtrack/trigger`, { triggerTag }),
+      api<YouTrackBinding>("PUT", `${projectPath(id)}/integrations/youtrack/trigger`, { triggerTag }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: keys.project(id) }),
+  });
+}
+
+/** Turns automatic planning of the project's intake tasks on or off (Owner, project admin). */
+export function useSaveAutoPlan(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (autoPlan: boolean) => api<YouTrackBinding>("PUT", `${projectPath(id)}/integrations/youtrack/autoplan`, { autoPlan }),
     onSuccess: () => qc.invalidateQueries({ queryKey: keys.project(id) }),
   });
 }

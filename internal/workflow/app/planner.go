@@ -33,6 +33,8 @@ type PlanningRepository interface {
 	ActivePlanningRuns(ctx context.Context) ([]string, error)
 	// PlanningRunsHeldBy lists the RUNNING runs whose current attempt is the runner's.
 	PlanningRunsHeldBy(ctx context.Context, runnerID string) ([]string, error)
+	// PlanningRunsSince counts the project's runs created at or after since (KIN-85 auto-start cap).
+	PlanningRunsSince(ctx context.Context, projectID string, since time.Time) (int, error)
 }
 
 // IssueContextSource reads the context package of a YouTrack issue: its text and the Knowledge Base articles it
@@ -104,25 +106,95 @@ func (s *Service) StartPlanning(ctx context.Context, p auth.Principal, taskID st
 		default:
 			return fmt.Errorf("task %s: plan in %s: %w", t.ID, t.State, domain.ErrInvalidTransition)
 		}
-		prepare := t.YouTrackIssue != "" && s.IssueContext != nil && s.Outbox != nil
-		run := domain.NewPlanningRun(s.NewID(), t.ID, p.UserID, prepare, now)
-		run.Session, run.SessionRunner, run.SessionAgent = prev.Session, prev.SessionRunner, prev.SessionAgent
-		if t.YouTrackIssue != "" && !prepare {
-			run.Context.Note = "the issue text is unavailable (YouTrack is not connected); plan from the title and the repository"
-		}
-		if err := s.Planning.CreatePlanningRun(ctx, &run); err != nil {
-			return err
-		}
-		if !prepare {
-			return nil
-		}
-		body, err := json.Marshal(contextPayload{RunID: run.ID})
+		return s.createPlanningRun(ctx, t, p.UserID, prev, now)
+	})
+}
+
+// createPlanningRun stores a new run for the task (ANALYZING) requested by requestedBy, continuing prev's session;
+// a task linked to a YouTrack issue first has its context read through the outbox.
+func (s *Service) createPlanningRun(ctx context.Context, t *domain.Task, requestedBy string, prev domain.PlanningRun, now time.Time) error {
+	prepare := t.YouTrackIssue != "" && s.IssueContext != nil && s.Outbox != nil
+	run := domain.NewPlanningRun(s.NewID(), t.ID, requestedBy, prepare, now)
+	run.Session, run.SessionRunner, run.SessionAgent = prev.Session, prev.SessionRunner, prev.SessionAgent
+	if t.YouTrackIssue != "" && !prepare {
+		run.Context.Note = "the issue text is unavailable (YouTrack is not connected); plan from the title and the repository"
+	}
+	if err := s.Planning.CreatePlanningRun(ctx, &run); err != nil {
+		return err
+	}
+	if !prepare {
+		return nil
+	}
+	body, err := json.Marshal(contextPayload{RunID: run.ID})
+	if err != nil {
+		return err
+	}
+	return s.Outbox.Enqueue(ctx, messaging.Message{Adapter: AdapterYouTrack, Topic: TopicPlanningContext,
+		Key: "planning-context/" + run.ID, Payload: body})
+}
+
+// AutoPlanOutcome says what AutoStartPlanning did.
+type AutoPlanOutcome string
+
+// AutoStartPlanning outcomes (KIN-85).
+const (
+	AutoPlanStarted     AutoPlanOutcome = "started"             // the task is ANALYZING with a new planning run
+	AutoPlanUnavailable AutoPlanOutcome = "planner_unavailable" // the planner step is not configured
+	AutoPlanNotNew      AutoPlanOutcome = "not_new"             // the task is not CREATED or was planned before
+	AutoPlanRateLimited AutoPlanOutcome = "rate_limited"        // the project reached AutoPlanPerHour
+)
+
+// AutoPlanPerHour caps the planning runs started in one project within a rolling hour for an automatic start to
+// go ahead (KIN-85): a burst of tagged issues cannot keep every planner CLI busy. Manual starts are not capped.
+const AutoPlanPerHour = 10
+
+// AutoStartPlanning plans a task the YouTrack intake just created (KIN-85), on the caller's transaction and on
+// behalf of the intake's initiator (already authorised by the intake). It starts at most once per task: only a
+// CREATED task that never had a planning run is started, so a redelivered issue never plans twice. The run then
+// follows the usual path: context through the outbox, routing (BLOCKED reasons, stopped CLIs), maintenance mode.
+func (s *Service) AutoStartPlanning(ctx context.Context, taskID, requestedBy string) (AutoPlanOutcome, error) {
+	if s.Planning == nil {
+		return AutoPlanUnavailable, nil
+	}
+	out := AutoPlanNotNew
+	err := s.Tx.InTx(ctx, func(ctx context.Context) error {
+		t, err := s.Repo.Task(ctx, taskID)
 		if err != nil {
 			return err
 		}
-		return s.Outbox.Enqueue(ctx, messaging.Message{Adapter: AdapterYouTrack, Topic: TopicPlanningContext,
-			Key: "planning-context/" + run.ID, Payload: body})
+		if t.State != domain.TaskCreated {
+			return nil
+		}
+		switch _, err := s.Planning.LatestPlanningRun(ctx, t.ID); {
+		case err == nil:
+			return nil
+		case !errors.Is(err, domain.ErrNotFound):
+			return err
+		}
+		now := s.now()
+		n, err := s.Planning.PlanningRunsSince(ctx, t.ProjectID, now.Add(-time.Hour))
+		if err != nil {
+			return err
+		}
+		if n >= AutoPlanPerHour {
+			out = AutoPlanRateLimited
+			return nil
+		}
+		_, err = s.updateTask(ctx, t.ID, func(ctx context.Context, t *domain.Task, now time.Time) error {
+			if err := t.Transition(domain.TaskAnalyzing, domain.Reason{}, now); err != nil {
+				return err
+			}
+			return s.createPlanningRun(ctx, t, requestedBy, domain.PlanningRun{}, now)
+		})
+		if err == nil {
+			out = AutoPlanStarted
+		}
+		return err
 	})
+	if err != nil {
+		return "", err
+	}
+	return out, nil
 }
 
 // HandlePlanningContext is the outbox handler of TopicPlanningContext: it reads the issue's context package and

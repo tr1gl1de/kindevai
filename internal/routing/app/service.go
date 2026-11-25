@@ -1,0 +1,511 @@
+// Package app holds the agent router's use cases (KIN-33): the Owner's global AI CLI switches and role bindings,
+// a project's allowlist and binding overrides (Owner or the project's admin), the emergency stop of a CLI, CLI
+// cool-downs after a usage limit, and Route — the permitted CLI chain the scheduler uses for one step. Every
+// change is audited in its transaction.
+package app
+
+import (
+	"context"
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
+	"github.com/tr1gl1de/kindevai/internal/platform/auth"
+	"github.com/tr1gl1de/kindevai/internal/routing/domain"
+)
+
+// Audit event kinds.
+const (
+	KindSwitched      = "routing.cli_switched"
+	KindEmergencyStop = "routing.cli_emergency_stop"
+	KindBound         = "routing.role_bound"
+	KindBindingReset  = "routing.role_binding_reset"
+)
+
+// GlobalScope is the project id of the System level.
+const GlobalScope = ""
+
+// Switch is a stored enable/disable switch of a CLI at one level.
+type Switch struct {
+	ProjectID string // GlobalScope for the System switch
+	Agent     string
+	Enabled   bool
+	UpdatedBy string
+	UpdatedAt time.Time
+}
+
+// StoredBinding is a role binding set at one level.
+type StoredBinding struct {
+	ProjectID string // GlobalScope for the global binding
+	Binding   domain.Binding
+	UpdatedBy string
+	UpdatedAt time.Time
+}
+
+// Cooldown: a runner's CLI hit its usage limit or is logged out (cli_limit); routing skips the pair until Until.
+type Cooldown struct {
+	RunnerID string
+	Agent    string
+	Until    time.Time
+	Reason   string
+}
+
+// Repo stores switches, bindings and cool-downs; every method runs on the caller's transaction (db.Conn).
+type Repo interface {
+	Switches(ctx context.Context, projectID string) ([]Switch, error)
+	SetSwitch(ctx context.Context, s Switch) error
+	Bindings(ctx context.Context, projectID string) ([]StoredBinding, error)
+	SetBinding(ctx context.Context, b StoredBinding) error
+	DeleteBinding(ctx context.Context, projectID string, role domain.Role) error
+	SetCooldown(ctx context.Context, c Cooldown) error
+	// Cooldowns lists the cool-downs still running at now.
+	Cooldowns(ctx context.Context, now time.Time) ([]Cooldown, error)
+}
+
+// TxRunner runs fn in one database transaction.
+type TxRunner interface {
+	InTx(ctx context.Context, fn func(ctx context.Context) error) error
+}
+
+// AuditLog records audit events in the caller's transaction.
+type AuditLog interface {
+	Record(ctx context.Context, e auditapp.Entry) error
+}
+
+// Access is the projects context: the projects p may see, with p's role there.
+type Access interface {
+	Visible(ctx context.Context, p auth.Principal) (map[string]string, error)
+}
+
+// Workflow is the workflow context as the emergency stop needs it (joins the caller's transaction).
+type Workflow interface {
+	StopAgent(ctx context.Context, agent string) (int, error)
+}
+
+// Project roles that may manage a project's agents.
+const (
+	RoleOwner        = "owner"
+	RoleProjectAdmin = "project_admin"
+)
+
+// MaxCooldown bounds a cool-down (a reported reset far in the future is capped).
+const MaxCooldown = 7 * 24 * time.Hour
+
+const maxCooldownReason = 500
+
+// Service implements the agent router.
+type Service struct {
+	Repo     Repo
+	Tx       TxRunner
+	Audit    AuditLog
+	Access   Access
+	Workflow Workflow // emergency stop; required for EmergencyStop
+	Now      func() time.Time
+}
+
+func (s *Service) owner(p auth.Principal) error {
+	if !p.Owner {
+		return domain.ErrForbidden
+	}
+	return nil
+}
+
+// mayManage: the Owner or the project's admin; a project p cannot see is not found.
+func (s *Service) mayManage(ctx context.Context, p auth.Principal, projectID string) error {
+	v, err := s.Access.Visible(ctx, p)
+	if err != nil {
+		return err
+	}
+	role, ok := v[projectID]
+	switch {
+	case !ok:
+		return domain.ErrNotFound
+	case p.Owner || role == RoleOwner || role == RoleProjectAdmin:
+		return nil
+	}
+	return domain.ErrForbidden
+}
+
+func switches(ss []Switch) domain.Switches {
+	out := domain.Switches{}
+	for _, s := range ss {
+		out[s.Agent] = s.Enabled
+	}
+	return out
+}
+
+// SwitchView is a CLI's switch at a level; Set is false while it has the default (enabled).
+type SwitchView struct {
+	Agent     string
+	Enabled   bool
+	Set       bool
+	UpdatedBy string
+	UpdatedAt *time.Time
+}
+
+func switchViews(ss []Switch, on func(agent string) bool) []SwitchView {
+	out := make([]SwitchView, 0, len(domain.Agents))
+	for _, a := range domain.Agents {
+		v := SwitchView{Agent: a, Enabled: on(a)}
+		if i := slices.IndexFunc(ss, func(s Switch) bool { return s.Agent == a }); i >= 0 {
+			at := ss[i].UpdatedAt
+			v.Set, v.UpdatedBy, v.UpdatedAt = true, ss[i].UpdatedBy, &at
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// Binding sources.
+const (
+	SourceDefault = "default"
+	SourceGlobal  = "global"
+	SourceProject = "project"
+)
+
+// BindingView is a role's effective binding at a level and where it comes from.
+type BindingView struct {
+	Binding   domain.Binding
+	Source    string
+	UpdatedBy string
+	UpdatedAt *time.Time
+}
+
+func bindingFor(role domain.Role, levels ...[]StoredBinding) (domain.Binding, BindingView) {
+	sources := []string{SourceGlobal, SourceProject}
+	v := BindingView{Binding: domain.DefaultBinding(role), Source: SourceDefault}
+	for i, bs := range levels {
+		if j := slices.IndexFunc(bs, func(b StoredBinding) bool { return b.Binding.Role == role }); j >= 0 {
+			at := bs[j].UpdatedAt
+			v = BindingView{Binding: bs[j].Binding, Source: sources[i], UpdatedBy: bs[j].UpdatedBy, UpdatedAt: &at}
+		}
+	}
+	return v.Binding, v
+}
+
+// Settings is the System level as the Owner sees it.
+type Settings struct {
+	Switches  []SwitchView
+	Bindings  []BindingView
+	Cooldowns []Cooldown
+}
+
+// Settings returns the global switches, bindings and running cool-downs. Owner only.
+func (s *Service) Settings(ctx context.Context, p auth.Principal) (Settings, error) {
+	if err := s.owner(p); err != nil {
+		return Settings{}, err
+	}
+	var out Settings
+	err := s.Tx.InTx(ctx, func(ctx context.Context) error {
+		gs, err := s.Repo.Switches(ctx, GlobalScope)
+		if err != nil {
+			return err
+		}
+		out.Switches = switchViews(gs, switches(gs).Enabled)
+		gb, err := s.Repo.Bindings(ctx, GlobalScope)
+		if err != nil {
+			return err
+		}
+		for _, r := range domain.Roles {
+			_, v := bindingFor(r, gb)
+			out.Bindings = append(out.Bindings, v)
+		}
+		cs, err := s.Repo.Cooldowns(ctx, s.Now())
+		if err != nil {
+			return err
+		}
+		slices.SortFunc(cs, func(a, b Cooldown) int {
+			return strings.Compare(a.RunnerID+"/"+a.Agent, b.RunnerID+"/"+b.Agent)
+		})
+		out.Cooldowns = cs
+		return nil
+	})
+	return out, err
+}
+
+// AgentState is a CLI in a project: the System switch, the project's switch and the result.
+type AgentState struct {
+	Agent     string
+	Global    bool
+	Project   SwitchView
+	Effective bool
+}
+
+// ProjectSettings is a project's agent configuration.
+type ProjectSettings struct {
+	ProjectID string
+	Agents    []AgentState
+	Bindings  []BindingView // effective per role, with the level it comes from
+}
+
+// ProjectSettings returns the project's switches and effective bindings. Owner or the project's admin.
+func (s *Service) ProjectSettings(ctx context.Context, p auth.Principal, projectID string) (ProjectSettings, error) {
+	if err := s.mayManage(ctx, p, projectID); err != nil {
+		return ProjectSettings{}, err
+	}
+	out := ProjectSettings{ProjectID: projectID}
+	err := s.Tx.InTx(ctx, func(ctx context.Context) error {
+		gs, err := s.Repo.Switches(ctx, GlobalScope)
+		if err != nil {
+			return err
+		}
+		ps, err := s.Repo.Switches(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		g, pr := switches(gs), switches(ps)
+		for _, v := range switchViews(ps, pr.Enabled) {
+			out.Agents = append(out.Agents, AgentState{Agent: v.Agent, Global: g.Enabled(v.Agent), Project: v,
+				Effective: g.Enabled(v.Agent) && v.Enabled})
+		}
+		gb, err := s.Repo.Bindings(ctx, GlobalScope)
+		if err != nil {
+			return err
+		}
+		pb, err := s.Repo.Bindings(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		for _, r := range domain.Roles {
+			_, v := bindingFor(r, gb, pb)
+			out.Bindings = append(out.Bindings, v)
+		}
+		return nil
+	})
+	return out, err
+}
+
+func (s *Service) setSwitch(ctx context.Context, p auth.Principal, projectID, agent string, enabled bool, kind string,
+	extra map[string]string) error {
+	if err := s.Repo.SetSwitch(ctx, Switch{ProjectID: projectID, Agent: agent, Enabled: enabled, UpdatedBy: p.Login,
+		UpdatedAt: s.Now().UTC()}); err != nil {
+		return err
+	}
+	scope := "global"
+	if projectID != GlobalScope {
+		scope = "project"
+	}
+	details := map[string]string{"agent": agent, "enabled": fmt.Sprint(enabled), "scope": scope}
+	for k, v := range extra {
+		details[k] = v
+	}
+	return s.Audit.Record(ctx, auditapp.Entry{Actor: auditapp.UserActor(p), Kind: kind, ProjectID: projectID,
+		Subject: "cli:" + agent, Details: details})
+}
+
+// SetGlobalSwitch enables or disables a CLI for the whole installation. Disabling assigns no new sessions; running
+// attempts finish (EmergencyStop stops them). Owner only.
+func (s *Service) SetGlobalSwitch(ctx context.Context, p auth.Principal, agent string, enabled bool) error {
+	if err := s.owner(p); err != nil {
+		return err
+	}
+	if !domain.KnownAgent(agent) {
+		return &domain.ValidationError{Field: "agent", Code: "agent_unknown"}
+	}
+	return s.Tx.InTx(ctx, func(ctx context.Context) error {
+		return s.setSwitch(ctx, p, GlobalScope, agent, enabled, KindSwitched, nil)
+	})
+}
+
+// EmergencyStop disables a CLI globally and stops every attempt running with it at once, in one transaction.
+// Owner only. It returns the number of attempts stopped.
+func (s *Service) EmergencyStop(ctx context.Context, p auth.Principal, agent string) (int, error) {
+	if err := s.owner(p); err != nil {
+		return 0, err
+	}
+	if !domain.KnownAgent(agent) {
+		return 0, &domain.ValidationError{Field: "agent", Code: "agent_unknown"}
+	}
+	n := 0
+	err := s.Tx.InTx(ctx, func(ctx context.Context) error {
+		var err error
+		if n, err = s.Workflow.StopAgent(ctx, agent); err != nil {
+			return err
+		}
+		return s.setSwitch(ctx, p, GlobalScope, agent, false, KindEmergencyStop, map[string]string{"stopped": fmt.Sprint(n)})
+	})
+	return n, err
+}
+
+// SetProjectSwitch sets a CLI in the project's allowlist; enabling a CLI disabled globally is refused
+// (domain.ErrDisabledGlobally). Owner or the project's admin.
+func (s *Service) SetProjectSwitch(ctx context.Context, p auth.Principal, projectID, agent string, enabled bool) error {
+	if err := s.mayManage(ctx, p, projectID); err != nil {
+		return err
+	}
+	return s.Tx.InTx(ctx, func(ctx context.Context) error {
+		gs, err := s.Repo.Switches(ctx, GlobalScope)
+		if err != nil {
+			return err
+		}
+		if err := domain.CheckProjectSwitch(switches(gs), agent, enabled); err != nil {
+			return err
+		}
+		return s.setSwitch(ctx, p, projectID, agent, enabled, KindSwitched, nil)
+	})
+}
+
+func (s *Service) setBinding(ctx context.Context, p auth.Principal, projectID string, b domain.Binding) error {
+	b = b.Normalize()
+	if err := b.Check(); err != nil {
+		return err
+	}
+	return s.Tx.InTx(ctx, func(ctx context.Context) error {
+		if err := s.Repo.SetBinding(ctx, StoredBinding{ProjectID: projectID, Binding: b, UpdatedBy: p.Login,
+			UpdatedAt: s.Now().UTC()}); err != nil {
+			return err
+		}
+		chain := make([]string, 0, len(b.Fallback)+1)
+		for _, c := range b.Choices() {
+			chain = append(chain, choiceLabel(c))
+		}
+		return s.Audit.Record(ctx, auditapp.Entry{Actor: auditapp.UserActor(p), Kind: KindBound, ProjectID: projectID,
+			Subject: "role:" + string(b.Role), Details: map[string]string{"role": string(b.Role),
+				"chain": strings.Join(chain, " → "), "strategy": string(b.Strategy)}})
+	})
+}
+
+func choiceLabel(c domain.Choice) string {
+	if c.Model == "" {
+		return c.Agent
+	}
+	return c.Agent + "/" + c.Model
+}
+
+// SetGlobalBinding sets a role's binding for every project without its own. Owner only.
+func (s *Service) SetGlobalBinding(ctx context.Context, p auth.Principal, b domain.Binding) error {
+	if err := s.owner(p); err != nil {
+		return err
+	}
+	return s.setBinding(ctx, p, GlobalScope, b)
+}
+
+// SetProjectBinding overrides a role's binding in the project. Owner or the project's admin.
+func (s *Service) SetProjectBinding(ctx context.Context, p auth.Principal, projectID string, b domain.Binding) error {
+	if err := s.mayManage(ctx, p, projectID); err != nil {
+		return err
+	}
+	return s.setBinding(ctx, p, projectID, b)
+}
+
+func (s *Service) resetBinding(ctx context.Context, p auth.Principal, projectID string, role domain.Role) error {
+	if !role.Valid() {
+		return &domain.ValidationError{Field: "role", Code: "role_unknown"}
+	}
+	return s.Tx.InTx(ctx, func(ctx context.Context) error {
+		if err := s.Repo.DeleteBinding(ctx, projectID, role); err != nil {
+			return err
+		}
+		return s.Audit.Record(ctx, auditapp.Entry{Actor: auditapp.UserActor(p), Kind: KindBindingReset,
+			ProjectID: projectID, Subject: "role:" + string(role), Details: map[string]string{"role": string(role)}})
+	})
+}
+
+// ResetGlobalBinding returns a role to the default binding. Owner only.
+func (s *Service) ResetGlobalBinding(ctx context.Context, p auth.Principal, role domain.Role) error {
+	if err := s.owner(p); err != nil {
+		return err
+	}
+	return s.resetBinding(ctx, p, GlobalScope, role)
+}
+
+// ResetProjectBinding makes the project inherit the global binding of a role again. Owner or the project's admin.
+func (s *Service) ResetProjectBinding(ctx context.Context, p auth.Principal, projectID string, role domain.Role) error {
+	if err := s.mayManage(ctx, p, projectID); err != nil {
+		return err
+	}
+	return s.resetBinding(ctx, p, projectID, role)
+}
+
+// CoolDown records that a runner's CLI hit its usage limit (or is logged out) until until (capped at MaxCooldown
+// from now); routing skips that CLI on that runner meanwhile. Internal: the runner protocol reports it (KIN-79).
+// reason is the runner's untrusted text: it is trimmed and bounded, and only shown.
+func (s *Service) CoolDown(ctx context.Context, runnerID, agent string, until time.Time, reason string) error {
+	if !domain.KnownAgent(agent) {
+		return &domain.ValidationError{Field: "agent", Code: "agent_unknown"}
+	}
+	if runnerID == "" {
+		return &domain.ValidationError{Field: "runnerId", Code: "runner_required"}
+	}
+	if limit := s.Now().Add(MaxCooldown); until.After(limit) {
+		until = limit
+	}
+	reason = strings.ToValidUTF8(strings.TrimSpace(reason), "")
+	if utf8.RuneCountInString(reason) > maxCooldownReason {
+		reason = string([]rune(reason)[:maxCooldownReason])
+	}
+	return s.Tx.InTx(ctx, func(ctx context.Context) error {
+		return s.Repo.SetCooldown(ctx, Cooldown{RunnerID: runnerID, Agent: agent, Until: until.UTC(), Reason: reason})
+	})
+}
+
+// Route is the permitted CLI chain for one step (KIN-A-15: System → Project → Role binding); the scheduler then
+// checks runner capabilities, cool-downs and the network policy.
+type Route struct {
+	Chain []domain.Choice
+	// Blocked explains an empty Chain: which CLIs of the binding are disabled and where.
+	Blocked string
+	// Cooling reports a runner's CLI cooling down after a usage limit, until the returned time.
+	Cooling func(runnerID, agent string) (time.Time, bool)
+}
+
+// Route returns the chain for a step of role in the project; author is the CLI that did the work under review.
+// Internal (the scheduler), no principal.
+func (s *Service) Route(ctx context.Context, projectID, role, author string) (Route, error) {
+	r := domain.Role(role)
+	if !r.Valid() {
+		return Route{}, &domain.ValidationError{Field: "role", Code: "role_unknown"}
+	}
+	var out Route
+	err := s.Tx.InTx(ctx, func(ctx context.Context) error {
+		gs, err := s.Repo.Switches(ctx, GlobalScope)
+		if err != nil {
+			return err
+		}
+		ps, err := s.Repo.Switches(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		gb, err := s.Repo.Bindings(ctx, GlobalScope)
+		if err != nil {
+			return err
+		}
+		pb, err := s.Repo.Bindings(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		b, _ := bindingFor(r, gb, pb)
+		pol := domain.Policy{Global: switches(gs), Project: switches(ps), Binding: b}
+		chain, skipped := pol.Chain(author)
+		out.Chain = chain
+		if len(chain) == 0 {
+			why := make([]string, 0, len(skipped))
+			for _, a := range skipped {
+				where := "disabled in the project"
+				if !pol.Global.Enabled(a) {
+					where = "disabled globally"
+				}
+				why = append(why, a+" ("+where+")")
+			}
+			out.Blocked = fmt.Sprintf("waiting for an AI CLI: no CLI bound to role %s is enabled: %s", role,
+				strings.Join(why, ", "))
+		}
+		cs, err := s.Repo.Cooldowns(ctx, s.Now())
+		if err != nil {
+			return err
+		}
+		cool := make(map[[2]string]time.Time, len(cs))
+		for _, c := range cs {
+			cool[[2]string{c.RunnerID, c.Agent}] = c.Until
+		}
+		out.Cooling = func(runnerID, agent string) (time.Time, bool) {
+			u, ok := cool[[2]string{runnerID, agent}]
+			return u, ok
+		}
+		return nil
+	})
+	return out, err
+}

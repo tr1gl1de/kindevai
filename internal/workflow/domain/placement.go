@@ -1,8 +1,10 @@
 package domain
 
 import (
+	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 // RunnerCandidate is a runner the scheduler may give a project's steps to: the runners context already checked it is
@@ -36,4 +38,59 @@ func PickRunner(cands []RunnerCandidate, caps []string, held map[string]int) (Ru
 		}
 	}
 	return best, found
+}
+
+// AgentChoice is an AI CLI with its model ("" = the CLI's default) that routing may run a step with (KIN-33).
+type AgentChoice struct {
+	Agent string
+	Model string
+}
+
+// PickRoute chooses the CLI and runner for a step (KIN-33, KB KIN-A-15 routing: … → Role binding → Runner
+// capabilities → Session availability): the first choice of the permitted chain for which an eligible runner
+// (PickRunner: capabilities, disk, least load) has the CLI installed and is not cooling down on it after a usage
+// limit (cli_limit). When nothing fits, the reason says why: every runner with a CLI of the chain cools down
+// (cli_limit, with the earliest reset) or no runner has any of them (runner).
+func PickRoute(cands []RunnerCandidate, caps []string, held map[string]int, chain []AgentChoice,
+	cooling func(runnerID, agent string) (time.Time, bool)) (RunnerCandidate, AgentChoice, Reason, bool) {
+	if cooling == nil {
+		cooling = func(string, string) (time.Time, bool) { return time.Time{}, false }
+	}
+	var limited []string
+	var reset time.Time
+	for _, c := range chain {
+		var ok []RunnerCandidate
+		for _, r := range cands {
+			if !r.Eligible(append(slices.Clip(caps), c.Agent)) {
+				continue
+			}
+			if until, cool := cooling(r.ID, c.Agent); cool {
+				if !slices.Contains(limited, c.Agent) {
+					limited = append(limited, c.Agent)
+				}
+				if reset.IsZero() || until.Before(reset) {
+					reset = until
+				}
+				continue
+			}
+			ok = append(ok, r)
+		}
+		if r, found := PickRunner(ok, caps, held); found {
+			return r, c, Reason{}, true
+		}
+	}
+	if len(limited) > 0 {
+		return RunnerCandidate{}, AgentChoice{}, Reason{Code: WaitCLILimit, Detail: fmt.Sprintf(
+			"waiting for a CLI limit to reset: %s: usage limit on every runner that has it, earliest reset %s",
+			strings.Join(limited, ", "), reset.UTC().Format("2006-01-02 15:04 UTC"))}, false
+	}
+	agents := make([]string, 0, len(chain))
+	for _, c := range chain {
+		if !slices.Contains(agents, c.Agent) {
+			agents = append(agents, c.Agent)
+		}
+	}
+	return RunnerCandidate{}, AgentChoice{}, Reason{Code: WaitRunner, Detail: fmt.Sprintf(
+		"waiting for a runner: no approved, online runner of this project has a permitted CLI (%s) with the step's capabilities and disk space",
+		strings.Join(agents, ", "))}, false
 }

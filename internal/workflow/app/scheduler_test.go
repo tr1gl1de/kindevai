@@ -33,13 +33,15 @@ func (p *fakePool) set(projectID string, cs ...Candidate) {
 }
 
 type fakeDispatcher struct {
-	mu   sync.Mutex
-	cmds []string
+	mu       sync.Mutex
+	cmds     []string
+	assigned []Assignment
 }
 
 func (d *fakeDispatcher) Assign(_ context.Context, runnerID string, a Assignment) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.assigned = append(d.assigned, a)
 	d.cmds = append(d.cmds, fmt.Sprintf("assign %s %s/%d %s %s", runnerID, a.StepKey, a.Fence, a.ProjectID, a.Repository))
 	return nil
 }

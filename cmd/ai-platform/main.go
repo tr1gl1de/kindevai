@@ -165,6 +165,8 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	attachNetwork(gateway, netSvc, logger)
 	wireStrictEgress(apv.Workflow, netSvc.StrictFor) // KIN-31 strict steps only on verified runners
 	modules = append(modules, netHTTP)
+	_, routingHTTP := newRouting(inst, audit, apv.Workflow, logger) // KIN-33 CLI switches, role bindings, routing
+	modules = append(modules, routingHTTP)
 	maint, err := newMaintenance(ctx, inst, audit, apv.Workflow, logger) // KIN-41 maintenance mode
 	if err != nil {
 		return err

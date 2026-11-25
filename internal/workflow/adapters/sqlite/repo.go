@@ -204,10 +204,10 @@ func (r *Repository) CreateExecution(ctx context.Context, e *domain.Execution) e
 			return fmt.Errorf("encoding dependencies: %w", err)
 		}
 		if _, err := c.ExecContext(ctx, `INSERT INTO workflow_steps(id, execution_id, position, step_key, title,
-			repository, depends_on, state, wait_reason, reason, fence, runner_id, lease_expires_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			repository, depends_on, state, wait_reason, reason, fence, runner_id, lease_expires_at, agent, model)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			s.ID, e.ID, i, s.Key, s.Title, s.Repository, string(deps), s.State, nullStr(s.WaitReason), s.Reason,
-			s.Fence, nullStr(s.RunnerID), nullTS(s.LeaseExpiresAt)); err != nil {
+			s.Fence, nullStr(s.RunnerID), nullTS(s.LeaseExpiresAt), s.Agent, s.Model); err != nil {
 			return fmt.Errorf("creating step %s: %w", s.Key, err)
 		}
 		if len(s.Attempts) > 0 {
@@ -263,7 +263,7 @@ func (r *Repository) loadExecution(ctx context.Context, q string, arg string) (d
 
 func (r *Repository) steps(ctx context.Context, c db.Executor, execID string) ([]domain.Step, error) {
 	rows, err := c.QueryContext(ctx, `SELECT id, step_key, title, repository, depends_on, state, wait_reason, reason,
-		fence, runner_id, lease_expires_at FROM workflow_steps WHERE execution_id = ? ORDER BY position`, execID)
+		fence, runner_id, lease_expires_at, agent, model FROM workflow_steps WHERE execution_id = ? ORDER BY position`, execID)
 	if err != nil {
 		return nil, fmt.Errorf("reading steps: %w", err)
 	}
@@ -275,7 +275,7 @@ func (r *Repository) steps(ctx context.Context, c db.Executor, execID string) ([
 		var deps string
 		var wait, runner, lease sql.NullString
 		if err := rows.Scan(&s.ID, &s.Key, &s.Title, &s.Repository, &deps, &s.State, &wait, &s.Reason, &s.Fence,
-			&runner, &lease); err != nil {
+			&runner, &lease, &s.Agent, &s.Model); err != nil {
 			return nil, fmt.Errorf("reading step: %w", err)
 		}
 		if err := json.Unmarshal([]byte(deps), &s.DependsOn); err != nil {
@@ -323,8 +323,9 @@ func (r *Repository) SaveExecution(ctx context.Context, e *domain.Execution) err
 	}
 	for _, s := range e.Steps {
 		res, err := c.ExecContext(ctx, `UPDATE workflow_steps SET state = ?, wait_reason = ?, reason = ?, fence = ?,
-			runner_id = ?, lease_expires_at = ? WHERE id = ? AND execution_id = ?`,
-			s.State, nullStr(s.WaitReason), s.Reason, s.Fence, nullStr(s.RunnerID), nullTS(s.LeaseExpiresAt), s.ID, e.ID)
+			runner_id = ?, lease_expires_at = ?, agent = ?, model = ? WHERE id = ? AND execution_id = ?`,
+			s.State, nullStr(s.WaitReason), s.Reason, s.Fence, nullStr(s.RunnerID), nullTS(s.LeaseExpiresAt), s.Agent,
+			s.Model, s.ID, e.ID)
 		if err := oneRow(res, err, "saving step "+s.Key); err != nil {
 			return err
 		}

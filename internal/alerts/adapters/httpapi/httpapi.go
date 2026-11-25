@@ -36,6 +36,9 @@ type AlertView struct {
 	AckedAt     *time.Time        `json:"ackedAt"`
 	ClosedAt    *time.Time        `json:"closedAt"`
 	CanManage   bool              `json:"canManage"`
+	// KIN-61: the Owner / Project Admin may suggest an analysis task; the requested or created one, if any.
+	CanSuggestAnalysis bool              `json:"canSuggestAnalysis"`
+	AnalysisTask       *AnalysisTaskView `json:"analysisTask"`
 }
 
 // PreferencesRequest is the body of PUT /api/notifications/preferences.
@@ -56,6 +59,8 @@ type PreferencesView struct {
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/alerts", h.list)
 	mux.HandleFunc("POST /api/alerts/{id}/{action}", h.act)
+	mux.HandleFunc("GET /api/alerts/{id}/analysis-task", h.previewAnalysis)
+	mux.HandleFunc("POST /api/alerts/{id}/analysis-task", h.suggestAnalysis)
 	mux.HandleFunc("GET /api/notifications/preferences", h.preferences)
 	mux.HandleFunc("PUT /api/notifications/preferences", h.savePreferences)
 }
@@ -102,7 +107,7 @@ func alertView(v app.View) AlertView {
 	return AlertView{ID: a.ID, ProjectID: a.ProjectID, ProjectName: v.ProjectName, Kind: string(a.Kind),
 		Severity: string(a.Severity), Subject: a.Subject, Details: d, State: string(a.State), Occurrences: a.Occurrences,
 		FirstSeenAt: a.FirstSeenAt, LastSeenAt: a.LastSeenAt, AckedAt: a.AckedAt, ClosedAt: a.ClosedAt,
-		CanManage: v.CanManage && a.Active()}
+		CanManage: v.CanManage && a.Active(), CanSuggestAnalysis: v.CanSuggest, AnalysisTask: analysisView(v.Analysis)}
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {

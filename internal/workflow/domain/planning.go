@@ -41,20 +41,24 @@ const MaxPlannerResult = 64 << 10
 // with a new fencing token), the native CLI session (resumed by a repeat on the same runner and by the plan chat,
 // KIN-43) and the plan revision it produced.
 type PlanningRun struct {
-	ID       string
-	TaskID   string
-	State    PlanningState
-	Fence    int64 // the current attempt's fencing token; 0 before the first assignment
-	Used     int   // attempts that ended without a plan
-	RunnerID string
-	Agent    string // the AI CLI routing chose for the current attempt
-	Model    string
-	Session  string // the native session id the CLI reported last
+	ID     string
+	TaskID string
+	// Kind: a planner run (plan) or one answer of the plan chat (discussion, KIN-43) about MessageID.
+	Kind      PlanningKind
+	MessageID string
+	State     PlanningState
+	Fence     int64 // the current attempt's fencing token; 0 before the first assignment
+	Used      int   // attempts that ended without a plan
+	RunnerID  string
+	Agent     string // the AI CLI routing chose for the current attempt
+	Model     string
+	Session   string // the native session id the CLI reported last
 	// SessionRunner and SessionAgent hold the session: a CLI session lives on one runner and one CLI.
 	SessionRunner string
 	SessionAgent  string
-	Feedback      string // why the previous attempt gave no plan: the repeat's prompt says so
-	Result        string // the last attempt's final answer (untrusted text, bounded)
+	Feedback      string     // why the previous attempt gave no plan: the repeat's prompt says so
+	Result        string     // the last attempt's final answer (untrusted text, bounded)
+	Usage         AgentUsage // what the last attempt's CLI reported spending
 	Context       PlanningContext
 	WaitReason    WaitReason // why a QUEUED run is not assigned ("" when nothing holds it)
 	WaitDetail    string
@@ -74,7 +78,8 @@ func NewPlanningRun(id, taskID, createdBy string, prepare bool, now time.Time) P
 	if prepare {
 		st = PlanningPreparing
 	}
-	return PlanningRun{ID: id, TaskID: taskID, State: st, CreatedBy: createdBy, CreatedAt: now, UpdatedAt: now}
+	return PlanningRun{ID: id, TaskID: taskID, Kind: PlanningKindPlan, State: st, CreatedBy: createdBy, CreatedAt: now,
+		UpdatedAt: now}
 }
 
 // StepID is the step id of the run's attempts on the runner channel.
@@ -127,7 +132,7 @@ func (r *PlanningRun) Assign(runnerID string, c AgentChoice, now time.Time, ttl 
 	}
 	exp := now.Add(ttl)
 	r.Fence++
-	r.State, r.RunnerID, r.Agent, r.Model, r.Result = PlanningRunning, runnerID, c.Agent, c.Model, ""
+	r.State, r.RunnerID, r.Agent, r.Model, r.Result, r.Usage = PlanningRunning, runnerID, c.Agent, c.Model, "", AgentUsage{}
 	r.WaitReason, r.WaitDetail, r.NotBefore, r.LeaseExpires, r.UpdatedAt = "", "", nil, &exp, now
 	return r.Fence, resume, nil
 }

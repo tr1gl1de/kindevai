@@ -45,7 +45,12 @@ export function PullRequestsSection({ prs }: { prs: PullRequest[] }) {
                 )}
               </p>
             )}
-            {noChecks(p) && <p className="muted">{t("tasks.ciNoChecks", { minutes: p.ciNoChecksBlockMinutes ?? 0 })}</p>}
+            {noChecks(p) &&
+              (p.ciWaived ? (
+                <p className="muted">{t("tasks.ciWaived")}</p>
+              ) : (
+                <p className="muted">{t("tasks.ciNoChecks", { minutes: p.ciNoChecksBlockMinutes ?? 0 })}</p>
+              ))}
             {p.ci === "failed" && p.ciDetail && <p className="muted">{p.ciDetail}</p>}
             {p.merge === "merged" && p.mergeSha && (
               <p className="muted">{t("tasks.mergedAs", { base: p.base ?? "", sha: p.mergeSha.slice(0, 10) })}</p>

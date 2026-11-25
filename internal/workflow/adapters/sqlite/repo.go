@@ -368,6 +368,9 @@ func (r *Repository) SaveExecution(ctx context.Context, e *domain.Execution) err
 			}
 		}
 	}
+	if err := refreshAgentTime(ctx, c, e.TaskID); err != nil {
+		return err
+	}
 	e.Version++
 	return nil
 }

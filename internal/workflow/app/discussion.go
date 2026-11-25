@@ -35,8 +35,6 @@ type DiscussionRepository interface {
 	UserMessageTimes(ctx context.Context, userID string, since time.Time) ([]time.Time, error)
 	DiscussionLimits(ctx context.Context) (domain.DiscussionLimits, error) // the defaults until the Owner sets them
 	SetDiscussionLimits(ctx context.Context, l domain.DiscussionLimits, by string, now time.Time) error
-	// DiscussionWork sums, per task f selects, the CLI time of its discussion answers (agent time).
-	DiscussionWork(ctx context.Context, f TaskFilter) (map[string]time.Duration, error)
 }
 
 // AuditLog records audit events in the caller's transaction (KIN-16).

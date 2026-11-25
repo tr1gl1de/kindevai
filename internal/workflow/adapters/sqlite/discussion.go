@@ -68,6 +68,11 @@ func (r *Repository) CreateMessage(ctx context.Context, m *domain.DiscussionMess
 	case err != nil:
 		return fmt.Errorf("creating discussion message: %w", err)
 	}
+	if m.Role == domain.RoleAssistant { // an answer's CLI time is the task's agent time (KIN-75 aggregate)
+		if err := refreshAgentTime(ctx, db.Conn(ctx, r.db), m.TaskID); err != nil {
+			return err
+		}
+	}
 	m.Version = 1
 	return nil
 }
@@ -180,28 +185,4 @@ func (r *Repository) SetDiscussionLimits(ctx context.Context, l domain.Discussio
 		return fmt.Errorf("saving discussion limits: %w", err)
 	}
 	return nil
-}
-
-// DiscussionWork sums, per task f selects, the CLI time of its discussion answers.
-func (r *Repository) DiscussionWork(ctx context.Context, f app.TaskFilter) (map[string]time.Duration, error) {
-	out := map[string]time.Duration{}
-	where, args, ok := taskWhere(f)
-	if !ok {
-		return out, nil
-	}
-	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, `SELECT t.id, SUM(m.work_ms) FROM tasks t
-		JOIN plan_discussion_messages m ON m.task_id = t.id AND m.role = 'assistant' WHERE `+where+` GROUP BY t.id`, args...)
-	if err != nil {
-		return nil, fmt.Errorf("reading discussion agent time: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		var ms int64
-		if err := rows.Scan(&id, &ms); err != nil {
-			return nil, fmt.Errorf("reading discussion agent time: %w", err)
-		}
-		out[id] = time.Duration(ms) * time.Millisecond
-	}
-	return out, rows.Err()
 }

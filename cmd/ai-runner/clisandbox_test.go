@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -16,7 +17,7 @@ import (
 
 func strictProfile() protocol.NetworkProfile {
 	return protocol.NetworkProfile{Enforcement: "strict", DNS: "proxy", Proxy: &protocol.NetworkProxy{Scheme: "socks5",
-		Host: "proxy.example", Port: 1080, Username: "u", Password: "p"}, DiagnosticURL: "https://ip.example"}
+		Host: "proxy.example", Port: 1080, Username: "u", Password: "p@ss"}, DiagnosticURL: "https://ip.example"}
 }
 
 // KIN-31 × KIN-32: a CLI run with a strict profile is wrapped into `ai-runner sandbox-run`; the CLI's own command
@@ -25,7 +26,7 @@ func TestCLISandboxWrapsTheCommand(t *testing.T) {
 	t.Parallel()
 	m := &nsbox.Manager{Program: "/usr/bin/ai-runner", Args: []string{"sandbox-exec"}, DataDir: "/var/lib/kr"}
 	ok := func(context.Context) (bool, string) { return true, "" }
-	s := cliSandbox{supported: ok, boxes: m, profile: strictProfile(), dir: "/var/lib/kr/attempts/s-1"}
+	s := cliSandbox{supported: ok, boxes: m, profile: strictProfile(), dir: t.TempDir()}
 	if !s.StrictEgress(t.Context()) {
 		t.Fatal("StrictEgress = false on a verified runner")
 	}
@@ -40,8 +41,18 @@ func TestCLISandboxWrapsTheCommand(t *testing.T) {
 	}
 	var rs nsbox.RunSpec
 	for _, kv := range out.Env {
+		if strings.Contains(kv, "p@ss") {
+			t.Fatalf("the proxy password is in the environment: %s", kv)
+		}
 		if v, found := strings.CutPrefix(kv, nsbox.RunEnv+"="); found {
-			if err := json.Unmarshal([]byte(v), &rs); err != nil {
+			b, err := os.ReadFile(v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fi, _ := os.Stat(v); fi.Mode().Perm() != 0o600 {
+				t.Fatalf("run description mode %v", fi.Mode())
+			}
+			if err := json.Unmarshal(b, &rs); err != nil {
 				t.Fatal(err)
 			}
 		}

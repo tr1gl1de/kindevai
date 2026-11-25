@@ -37,6 +37,9 @@ func TestMain(m *testing.M) {
 		os.Exit(RunMain(os.Stderr))
 	case os.Getenv("KINDEV_NSBOX_HELPER") == "1":
 		os.Exit(Main(os.Args[1:], os.Stderr))
+	case os.Getenv("KINDEV_NSBOX_AGENT") == "hang": // runs until a signal ends it
+		fmt.Println("agent hanging")
+		select {}
 	case os.Getenv("KINDEV_NSBOX_AGENT") == "1":
 		os.Exit(agentMain())
 	}
@@ -389,6 +392,11 @@ func TestWrappedRun(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			for _, kv := range env { // the credentials never travel in the environment
+				if strings.Contains(kv, f.proxy.Password) && f.proxy.Password != "" || strings.Contains(kv, "\"argv\"") {
+					t.Fatalf("run description in the environment: %s", kv)
+				}
+			}
 			cmd := exec.Command(path, args...) //nolint:noctx // killed with its group on cleanup
 			cmd.Env, cmd.Stdin = env, strings.NewReader("the prompt")
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -406,9 +414,81 @@ func TestWrappedRun(t *testing.T) {
 			if tc.exit == 0 && (!ran || strings.Contains(out.String(), "FAIL") || !strings.Contains(out.String(), "ok stdin-relayed")) {
 				t.Fatalf("agent output:\n%s", out.String())
 			}
-			if tc.exit != 0 && ran {
-				t.Fatalf("the CLI ran without a verified sandbox:\n%s", out.String())
+			if tc.exit != 0 && (ran || !strings.Contains(out.String(), UnverifiedMarker)) {
+				t.Fatalf("unverified run output:\n%s", out.String())
+			}
+			if left, _ := filepath.Glob(filepath.Join(f.dir, "sandbox-run-*.json")); len(left) != 0 {
+				t.Fatalf("run description left behind: %v", left)
 			}
 		})
 	}
+}
+
+// A cancel (SIGTERM to the process group) ends a wrapped run promptly whether it arrives while the sandbox is
+// being built (the agent then never starts) or once the agent runs.
+func TestWrappedRunCancel(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	agent := f.agentCopy(t)
+	path, args, env, err := f.m.Wrap(egress.BoxRequest{Dir: f.dir, Workdir: f.workdir, Profile: f.profile("203.0.113.7")},
+		[]string{agent}, []string{"KINDEV_NSBOX_AGENT=hang"}, f.workdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, delay := range []time.Duration{0, 5 * time.Second} {
+		cmd := exec.Command(path, args...) //nolint:noctx // killed with its group on cleanup
+		cmd.Env = env
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		out := &syncBuf{}
+		cmd.Stdout, cmd.Stderr = out, out
+		if delay > 0 { // a fresh description: the first run deleted it
+			if path, args, env, err = f.m.Wrap(egress.BoxRequest{Dir: f.dir, Workdir: f.workdir, Profile: f.profile("203.0.113.7")},
+				[]string{agent}, []string{"KINDEV_NSBOX_AGENT=hang"}, f.workdir); err != nil {
+				t.Fatal(err)
+			}
+			cmd = exec.Command(path, args...) //nolint:noctx // as above
+			cmd.Env, cmd.Stdout, cmd.Stderr = env, out, out
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		pid := cmd.Process.Pid
+		t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
+		done := make(chan struct{})
+		go func() { _ = cmd.Wait(); close(done) }()
+		if delay > 0 {
+			deadline := time.Now().Add(60 * time.Second)
+			for !strings.Contains(out.String(), "agent hanging") && time.Now().Before(deadline) {
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+		_ = syscall.Kill(-pid, syscall.SIGTERM)
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("delay %v: the run ignored the cancel\n%s", delay, out.String())
+		}
+		if code := cmd.ProcessState.ExitCode(); code == 0 {
+			t.Fatalf("delay %v: a cancelled run exited 0\n%s", delay, out.String())
+		}
+	}
+}
+
+// syncBuf is an output buffer read while the process writes it.
+type syncBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

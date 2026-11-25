@@ -3,6 +3,8 @@ package nsbox
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"slices"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
@@ -10,14 +12,20 @@ import (
 )
 
 // Wrapping a command (for launchers that start a plain command line, like the CLI adapters of KIN-32): Wrap
-// returns `<Program> <RunArgs...>` with the run's description in the environment variable RunEnv. That process,
+// writes the run's description to an owner-only file in the attempt's state directory and returns
+// `<Program> <RunArgs...>` with that file's path in the environment variable RunEnv. That process,
 // `ai-runner sandbox-run` (RunMain), runs on the host: it starts the run's proxy adapter, builds the sandbox like
 // Box does, waits for the verdict and, once verified, relays the agent's stdin, output, signals and exit status.
-// An unverified sandbox ends it with ExitUnverified before the agent ever starts.
+// An unverified sandbox ends it with ExitUnverified, and UnverifiedMarker on stderr, before the agent ever starts.
 
-// RunEnv carries the run's description to `ai-runner sandbox-run`. It holds the upstream proxy credentials:
-// only that host process sees it (the sandbox has its own PID namespace and never gets this variable).
+// RunEnv carries the path of the run's description to `ai-runner sandbox-run`, which reads and deletes the file
+// first thing. The description holds the upstream proxy credentials and the CLI's environment, so it never
+// travels in an environment variable (readable in /proc/<pid>/environ) or the command line.
 const RunEnv = "KINDEV_SANDBOX_RUN"
+
+// UnverifiedMarker is the stderr line `sandbox-run` writes before exiting with ExitUnverified: the launcher tells
+// "the sandbox did not verify" (the step waits for the network) from a CLI that happened to exit with that code.
+const UnverifiedMarker = "kindev: strict egress sandbox not verified"
 
 // RunSpec is the description of a wrapped run.
 type RunSpec struct {
@@ -46,11 +54,23 @@ func (m *Manager) Wrap(r egress.BoxRequest, argv, env []string, dir string) (str
 	if err != nil {
 		return "", nil, nil, err
 	}
+	f, err := os.CreateTemp(r.Dir, "sandbox-run-*.json") // 0600, in the runner's own attempt directory
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("writing the sandbox run description: %w", err)
+	}
+	_, werr := f.Write(b)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		_ = os.Remove(f.Name())
+		return "", nil, nil, fmt.Errorf("writing the sandbox run description: %w", werr)
+	}
 	args := m.RunArgs
 	if args == nil {
 		args = []string{"sandbox-run"}
 	}
-	return m.Program, slices.Clone(args), append(slices.Clone(m.Env), RunEnv+"="+string(b)), nil
+	return m.Program, slices.Clone(args), append(slices.Clone(m.Env), RunEnv+"="+f.Name()), nil
 }
 
 // profileStrict reports a strict profile with a proxy.

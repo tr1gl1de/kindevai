@@ -251,6 +251,7 @@ type Record struct {
 type SandboxRef struct {
 	Endpoint string `json:"endpoint"` // the proxy adapter's socket, the sandbox's only way out
 	Role     string `json:"role"`     // the CLI role the network profile was chosen for
+	Profile  string `json:"profile"`  // the fingerprint of that profile: reattached only while it is unchanged
 }
 
 // OutputOffsets are byte offsets in an AI CLI's stdout and stderr files.

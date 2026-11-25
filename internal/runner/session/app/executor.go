@@ -393,7 +393,7 @@ func (x *Executor) launch(ctx context.Context, r *run, a domain.Assignment, dir,
 	if err := r.save(x.Journal, func(rec *domain.Record) {
 		rec.PID, rec.PGID, rec.Start = proc.PID(), proc.PGID(), proc.StartTime()
 		if sandbox != nil { // KIN-81: a restarted runner serves its adapter again
-			rec.Sandbox = &domain.SandboxRef{Endpoint: sandbox.Endpoint(), Role: a.Adapter}
+			rec.Sandbox = &domain.SandboxRef{Endpoint: sandbox.Endpoint(), Role: a.Adapter, Profile: sandbox.Profile()}
 		}
 	}); err != nil {
 		x.logger().Error("recording the attempt's process", "step", a.Step, "err", err)
@@ -912,7 +912,7 @@ func (x *Executor) guardEgress(r *run) {
 			}
 			x.mu.Lock()
 			defer x.mu.Unlock()
-			if x.closed.Load() || ended(r) || r.network != "" {
+			if x.closed.Load() || ended(r) || r.network != "" || r.cancelled != "" {
 				return
 			}
 			k := r.key()

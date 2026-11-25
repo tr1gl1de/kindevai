@@ -32,6 +32,7 @@ func (s *stubSandbox) Release()                    {}
 func (s *stubSandbox) Endpoint() string            { return "" }
 func (s *stubSandbox) Fault() <-chan string        { return nil }
 func (s *stubSandbox) Summary() string             { return "" }
+func (s *stubSandbox) Profile() string             { return "" }
 
 func TestLaunchRunsThroughTheSandbox(t *testing.T) {
 	t.Parallel()

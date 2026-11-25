@@ -32,6 +32,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -228,6 +229,7 @@ type Box struct {
 	once     sync.Once
 	// reattached: served again after a runner restart (KIN-81); it runs no new command.
 	reattached bool
+	profile    string // the fingerprint of the profile it serves
 
 	mu       sync.Mutex
 	verdictR *os.File
@@ -286,11 +288,15 @@ func (m *Manager) serve(l net.Listener, sock string, p protocol.NetworkProfile, 
 		allow.Rules = append(allow.Rules, domain.Rule{Host: a.Host, CIDR: a.CIDR, Ports: a.Ports})
 	}
 	ctx, stop := context.WithCancel(context.Background()) // lives as long as the attempt, not the command
-	b := &Box{m: m, stop: stop, served: make(chan struct{}), fault: make(chan string, 1),
+	b := &Box{m: m, stop: stop, served: make(chan struct{}), fault: make(chan string, 1), profile: egress.Fingerprint(p),
 		srv: &proxyadapter.Server{Upstream: *p.Proxy, Allow: allow, Logger: m.Logger}}
 	go func() { defer close(b.served); _ = b.srv.Serve(ctx, l) }()
-	if every := m.monitorEvery(); every > 0 && p.DiagnosticURL != "" {
+	switch every := m.monitorEvery(); {
+	case every > 0 && p.DiagnosticURL != "":
 		b.watching.Go(func() { b.monitor(ctx, sock, p, every, checkNow) })
+	case every > 0:
+		m.logger().Warn("strict egress: the profile names no diagnostic endpoint; the egress is not checked while the attempt runs",
+			"socket", sock)
 	}
 	return b
 }
@@ -341,11 +347,14 @@ func (b *Box) monitor(ctx context.Context, sock string, p protocol.NetworkProfil
 // Endpoint is the adapter's socket: the journal keeps it, so a restarted runner serves it again (KIN-81).
 func (b *Box) Endpoint() string { return b.spec.Socket }
 
+// Profile is the fingerprint of the network profile the adapter serves (kept in the journal with Endpoint).
+func (b *Box) Profile() string { return b.profile }
+
 // Fault delivers why the runtime monitor cut the sandbox off (once; never when it is not monitored).
 func (b *Box) Fault() <-chan string { return b.fault }
 
-// maxSummaryHost bounds the denied destination quoted in Summary (it comes from the sandbox).
-const maxSummaryHost = 255
+// maxSummaryHost bounds the denied destination quoted in Summary, in runes (it comes from the sandbox).
+const maxSummaryHost = 100
 
 // Summary reports the connections the allowlist denied, for the attempt's output ("" when none).
 func (b *Box) Summary() string {
@@ -353,10 +362,13 @@ func (b *Box) Summary() string {
 	if n == 0 {
 		return ""
 	}
-	if len(last) > maxSummaryHost {
-		last = last[:maxSummaryHost]
+	// The destination comes from the sandbox: quoted (no control characters or escapes reach the output) and
+	// cut on a rune boundary.
+	if r := []rune(last); len(r) > maxSummaryHost {
+		last = string(r[:maxSummaryHost])
 	}
-	return fmt.Sprintf("kindev: strict egress denied %d connection(s) outside the allowlist (last: %s)", n, last)
+	return fmt.Sprintf("kindev: strict egress denied %d connection(s) outside the allowlist (last: %s)", n,
+		strconv.QuoteToASCII(last))
 }
 
 // Reattach serves the proxy adapter of a sandbox built by an earlier runner process again (KIN-81): the sandbox's

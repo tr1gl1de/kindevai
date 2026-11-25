@@ -21,6 +21,9 @@ type Sandbox interface {
 	// Endpoint is the sandbox's way out (its proxy adapter's socket), kept in the attempt's journal record so a
 	// restarted runner can serve it again (KIN-81).
 	Endpoint() string
+	// Profile fingerprints the network profile the sandbox was built for (kept with Endpoint): a restarted runner
+	// serves it again only with that very profile.
+	Profile() string
 	// Fault delivers why the sandbox lost its verified egress while the attempt runs (KIN-81: a runtime check
 	// found another egress IP, or the proxy unreachable); its proxy adapter has already cut every connection. nil
 	// when the sandbox is not monitored.

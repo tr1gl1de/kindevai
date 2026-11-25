@@ -176,7 +176,9 @@ func TestReattach(t *testing.T) {
 	t.Run("strict: the adapter is served again at the endpoint", func(t *testing.T) {
 		t.Parallel()
 		b := &fakeBoxes{}
-		box, err := (&Sandboxes{Config: config("strict"), Boxes: b}).Reattach(ctx, "p", "claude", "/d", "/run/x/s")
+		cu, _, _ := config("strict")()
+		fp := Fingerprint(ProfileFor(cu.Network, "p", "claude"))
+		box, err := (&Sandboxes{Config: config("strict"), Boxes: b}).Reattach(ctx, "p", "claude", "/d", "/run/x/s", fp)
 		if err != nil || box == nil {
 			t.Fatalf("box %v, err %v", box, err)
 		}
@@ -188,19 +190,23 @@ func TestReattach(t *testing.T) {
 			t.Fatal("a self-test sandbox ran before the adapter was back")
 		}
 	})
+	cu, _, _ := config("strict")()
+	strictFP := Fingerprint(cu.Network.Default)
 	for _, tc := range []struct {
 		name string
 		cfg  func() (protocol.ConfigUpdate, bool, error)
 		err  error
+		fp   string
 	}{
-		{"no longer strict", config("monitor"), nil},
-		{"no configuration", func() (protocol.ConfigUpdate, bool, error) { return protocol.ConfigUpdate{}, false, nil }, nil},
-		{"the adapter cannot be served", config("strict"), errors.New("socket directory gone")},
+		{"no longer strict", config("monitor"), nil, strictFP},
+		{"the profile changed since the attempt started", config("strict"), nil, "another-profile"},
+		{"no configuration", func() (protocol.ConfigUpdate, bool, error) { return protocol.ConfigUpdate{}, false, nil }, nil, strictFP},
+		{"the adapter cannot be served", config("strict"), errors.New("socket directory gone"), strictFP},
 	} {
 		t.Run(tc.name+" fails closed", func(t *testing.T) {
 			t.Parallel()
 			b := &fakeBoxes{err: tc.err}
-			if box, err := (&Sandboxes{Config: tc.cfg, Boxes: b}).Reattach(ctx, "p", "", "/d", "/run/x/s"); box != nil || err == nil {
+			if box, err := (&Sandboxes{Config: tc.cfg, Boxes: b}).Reattach(ctx, "p", "", "/d", "/run/x/s", tc.fp); box != nil || err == nil {
 				t.Fatalf("box %v, err %v", box, err)
 			}
 		})

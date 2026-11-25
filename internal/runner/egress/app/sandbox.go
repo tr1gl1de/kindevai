@@ -2,6 +2,9 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -164,10 +167,10 @@ func (s *Sandboxes) Confine(ctx context.Context, project, role, dir, workdir str
 
 // Reattach serves the sandbox of an attempt adopted after a runner restart again (KIN-81): the attempt's proxy
 // adapter lived in the old runner process, so the sandbox has no way out until it is back at endpoint. The profile
-// is the attempt's current one from the stored configuration; one that is no longer strict, or no configuration,
+// must be the one the attempt started with (fingerprint): one that changed, is no longer strict, or no configuration
 // fails closed (the caller stops the attempt). No self-test runs first: the sandbox verified when it was built, and
 // a self-test would sweep the adapter's socket directory as abandoned.
-func (s *Sandboxes) Reattach(ctx context.Context, project, role, dir, endpoint string) (Box, error) {
+func (s *Sandboxes) Reattach(ctx context.Context, project, role, dir, endpoint, fingerprint string) (Box, error) {
 	cu, ok, err := s.Config()
 	if err != nil {
 		return nil, fmt.Errorf("reading the network configuration: %w", err)
@@ -179,9 +182,23 @@ func (s *Sandboxes) Reattach(ctx context.Context, project, role, dir, endpoint s
 	if p.Enforcement != domain.EnforcementStrict {
 		return nil, errors.New("the attempt's network profile is no longer strict")
 	}
+	if Fingerprint(p) != fingerprint { // a changed proxy or allowlist never reaches a running agent (review)
+		return nil, errors.New("the attempt's network profile changed since it started")
+	}
 	b, err := s.Boxes.Reattach(ctx, BoxRequest{Dir: dir, Profile: p}, endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("serving the strict egress adapter again: %w", err)
 	}
 	return b, nil
+}
+
+// Fingerprint identifies a network profile (proxy, credentials, allowlist, expected IPs): a sandbox is reattached
+// after a restart only with the very profile it was built for (KIN-81).
+func Fingerprint(p protocol.NetworkProfile) string {
+	b, err := json.Marshal(p)
+	if err != nil {
+		return ""
+	}
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
 }

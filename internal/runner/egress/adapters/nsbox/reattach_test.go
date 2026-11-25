@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	egress "github.com/tr1gl1de/kindevai/internal/runner/egress/app"
@@ -218,5 +219,28 @@ func TestMonitorToleratesOneFailedCheck(t *testing.T) {
 	case why := <-b.Fault():
 		t.Fatalf("fault %q after a single failed check", why)
 	default:
+	}
+}
+
+// The denied destination comes from the sandbox: Summary quotes it (no raw control or non-ASCII bytes reach the
+// attempt's output) and cuts a long one on a rune boundary (review finding).
+func TestSummaryQuotesTheDeniedDestination(t *testing.T) {
+	sock := deadAdapter(t)
+	box, err := (&Manager{MonitorEvery: -1}).Reattach(t.Context(), egress.BoxRequest{Profile: strictProfile()}, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := box.(*Box)
+	defer b.Release()
+	connect(t, sock, strings.Repeat("é", 300)+".test:443")
+	s := b.Summary()
+	if !utf8.ValidString(s) || strings.ContainsRune(s, 'é') || !strings.Contains(s, `"\u00e9`) {
+		t.Fatalf("Summary = %q", s)
+	}
+	if strings.Contains(s, ".test:443") {
+		t.Fatalf("a long destination was not cut: %q", s)
+	}
+	if b.Profile() != egress.Fingerprint(strictProfile()) {
+		t.Fatalf("Profile = %q", b.Profile())
 	}
 }

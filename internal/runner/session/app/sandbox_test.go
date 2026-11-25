@@ -25,6 +25,7 @@ type fakeSandbox struct {
 func (s *fakeSandbox) Endpoint() string     { return s.endpoint }
 func (s *fakeSandbox) Fault() <-chan string { return s.fault }
 func (s *fakeSandbox) Summary() string      { return s.summary }
+func (s *fakeSandbox) Profile() string      { return "fp-1" }
 
 func (s *fakeSandbox) Command([]string, []string, string) (*exec.Cmd, error) {
 	return nil, errors.New("unused")

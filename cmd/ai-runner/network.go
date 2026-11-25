@@ -144,7 +144,7 @@ func (c confiner) Reattach(ctx context.Context, rec sessiondomain.Record, dir st
 	if rec.Sandbox == nil {
 		return nil, errors.New("the attempt has no sandbox")
 	}
-	b, err := c.s.Reattach(ctx, rec.Project, rec.Sandbox.Role, dir, rec.Sandbox.Endpoint)
+	b, err := c.s.Reattach(ctx, rec.Project, rec.Sandbox.Role, dir, rec.Sandbox.Endpoint, rec.Sandbox.Profile)
 	if err != nil {
 		return nil, err
 	}

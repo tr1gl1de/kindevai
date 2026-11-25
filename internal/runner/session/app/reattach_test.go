@@ -34,7 +34,8 @@ func restartStrict(t *testing.T) (*fakeProc, *memJournal, *fakeEvents, domain.Re
 func TestStrictAttemptRecordsItsSandbox(t *testing.T) {
 	t.Parallel()
 	_, _, _, rec := restartStrict(t)
-	if rec.Sandbox == nil || rec.Sandbox.Endpoint != "/run/user/1000/kindev-egress-1/s" || rec.Sandbox.Role != domain.AgentClaude {
+	if rec.Sandbox == nil || rec.Sandbox.Endpoint != "/run/user/1000/kindev-egress-1/s" || rec.Sandbox.Role != domain.AgentClaude ||
+		rec.Sandbox.Profile != "fp-1" {
 		t.Fatalf("record sandbox %+v", rec.Sandbox)
 	}
 }

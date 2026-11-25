@@ -1,6 +1,7 @@
 package youtrack
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -181,18 +182,30 @@ func (c *Client) TagEvents(ctx context.Context, baseURL string, token domain.Sec
 }
 
 func (c *Client) get(ctx context.Context, u string, token domain.Secret, dst any) error {
+	return c.do(ctx, http.MethodGet, u, token, nil, dst)
+}
+
+// do sends one request (payload: JSON or nil) and decodes a 200 response into dst.
+func (c *Client) do(ctx context.Context, method, u string, token domain.Secret, payload []byte, dst any) error {
 	timeout := c.Timeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	var rd io.Reader
+	if payload != nil {
+		rd = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u, rd)
 	if err != nil {
 		return errors.New("youtrack: bad base URL")
 	}
 	req.Header.Set("Authorization", "Bearer "+token.Reveal())
 	req.Header.Set("Accept", "application/json")
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := c.client().Do(req)
 	if err != nil {
 		return fmt.Errorf("youtrack: %s", networkDetail(err))

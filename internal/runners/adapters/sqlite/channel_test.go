@@ -135,6 +135,46 @@ func TestEventCursorAndRecords(t *testing.T) {
 	}
 }
 
+// The workspace reports of one attempt (KIN-78) count only that runner's applied events of that fence; a final
+// report is a readable, non-interim workspace.changes.
+func TestWorkspaceReports(t *testing.T) {
+	t.Parallel()
+	_, r := withRunner(t)
+	ctx := t.Context()
+	seq := int64(0)
+	rec := func(runner string, fence int64, kind, outcome, body string) {
+		t.Helper()
+		seq++
+		var b []byte
+		if body != "" {
+			b = []byte(body)
+		}
+		if err := r.RecordEvent(ctx, domain.AttemptEvent{RunnerID: runner, Step: "s", Fence: fence, AttemptSeq: seq,
+			Kind: kind, Body: b, Outcome: outcome, RunnerAt: t0, ReceivedAt: t0}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := func(w domain.WorkspaceReports) {
+		t.Helper()
+		got, err := r.WorkspaceReports(ctx, "r1", "s", 2)
+		if err != nil || got != w {
+			t.Fatalf("reports %+v %v, want %+v", got, err, w)
+		}
+	}
+	want(domain.WorkspaceReports{})
+	rec("r1", 2, protocol.EventWorkspacePrepared, domain.OutcomeApplied, `{"base":"dev"}`)
+	want(domain.WorkspaceReports{Prepared: true})
+	rec("r1", 2, protocol.EventWorkspaceChanges, domain.OutcomeApplied, `{"files":[],"interim":true}`)
+	rec("r1", 2, protocol.EventWorkspaceChanges, domain.OutcomeApplied, `"nope"`)
+	rec("r1", 2, protocol.EventWorkspaceChanges, domain.OutcomeApplied, `{not json`)
+	rec("r1", 2, protocol.EventWorkspaceChanges, domain.OutcomeRejected, "")
+	rec("r2", 2, protocol.EventWorkspaceChanges, domain.OutcomeApplied, `{"files":[]}`)
+	rec("r1", 1, protocol.EventWorkspaceChanges, domain.OutcomeApplied, `{"files":[]}`)
+	want(domain.WorkspaceReports{Prepared: true})
+	rec("r1", 2, protocol.EventWorkspaceChanges, domain.OutcomeApplied, `{"files":[{"path":"a","status":"M"}],"interim":false}`)
+	want(domain.WorkspaceReports{Prepared: true, Final: true})
+}
+
 // okWorkflow accepts every event in order (the fencing rules are covered by the app tests).
 type okWorkflow struct {
 	mu    sync.Mutex

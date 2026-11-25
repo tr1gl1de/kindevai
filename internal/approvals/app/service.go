@@ -346,7 +346,14 @@ type StepChanges struct {
 	Fence      int64
 	Changed    []string
 	Unreported int
+	// Missing: the attempt worked in a worktree and ended without a final report (KIN-78); what it changed is
+	// unknown, so the step stops like on a truncated report.
+	Missing bool
 }
+
+// MissingChangesReport stands for the files of an attempt that sent no final changes report (KIN-78) in a
+// scope_exceeded request, like "(+N unreported)" for a truncated one.
+const MissingChangesReport = "(changes report not received)"
 
 // MaxChangedFiles bounds the files one report is checked against; a longer report stops the step anyway.
 const MaxChangedFiles = 2000
@@ -401,10 +408,14 @@ func (s *Service) CheckChanges(ctx context.Context, ch StepChanges) (domain.Viol
 		if more > 0 { // the rest is checked again after the approval; the step must not run on unchecked files
 			v.Outside = append(v.Outside, fmt.Sprintf("(+%d unreported)", more))
 		}
+		msg := "changes beyond the approved scope"
+		if ch.Missing {
+			v.Outside, msg = append(v.Outside, MissingChangesReport), "no changes report from the attempt"
+		}
 		if v.Empty() {
 			return nil
 		}
-		if err := s.Workflow.HoldStep(ctx, ch.StepID, ch.RunnerID, ch.Fence, "changes beyond the approved scope"); err != nil {
+		if err := s.Workflow.HoldStep(ctx, ch.StepID, ch.RunnerID, ch.Fence, msg); err != nil {
 			return err
 		}
 		return s.request(ctx, domain.Request{ID: s.NewID(), ProjectID: t.ProjectID, TaskID: t.ID, TaskTitle: t.Title,

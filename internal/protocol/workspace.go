@@ -56,7 +56,9 @@ type InstructionChange struct {
 // committed to the branch first). Files holds at most what fits a message; FilesTotal counts all of them.
 // An Interim report is sent while the process runs (KIN-51): the worktree against the base, untracked files
 // included, nothing committed and no HeadSHA. The Control Plane checks every report against the step's approved
-// scope (it never trusts a runner-side verdict); a Truncated report stops the step like a violation.
+// scope (it never trusts a runner-side verdict); a Truncated report stops the step like a violation. An attempt
+// that sent workspace.prepared must send a final (non-Interim) report before execution.completed: a completion
+// without one stops the step too (KIN-78).
 type WorkspaceChanges struct {
 	Branch              string              `json:"branch"`
 	BaseSHA             string              `json:"baseSha"`

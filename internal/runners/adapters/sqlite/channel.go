@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
+	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runners/app"
 	"github.com/tr1gl1de/kindevai/internal/runners/domain"
 )
@@ -152,6 +153,25 @@ func (r *Repository) RecordEvent(ctx context.Context, e domain.AttemptEvent) err
 		return fmt.Errorf("recording runner event: %w", err)
 	}
 	return nil
+}
+
+// WorkspaceReports returns what the attempt's applied events reported about its worktree (KIN-78): a
+// workspace.prepared, and a final workspace.changes (a JSON object without "interim": true; an unreadable report
+// is not one).
+func (r *Repository) WorkspaceReports(ctx context.Context, runnerID, step string, fence int64) (domain.WorkspaceReports, error) {
+	var w domain.WorkspaceReports
+	err := db.Conn(ctx, r.db).QueryRowContext(ctx, `SELECT
+		EXISTS(SELECT 1 FROM runner_attempt_events WHERE runner_id = ?1 AND step_id = ?2 AND fence = ?3
+			AND outcome = 'applied' AND kind = ?4),
+		EXISTS(SELECT 1 FROM runner_attempt_events WHERE runner_id = ?1 AND step_id = ?2 AND fence = ?3
+			AND outcome = 'applied' AND kind = ?5 AND CASE WHEN json_valid(CAST(body AS TEXT))
+				THEN json_type(CAST(body AS TEXT)) = 'object' AND coalesce(json_extract(CAST(body AS TEXT), '$.interim'), 0) = 0
+				ELSE 0 END)`,
+		runnerID, step, fence, protocol.EventWorkspacePrepared, protocol.EventWorkspaceChanges).Scan(&w.Prepared, &w.Final)
+	if err != nil {
+		return domain.WorkspaceReports{}, fmt.Errorf("reading the attempt's workspace reports: %w", err)
+	}
+	return w, nil
 }
 
 // AddOutput counts n bytes of the attempt's output at now if they fit the attempt's and the total limit; it

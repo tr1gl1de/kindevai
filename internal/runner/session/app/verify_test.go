@@ -143,3 +143,37 @@ func TestKillAllWhileTheSandboxVerifies(t *testing.T) {
 		t.Fatalf("last event %s %+v", ev.last().kind, f)
 	}
 }
+
+// KIN-112 AC: KillAll waits for an attempt that Assign launches itself (no worktree) while its sandbox verifies: it
+// returns only once that attempt was killed and its end reported, not before its launch returned.
+func TestKillAllWaitsForAnAttemptLaunchedWithoutAWorktree(t *testing.T) {
+	t.Parallel()
+	x, l, ev, sb := verifyingExecutor(t)
+	l.termExit = false // only SIGKILL ends it
+	assigned := make(chan error, 1)
+	go func() { assigned <- x.Assign(t.Context(), assignment("P1")) }() // launches in the foreground
+	<-sb.verifying
+	killed := make(chan struct{})
+	go func() { x.KillAll(); close(killed) }()
+	waitFor(t, "sandbox cancelled", func() bool { return sb.cancelled() == 1 })
+	select {
+	case <-killed:
+		t.Fatal("KillAll returned while the attempt it killed was still launching")
+	case <-time.After(50 * time.Millisecond):
+	}
+	sb.verdict <- nil // the launch returns; the process is killed at once
+	select {
+	case <-killed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("KillAll did not return after the attempt ended")
+	}
+	if err := <-assigned; err != nil {
+		t.Fatal(err)
+	}
+	if s := l.proc(0).sent(); len(s) == 0 || !s[0] {
+		t.Fatalf("signals %v, want SIGKILL first (no SIGTERM)", s)
+	}
+	if f := failure(t, ev.last()); ev.last().kind != protocol.EventFailed || !strings.HasPrefix(f.Reason, "cancelled") {
+		t.Fatalf("last event %s %+v (the end must be reported before KillAll returns)", ev.last().kind, f)
+	}
+}

@@ -281,7 +281,8 @@ func PlannerPrompt(in PlannerInput) string {
 	rules.WriteString("- Use only these repositories: " + strings.Join(in.Repositories, ", ") + ".\n")
 	rules.WriteString("- Give every step the narrowest scope (repository-relative paths or globs) it needs; the step may change nothing else.\n")
 	rules.WriteString("- Propose the risk honestly (L0 trivial … L3 security-sensitive); the platform's policy may raise it, never lower it.\n")
-	rules.WriteString("- List contract changes, migrations, tests and documentation impact; use the role reviewer for review steps.\n")
+	rules.WriteString("- List contract changes, migrations, tests and documentation impact. The platform reviews every step independently " +
+		"(another AI CLI) and runs the repository's tests: do not add separate review or test-only steps.\n")
 	fmt.Fprintf(&rules, "\n## Output\nAnswer with one JSON object only, no prose and no code fence, at most 12 KB, valid against this JSON Schema (plan %s):\n", PlanSchemaVersion)
 	rules.Write(PlanSchema())
 	rules.WriteString("\n")

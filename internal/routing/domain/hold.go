@@ -61,9 +61,13 @@ func (h Hold) NeedsOwner() bool { return h.Parked }
 // NextHold is the hold after a new cli_limit report at now (prev: the pair's last hold, nil when none or after
 // the CLI worked again). reported is the reset time the CLI named (zero: none; only rate limits use it); limit
 // bounds any wait. A report while the same hold is still active (attempts that were already running) is not a
-// new strike: the hold stays, a rate limit only takes a later reset.
+// new strike: the hold stays, a rate limit only takes a later reset. A rate limit reported while a logout or
+// billing hold is active never replaces it (a parked hold stays parked until the Owner acts).
 func NextHold(prev *Hold, cause string, reported, now time.Time, limit time.Duration) Hold {
 	cause = KnownCause(cause)
+	if prev != nil && prev.Active(now) && NeedsHuman(prev.Cause) && !NeedsHuman(cause) {
+		return *prev
+	}
 	if prev != nil && prev.Cause == cause && prev.Active(now) {
 		h := *prev
 		if !NeedsHuman(cause) {

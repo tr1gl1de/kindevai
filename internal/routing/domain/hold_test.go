@@ -83,3 +83,21 @@ func TestHoldsWhileTheHoldIsActiveDoNotCount(t *testing.T) {
 		t.Fatalf("a later reset of a concurrent rate limit = %+v", later)
 	}
 }
+
+// Review finding: a rate limit reported by an attempt that was still running never lifts an active logout or
+// billing hold (a parked one stays parked); a logout does replace a rate limit.
+func TestARateLimitNeverReplacesAHumanHold(t *testing.T) {
+	t.Parallel()
+	parked := Hold{Cause: CauseAuth, Strikes: 4, Until: now.Add(MaxHold), Parked: true}
+	if h := NextHold(&parked, CauseRateLimit, now.Add(time.Hour), now, MaxHold); h != parked {
+		t.Fatalf("rate limit replaced a parked hold: %+v", h)
+	}
+	timed := Hold{Cause: CauseBilling, Strikes: 2, Until: now.Add(time.Hour)}
+	if h := NextHold(&timed, CauseRateLimit, time.Time{}, now, MaxHold); h != timed {
+		t.Fatalf("rate limit replaced a billing hold: %+v", h)
+	}
+	rate := Hold{Cause: CauseRateLimit, Strikes: 1, Until: now.Add(time.Hour)}
+	if h := NextHold(&rate, CauseAuth, time.Time{}, now, MaxHold); h.Cause != CauseAuth || h.Strikes != 1 {
+		t.Fatalf("logout did not replace a rate limit: %+v", h)
+	}
+}

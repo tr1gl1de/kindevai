@@ -423,6 +423,9 @@ func TestLoggedOutCLIBacksOffEscalatesAndParks(t *testing.T) {
 		t.Fatalf("4th hold %+v, want parked", h)
 	}
 	*e.now = e.now.Add(30 * 24 * time.Hour)
+	if err := e.svc.Recovered(ctx, "r1", "claude"); err != nil { // only the Owner lifts a parked hold
+		t.Fatal(err)
+	}
 	r, _ := e.svc.Route(ctx, "p1", "implementer", "")
 	if c, ok := r.Cooling("r1", "claude"); !ok || !c.NeedsOwner() {
 		t.Fatalf("parked CLI routed again: %+v %v", c, ok)
@@ -477,6 +480,14 @@ func TestRepeatedRateLimitsEscalateAndRecover(t *testing.T) {
 	if got := e.out.events(t); !slices.Equal(got, []string{"alerts.cli_held r2/codex rate_limit/3/true/false"}) {
 		t.Fatalf("alerts %v", got)
 	}
+	*e.now = e.now.Add(-2 * time.Hour) // a success while the hold is active (an attempt older than it): no effect
+	if err := e.svc.Recovered(ctx, "r2", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.out.events(t); len(got) != 1 {
+		t.Fatalf("an older attempt's success ended the hold: %v", got)
+	}
+	*e.now = e.now.Add(2 * time.Hour)
 	if err := e.svc.Recovered(ctx, "r2", "codex"); err != nil {
 		t.Fatal(err)
 	}

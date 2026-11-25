@@ -133,6 +133,31 @@ describe("agents page (Owner)", () => {
     expect(calls).toEqual(["ready r-mac codex"]);
   });
 
+  it("treats a hold already lifted as done (KIN-83 review)", async () => {
+    let lifted = false;
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/agents", () =>
+        json(lifted ? { ...settings, cooldowns: [] } : settings),
+      ),
+      http.post("/api/agents/cooldowns/:runner/:agent/ready", () => {
+        lifted = true;
+        return apiError(404, "not_found");
+      }),
+    );
+    await renderApp("/agents");
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Codex on r-mac is ready again",
+      }),
+    );
+    expect(
+      await screen.findByText("No CLI is waiting for a limit"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("disables a CLI and confirms an emergency stop", async () => {
     const calls: string[] = [];
     server.use(

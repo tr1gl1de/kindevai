@@ -1,5 +1,7 @@
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import { ApiError } from "../../api/client";
 import type { AgentCli, AgentSettings } from "../../api/types";
 import { ConfirmDialog } from "../../ui/ConfirmDialog";
 import {
@@ -166,6 +168,8 @@ function Cooldowns({ settings }: { settings: AgentSettings }) {
   const { t, i18n } = useTranslation();
   const notify = useNotify();
   const ready = useMarkCLIReady();
+  const qc = useQueryClient();
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["agents"] });
   const [error, setError] = useState<string>();
 
   async function markReady(runnerId: string, agent: AgentCli) {
@@ -173,9 +177,17 @@ function Cooldowns({ settings }: { settings: AgentSettings }) {
     try {
       await ready.mutateAsync({ runnerId, agent });
       notify(
-        t("agents.readyNotice", { cli: t(`agents.cli_${agent}`), runner: runnerId }),
+        t("agents.readyNotice", {
+          cli: t(`agents.cli_${agent}`),
+          runner: runnerId,
+        }),
       );
     } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        // Already lifted (the CLI worked again or another click won): the list refreshes.
+        await invalidate();
+        return;
+      }
       setError(errorMessage(t, err));
     }
   }

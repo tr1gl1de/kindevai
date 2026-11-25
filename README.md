@@ -180,7 +180,9 @@ ai-runner fingerprint                                    # compare with the runn
   failure) appear in the attempt's log; its usage (tokens, cost, turns), native session id and CLI version are stored
   per attempt and shown next to the agent time. A usage limit or logout (`cli_limit`) parks the step and BLOCKs the task
   (reason `cli_limit`, an alert) until the limit resets (30 min when the CLI names no time) — or at once on another permitted CLI or runner,
-  while this runner's CLI cools down.
+  while this runner's CLI cools down. A logged-out or billing-refused CLI is retried after 30 min, 2 h and 6 h, then
+  waits for the Owner's **ready again** on the Agents page; its alert names the runner and CLI and turns critical at
+  the 3rd hold in a row.
 - Workspaces (runner): when the step's repository is registered for the project, the attempt runs in its own git
   worktree under `workspaces/` on the branch `feature/<task>--<step>` (never main/master), started from the
   repository's integration branch fetched into a bare cache under `repos/`; the base commit is recorded. The Control

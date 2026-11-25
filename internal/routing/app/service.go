@@ -487,11 +487,15 @@ func (s *Service) CoolDown(ctx context.Context, runnerID, agent, cause string, r
 }
 
 // Recovered forgets a runner's CLI hold and streak after an attempt with it succeeded (KIN-83) and resolves its
-// alert. Internal (the workflow).
+// alert. A success while the hold is still active (an attempt that started before it) changes nothing: only a
+// retry after the wait proves the CLI works, and a parked hold is lifted only by the Owner. Internal (the workflow).
 func (s *Service) Recovered(ctx context.Context, runnerID, agent string) error {
 	return s.Tx.InTx(ctx, func(ctx context.Context) error {
-		had, err := s.Repo.DeleteCooldown(ctx, runnerID, agent)
-		if err != nil || !had {
+		c, found, err := s.Repo.Cooldown(ctx, runnerID, agent)
+		if err != nil || !found || c.Active(s.Now()) {
+			return err
+		}
+		if _, err := s.Repo.DeleteCooldown(ctx, runnerID, agent); err != nil {
 			return err
 		}
 		return s.alert(ctx, TopicCLIReady, runnerID, agent, nil, s.Now())

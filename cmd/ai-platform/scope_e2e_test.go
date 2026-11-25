@@ -91,6 +91,12 @@ func testChanges(res *workspaceapp.Result, err error) (*protocol.WorkspaceChange
 // scopeEnv is a Control Plane and a runner with worktrees from a local origin.
 func scopeEnv(t *testing.T, changesEvery time.Duration) (*controlPlane, *runner) {
 	t.Helper()
+	return scopeEnvWith(t, changesEvery, func(w sessionapp.Workspaces) sessionapp.Workspaces { return w })
+}
+
+// scopeEnvWith is scopeEnv whose runner's workspaces are wrapped by wrap.
+func scopeEnvWith(t *testing.T, changesEvery time.Duration, wrap func(sessionapp.Workspaces) sessionapp.Workspaces) (*controlPlane, *runner) {
+	t.Helper()
 	root := scopeOrigin(t)
 	cp := startCPWith(t, t.TempDir(), "127.0.0.1:0", fakeSources{"p1 acme/app": integrationsapp.CheckoutSource{Branch: "dev"}})
 	id, key := cp.seed(t, "p1")
@@ -100,7 +106,7 @@ func scopeEnv(t *testing.T, changesEvery time.Duration) (*controlPlane, *runner)
 	}
 	dir := t.TempDir()
 	ws := testWorkspaces{&workspaceapp.Manager{Git: g, Scanner: scan.Scanner{}, Store: fsstore.Store{DataDir: dir}}}
-	r := startRunnerWith(t, dir, cp.addr, id, key, nil, nil, ws, changesEvery)
+	r := startRunnerWith(t, dir, cp.addr, id, key, nil, nil, wrap(ws), changesEvery)
 	return cp, r
 }
 
@@ -204,4 +210,36 @@ func TestChangesBeyondTheScopeAtTheEndOfTheStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	cp.waitTask(t, task, func(d workflowapp.TaskDetail) bool { return d.Task.State == workflow.TaskCancelled })
+}
+
+// noFinalReport is a runner's workspaces that save and remove the worktree at the end of an attempt but report
+// nothing (as after a crash between the two, or a runner that skips the report).
+type noFinalReport struct{ sessionapp.Workspaces }
+
+func (w noFinalReport) Finish(ctx context.Context, step string, fence int64) (*protocol.WorkspaceChanges, error) {
+	_, err := w.Workspaces.Finish(ctx, step, fence)
+	return nil, err
+}
+
+// KIN-78: a step that worked in a worktree completes only with its final changes report. The runner sends
+// workspace.prepared and execution.completed without workspace.changes: the step is held for approval with a
+// scope_exceeded request for the missing report instead of succeeding unchecked. With the report the same
+// scenario succeeds.
+func TestCompletionWithoutAChangesReportStopsTheStep(t *testing.T) {
+	t.Parallel()
+	e2eSlot(t)
+	cp, _ := scopeEnvWith(t, 0, func(w sessionapp.Workspaces) sessionapp.Workspaces { return noFinalReport{w} })
+	task := cp.mockTask(t, "p1", "success")
+	d := cp.waitTask(t, task, heldForApproval)
+	st := d.Execution.Steps[0]
+	if len(st.Attempts) != 1 || st.Attempts[0].State != workflow.AttemptCancelled ||
+		!strings.Contains(st.Attempts[0].Error, "no changes report") {
+		t.Fatalf("attempts %+v", st.Attempts)
+	}
+	if req := cp.scopeRequest(t, task); !slices.Equal(req.Paths, []string{approvalsapp.MissingChangesReport}) {
+		t.Fatalf("approval %+v", req.Approval)
+	}
+
+	with, _ := scopeEnv(t, 0)
+	with.waitTask(t, with.mockTask(t, "p1", "success"), succeeded)
 }

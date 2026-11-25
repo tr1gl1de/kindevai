@@ -4,7 +4,7 @@
 // `make test-integration` (or `go test -tags=integration ./internal/runner/egress/adapters/nsbox/`) on Linux or
 // WSL2; the tests skip when this user may not create namespaces (e.g. Ubuntu's
 // kernel.apparmor_restrict_unprivileged_userns=1: `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`)
-// or nft is not installed.
+// or nft is not installed (CI sets KINDEV_REQUIRE_SANDBOX=1 to fail instead).
 package nsbox
 
 import (
@@ -105,13 +105,19 @@ func agentMain() int {
 	return fail
 }
 
+// requireSandbox skips without namespaces or nft, unless KINDEV_REQUIRE_SANDBOX=1 (the CI job) makes that a
+// failure.
 func requireSandbox(t *testing.T, m *Manager) {
 	t.Helper()
+	skip := t.Skip
+	if os.Getenv("KINDEV_REQUIRE_SANDBOX") == "1" {
+		skip = t.Fatal
+	}
 	if !namespacesAvailable() {
-		t.Skip("this user may not create user/network namespaces")
+		skip("this user may not create user/network namespaces")
 	}
 	if _, err := m.nft(); err != nil {
-		t.Skip("nft is not installed")
+		skip("nft is not installed")
 	}
 }
 

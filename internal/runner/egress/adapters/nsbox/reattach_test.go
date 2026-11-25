@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -243,4 +244,78 @@ func TestSummaryQuotesTheDeniedDestination(t *testing.T) {
 	if b.Profile() != egress.Fingerprint(strictProfile()) {
 		t.Fatalf("Profile = %q", b.Profile())
 	}
+}
+
+// aged makes the adapter directory of sock look untouched for longer than staleAge, as a sandbox's directory is
+// after a runner restart: the sweep's age test alone no longer protects it.
+func aged(t *testing.T, sock string) {
+	t.Helper()
+	old := time.Now().Add(-2 * staleAge)
+	if err := os.Chtimes(filepath.Dir(sock), old, old); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// KIN-100: after a runner restart a journalled sandbox's adapter directory is dead and old. A sweep (any Open, or
+// the self-test of `ai-runner network`) that runs before or while Reattach restores it must keep it: InUse names it.
+//
+// Not parallel: see TestReattachServesTheAdapterAgain.
+func TestSweepKeepsJournalledSandboxesForReattach(t *testing.T) {
+	t.Run("sweep first", func(t *testing.T) {
+		sock := deadAdapter(t)
+		aged(t, sock)
+		m := &Manager{MonitorEvery: -1, InUse: func() ([]string, error) { return []string{sock}, nil }}
+		if removed := m.sweep(time.Now()); slices.Contains(removed, filepath.Dir(sock)) {
+			t.Fatalf("the sweep removed the journalled sandbox's directory %s", filepath.Dir(sock))
+		}
+		box, err := m.Reattach(t.Context(), egress.BoxRequest{Profile: strictProfile()}, sock)
+		if err != nil {
+			t.Fatalf("Reattach after a sweep: %v", err)
+		}
+		box.Release()
+	})
+	t.Run("sweep races reattach", func(t *testing.T) {
+		sock := deadAdapter(t)
+		aged(t, sock)
+		m := &Manager{MonitorEvery: -1, InUse: func() ([]string, error) { return []string{sock}, nil }}
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for range 4 {
+			wg.Go(func() {
+				<-start
+				for range 20 {
+					m.sweep(time.Now())
+				}
+			})
+		}
+		close(start)
+		box, err := m.Reattach(t.Context(), egress.BoxRequest{Profile: strictProfile()}, sock)
+		wg.Wait()
+		if err != nil {
+			t.Fatalf("Reattach racing sweeps: %v", err)
+		}
+		defer box.Release()
+		if code := connect(t, sock, "example.org:443"); code != http.StatusForbidden {
+			t.Fatalf("the reattached adapter answered %d, want 403", code)
+		}
+	})
+	t.Run("unknown in-use set", func(t *testing.T) {
+		sock := deadAdapter(t)
+		aged(t, sock)
+		m := &Manager{MonitorEvery: -1, InUse: func() ([]string, error) { return nil, os.ErrPermission }}
+		if removed := m.sweep(time.Now()); len(removed) != 0 {
+			t.Fatalf("a sweep without the journal removed %v; want nothing (fail-safe)", removed)
+		}
+		if _, err := os.Stat(filepath.Dir(sock)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("not journalled", func(t *testing.T) {
+		sock := deadAdapter(t)
+		aged(t, sock)
+		m := &Manager{MonitorEvery: -1, InUse: func() ([]string, error) { return nil, nil }}
+		if removed := m.sweep(time.Now()); !slices.Contains(removed, filepath.Dir(sock)) {
+			t.Fatalf("an abandoned directory was kept: removed %v", removed)
+		}
+	})
 }

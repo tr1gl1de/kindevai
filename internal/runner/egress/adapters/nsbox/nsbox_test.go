@@ -61,11 +61,11 @@ func TestSweepStale(t *testing.T) {
 	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: filepath.Join(binding, "s")}); err != nil {
 		t.Fatal(err)
 	}
-	removed := sweepStale(base, time.Now())
+	removed := sweepStale(base, time.Now(), nil)
 	if len(removed) != 1 || removed[0] != stale {
 		t.Fatalf("removed %v, want only %s", removed, stale)
 	}
-	got := sweepStale(base, time.Now().Add(staleAge))
+	got := sweepStale(base, time.Now().Add(staleAge), nil)
 	slices.Sort(got)
 	if want := []string{binding, empty}; !slices.Equal(got, want) {
 		t.Fatalf("later sweep removed %v, want %v", got, want)

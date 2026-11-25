@@ -16,6 +16,7 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/runner/egress/adapters/nsbox"
 	egress "github.com/tr1gl1de/kindevai/internal/runner/egress/app"
 	"github.com/tr1gl1de/kindevai/internal/runner/platform/datadir"
+	"github.com/tr1gl1de/kindevai/internal/runner/session/adapters/journal"
 	sessionapp "github.com/tr1gl1de/kindevai/internal/runner/session/app"
 	sessiondomain "github.com/tr1gl1de/kindevai/internal/runner/session/domain"
 )
@@ -115,8 +116,27 @@ func orDash(s string) string {
 func strictEgress(d *datadir.Dir, exe string, logger *slog.Logger) *egress.Sandboxes {
 	return &egress.Sandboxes{
 		Config: configstore.File{Path: networkConfigPath(d)}.Load,
-		Boxes:  &nsbox.Manager{Program: exe, Args: []string{"sandbox-exec"}, DataDir: d.Path(), Logger: logger},
+		Boxes: &nsbox.Manager{Program: exe, Args: []string{"sandbox-exec"}, DataDir: d.Path(), Logger: logger,
+			InUse: journalledSandboxes(journal.Dir{Path: attemptsDir(d.Path())})},
 		Logger: logger,
+	}
+}
+
+// journalledSandboxes lists the adapter sockets of the attempts in the journal j: a sweep keeps their directories,
+// so a restarted runner can reattach them (KIN-100), also when `ai-runner network` runs its self-test meanwhile.
+func journalledSandboxes(j journal.Dir) func() ([]string, error) {
+	return func() ([]string, error) {
+		recs, err := j.List()
+		if err != nil {
+			return nil, err
+		}
+		var socks []string
+		for _, r := range recs {
+			if r.Sandbox != nil && r.Sandbox.Endpoint != "" {
+				socks = append(socks, r.Sandbox.Endpoint)
+			}
+		}
+		return socks, nil
 	}
 }
 

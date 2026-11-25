@@ -408,7 +408,7 @@ func wireAgents(x *sessionapp.Executor, d *datadir.Dir, agents *cliagent.Agents,
 func newExecutor(ch *app.Channel, dataDir, exe string, projects []string, logger *slog.Logger) *sessionapp.Executor {
 	x := &sessionapp.Executor{
 		Launcher: &process.Launcher{Program: exe, Args: []string{"mock-agent"}, Env: []string{}},
-		Journal:  journal.Dir{Path: filepath.Join(dataDir, "attempts")},
+		Journal:  journal.Dir{Path: attemptsDir(dataDir)},
 		Events:   spoolevents.Events{Channel: ch},
 		Policy:   sessiondomain.Policy{Projects: projects},
 		Logger:   logger,
@@ -416,6 +416,9 @@ func newExecutor(ch *app.Channel, dataDir, exe string, projects []string, logger
 	ch.Commands, ch.Processes = x.Command, x
 	return x
 }
+
+// attemptsDir is the attempts journal of the data dir: it survives restarts (KIN-23).
+func attemptsDir(dataDir string) string { return filepath.Join(dataDir, "attempts") }
 
 func envOr(name, def string) string {
 	if v := os.Getenv(name); v != "" {

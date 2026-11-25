@@ -143,9 +143,12 @@ func journalledSandboxes(j journal.Dir) func() ([]string, error) {
 // confiner gives the session context the egress context's sandboxes. sessions, when set, returns the CLI session
 // store of an AI CLI attempt's task, bound into the agent's HOME so a later attempt can resume (KIN-86), and a
 // notice for the attempt's output when files were removed to keep the store within its limit (KIN-96).
+// quota, when set, measures a task's session store while an attempt uses it (KIN-115): the sandbox of a strict CLI
+// attempt with a task reports the store over its quota, and the executor stops the attempt.
 type confiner struct {
 	s        *egress.Sandboxes
 	sessions func(sessiondomain.Assignment) ([]egress.HomeBind, string, error)
+	quota    func(project, task string) string
 }
 
 var _ sessionapp.Confiner = confiner{}
@@ -156,6 +159,7 @@ var _ sessionapp.Sandbox = (*nsbox.Box)(nil)
 func (c confiner) Confine(ctx context.Context, a sessiondomain.Assignment, dir, workdir string) (sessionapp.Sandbox, error) {
 	r := egress.BoxRequest{Dir: dir, Workdir: workdir}
 	var notice string
+	bound := false
 	if c.sessions != nil && a.CLI() {
 		// Only a sandboxed run uses the store (on the host the CLI keeps its sessions in its own home).
 		if _, strict, err := c.s.StrictProfile(ctx, a.Project, a.Adapter); err == nil && strict {
@@ -163,7 +167,7 @@ func (c confiner) Confine(ctx context.Context, a sessiondomain.Assignment, dir, 
 			if err != nil {
 				return nil, err
 			}
-			r.HomeBinds, notice = binds, n
+			r.HomeBinds, notice, bound = binds, n, len(binds) > 0
 		}
 	}
 	b, err := c.s.Confine(ctx, a.Project, a.Adapter, r)
@@ -175,8 +179,30 @@ func (c confiner) Confine(ctx context.Context, a sessiondomain.Assignment, dir, 
 		b.Release()
 		return nil, errors.New("the sandbox cannot launch processes")
 	}
-	return withNotice(sb, notice), nil
+	sb = withNotice(sb, notice)
+	if bound {
+		sb = c.watched(sb, a.Project, a.Task, a.Adapter)
+	}
+	return sb, nil
 }
+
+// watched makes sb report the session store of task over its quota (KIN-115) when the attempt is an AI CLI's with
+// a task and the confiner has a store; sb itself otherwise.
+func (c confiner) watched(sb sessionapp.Sandbox, project, task, agent string) sessionapp.Sandbox {
+	if c.quota == nil || task == "" || agent == "" {
+		return sb
+	}
+	return quotaSandbox{sb, func() string { return c.quota(project, task) }}
+}
+
+type quotaSandbox struct {
+	sessionapp.Sandbox
+	over func() string
+}
+
+var _ sessionapp.Quota = quotaSandbox{}
+
+func (q quotaSandbox) OverQuota() string { return q.over() }
 
 // withNotice puts notice ahead of the sandbox's summary, which the attempt's output shows once it ended; sb itself
 // when there is none.
@@ -214,7 +240,7 @@ func (c confiner) Reattach(ctx context.Context, rec sessiondomain.Record, dir st
 		b.Release()
 		return nil, errors.New("the sandbox cannot be monitored")
 	}
-	return sb, nil
+	return c.watched(sb, rec.Project, rec.Task, rec.Agent), nil // KIN-115: its store is bound since it started
 }
 
 // printStrictEgress reports whether this machine can enforce strict egress, and why not.

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -24,13 +25,18 @@ import (
 // project × task × CLI gets its own directory under Root (in the runner's data directory), bound read-write at the
 // CLI's SessionDir below the agent's HOME: an attempt sees its own task's sessions only, never another task's or the
 // host's. The store holds transcripts only: the CLI's login stays a copy (or the runner's token) and is never written
-// back. Stores no attempt used for MaxAge are removed. A task's store (all its CLIs together) is kept within Limit
-// (KIN-96): before each attempt its oldest session files are removed until it fits again, and the attempt says so.
+// back. Stores no attempt used for MaxAge are removed. A task's store (all its CLIs together) is bounded by Limit
+// bytes and EntryLimit entries (KIN-96, KIN-115): before each attempt its oldest session files are removed until it
+// is within 3/4 of both, and the attempt says so; during the attempt the runner stops it once it is over either
+// (OverQuota, polled by the executor).
 type SessionStore struct {
 	Root   string
-	MaxAge time.Duration    // DefaultSessionMaxAge when zero
-	Limit  int64            // bytes of session files per task; DefaultSessionLimit when zero
-	Now    func() time.Time // time.Now when nil
+	MaxAge time.Duration // DefaultSessionMaxAge when zero
+	Limit  int64         // bytes of session files per task; DefaultSessionLimit when zero
+	// EntryLimit bounds the entries (files, directories, symlinks) of a task's store; DefaultSessionEntryLimit when
+	// zero (KIN-115: an agent cannot use up the inodes either).
+	EntryLimit int64
+	Now        func() time.Time // time.Now when nil
 
 	remove func(string) error // os.Remove when nil (tests make it fail)
 
@@ -49,6 +55,10 @@ type Store struct {
 // DefaultSessionLimit bounds the session files of one task: a transcript is a few MiB at most, so this keeps many
 // sessions while an agent cannot fill the runner's data directory through its store.
 const DefaultSessionLimit = 256 << 20
+
+// DefaultSessionEntryLimit bounds the entries of one task's store: a session is a handful of files, so this keeps
+// many while an agent cannot use up the inodes of the runner's data directory through its store.
+const DefaultSessionEntryLimit = 20000
 
 // DefaultSessionMaxAge is how long a task's sessions are kept after its last attempt.
 const DefaultSessionMaxAge = 30 * 24 * time.Hour
@@ -70,6 +80,13 @@ func (s *SessionStore) maxAge() time.Duration {
 		return DefaultSessionMaxAge
 	}
 	return s.MaxAge
+}
+
+func (s *SessionStore) entryLimit() int64 {
+	if s.EntryLimit <= 0 {
+		return DefaultSessionEntryLimit
+	}
+	return s.EntryLimit
 }
 
 func (s *SessionStore) limit() int64 {
@@ -116,8 +133,151 @@ type sessionFile struct {
 	mod  time.Time
 }
 
-// shrink removes the oldest session files of the task's store at taskDir until it is within Limit and says what it
-// removed ("" when the store was within it). Only regular files count; symlinks are neither followed nor counted.
+// usage is what a task's store holds: bytes of regular files and entries (files, directories, symlinks, anything
+// else) below the task's directory; files lists the entries that are not directories when asked for.
+type usage struct {
+	bytes   int64
+	entries int64
+	files   []sessionFile
+}
+
+// readBatch is how many directory entries measure reads at a time: a directory with millions of entries is never
+// loaded whole.
+const readBatch = 256
+
+// errOver stops measure once the store is over its bounds.
+var errOver = errors.New("over")
+
+// measure walks the task's store at taskDir, one directory at a time and readBatch entries at a time, without
+// following symlinks. A directory an agent left unreadable or read-only is made owner-accessible again before it is
+// read (the store and everything in it belong to the runner's user). It stops early (over=true) once the store holds
+// more than bytes or entries (when they are positive), so its cost is bounded by them however many entries an agent
+// made; an error is returned when the store cannot be measured (callers fail closed).
+func measure(taskDir string, list bool, bytes, entries int64) (u usage, over bool, err error) {
+	stack := []string{taskDir}
+	for len(stack) > 0 {
+		dir := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		err := readDir(dir, dir == taskDir, func(p string, fi fs.FileInfo) error {
+			u.entries++
+			switch {
+			case fi.IsDir():
+				stack = append(stack, p)
+			case fi.Mode().IsRegular():
+				u.bytes += fi.Size()
+				fallthrough
+			default:
+				if list {
+					size := int64(0)
+					if fi.Mode().IsRegular() {
+						size = fi.Size()
+					}
+					u.files = append(u.files, sessionFile{p, size, fi.ModTime()})
+				}
+			}
+			if (bytes > 0 && u.bytes > bytes) || (entries > 0 && u.entries > entries) {
+				return errOver
+			}
+			return nil
+		})
+		if errors.Is(err, errOver) {
+			return u, true, nil
+		}
+		if err != nil {
+			return u, false, err
+		}
+	}
+	return u, false, nil
+}
+
+// readDir calls fn with the lstat of every entry of dir, readBatch at a time. A directory that is gone meanwhile
+// (but the store's own) has no entries; one an agent made inaccessible is made owner-accessible and opened again.
+func readDir(dir string, root bool, fn func(string, fs.FileInfo) error) error {
+	var f *os.File
+	var err error
+	for range 3 { // an agent may change the mode back between the chmod and the open: try again, then give up
+		if f, err = os.Open(dir); err == nil || !errors.Is(err, fs.ErrPermission) {
+			break
+		}
+		_ = os.Chmod(dir, 0o700) //nolint:gosec // G302: directories need the x bit; 0700 is owner-only
+	}
+	if err != nil {
+		if !root && errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	if fi, err := f.Stat(); err == nil && fi.Mode().Perm()&0o700 != 0o700 { // readable, but not searchable
+		_ = os.Chmod(dir, 0o700) //nolint:gosec // G302: as above
+	}
+	for {
+		batch, err := f.ReadDir(readBatch)
+		for _, d := range batch {
+			p := filepath.Join(dir, d.Name())
+			fi, err := os.Lstat(p)
+			if errors.Is(err, fs.ErrNotExist) {
+				continue // removed meanwhile
+			}
+			if err != nil {
+				return err
+			}
+			if err := fn(p, fi); err != nil {
+				return err
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+// OverQuota measures the store of task of project while an attempt uses it (KIN-115) and says why it is over
+// Limit or EntryLimit ("" while within them, and when the task has no store). A store that cannot be measured (an
+// agent keeps a directory of it inaccessible) counts as over: the check never fails open. The walk stops as soon as
+// the store is over, so its cost is bounded by EntryLimit however many entries an agent made.
+func (s *SessionStore) OverQuota(project, task string) string {
+	taskDir := filepath.Join(s.Root, storeName(project), storeName(task))
+	limit, entries := s.limit(), s.entryLimit()
+	u, over, err := measure(taskDir, false, limit, entries)
+	switch {
+	case errors.Is(err, fs.ErrNotExist) && u.entries == 0:
+		return ""
+	case err != nil:
+		return "session store of the task cannot be measured during the attempt: " + relErr(taskDir, err)
+	case !over:
+		return ""
+	case u.entries > entries:
+		return fmt.Sprintf("session store of the task went over its quota during the attempt (> %d entries)", entries)
+	}
+	return fmt.Sprintf("session store of the task went over its quota during the attempt (> %s of session files)",
+		byteSize(limit))
+}
+
+// relErr is err with the runner's data directory path left out (the attempt's failure shows it).
+func relErr(taskDir string, err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		rel, rerr := filepath.Rel(taskDir, pe.Path)
+		if rerr != nil {
+			rel = filepath.Base(pe.Path)
+		}
+		return fmt.Sprintf("%s %s: %v", pe.Op, rel, pe.Err)
+	}
+	return err.Error()
+}
+
+// wipeAt is how far over EntryLimit Prepare still lists a store to evict its oldest files; beyond it every session
+// file of the task is removed (listing it would cost too much).
+const wipeAt = 4
+
+// shrink brings the task's store at taskDir within 3/4 of Limit and EntryLimit (KIN-115: an attempt that goes over
+// the limits themselves is stopped, so it starts with headroom): it removes the oldest entries that are not
+// directories, then the directories that left empty, and says what it removed ("" when the store was within).
+// Only regular files count towards the bytes; symlinks are neither followed nor counted as bytes.
 func (s *SessionStore) shrink(taskDir string) (string, error) {
 	s.mu.Lock()
 	if s.shrinking == nil {
@@ -131,34 +291,19 @@ func (s *SessionStore) shrink(taskDir string) (string, error) {
 	s.mu.Unlock()
 	m.Lock()
 	defer m.Unlock()
-	unlock(taskDir) // an agent may have made a directory unreadable or read-only
-	var files []sessionFile
-	var total int64
-	err := filepath.WalkDir(taskDir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		fi, err := d.Info() // lstat
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				return nil
-			}
-			return err
-		}
-		files = append(files, sessionFile{p, fi.Size(), fi.ModTime()})
-		total += fi.Size()
-		return nil
-	})
+	limit, entryLimit := s.limit(), s.entryLimit()
+	lowBytes, lowEntries := limit/4*3, entryLimit/4*3
+	u, huge, err := measure(taskDir, true, 0, wipeAt*entryLimit)
 	if err != nil {
-		return "", fmt.Errorf("session store: measuring %s: %w", filepath.Base(taskDir), err)
+		return "", fmt.Errorf("session store: measuring %s: %s", filepath.Base(taskDir), relErr(taskDir, err))
 	}
-	limit := s.limit()
-	if total <= limit {
+	if huge {
+		return s.wipe(taskDir, entryLimit)
+	}
+	if u.bytes <= lowBytes && u.entries <= lowEntries {
 		return "", nil
 	}
+	files := u.files
 	sort.Slice(files, func(i, j int) bool {
 		if !files[i].mod.Equal(files[j].mod) {
 			return files[i].mod.Before(files[j].mod)
@@ -169,12 +314,12 @@ func (s *SessionStore) shrink(taskDir string) (string, error) {
 	if remove == nil {
 		remove = os.Remove
 	}
-	was := total
+	total, entries := u.bytes, u.entries
 	var n int
 	var freed int64
 	var lastErr error
 	for _, f := range files {
-		if total <= limit {
+		if total <= lowBytes && entries <= lowEntries {
 			break
 		}
 		if err := remove(f.path); err != nil {
@@ -184,16 +329,57 @@ func (s *SessionStore) shrink(taskDir string) (string, error) {
 			continue
 		}
 		total -= f.size
+		entries--
 		freed += f.size
 		n++
 	}
 	pruneEmpty(taskDir)
-	if total > limit {
-		return "", fmt.Errorf("session store of the task is over its limit (%s > %s) and could not be shrunk: %w",
-			byteSize(total), byteSize(limit), lastErr)
+	after, _, err := measure(taskDir, false, 0, 0)
+	if err != nil {
+		return "", fmt.Errorf("session store: measuring %s: %s", filepath.Base(taskDir), relErr(taskDir, err))
 	}
-	return fmt.Sprintf("session store of the task was over its limit (%s > %s): removed %d oldest session files "+
-		"(%s); sessions in them can no longer be resumed", byteSize(was), byteSize(limit), n, byteSize(freed)), nil
+	if after.bytes > limit || after.entries > entryLimit {
+		return "", fmt.Errorf("session store of the task is over its limit (%s in %d entries > %s, %d entries) and "+
+			"could not be shrunk: %w", byteSize(after.bytes), after.entries, byteSize(limit), entryLimit, lastErr)
+	}
+	return fmt.Sprintf("session store of the task was over its limit for a new attempt (%s in %d entries; an attempt "+
+		"starts within 3/4 of %s and %d entries): removed %d oldest session files (%s); sessions in them can no longer "+
+		"be resumed", byteSize(u.bytes), u.entries, byteSize(limit), entryLimit, n, byteSize(freed)), nil
+}
+
+// wipe removes everything in the CLIs' stores of the task at taskDir (the stores themselves stay: they are bound
+// into the sandbox) when it holds too many entries to list.
+func (s *SessionStore) wipe(taskDir string, entryLimit int64) (string, error) {
+	stores, err := os.ReadDir(taskDir)
+	if err != nil {
+		return "", fmt.Errorf("session store: %w", err)
+	}
+	for _, st := range stores {
+		dir := filepath.Join(taskDir, st.Name())
+		if !st.IsDir() {
+			_ = os.Remove(dir)
+			continue
+		}
+		_ = os.Chmod(dir, 0o700) //nolint:gosec // G302: directories need the x bit; 0700 is owner-only
+		children, err := os.ReadDir(dir)
+		if err != nil {
+			return "", fmt.Errorf("session store: %w", err)
+		}
+		for _, c := range children {
+			p := filepath.Join(dir, c.Name())
+			err := os.RemoveAll(p) // reads in batches and never follows a symlink inside
+			if err != nil {        // an agent made a directory in it inaccessible
+				unlock(p)
+				err = os.RemoveAll(p)
+			}
+			if err != nil {
+				return "", fmt.Errorf("session store of the task is over its limit and could not be emptied: %s",
+					relErr(taskDir, err))
+			}
+		}
+	}
+	return fmt.Sprintf("session store of the task held more than %d entries (its limit is %d): removed all its "+
+		"session files; no session of the task can be resumed", wipeAt*entryLimit, entryLimit), nil
 }
 
 // pruneEmpty removes the directories below the CLIs' stores in taskDir that eviction left empty (the stores

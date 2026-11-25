@@ -37,6 +37,13 @@ type Sandbox interface {
 	Summary() string
 }
 
+// Quota is a sandbox that bounds what its attempt stores outside the worktree (KIN-115: the task's CLI session
+// store, bound read-write into it). OverQuota measures it and says why it is over its quota ("" while within); the
+// executor asks every QuotaEvery while the attempt runs and stops an attempt that is over.
+type Quota interface {
+	OverQuota() string
+}
+
 // Confiner decides whether an attempt runs in a sandbox: nil when its network profile is not strict, an error
 // when it is strict and no verified sandbox can be had (the attempt must not run at all: fail-closed).
 type Confiner interface {

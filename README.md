@@ -506,13 +506,14 @@ for a browser and a runner on the same host. Never publish the plain-HTTP port: 
 name pointing to it, and ports 80/443 open for the ACME certificate. Do not run runners, AI CLIs or other heavy
 services there: agents work on the runners. Measured under `--cpus=1 --memory=1g` (KIN-42), with 8 runners running
 1000 mock tasks in 33 s, the Control Plane used at most 50 MiB of RAM and 67% of the vCPU (about 11 MiB at idle).
-Real AI tasks are far slower, so the load is lower. Repeat the measurement with `scripts/measure-cp.sh`.
+The mock tasks skipped the pull request, CI and merge path and the YouTrack writes (no GitHub App), which add a few
+outbox calls per task. Real AI tasks take minutes each, so the load is far lower. Repeat the measurement with `scripts/measure-cp.sh`.
 
 ### 2. Start the Control Plane
 
 ```bash
-git clone https://github.com/tr1gl1de/kindevai.git && cd kindevai
-export KINDEV_IMAGE_TAG=X.Y.Z                       # a release from the GitHub Releases page
+git clone --branch vX.Y.Z https://github.com/tr1gl1de/kindevai.git && cd kindevai   # a release: compose.yml matches it
+export KINDEV_IMAGE_TAG=X.Y.Z                       # the same release
 export DOMAIN=ai.example.com KINDEV_PUBLIC_URL=https://ai.example.com
 docker compose --profile https pull && docker compose --profile https up -d
 docker compose exec cp ai-platform setup-token     # one-time setup token, valid 1 h
@@ -546,7 +547,8 @@ Settings for each repository (**Settings → Rules → Rulesets → New branch r
    Enforcement status: **Active**.
 2. Rules: **Restrict updates**, **Restrict deletions**, **Block force pushes**, and **Require a pull request before
    merging**.
-3. Bypass list: only you (or the repository admin role). **Never add the GitHub App.**
+3. Bypass list: only you (or the repository admin role). **Never add the GitHub App.** With "Restrict updates"
+   every change of the branch, a pull request merge included, is yours alone.
 4. If you release from the repository, add a tag ruleset for `v*` that only you may create, update or delete, and a
    `production` environment with you as the required reviewer.
 

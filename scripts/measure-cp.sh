@@ -3,7 +3,8 @@
 # The Control Plane runs in a container limited with --cpus=1 --memory=1g; RUNNERS real ai-runner daemons on this host
 # connect to it and run TASKS mock tasks (the mock agent, no AI), while a poller reads the Dashboard's task and
 # runner lists like an open browser tab. docker stats is sampled every second; the summary goes to stdout and the
-# samples to <out>/stats.csv. Everything it starts is stopped on exit.
+# samples to <out>/stats.csv. Everything it starts is stopped on exit; without --out the working directory (binaries,
+# data, runners, samples) is removed too, with --out it is kept for inspection.
 #
 #   scripts/measure-cp.sh [--runners 4] [--tasks 200] [--port <free port>] [--out <dir>]
 #
@@ -17,14 +18,15 @@ while [ $# -gt 0 ]; do
     --tasks) tasks=$2; shift 2 ;;
     --port) port=$2; shift 2 ;;
     --out) out=$2; shift 2 ;;
-    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 for tool in docker curl jq git go; do command -v "$tool" >/dev/null || { echo "$tool is required" >&2; exit 1; }; done
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-out=${out:-$(mktemp -d -t kindev-measure.XXXXXX)}
+keep=1
+[ -n "$out" ] || { out=$(mktemp -d -t kindev-measure.XXXXXX); keep=""; }
 mkdir -p "$out/bin" "$out/data" "$out/runners"
 name=kindev-measure-$$
 image=gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
@@ -36,6 +38,7 @@ cleanup() {
   for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
   wait 2>/dev/null || true
   docker rm -f "$name" >/dev/null 2>&1 || true
+  [ -n "$keep" ] || rm -rf "$out"
 }
 trap cleanup EXIT
 
@@ -52,7 +55,7 @@ stats() { docker stats --no-stream --format '{{.CPUPerc}},{{.MemUsage}}' "$name"
 for _ in $(seq 100); do curl --noproxy '*' -m 2 -fsS "$base/api/health" >/dev/null 2>&1 && break; sleep 0.2; done
 idle=$(stats)
 echo "cpu,mem" >"$out/stats.csv"
-(while true; do stats >>"$out/stats.csv"; sleep 1; done) &
+(while true; do stats >>"$out/stats.csv" || true; sleep 1; done) &
 pids+=($!)
 
 api() { # api METHOD PATH [BODY]
@@ -93,7 +96,11 @@ for _ in $(seq 150); do
 done
 connected=$(stats)
 
-(while true; do api GET "/api/tasks?projectId=$project" '' >/dev/null; api GET /api/runners '' >/dev/null; sleep 1; done) &
+(while true; do
+  api GET "/api/tasks?projectId=$project" '' >/dev/null || true
+  api GET /api/runners '' >/dev/null || true
+  sleep 1
+done) &
 pids+=($!)
 
 echo "running $tasks mock tasks…"
@@ -142,5 +149,5 @@ printf '%s\n' \
   "  runners connected:       $connected" \
   "  whole run: peak cpu ${peak_cpu}%, mean cpu ${avg_cpu}%, peak memory $peak_mem" \
   "  after the load:          $final" \
-  "  database directory:      $db" \
-  "samples: $out/stats.csv"
+  "  database directory:      $db"
+[ -z "$keep" ] || echo "samples: $out/stats.csv"

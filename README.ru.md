@@ -512,14 +512,15 @@ ai-runner cli-login status --cli-home <dir>                    # чем зало
 **Хост Control Plane:** достаточно Linux VPS с 1 vCPU и 1 ГБ RAM. Нужны Docker с Compose v2, DNS-имя, указывающее
 на хост, и открытые порты 80/443 для сертификата ACME. Не запускайте там runners, AI CLI и другие тяжёлые сервисы:
 агенты работают на runners. Замер под `--cpus=1 --memory=1g` (KIN-42): 8 runners выполнили 1000 mock-задач за 33 с,
-Control Plane занял не больше 50 МиБ RAM и 67% vCPU (около 11 МиБ в простое). Настоящие AI-задачи идут гораздо
-медленнее, поэтому нагрузка ниже. Повторить замер можно через `scripts/measure-cp.sh`.
+Control Plane занял не больше 50 МиБ RAM и 67% vCPU (около 11 МиБ в простое). Mock-задачи не проходили путь pull
+request, CI и merge и не писали в YouTrack (нет GitHub App); это добавляет несколько вызовов outbox на задачу.
+Настоящая AI-задача идёт минуты, поэтому нагрузка гораздо ниже. Повторить замер можно через `scripts/measure-cp.sh`.
 
 ### 2. Запустите Control Plane
 
 ```bash
-git clone https://github.com/tr1gl1de/kindevai.git && cd kindevai
-export KINDEV_IMAGE_TAG=X.Y.Z                       # релиз со страницы GitHub Releases
+git clone --branch vX.Y.Z https://github.com/tr1gl1de/kindevai.git && cd kindevai   # релиз: compose.yml ему соответствует
+export KINDEV_IMAGE_TAG=X.Y.Z                       # тот же релиз
 export DOMAIN=ai.example.com KINDEV_PUBLIC_URL=https://ai.example.com
 docker compose --profile https pull && docker compose --profile https up -d
 docker compose exec cp ai-platform setup-token     # одноразовый токен настройки, действует 1 ч
@@ -553,7 +554,8 @@ docker compose exec cp ai-platform setup-token     # одноразовый то
    Enforcement status: **Active**.
 2. Правила: **Restrict updates**, **Restrict deletions**, **Block force pushes** и **Require a pull request before
    merging**.
-3. Bypass list: только вы (или роль администратора репозитория). **GitHub App туда не добавляйте никогда.**
+3. Bypass list: только вы (или роль администратора репозитория). **GitHub App туда не добавляйте никогда.** С
+   «Restrict updates» любое изменение ветки, включая merge pull request, доступно только вам.
 4. Если вы выпускаете релизы из репозитория, добавьте ruleset тегов `v*`, где создавать, менять и удалять теги можете
    только вы, и environment `production`, где вы — обязательный reviewer.
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -85,7 +86,33 @@ func TestCrossProjectIsolationOfEveryScopedEndpoint(t *testing.T) {
 		t.Fatalf("created task %v, repository %q", created, repo)
 	}
 	p, tk := "/api/projects/"+beta, "/api/tasks/"+task
-	owner.must(200, "POST", tk+"/mock-run", `{"scenario":"success"}`)
+	// Every Beta plan needs the Owner's approval, so the plan stays open for the discussion until approved.
+	owner.must(200, "PUT", p+"/risk-policy", `{"rules":[{"category":"paths","risk":"L2","patterns":["**"]}]}`)
+	owner.must(202, "POST", tk+"/mock-run", `{"scenario":"success"}`)
+	msg, _ := owner.must(202, "POST", tk+"/discussion/messages", `{"text":"Why this step?"}`)["id"].(string)
+	pending := func() map[string]map[string]any {
+		_, body := owner.do("GET", "/api/approvals?state=pending", "")
+		var list []map[string]any
+		if err := json.Unmarshal([]byte(body), &list); err != nil {
+			t.Fatalf("approvals %s: %v", body, err)
+		}
+		out := map[string]map[string]any{}
+		for _, a := range list {
+			out[a["scope"].(string)] = a
+		}
+		return out
+	}
+	exec := pending()["execute"]
+	if msg == "" || exec == nil {
+		t.Fatalf("discussion message %q, approvals %v", msg, pending())
+	}
+	owner.must(200, "POST", "/api/approvals/"+exec["id"].(string)+"/approve", fmt.Sprintf(`{"planRevision":%v,"planHash":%q}`,
+		exec["planRevision"], exec["planHash"]))
+	integ := pending()["integrate_dev"]
+	if integ == nil {
+		t.Fatalf("no pending integrate_dev approval: %v", pending())
+	}
+	approval := "/api/approvals/" + integ["id"].(string)
 	var step string
 	eventually(t, "Beta's task waiting for a runner", func() bool {
 		d := owner.must(200, "GET", tk, "")
@@ -97,18 +124,27 @@ func TestCrossProjectIsolationOfEveryScopedEndpoint(t *testing.T) {
 		}
 		return task["state"] == "BLOCKED" && step != ""
 	})
-	msg, _ := owner.must(202, "POST", tk+"/discussion/messages", `{"text":"Why this step?"}`)["id"].(string)
-	if msg == "" {
-		t.Fatal("no discussion message id")
-	}
+	eventually(t, "the discussion message settled (the approved plan can no longer change)", func() bool {
+		d := owner.must(200, "GET", tk+"/discussion", "")
+		msgs, _ := d["messages"].([]any)
+		return len(msgs) == 1 && msgs[0].(map[string]any)["status"] == "FAILED"
+	})
 	snapshot := func() map[string]string {
 		out := map[string]string{}
-		for _, path := range []string{p, p + "/members", p + "/integrations", p + "/youtrack", p + "/risk-policy", p + "/agents",
-			tk + "/revisions/1", tk + "/discussion", "/api/tasks?projectId=" + beta} {
+		for _, path := range []string{p, approval, "/api/approvals?state=all", p + "/members", p + "/integrations", p + "/youtrack", p + "/risk-policy", p + "/agents",
+			tk + "/revisions/1", tk + "/discussion"} {
 			_, out[path] = owner.do("GET", path, "")
 		}
+		var list struct{ Tasks []map[string]any }
+		_, body := owner.do("GET", "/api/tasks?projectId="+beta, "")
+		_ = json.Unmarshal([]byte(body), &list)
+		for _, it := range list.Tasks {
+			delete(it, "time") // the calendar time of a waiting task grows by itself
+		}
+		b, _ := json.Marshal(list.Tasks)
+		out["tasks of Beta"] = string(b)
 		d := owner.must(200, "GET", tk, "")
-		b, _ := json.Marshal([]any{d["task"], d["execution"]})
+		b, _ = json.Marshal([]any{d["task"], d["execution"]})
 		out[tk] = string(b)
 		return out
 	}
@@ -127,6 +163,9 @@ func TestCrossProjectIsolationOfEveryScopedEndpoint(t *testing.T) {
 	r, st, m := p+"/repositories/"+repo, tk+"/steps/"+step, tk+"/discussion/messages/"+msg
 	for _, c := range []struct{ method, path, body string }{
 		{"GET", p, ""},
+		{"GET", approval, ""},
+		{"POST", approval + "/approve", fmt.Sprintf(`{"planRevision":%v,"planHash":%q}`, integ["planRevision"], integ["planHash"])},
+		{"POST", approval + "/reject", fmt.Sprintf(`{"planRevision":%v,"planHash":%q,"comment":"no"}`, integ["planRevision"], integ["planHash"])},
 		{"GET", p + "/members", ""},
 		{"PUT", p + "/members/carol", `{"role":"member"}`},
 		{"DELETE", p + "/members/owner", ""},

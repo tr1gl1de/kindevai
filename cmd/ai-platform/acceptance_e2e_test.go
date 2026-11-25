@@ -137,7 +137,9 @@ func (f *acceptGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// touchesProtected reports a write naming main or master: a path segment or a base/branch/ref field of the body.
+// touchesProtected reports a write naming main or master in a path segment or in a base/branch/ref field of the body
+// (pull request creation, ref and contents writes). A merge names no branch: the merge gate's base check is covered
+// by the retargeted pull request case of TestAcceptanceDevMovedBeforeTheMergeBlocksTheTask.
 func touchesProtected(path string, body []byte) bool {
 	protected := func(v string) bool {
 		v = strings.ToLower(strings.TrimPrefix(v, "refs/heads/"))
@@ -568,17 +570,30 @@ func TestAcceptanceL2IssueIsMergedOnlyAfterTheOwnersApprovals(t *testing.T) {
 }
 
 // AC (KIN-42, KIN-A-25 "dev moved before the merge"): when dev moved so that the pull request no longer merges, or
-// the pull request's head moved, nothing is merged blindly: the task is BLOCKED (reason ci) for the Owner.
+// the pull request's head moved, nothing is merged blindly: the task is BLOCKED (reason ci) for the Owner. A pull
+// request someone retargeted at main between publishing and the merge is never even sent to the merge API.
 func TestAcceptanceDevMovedBeforeTheMergeBlocksTheTask(t *testing.T) {
 	t.Parallel()
-	for name, status := range map[string]int{"conflict with the new dev": http.StatusMethodNotAllowed,
-		"head moved": http.StatusConflict} {
+	for name, c := range map[string]struct {
+		status   int    // GitHub's answer to the merge
+		retarget string // base the pull request has when the merge gate reads it
+		merges   int
+	}{
+		"conflict with the new dev":  {status: http.StatusMethodNotAllowed, merges: 1},
+		"head moved":                 {status: http.StatusConflict, merges: 1},
+		"pull request moved to main": {retarget: "main"},
+	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			e := newAcceptanceEnv(t, 0)
 			task := e.issueTask(t, workflow.RiskL0)
 			e.implementAndPublish(t, task.ID)
-			e.gh.set(func(f *acceptGitHub) { f.conclusion, f.mergeStatus = "success", status })
+			e.gh.set(func(f *acceptGitHub) {
+				f.conclusion, f.mergeStatus = "success", c.status
+				if c.retarget != "" {
+					f.pr["base"] = map[string]any{"ref": c.retarget}
+				}
+			})
 			e.checkSuite(t, task.ID, "delivery-1", "success")
 			d := e.cp.waitTask(t, task.ID, func(d workflowapp.TaskDetail) bool { return d.Task.State == workflow.TaskBlocked })
 			if d.Task.BlockReason != workflow.WaitCI {
@@ -588,16 +603,17 @@ func TestAcceptanceDevMovedBeforeTheMergeBlocksTheTask(t *testing.T) {
 			if len(arts) != 1 || arts[0].Merge != workflow.MergeFailed || arts[0].MergeSHA != "" {
 				t.Fatalf("change set %+v", arts)
 			}
-			if merges, _, _ := e.gh.snapshot(); len(merges) != 1 {
-				t.Fatalf("merge attempts %v, want exactly one", merges)
+			if merges, _, _ := e.gh.snapshot(); len(merges) != c.merges {
+				t.Fatalf("merge attempts %v, want %d", merges, c.merges)
 			}
 		})
 	}
 }
 
 // AC (KIN-42, KIN-A-25 "two runners race"): two runners eligible for one READY step and concurrent scheduler passes
-// give the step to exactly one of them; the other runner's reports for it are refused and change nothing.
-func TestAcceptanceTwoRunnersRacingForOneStep(t *testing.T) {
+// give the step to exactly one of them; the other runner's reports for it are refused and change nothing. The
+// passes may be serialised inside the Control Plane; the test pins the outcome (one claim, fenced), not the timing.
+func TestAcceptanceTwoRunnersCompetingForOneStep(t *testing.T) {
 	t.Parallel()
 	e := newAcceptanceEnv(t, 0)
 	e.pool.mu.Lock()

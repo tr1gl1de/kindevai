@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/workflow/domain"
@@ -100,6 +101,7 @@ type Service struct {
 	Dispatcher  Dispatcher   // runner commands; required for Schedule, optional otherwise
 	Access      Access       // project visibility for the task API (KIN-23)
 	Outbox      Outbox       // alert hooks (KIN-60); nil: none
+	CLILimits   CLILimits    // KIN-79: a CLI that hit its limit (KIN-33 routing cool-downs); nil: none
 	Log         AttemptLog   // attempt events for the task API (KIN-25); optional
 	Tx          TxRunner
 	Now         func() time.Time
@@ -320,7 +322,7 @@ func attemptsEqual(a, b domain.Execution) bool {
 			return false
 		}
 		for j := range x.Attempts {
-			if a, b := x.Attempts[j], y.Attempts[j]; a.State != b.State || a.Agent != b.Agent ||
+			if a, b := x.Attempts[j], y.Attempts[j]; a.State != b.State || a.Agent != b.Agent || a.Report != b.Report ||
 				a.WorkIncomplete != b.WorkIncomplete || !ptrTimeEqual(a.WorkStart, b.WorkStart) || !ptrTimeEqual(a.WorkEnd, b.WorkEnd) {
 				return false
 			}
@@ -479,6 +481,68 @@ func (s *Service) HoldStepForNetwork(ctx context.Context, stepID, runnerID strin
 		return nil
 	})
 	return s.lateWorkEnd(ctx, err, stepID, runnerID, fence, at)
+}
+
+// CLILimits hears of a runner's CLI that hit its limit (KIN-79), e.g. routing's per-runner cool-down (KIN-33), in
+// the report's transaction.
+type CLILimits interface {
+	CLILimitHit(ctx context.Context, runnerID, agent string, until time.Time, reason string) error
+}
+
+// HoldStepForCLILimit parks a step whose AI CLI hit its subscription/rate limit or is logged out (KIN-79): the
+// attempt never counts against the retry budget, the step WAITs with reason cli_limit until resetsAt (see
+// domain.Execution.HoldForCLILimit) and the task is BLOCKED(cli_limit) (an alert for the Owner) until the scheduler
+// assigns the step again. at ends the attempt's agent time.
+func (s *Service) HoldStepForCLILimit(ctx context.Context, stepID, runnerID string, fence int64, msg string, resetsAt, at time.Time) error {
+	err := s.updateExecution(ctx, stepID, func(ctx context.Context, e *domain.Execution, now time.Time) error {
+		if err := e.HoldForCLILimit(stepID, runnerID, fence, msg, resetsAt, now); err != nil {
+			return refusedReport{err}
+		}
+		e.MarkWorkEnd(stepID, runnerID, fence, at, now)
+		st := e.Step(stepID)
+		if s.CLILimits != nil && st != nil && st.WaitUntil != nil {
+			agent := ""
+			if a := st.Attempts; len(a) > 0 {
+				agent = a[len(a)-1].Agent
+			}
+			if err := s.CLILimits.CLILimitHit(ctx, runnerID, agent, *st.WaitUntil, msg); err != nil {
+				return err
+			}
+		}
+		t, err := s.Repo.Task(ctx, e.TaskID)
+		if err != nil {
+			return err
+		}
+		if t.State != domain.TaskRunning {
+			return nil
+		}
+		detail := msg
+		if st != nil && st.WaitUntil != nil {
+			detail += " (retry at " + st.WaitUntil.Format(time.RFC3339) + ")"
+		}
+		if err := t.Transition(domain.TaskBlocked, domain.Reason{Code: domain.WaitCLILimit, Detail: detail}, now); err != nil {
+			return err
+		}
+		return s.saveTask(ctx, &t)
+	})
+	return s.lateWorkEnd(ctx, err, stepID, runnerID, fence, at)
+}
+
+// RecordAgentReport stores what the attempt's AI CLI reported (usage, native session, model, version; KIN-79,
+// agent time accounting of KB KIN-A-16) with the attempt of runnerID under fence, whatever the step's state now.
+// An attempt the runner does not hold is domain.ErrStaleFence.
+func (s *Service) RecordAgentReport(ctx context.Context, stepID, runnerID string, fence int64, r domain.AgentReport) error {
+	return s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, _ time.Time) error {
+		st := e.Step(stepID)
+		if st == nil {
+			return domain.ErrNotFound
+		}
+		if !slices.ContainsFunc(st.Attempts, func(a domain.Attempt) bool { return a.RunnerID == runnerID && a.Fence == fence }) {
+			return fmt.Errorf("attempt %d of step %s on runner %s: %w", fence, st.Key, runnerID, domain.ErrStaleFence)
+		}
+		e.RecordAgentReport(stepID, runnerID, fence, r)
+		return nil
+	})
 }
 
 // refusedReport marks the execution's own refusal of a terminal report (stale token, step already moved on), as

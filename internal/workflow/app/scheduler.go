@@ -28,6 +28,13 @@ type Assignment struct {
 	ProjectID   string
 	Repository  string
 	Scope       []string
+	// Agent is the AI CLI to run the step (claude | codex; "" or "mock": the mock agent), Model its model ("" = the
+	// CLI's default) and Role the step's platform role — chosen by routing (KIN-33). Prompt is the step's
+	// prompt/context package for an AI CLI (KIN-79).
+	Agent  string
+	Model  string
+	Role   string
+	Prompt string
 }
 
 // Dispatcher queues runner commands in the use case's transaction (the runner's ordered command log, KIN-22), so a
@@ -101,7 +108,7 @@ func (s *Service) Schedule(ctx context.Context) error {
 func schedulable(st *domain.Step, now time.Time) bool {
 	return st.State == domain.StepReady ||
 		st.State == domain.StepWaiting && st.WaitReason == domain.WaitRunner && !st.AttemptUnknown() ||
-		st.NetworkRetryDue(now)
+		st.NetworkRetryDue(now) || st.CLILimitRetryDue(now)
 }
 
 func (s *Service) scheduleExecution(ctx context.Context, id string) error {
@@ -114,8 +121,9 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		blockedForRunner := t.State == domain.TaskBlocked && t.BlockReason == domain.WaitRunner &&
-			t.BlockedFrom == domain.TaskRunning
+		// Blocked for a runner or for the CLI's limit (KIN-79): the scheduler resumes the task when it assigns a step.
+		blockedForRunner := t.State == domain.TaskBlocked && t.BlockedFrom == domain.TaskRunning &&
+			(t.BlockReason == domain.WaitRunner || t.BlockReason == domain.WaitCLILimit)
 		if t.State != domain.TaskRunning && !blockedForRunner {
 			return nil // blocked for something else, or finishing: not the scheduler's business
 		}
@@ -177,7 +185,8 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 				return err
 			}
 			if err := s.Dispatcher.Assign(ctx, c.ID, Assignment{StepID: st.ID, StepKey: st.Key, Fence: l.Fence,
-				ExecutionID: e.ID, TaskID: t.ID, ProjectID: t.ProjectID, Repository: ps.Repository, Scope: ps.Scope}); err != nil {
+				ExecutionID: e.ID, TaskID: t.ID, ProjectID: t.ProjectID, Repository: ps.Repository, Scope: ps.Scope,
+				Prompt: domain.StepPrompt(t, rev.Plan(), ps)}); err != nil {
 				return fmt.Errorf("queueing the assignment: %w", err)
 			}
 			held[c.ID]++

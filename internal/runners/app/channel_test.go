@@ -900,3 +900,70 @@ func TestNetworkFailureHoldsTheStep(t *testing.T) {
 		t.Fatalf("states %v", e.wf.state)
 	}
 }
+
+// agentWorkflow also holds steps for a CLI limit and stores CLI reports (the real workflow does, KIN-79).
+type agentWorkflow struct {
+	*fakeWorkflow
+	reports *[]string
+}
+
+func (w agentWorkflow) HoldAttemptForCLILimit(_ context.Context, _, step string, fence int64, reason string, resetsAt, at time.Time) error {
+	w.mark("hold-cli-limit "+resetsAt.UTC().Format(time.RFC3339)+" "+reason, at, "")
+	return w.op("hold-cli-limit", step, fence, "", "waiting-cli-limit")
+}
+
+func (w agentWorkflow) RecordAgentReport(_ context.Context, _, step string, fence int64, r protocol.AgentReport) error {
+	w.mu.Lock()
+	*w.reports = append(*w.reports, fmt.Sprintf("%s/%d %s %s %d %.2f", step, fence, r.Session, r.Version,
+		r.Usage.InputTokens, r.Usage.CostUSD))
+	w.mu.Unlock()
+	return nil
+}
+
+// KIN-79: a failure with code cli_limit holds the step for the CLI's limit (with its reset time); the CLI's report
+// on a completed or failed attempt is stored before the attempt's end is applied.
+func TestCLILimitHoldsTheStepAndReportsAreStored(t *testing.T) {
+	t.Parallel()
+	e := newChannelEnv()
+	var reports []string
+	e.ch.Executions = agentWorkflow{e.wf, &reports}
+	e.wf.fence["s1"], e.wf.state["s1"] = 1, "running"
+	e.wf.fence["s2"], e.wf.state["s2"] = 1, "running"
+	sess, _ := newSession("r1")
+	rep := &protocol.AgentReport{Session: "sess-1", Version: "2.1.0", Usage: &protocol.AgentUsage{InputTokens: 10, CostUSD: 0.5}}
+	limit, _ := json.Marshal(protocol.Failure{Reason: "cli_limit: rate_limit: usage limit reached", Code: protocol.FailureCLILimit,
+		Cause: "rate_limit", ResetsAt: 1_795_575_600_000, Agent: rep})
+	done, _ := json.Marshal(protocol.Completed{Agent: rep})
+	evs := []protocol.Event{
+		{Epoch: "sp", Seq: 1, Step: "s1", Fence: 1, AttemptSeq: 1, Kind: protocol.EventFailed, At: 1_000, Body: limit},
+		{Epoch: "sp", Seq: 2, Base: 1, Step: "s2", Fence: 1, AttemptSeq: 1, Kind: protocol.EventCompleted, At: 2_000, Body: done},
+	}
+	for _, ev := range evs {
+		if err := handle(t, e.ch, sess, protocol.TypeEvent, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.wf.mu.Lock()
+	defer e.wf.mu.Unlock()
+	if e.wf.state["s1"] != "waiting-cli-limit" || e.wf.state["s2"] != "done" {
+		t.Fatalf("states %v", e.wf.state)
+	}
+	if !slices.Contains(e.wf.marks, "hold-cli-limit 2026-11-25T03:00:00Z cli_limit: rate_limit: usage limit reached 1000 ") {
+		t.Fatalf("marks %q", e.wf.marks)
+	}
+	if !slices.Equal(reports, []string{"s1/1 sess-1 2.1.0 10 0.50", "s2/1 sess-1 2.1.0 10 0.50"}) {
+		t.Fatalf("reports %q", reports)
+	}
+}
+
+// KIN-79: a CLI event is an attempt event (checked against the attempt's token) whose text is redacted before it is
+// stored.
+func TestAgentEventsAreCheckedAndRedacted(t *testing.T) {
+	t.Parallel()
+	body, _ := json.Marshal(protocol.AgentEvent{Kind: "text", Text: "token ghp_" + strings.Repeat("a", 36) + " here",
+		Input: `{"password":"hunter2hunter2"}`})
+	red := redactBody(protocol.EventAgent, body)
+	if strings.Contains(string(red), "ghp_aaaa") || !strings.Contains(string(red), "here") {
+		t.Fatalf("redacted %s", red)
+	}
+}

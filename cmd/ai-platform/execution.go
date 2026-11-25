@@ -122,8 +122,8 @@ func wireStrictEgress(wf *workflowapp.Service, strict func(ctx context.Context, 
 }
 
 // runnerDispatcher queues the workflow's commands in the runner's command log (joins the caller's transaction).
-// Until the CLI adapters (KIN-32) every assignment runs the mock agent; the mock planner names its step after the
-// scenario.
+// An assignment for an AI CLI (claude, codex; chosen by routing, KIN-33) carries the CLI run (KIN-79); any other
+// runs the mock agent, whose planner names its step after the scenario.
 type runnerDispatcher struct{ ch *runnersapp.Channel }
 
 func mockScenario(stepKey string) string {
@@ -138,9 +138,16 @@ func (d runnerDispatcher) Assign(ctx context.Context, runnerID string, a workflo
 	if scope == nil {
 		scope = []string{}
 	}
-	return d.ch.Send(ctx, runnerID, protocol.AssignCommandID(a.StepID, a.Fence), protocol.CommandAssign, protocol.Assign{
-		Step: a.StepID, Fence: a.Fence, Execution: a.ExecutionID, Task: a.TaskID, Project: a.ProjectID,
-		Repository: a.Repository, Scope: scope, Adapter: protocol.AdapterMock, Scenario: mockScenario(a.StepKey)})
+	return d.ch.Send(ctx, runnerID, protocol.AssignCommandID(a.StepID, a.Fence), protocol.CommandAssign, assignBody(a, scope))
+}
+
+func assignBody(a workflowapp.Assignment, scope []string) protocol.Assign {
+	as := protocol.Assign{Step: a.StepID, Fence: a.Fence, Execution: a.ExecutionID, Task: a.TaskID, Project: a.ProjectID,
+		Repository: a.Repository, Scope: scope, Adapter: protocol.AdapterMock, Scenario: mockScenario(a.StepKey)}
+	if protocol.CLIAdapter(a.Agent) {
+		as.Adapter, as.Scenario, as.Model, as.Role, as.Prompt = a.Agent, "", a.Model, a.Role, a.Prompt
+	}
+	return as
 }
 
 func (d runnerDispatcher) Cancel(ctx context.Context, runnerID, stepID string, fence int64, reason string) error {

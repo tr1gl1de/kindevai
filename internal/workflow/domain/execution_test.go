@@ -629,3 +629,76 @@ func TestHoldForNetworkWaitsWithoutUsingTheRetryBudget(t *testing.T) {
 		t.Fatal("a step waiting for approval is not a network retry")
 	}
 }
+
+// KIN-79: a CLI that hit its limit (or is logged out) parks the step WAITING(cli_limit) until the limit resets (or
+// CLILimitRetryDelay when the CLI did not say): the attempt is cancelled, no retry budget is used.
+func TestHoldForCLILimitWaitsUntilTheReset(t *testing.T) {
+	t.Parallel()
+	e := newExecution(t, 1)
+	id := e.StepByKey("backend").ID
+	resets := t0.Add(3 * time.Hour)
+	for i, until := range []time.Time{resets, {}, t0.Add(-time.Hour)} {
+		l, err := e.Claim(id, "r1", t0, ttl)
+		if err != nil {
+			t.Fatalf("claim %d: %v", i, err)
+		}
+		if err := e.HoldForCLILimit(id, "r2", l.Fence, "x", until, t0); !errors.Is(err, ErrStaleFence) {
+			t.Fatalf("hold by a runner without the claim = %v", err)
+		}
+		if err := e.HoldForCLILimit(id, "r1", l.Fence, "cli_limit: rate_limit", until, t0); err != nil {
+			t.Fatal(err)
+		}
+		s := e.StepByKey("backend")
+		want := until
+		if until.IsZero() || until.Before(t0) {
+			want = t0.Add(CLILimitRetryDelay)
+		}
+		if s.State != StepWaiting || s.WaitReason != WaitCLILimit || s.WaitUntil == nil || !s.WaitUntil.Equal(want) ||
+			s.Attempts[len(s.Attempts)-1].State != AttemptCancelled {
+			t.Fatalf("held step %d = %+v", i, s)
+		}
+		if s.CLILimitRetryDue(want.Add(-time.Second)) || !s.CLILimitRetryDue(want) {
+			t.Fatalf("retry due around %v wrong", want)
+		}
+		if err := e.ResumeStep(id, t0); err != nil {
+			t.Fatal(err)
+		}
+		if e.StepByKey("backend").WaitUntil != nil {
+			t.Fatal("wait until kept after resuming")
+		}
+	}
+	if e.State != ExecutionRunning {
+		t.Fatalf("cli limits failed the execution: %s", e.State)
+	}
+	if (&Step{State: StepWaiting, WaitReason: WaitNetwork}).CLILimitRetryDue(t0.Add(time.Hour)) {
+		t.Fatal("a network wait is not a cli_limit retry")
+	}
+}
+
+// KIN-79: the usage and native session the CLI reported are stored with the attempt, also after its end.
+func TestRecordAgentReportKeepsTheUsageOfTheAttempt(t *testing.T) {
+	t.Parallel()
+	e := newExecution(t, 2)
+	id := e.StepByKey("backend").ID
+	l, _ := e.Claim(id, "r1", t0, ttl)
+	if err := e.Start(id, "r1", l.Fence, t0, ttl); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Fail(id, "r1", l.Fence, "cli_error", t0, 2); err != nil {
+		t.Fatal(err)
+	}
+	r := AgentReport{Session: "sess-1", Model: "claude-sonnet", Version: "2.1.0",
+		Usage: AgentUsage{InputTokens: 100, OutputTokens: 20, CacheReadTokens: 7, CacheWriteTokens: 3, CostUSD: 0.5, Turns: 4}}
+	if e.RecordAgentReport(id, "r2", l.Fence, r) {
+		t.Fatal("a report from another runner was recorded")
+	}
+	if !e.RecordAgentReport(id, "r1", l.Fence, r) {
+		t.Fatal("not recorded")
+	}
+	if got := e.StepByKey("backend").Attempts[0].Report; got != r {
+		t.Fatalf("report %+v", got)
+	}
+	if e.RecordAgentReport(id, "r1", l.Fence, r) {
+		t.Fatal("the same report changed the attempt again")
+	}
+}

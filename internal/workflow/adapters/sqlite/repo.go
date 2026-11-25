@@ -263,7 +263,7 @@ func (r *Repository) loadExecution(ctx context.Context, q string, arg string) (d
 
 func (r *Repository) steps(ctx context.Context, c db.Executor, execID string) ([]domain.Step, error) {
 	rows, err := c.QueryContext(ctx, `SELECT id, step_key, title, repository, depends_on, state, wait_reason, reason,
-		fence, runner_id, lease_expires_at FROM workflow_steps WHERE execution_id = ? ORDER BY position`, execID)
+		fence, runner_id, lease_expires_at, wait_until FROM workflow_steps WHERE execution_id = ? ORDER BY position`, execID)
 	if err != nil {
 		return nil, fmt.Errorf("reading steps: %w", err)
 	}
@@ -273,9 +273,9 @@ func (r *Repository) steps(ctx context.Context, c db.Executor, execID string) ([
 	for rows.Next() {
 		var s domain.Step
 		var deps string
-		var wait, runner, lease sql.NullString
+		var wait, runner, lease, until sql.NullString
 		if err := rows.Scan(&s.ID, &s.Key, &s.Title, &s.Repository, &deps, &s.State, &wait, &s.Reason, &s.Fence,
-			&runner, &lease); err != nil {
+			&runner, &lease, &until); err != nil {
 			return nil, fmt.Errorf("reading step: %w", err)
 		}
 		if err := json.Unmarshal([]byte(deps), &s.DependsOn); err != nil {
@@ -283,6 +283,9 @@ func (r *Repository) steps(ctx context.Context, c db.Executor, execID string) ([
 		}
 		s.WaitReason, s.RunnerID = domain.WaitReason(wait.String), runner.String
 		if s.LeaseExpiresAt, err = parseNullTS(lease); err != nil {
+			return nil, fmt.Errorf("reading step %s: %w", s.ID, err)
+		}
+		if s.WaitUntil, err = parseNullTS(until); err != nil {
 			return nil, fmt.Errorf("reading step %s: %w", s.ID, err)
 		}
 		index[s.ID] = len(steps)
@@ -323,22 +326,30 @@ func (r *Repository) SaveExecution(ctx context.Context, e *domain.Execution) err
 	}
 	for _, s := range e.Steps {
 		res, err := c.ExecContext(ctx, `UPDATE workflow_steps SET state = ?, wait_reason = ?, reason = ?, fence = ?,
-			runner_id = ?, lease_expires_at = ? WHERE id = ? AND execution_id = ?`,
-			s.State, nullStr(s.WaitReason), s.Reason, s.Fence, nullStr(s.RunnerID), nullTS(s.LeaseExpiresAt), s.ID, e.ID)
+			runner_id = ?, lease_expires_at = ?, wait_until = ? WHERE id = ? AND execution_id = ?`,
+			s.State, nullStr(s.WaitReason), s.Reason, s.Fence, nullStr(s.RunnerID), nullTS(s.LeaseExpiresAt),
+			nullTS(s.WaitUntil), s.ID, e.ID)
 		if err := oneRow(res, err, "saving step "+s.Key); err != nil {
 			return err
 		}
 		for _, a := range s.Attempts {
 			if _, err := c.ExecContext(ctx, `INSERT INTO step_attempts(step_id, number, runner_id, fence, state, error,
-				started_at, finished_at, agent, work_started_at, work_ended_at, work_incomplete)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				started_at, finished_at, agent, work_started_at, work_ended_at, work_incomplete, agent_session, agent_model,
+				agent_version, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, turns)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(step_id, number) DO UPDATE SET state = excluded.state, error = excluded.error,
 				finished_at = excluded.finished_at, agent = excluded.agent,
+				agent_session = excluded.agent_session, agent_model = excluded.agent_model,
+				agent_version = excluded.agent_version, input_tokens = excluded.input_tokens,
+				output_tokens = excluded.output_tokens, cache_read_tokens = excluded.cache_read_tokens,
+				cache_write_tokens = excluded.cache_write_tokens, cost_usd = excluded.cost_usd, turns = excluded.turns,
 				work_started_at = coalesce(work_started_at, excluded.work_started_at),
 				work_ended_at = coalesce(work_ended_at, excluded.work_ended_at),
 				work_incomplete = max(work_incomplete, excluded.work_incomplete)`,
 				s.ID, a.Number, a.RunnerID, a.Fence, a.State, a.Error, ts(a.StartedAt), nullTS(a.FinishedAt), a.Agent,
-				nullTS(a.WorkStart), nullTS(a.WorkEnd), a.WorkIncomplete); err != nil {
+				nullTS(a.WorkStart), nullTS(a.WorkEnd), a.WorkIncomplete, a.Report.Session, a.Report.Model, a.Report.Version,
+				max(a.Report.Usage.InputTokens, 0), max(a.Report.Usage.OutputTokens, 0), max(a.Report.Usage.CacheReadTokens, 0),
+				max(a.Report.Usage.CacheWriteTokens, 0), max(a.Report.Usage.CostUSD, 0), max(a.Report.Usage.Turns, 0)); err != nil {
 				return fmt.Errorf("saving attempt %d of step %s: %w", a.Number, s.Key, err)
 			}
 		}
@@ -479,14 +490,17 @@ func (r *Repository) ListTasks(ctx context.Context, f app.TaskFilter, limit int)
 }
 
 const attemptCols = `a.number, a.runner_id, a.fence, a.state, a.error, a.started_at, a.finished_at, a.agent,
-	a.work_started_at, a.work_ended_at, a.work_incomplete`
+	a.work_started_at, a.work_ended_at, a.work_incomplete, a.agent_session, a.agent_model, a.agent_version,
+	a.input_tokens, a.output_tokens, a.cache_read_tokens, a.cache_write_tokens, a.cost_usd, a.turns`
 
 func scanAttempt(row scanner, key *string) (domain.Attempt, error) {
 	var a domain.Attempt
 	var started string
 	var finished, workStart, workEnd sql.NullString
 	if err := row.Scan(key, &a.Number, &a.RunnerID, &a.Fence, &a.State, &a.Error, &started, &finished, &a.Agent,
-		&workStart, &workEnd, &a.WorkIncomplete); err != nil {
+		&workStart, &workEnd, &a.WorkIncomplete, &a.Report.Session, &a.Report.Model, &a.Report.Version,
+		&a.Report.Usage.InputTokens, &a.Report.Usage.OutputTokens, &a.Report.Usage.CacheReadTokens,
+		&a.Report.Usage.CacheWriteTokens, &a.Report.Usage.CostUSD, &a.Report.Usage.Turns); err != nil {
 		return a, fmt.Errorf("reading attempt: %w", err)
 	}
 	var err error

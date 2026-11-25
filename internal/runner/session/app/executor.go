@@ -94,6 +94,8 @@ type WorkspaceRequest struct {
 	Token      domain.Secret
 	// ReadOnly: a reviewer's workspace, whose end commits nothing (KIN-35).
 	ReadOnly bool
+	// BranchHead: continue the work branch from this published head (a CI fix round, KIN-106).
+	BranchHead string
 	// Progress gets the preparation's phases (protocol.Preparing*) as it reaches them (KIN-71).
 	Progress func(phase string)
 }
@@ -262,7 +264,7 @@ func (x *Executor) Command(ctx context.Context, cmd protocol.Command) error {
 		as := domain.Assignment{Step: a.Step, Fence: a.Fence, Execution: a.Execution, Task: a.Task,
 			Project: a.Project, Repository: a.Repository, Scope: a.Scope, Adapter: a.Adapter, Scenario: a.Scenario, Base: a.Base,
 			Model: a.Model, Role: a.Role, Prompt: a.Prompt, Resume: a.Resume, BypassPermissions: a.BypassPermissions,
-			TestCommand: a.TestCommand, DiffBase: a.DiffBase, DiffHead: a.DiffHead}
+			TestCommand: a.TestCommand, DiffBase: a.DiffBase, DiffHead: a.DiffHead, BranchHead: a.BranchHead}
 		if a.TimeoutSec != 0 {
 			as.Timeout = time.Duration(min(max(a.TimeoutSec, -1), int64(domain.MaxAgentTimeout/time.Second)+1)) * time.Second
 		}
@@ -840,7 +842,8 @@ func (x *Executor) prepareWorkspace(ctx context.Context, a domain.Assignment, r 
 	err = errors.New("this runner has no workspace manager")
 	if x.Workspaces != nil {
 		dir, prep, err = x.Workspaces.Prepare(ctx, WorkspaceRequest{Step: a.Step, Fence: a.Fence, Task: a.Task,
-			Repository: a.Repository, Base: a.Base, Token: a.Token, ReadOnly: a.ReadOnly(), Progress: progress.set})
+			Repository: a.Repository, Base: a.Base, Token: a.Token, ReadOnly: a.ReadOnly(), BranchHead: a.BranchHead,
+			Progress: progress.set})
 	}
 	progress.end()
 	if err != nil {

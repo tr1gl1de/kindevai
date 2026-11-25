@@ -158,12 +158,13 @@ func (h Handlers) ApprovalRequested(ctx context.Context, d messaging.Delivery) e
 		TaskID     string `json:"taskId"`
 		Reason     string `json:"reason"`
 		Risk       string `json:"risk"`
+		Scope      string `json:"scope"`
 	}
 	if err := decode(d, &p); err != nil {
 		return err
 	}
 	return permanent(h.Svc.NotifyApproval(ctx, app.ApprovalRequest{ApprovalID: p.ApprovalID, ProjectID: p.ProjectID,
-		TaskID: p.TaskID, Risk: p.Risk, Reason: p.Reason}))
+		TaskID: p.TaskID, Risk: p.Risk, Reason: p.Reason, Scope: p.Scope}))
 }
 
 // TaskFinished handles telegram.task_finished {taskId, projectId, state, title, createdBy} (KIN-62): the

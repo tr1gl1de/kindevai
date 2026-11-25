@@ -228,7 +228,7 @@ func newFixture() fixture {
 			admins:  map[string][]string{"p1": {"admin"}},
 		},
 		People:    fakePeople{owners: []string{"owner"}, chats: map[string]int64{"owner": 100, "member": 300}},
-		Approvals: fakeApprovals{"AP1": true, "AP2": true},
+		Approvals: fakeApprovals{"AP1": true, "AP2": true, "AP3": true},
 		Tx:        noTx{}, Audit: au, Outbox: out,
 		Now: func() time.Time { return time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC) },
 		NewID: func() string {
@@ -345,6 +345,23 @@ func TestVisibilityAndActions(t *testing.T) {
 	}
 	if slices.Sort(chats); !slices.Equal(chats, []int64{100, 300}) {
 		t.Fatalf("chats = %v", chats)
+	}
+}
+
+// KIN-106: a pending merge into dev (integrate_dev) reads as such, in the Owner's language.
+func TestNotifyMergeApproval(t *testing.T) {
+	t.Parallel()
+	f := newFixture()
+	ctx := t.Context()
+	if _, err := f.svc.SavePreferences(ctx, owner, "ru", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.NotifyApproval(ctx, app.ApprovalRequest{ApprovalID: "AP3", ProjectID: "p1", TaskID: "T1", Risk: "L2",
+		Reason: "plan", Scope: "integrate_dev"}); err != nil {
+		t.Fatal(err)
+	}
+	if s := f.out.sent(t); len(s) != 1 || !strings.Contains(s[0].Text, "мерж в dev") || s[0].StartParam != "approval_AP3" {
+		t.Fatalf("merge approval sent = %+v", s)
 	}
 }
 

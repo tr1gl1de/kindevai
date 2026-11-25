@@ -13,13 +13,13 @@ import (
 )
 
 type fakeCIGitHub struct {
-	state, detail string
-	err           error
-	merges        int
+	state, detail, output string
+	err                   error
+	merges                int
 }
 
-func (f *fakeCIGitHub) CIStatus(context.Context, string, string, string) (string, string, error) {
-	return f.state, f.detail, f.err
+func (f *fakeCIGitHub) CIStatus(context.Context, string, string, string) (integrationsapp.CIResult, error) {
+	return integrationsapp.CIResult{State: f.state, Detail: f.detail, Output: f.output}, f.err
 }
 
 func (f *fakeCIGitHub) MergePullRequest(context.Context, integrationsapp.MergeInput) (string, error) {
@@ -38,6 +38,11 @@ func TestCIAndMergeResultsAreTranslated(t *testing.T) {
 		if err != nil || st.State != want {
 			t.Errorf("%s → %+v %v", state, st, err)
 		}
+	}
+	// KIN-106: a failure's output reaches the workflow apart from the names.
+	if st, err := (workflowCI{gh: &fakeCIGitHub{state: integrations.CIStateFailed, detail: "d", output: "o"}}).CIStatus(t.Context(), "p", "r", "h"); err != nil ||
+		st.Detail != "d" || st.Output != "o" {
+		t.Errorf("failed → %+v %v", st, err)
 	}
 	// KIN-105: a commit without any check run is pending with NoChecks (a repository without CI).
 	st, err := workflowCI{gh: &fakeCIGitHub{state: integrations.CIStateNone}}.CIStatus(t.Context(), "p", "r", "h")

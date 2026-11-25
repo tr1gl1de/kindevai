@@ -702,23 +702,33 @@ func (s *GitHubService) OpenPullRequest(ctx context.Context, in PullRequestInput
 		Title: in.Title, Body: in.Body})
 }
 
+// CIResult is the combined CI state of a commit: State, the failed checks named in Detail, and their output for a
+// CI fix round (KIN-106; untrusted, bounded).
+type CIResult struct {
+	State, Detail, Output string
+}
+
 // CIStatus is the combined CI state of commit sha of the project's registered repository (KIN-37): its latest check
-// runs, domain.CombineChecks.
-func (s *GitHubService) CIStatus(ctx context.Context, projectID, repository, sha string) (state, detail string, err error) {
+// runs, domain.CombineChecks, and the failed checks' output (domain.FailedOutput).
+func (s *GitHubService) CIStatus(ctx context.Context, projectID, repository, sha string) (CIResult, error) {
 	r, err := s.projectRepository(ctx, projectID, repository)
 	if err != nil {
-		return "", "", err
+		return CIResult{}, err
 	}
 	tok, err := s.RepositoryToken(ctx, projectID, repository)
 	if err != nil {
-		return "", "", err
+		return CIResult{}, err
 	}
 	runs, total, err := s.API.CheckRuns(ctx, tok, r.Owner, r.Name, sha)
 	if err != nil {
-		return "", "", err
+		return CIResult{}, err
 	}
-	state, detail = domain.CombineChecks(runs, total)
-	return state, detail, nil
+	res := CIResult{}
+	res.State, res.Detail = domain.CombineChecks(runs, total)
+	if res.State == domain.CIStateFailed {
+		res.Output = domain.FailedOutput(runs)
+	}
+	return res, nil
 }
 
 // MergeInput asks to merge pull request Number of the project's Repository while its head is HeadSHA (KIN-37).

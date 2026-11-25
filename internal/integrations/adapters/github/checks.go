@@ -9,8 +9,13 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/integrations/domain"
 )
 
-// maxCheckRuns bounds the check runs read per commit (one page).
-const maxCheckRuns = 100
+// maxCheckRuns bounds the check runs read per commit (one page); maxCheckRunsBytes the page: each run carries its
+// output, whose summary and text GitHub bounds at 64 KiB each, so 100 runs fit (streamed; only titles and
+// summaries are kept, KIN-106).
+const (
+	maxCheckRuns      = 100
+	maxCheckRunsBytes = 24 << 20
+)
 
 // CheckRuns lists the latest check runs of commit sha (KIN-37), at most maxCheckRuns, and how many there are.
 func (c *Client) CheckRuns(ctx context.Context, tok domain.Secret, owner, name, sha string) ([]domain.CheckRun, int, error) {
@@ -21,15 +26,20 @@ func (c *Client) CheckRuns(ctx context.Context, tok domain.Secret, owner, name, 
 			Name       string `json:"name"`
 			Status     string `json:"status"`
 			Conclusion string `json:"conclusion"`
+			Output     struct {
+				Title   string `json:"title"`
+				Summary string `json:"summary"`
+			} `json:"output"`
 		} `json:"check_runs"`
 	}
-	if _, err := c.call(ctx, http.MethodGet, repoPath(owner, name)+"/commits/"+url.PathEscape(sha)+"/check-runs?"+q.Encode(),
+	if _, err := c.call(withResponseLimit(ctx, maxCheckRunsBytes), http.MethodGet, repoPath(owner, name)+"/commits/"+url.PathEscape(sha)+"/check-runs?"+q.Encode(),
 		tok.Reveal(), nil, &out, http.StatusOK); err != nil {
 		return nil, 0, err
 	}
 	runs := make([]domain.CheckRun, 0, len(out.CheckRuns))
 	for _, r := range out.CheckRuns {
-		runs = append(runs, domain.CheckRun{Name: r.Name, Status: r.Status, Conclusion: r.Conclusion})
+		runs = append(runs, domain.CheckRun{Name: r.Name, Status: r.Status, Conclusion: r.Conclusion,
+			Title: r.Output.Title, Summary: r.Output.Summary})
 	}
 	return runs, max(out.TotalCount, len(runs)), nil
 }

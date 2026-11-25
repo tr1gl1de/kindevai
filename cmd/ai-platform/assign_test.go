@@ -14,15 +14,16 @@ import (
 func TestAssignBodyCarriesTheCLIRun(t *testing.T) {
 	t.Parallel()
 	a := workflowapp.Assignment{StepID: "s1", StepKey: "api", Fence: 2, Agent: "claude", Model: "sonnet", Role: "implementer",
-		Prompt: "# Task"}
+		Prompt: "# Task", BranchHead: "abc123"}
 	got := assignBody(a)
 	if got.Adapter != protocol.AdapterClaude || got.Scenario != "" || got.Model != "sonnet" || got.Role != "implementer" ||
-		got.Prompt != "# Task" {
+		got.Prompt != "# Task" || got.BranchHead != "abc123" { // KIN-106: a CI fix round continues the published branch
 		t.Fatalf("assign %+v", got)
 	}
 	for _, agent := range []string{"", "mock"} {
 		a.Agent = agent
-		if got := assignBody(a); got.Adapter != protocol.AdapterMock || got.Prompt != "" || got.Scenario != protocol.ScenarioSuccess {
+		if got := assignBody(a); got.Adapter != protocol.AdapterMock || got.Prompt != "" || got.Scenario != protocol.ScenarioSuccess ||
+			got.BranchHead != "" {
 			t.Fatalf("%q: assign %+v", agent, got)
 		}
 	}

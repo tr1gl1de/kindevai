@@ -376,6 +376,7 @@ func (s *Service) SavePreferences(ctx context.Context, p auth.Principal, languag
 // ApprovalRequest is a pending approval as the approvals context announces it.
 type ApprovalRequest struct {
 	ApprovalID, ProjectID, TaskID, Risk, Reason string
+	Scope                                       string // execute or integrate_dev (KIN-106)
 }
 
 // NotifyApproval tells the Owners (the only ones who decide) about a pending approval. The message only opens
@@ -403,7 +404,8 @@ func (s *Service) NotifyApproval(ctx context.Context, r ApprovalRequest) error {
 		if err != nil {
 			return fmt.Errorf("listing owners: %w", err)
 		}
-		n := domain.ApprovalNotice{ApprovalID: r.ApprovalID, TaskID: r.TaskID, Project: project, Risk: r.Risk, Reason: r.Reason}
+		n := domain.ApprovalNotice{ApprovalID: r.ApprovalID, TaskID: r.TaskID, Project: project, Risk: r.Risk, Reason: r.Reason,
+			Scope: r.Scope}
 		return s.send(ctx, owners, domain.NotifyApprovalRequested, "approval/"+r.ApprovalID, "approval_"+r.ApprovalID,
 			func(l domain.Language) string { return domain.RenderApproval(l, n) })
 	})

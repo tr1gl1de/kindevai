@@ -212,6 +212,13 @@ ai-runner fingerprint                                    # compare with the runn
   checked at once, red CI blocks again, a repository without CI gets another 30 minutes) or **Retry merge**
   (`POST /api/tasks/{id}/retry-merge`, after a refused merge). Neither skips the merge gate. Legacy commit statuses
   are not read: CI must report check runs (GitHub Actions does).
+- CI fix rounds in practice (KIN-106): the implementer of a CI fix round is told the failed checks' output title and
+  summary (bounded, as untrusted text), not only their names; audit entries, block reasons and the PR card keep the
+  names only (a summary may echo log lines). If the runner holding the step's branch is disabled or revoked, the round
+  continues on another runner from the published head of the remote branch (fetched into its cache), so the push
+  stays a fast-forward; a branch that someone else moved is never overwritten. A runner that only went offline keeps
+  the step until it returns — disable it to move the work. When a task reaches VERIFYING with a pending integrate_dev approval (L2/L3), the Owners get a Telegram
+  notification that the verified work waits for the merge into dev.
 - Plan discussion API (KIN-43; the chat UI is KIN-44): the Owner and project admins write about the current plan
   revision of a task awaiting approval or ready (`POST /api/tasks/{id}/discussion/messages`, 202; members and viewers
   read `GET /api/tasks/{id}/discussion`). Each message is one turn run by the planner role's CLI like a planner

@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -34,7 +36,21 @@ type fakeEvents struct {
 	mu       sync.Mutex
 	accepted []int // revision numbers
 	closed   []string
+	verified []string // task:revision of each entry into VERIFYING (KIN-106)
 	fail     error
+}
+
+func (f *fakeEvents) TaskVerifying(_ context.Context, t domain.Task) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.verified = append(f.verified, fmt.Sprintf("%s:%d", t.ID, t.PlanRevision))
+	return nil
+}
+
+func (f *fakeEvents) verifying() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.verified)
 }
 
 func (f *fakeEvents) PlanAccepted(_ context.Context, _ domain.Task, rev domain.PlanRevision) error {

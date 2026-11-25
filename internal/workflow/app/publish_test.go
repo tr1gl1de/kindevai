@@ -129,6 +129,19 @@ func (a *memAudit) kinds() []string {
 	return out
 }
 
+// details is every recorded detail value.
+func (a *memAudit) details() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var out []string
+	for _, e := range a.entries {
+		for _, v := range e.Details {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 type publishEnv struct {
 	schedEnv
 	out   *alertOutbox

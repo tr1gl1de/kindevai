@@ -26,19 +26,29 @@ const (
 	CIStateNone = "none"
 )
 
-// CheckRun is one check run on a commit as GitHub reports it.
+// CheckRun is one check run on a commit as GitHub reports it; Title and Summary are its output (KIN-106,
+// untrusted text written by the CI).
 type CheckRun struct {
 	Name       string
 	Status     string // queued | in_progress | completed | waiting | requested | pending
 	Conclusion string // success | failure | neutral | cancelled | skipped | timed_out | action_required | stale | ...
+	Title      string
+	Summary    string
 }
 
-const maxCIDetail = 2000
+// maxCIDetail bounds the CI detail (the failed checks' names, bytes); maxCIOutput the failed checks' output told to a
+// CI fix round, maxCheckTitle and maxCheckSummary one check's share of it at most (KIN-106).
+const (
+	maxCIDetail     = 2000
+	maxCIOutput     = 3000
+	maxCheckTitle   = 200
+	maxCheckSummary = 1000
+)
 
 // CombineChecks is the CI state of a commit from its latest check runs (total: how many GitHub has, maybe more than
-// were read): none when the commit has no check run at all; pending while none was read, one is not completed or some were not read (never green on a partial
-// list); passed when every one concluded success, neutral or skipped; failed otherwise, with the failed checks named
-// in detail ("name (conclusion)", bounded).
+// were read): none when the commit has no check run at all; pending while none was read, one is not completed or
+// some were not read (never green on a partial list); passed when every one concluded success, neutral or skipped;
+// failed otherwise, with the failed checks named in detail ("name (conclusion)", bounded).
 func CombineChecks(runs []CheckRun, total int) (state, detail string) {
 	if len(runs) == 0 {
 		if total == 0 {
@@ -52,9 +62,9 @@ func CombineChecks(runs []CheckRun, total int) (state, detail string) {
 		switch {
 		case r.Status != "completed":
 			pending = true
-		case r.Conclusion == "success" || r.Conclusion == "neutral" || r.Conclusion == "skipped":
+		case passed(r):
 		default:
-			failed = append(failed, fmt.Sprintf("%s (%s)", truncate(strings.TrimSpace(r.Name), 100), truncate(r.Conclusion, 30)))
+			failed = append(failed, checkName(r))
 		}
 	}
 	switch {
@@ -64,6 +74,42 @@ func CombineChecks(runs []CheckRun, total int) (state, detail string) {
 		return CIStatePending, ""
 	}
 	return CIStatePassed, ""
+}
+
+// FailedOutput is what a CI fix round is told about the failed checks beyond their names (KIN-106): each one's
+// output title and summary (untrusted text the CI wrote), the budget shared among them, all bounded. Only the
+// implementer gets it: audit entries, block reasons and the API keep the names (a summary may echo log lines).
+func FailedOutput(runs []CheckRun) string {
+	var failed []CheckRun
+	for _, r := range runs {
+		if r.Status == "completed" && !passed(r) && (strings.TrimSpace(r.Title) != "" || strings.TrimSpace(r.Summary) != "") {
+			failed = append(failed, r)
+		}
+	}
+	if len(failed) == 0 {
+		return ""
+	}
+	share := max(maxCIOutput/len(failed), 160)
+	var b strings.Builder
+	for _, r := range failed {
+		part := "### " + checkName(r)
+		if title := truncate(strings.TrimSpace(r.Title), maxCheckTitle); title != "" {
+			part += ": " + title
+		}
+		if summary := truncate(strings.TrimSpace(r.Summary), maxCheckSummary); summary != "" {
+			part += "\n" + summary
+		}
+		b.WriteString(truncate(part, share) + "\n\n")
+	}
+	return truncate(strings.TrimSpace(b.String()), maxCIOutput)
+}
+
+func passed(r CheckRun) bool {
+	return r.Conclusion == "success" || r.Conclusion == "neutral" || r.Conclusion == "skipped"
+}
+
+func checkName(r CheckRun) string {
+	return fmt.Sprintf("%s (%s)", truncate(strings.TrimSpace(r.Name), 100), truncate(r.Conclusion, 30))
 }
 
 // PullRequestState is a pull request as the merge needs it.

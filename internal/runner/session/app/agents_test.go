@@ -454,6 +454,28 @@ func TestReviewerRunsReadOnlyWithTheDiffInItsPrompt(t *testing.T) {
 	l.proc(0).end(domain.Exit{})
 }
 
+// KIN-106: a CI fix round's implementer continues the published branch: its workspace request carries the branch
+// head; other attempts' requests carry none.
+func TestACIFixRoundWorkspaceContinuesThePublishedBranch(t *testing.T) {
+	t.Parallel()
+	x, l, _, _, _ := newCLIExecutor()
+	ws := &fakeWorkspaces{}
+	x.Workspaces = ws
+	a := cliAssignment(domain.AgentClaude)
+	a.Base, a.BranchHead = "dev", "abc123"
+	if err := x.Assign(t.Context(), a); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "launch", func() bool { return l.count() == 1 })
+	ws.mu.Lock()
+	got := ws.reqs[0].BranchHead
+	ws.mu.Unlock()
+	if got != "abc123" {
+		t.Fatalf("workspace request branch head %q", got)
+	}
+	l.proc(0).end(domain.Exit{})
+}
+
 // KIN-35: an implementer's CLI gets the test command; the runner reports the test result before the final changes and
 // the attempt's end, masked and bounded.
 func TestImplementerTestResultIsReportedBeforeTheEnd(t *testing.T) {

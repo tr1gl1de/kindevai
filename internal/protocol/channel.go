@@ -147,6 +147,9 @@ type Assign struct {
 	TestCommand string `json:"testCommand,omitempty"`
 	DiffBase    string `json:"diffBase,omitempty"`
 	DiffHead    string `json:"diffHead,omitempty"`
+	// BranchHead is the published head of the step's work branch (a CI fix round's implementer, KIN-106): the runner
+	// continues the worktree from it, fetching the branch from the repository when its cache does not hold it.
+	BranchHead string `json:"branchHead,omitempty"`
 	// Base is the branch the attempt's worktree starts from (the repository's integration branch, KIN-26/KIN-29).
 	// Empty: the attempt runs in an empty directory (no registered repository).
 	Base string `json:"base,omitempty"`

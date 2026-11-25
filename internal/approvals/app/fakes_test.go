@@ -272,6 +272,11 @@ func (f *fakeOutbox) Enqueue(_ context.Context, m messaging.Message) error {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	for _, o := range f.msgs {
+		if o.Key == m.Key {
+			return nil // the outbox is idempotent by key (messaging.Outbox.Enqueue)
+		}
+	}
 	f.msgs = append(f.msgs, m)
 	return nil
 }

@@ -43,10 +43,16 @@ func TestCIStatusAndMergeOfAPlatformPullRequest(t *testing.T) {
 	e.deliver(t, app.TopicRepositorySync)
 	ctx := t.Context()
 	e.api.runs = []domain.CheckRun{{Name: "test", Status: "completed", Conclusion: "success"}}
-	if st, _, err := e.gh.CIStatus(ctx, "p1", "acme/api", "h1"); err != nil || st != domain.CIStatePassed {
-		t.Fatalf("CI %s %v", st, err)
+	if res, err := e.gh.CIStatus(ctx, "p1", "acme/api", "h1"); err != nil || res.State != domain.CIStatePassed || res.Output != "" {
+		t.Fatalf("CI %+v %v", res, err)
 	}
-	if _, _, err := e.gh.CIStatus(ctx, "p2", "acme/api", "h1"); !errors.Is(err, domain.ErrNotFound) {
+	// KIN-106: a failed check's output comes with the result, apart from the names.
+	e.api.runs = []domain.CheckRun{{Name: "test", Status: "completed", Conclusion: "failure", Title: "1 failed", Summary: "FAIL x"}}
+	if res, err := e.gh.CIStatus(ctx, "p1", "acme/api", "h1"); err != nil || res.State != domain.CIStateFailed ||
+		res.Detail != "failed checks: test (failure)" || res.Output != "### test (failure): 1 failed\nFAIL x" {
+		t.Fatalf("CI %+v %v", res, err)
+	}
+	if _, err := e.gh.CIStatus(ctx, "p2", "acme/api", "h1"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("another project's repository: %v", err)
 	}
 	open := domain.PullRequestState{Number: 9, State: "open", HeadRef: "feature/t1--s1", HeadSHA: "h1", Base: "dev"}

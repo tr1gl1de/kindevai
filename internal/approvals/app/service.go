@@ -308,7 +308,25 @@ func (s *Service) PlanAccepted(ctx context.Context, ev PlanEvent) error {
 	}
 	integ := base
 	integ.ID, integ.Scope = s.NewID(), domain.ScopeIntegrateDev
-	return s.request(ctx, integ, now, false) // actionable only after verification (KIN-37 notifies then)
+	return s.request(ctx, integ, now, false) // actionable only after verification (TaskVerifying notifies then)
+}
+
+// TaskVerifying runs in the workflow's transaction when a task enters VERIFYING on plan revision rev (KIN-106):
+// a pending integrate_dev approval of that revision is now actionable, so the Owner is notified (once per approval:
+// the notification's outbox key is the approval's).
+func (s *Service) TaskVerifying(ctx context.Context, taskID string, rev int) error {
+	all, err := s.Repo.ForTask(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("loading approvals: %w", err)
+	}
+	for _, a := range all {
+		if a.Scope == domain.ScopeIntegrateDev && a.State == domain.StatePending && a.Revision == rev {
+			if err := s.notify(ctx, a); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // TaskClosed runs in the workflow's transaction when a task is cancelled or failed: its pending approvals are moot.

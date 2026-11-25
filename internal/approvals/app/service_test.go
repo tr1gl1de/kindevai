@@ -601,3 +601,36 @@ func TestRevisionDiffFollowsTaskAccess(t *testing.T) {
 		t.Fatalf("base = revision: err = %v", err)
 	}
 }
+
+// Acceptance (KIN-106, KIN-24 note): a task that reaches VERIFYING with a pending integrate_dev approval of its
+// revision notifies the Owner (telegram.approval_requested, scope integrate_dev) once; nothing is sent for an L1
+// task (granted by policy), for another revision or for an approval already decided.
+func TestVerifyingWithAPendingMergeApprovalNotifiesTheOwner(t *testing.T) {
+	t.Parallel()
+	e := newEnv()
+	e.submit(t, 1, snapshot(domain.RiskL2, "docs"))
+	in := find(t, e.pending(t), domain.ScopeIntegrateDev)
+	before := len(e.outbox.msgs)
+	if err := e.svc.TaskVerifying(t.Context(), "t1", 2); err != nil || len(e.outbox.msgs) != before {
+		t.Fatalf("another revision: %v %+v", err, e.outbox.msgs)
+	}
+	for range 2 { // a CI fix round returns the task to VERIFYING again
+		if err := e.svc.TaskVerifying(t.Context(), "t1", 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var sent []string
+	for _, m := range e.outbox.msgs[before:] {
+		if m.Topic == TopicApprovalRequested {
+			sent = append(sent, string(m.Payload))
+		}
+	}
+	if len(sent) != 1 || !strings.Contains(sent[0], in.ID) || !strings.Contains(sent[0], `"scope":"integrate_dev"`) {
+		t.Fatalf("notifications %v", sent)
+	}
+	l1 := newEnv()
+	l1.submit(t, 1, snapshot(domain.RiskL1, "docs"))
+	if err := l1.svc.TaskVerifying(t.Context(), "t1", 1); err != nil || len(l1.outbox.msgs) != 0 {
+		t.Fatalf("L1: %v %+v", err, l1.outbox.msgs)
+	}
+}

@@ -87,6 +87,9 @@ type Assignment struct {
 	TestCommand string
 	DiffBase    string
 	DiffHead    string
+	// BranchHead is the published head of the step's work branch (a CI fix round's implementer, KIN-106): the
+	// workspace continues from it even when this runner's cache does not hold the branch.
+	BranchHead string
 }
 
 // RoleReviewer is the platform role of a reviewer attempt: its CLI runs read-only (KIN-35).
@@ -175,13 +178,13 @@ func CheckAssignment(a Assignment, p Policy) error {
 	case a.Publish():
 		if a.Role != RolePublisher || a.Base == "" || !commitRe.MatchString(a.DiffHead) || a.DiffBase != "" ||
 			a.Model != "" || a.Prompt != "" || a.Resume != "" || a.BypassPermissions || a.Timeout != 0 ||
-			a.TestCommand != "" || a.Scenario != "" {
+			a.TestCommand != "" || a.Scenario != "" || a.BranchHead != "" {
 			return bad("publish assignment")
 		}
 	case a.Adapter != AdapterMock:
 		return fmt.Errorf("%w: %q", ErrUnknownAdapter, a.Adapter)
 	case a.Model != "" || a.Prompt != "" || a.Resume != "" || a.BypassPermissions || a.Timeout != 0 || a.TestCommand != "" ||
-		a.DiffBase != "" || a.DiffHead != "":
+		a.DiffBase != "" || a.DiffHead != "" || a.BranchHead != "":
 		return bad("agent fields for the mock agent")
 	case a.Scenario != "" && !slices.Contains(scenarios, a.Scenario):
 		return bad("scenario")
@@ -213,6 +216,8 @@ func checkAgent(a Assignment) error {
 		return bad("test command")
 	case (a.DiffBase == "") != (a.DiffHead == "") || a.DiffBase != "" && (!shaRe.MatchString(a.DiffBase) || !shaRe.MatchString(a.DiffHead)):
 		return bad("diff range")
+	case a.BranchHead != "" && (a.Base == "" || a.ReadOnly() || !shaRe.MatchString(a.BranchHead)):
+		return bad("branch head")
 	}
 	return nil
 }

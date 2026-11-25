@@ -84,6 +84,18 @@ func (s *Step) Published() (Publication, bool) {
 	return Publication{}, false
 }
 
+// PublishedHead is the head the step last pushed to its work branch (its latest succeeded publish attempt, of any
+// round: a CI fix round or a runner loss resets the attempt window, not the remote branch) — "" before its first
+// publish. A CI fix round's implementer continues from it (KIN-106), on whatever runner it gets.
+func (s *Step) PublishedHead() string {
+	for i := len(s.Attempts) - 1; i >= 0; i-- {
+		if a := s.Attempts[i]; a.Role == StepRolePublisher && a.State == AttemptSucceeded && a.HeadSHA != "" {
+			return a.HeadSHA
+		}
+	}
+	return ""
+}
+
 // finishPublish decides the end of a publish attempt: it succeeds only on the push of the reviewed head to the
 // step's own work branch.
 func (e *Execution) finishPublish(s *Step, now time.Time, maxAttempts int) bool {

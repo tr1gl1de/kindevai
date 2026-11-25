@@ -54,6 +54,19 @@ func TestRenderApproval(t *testing.T) {
 	}
 }
 
+// KIN-106: a pending integrate_dev approval says the verified work waits for the merge into dev, in both languages.
+func TestRenderMergeApproval(t *testing.T) {
+	t.Parallel()
+	n := domain.ApprovalNotice{ApprovalID: "ap1", TaskID: "t1", Project: "Shop", Risk: "L2", Reason: "plan",
+		Scope: "integrate_dev"}
+	if en := domain.RenderApproval(domain.LangEN, n); !strings.Contains(en, "merge into dev") || !strings.Contains(en, "Shop") {
+		t.Fatalf("en = %q", en)
+	}
+	if ru := domain.RenderApproval(domain.LangRU, n); !strings.Contains(ru, "мерж в dev") || !strings.Contains(ru, "t1") {
+		t.Fatalf("ru = %q", ru)
+	}
+}
+
 // KIN-60: every new source has its own text in both languages, built only from the listed fields.
 func TestRenderAlertNewSources(t *testing.T) {
 	t.Parallel()

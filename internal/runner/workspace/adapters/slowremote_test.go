@@ -58,9 +58,16 @@ for a in "$@"; do
 done
 exec %[4]s "$@"
 `, s.dir, delay, fifo, real)
-	prog := filepath.Join(s.dir, "git")
-	if err := os.WriteFile(prog, []byte(script), 0o700); err != nil { //nolint:gosec // test helper program
+	// The program is written by a child process (install), never through a file descriptor of this process: a
+	// parallel test forking while that descriptor is open would hold it across its exec, and running the program
+	// would then fail with ETXTBSY ("text file busy").
+	wrapper := filepath.Join(s.dir, "git.src")
+	if err := os.WriteFile(wrapper, []byte(script), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	prog := filepath.Join(s.dir, "git")
+	if out, err := exec.CommandContext(t.Context(), "install", "-m", "0700", wrapper, prog).CombinedOutput(); err != nil {
+		t.Fatalf("installing the git wrapper: %v\n%s", err, out)
 	}
 	write(t, filepath.Join(s.dir, "slow"), "")
 	g, err := gitcli.New("file://"+s.remotes, nil)

@@ -57,10 +57,13 @@ const (
 var ErrHeadMoved = errors.New("the pull request's head moved away from the checked commit")
 
 // CIStatus is the combined status of all checks on a commit; Detail names the failed ones (untrusted text from
-// GitHub, bounded by the adapter). NoChecks: pending because the commit has no check run at all (KIN-105).
+// GitHub, bounded by the adapter), Output is their output title and summary, told only to the CI fix round's
+// implementer (KIN-106: never in audit entries, block reasons or the API). NoChecks: pending because the commit has
+// no check run at all (KIN-105).
 type CIStatus struct {
 	State    domain.CIState
 	Detail   string
+	Output   string
 	NoChecks bool
 }
 
@@ -235,7 +238,7 @@ func (s *Service) HandleCICheck(ctx context.Context, d messaging.Delivery) error
 			}
 			// A new failure, or one still there after the Owner resumed the task: a fix round, or blocked again
 			// once the rounds are used up (a fix round makes the task RUNNING, so this never repeats one).
-			return s.ciFailed(ctx, &t, cur, now)
+			return s.ciFailed(ctx, &t, cur, st.Output, now)
 		case domain.CIPassed:
 			if t.State == domain.TaskBlocked {
 				if cur.Merge == domain.MergeFailed {
@@ -268,7 +271,7 @@ func (s *Service) HandleCICheck(ctx context.Context, d messaging.Delivery) error
 
 // ciFailed starts a CI fix round of the artifact's step in its execution (task VERIFYING → RUNNING), or blocks the
 // task once the CI fix rounds are used up.
-func (s *Service) ciFailed(ctx context.Context, t *domain.Task, a domain.GitArtifact, now time.Time) error {
+func (s *Service) ciFailed(ctx context.Context, t *domain.Task, a domain.GitArtifact, output string, now time.Time) error {
 	entry := auditapp.Entry{Actor: auditapp.System(), ProjectID: t.ProjectID, Subject: auditSubjectTaskPrefix + t.ID,
 		Kind: KindCIFailed, Details: map[string]string{"repository": a.Repository, "branch": a.Branch, "head": a.HeadSHA,
 			"pullRequest": strconv.Itoa(a.PRNumber), "checks": a.CIDetail}}
@@ -283,6 +286,9 @@ func (s *Service) ciFailed(ctx context.Context, t *domain.Task, a domain.GitArti
 		return nil // not the task's current run
 	}
 	feedback := fmt.Sprintf("Pull request #%d (%s, commit %s): %s", a.PRNumber, a.Branch, a.HeadSHA, a.CIDetail)
+	if output != "" {
+		feedback += "\n\nOutput of the failed checks:\n" + output
+	}
 	var exhausted bool
 	err = s.applyExecution(ctx, e, func(_ context.Context, e *domain.Execution, now time.Time) error {
 		err := e.ReopenForCI(a.StepID, feedback, now)

@@ -65,6 +65,11 @@ type Git interface {
 	// FetchBase fetches branch base of repository into the bare cache mirror (created if missing) and returns the
 	// commit it points to.
 	FetchBase(ctx context.Context, mirror, repository, base string, tok Token) (string, error)
+	// SyncBranch makes the cache's branch hold head, the published head of the remote branch (KIN-106): a branch
+	// that already contains head is kept (this runner's own work on top of it); otherwise the remote branch is
+	// fetched, must point at head, and the cache's branch (missing, or an ancestor of head) is set to it. A branch
+	// that diverged from head, or a remote branch that moved away from it, is an error.
+	SyncBranch(ctx context.Context, mirror, repository, branch, head string, tok Token) error
 	// AddWorktree checks branch out in dir, creating it at baseSHA when it does not exist yet. It returns the
 	// branch's fork point from the base (baseSHA for a new branch) and the worktree's administrative directory.
 	AddWorktree(ctx context.Context, mirror, dir, branch, baseSHA string) (fork, admin string, err error)
@@ -129,6 +134,10 @@ type Request struct {
 	Base       string
 	Token      Token
 	ReadOnly   bool // a reviewer's workspace: Finish commits nothing (KIN-35)
+	// BranchHead is the published head of the step's work branch (a CI fix round, KIN-106): the worktree continues
+	// from it even when this runner's cache does not hold the branch (another runner did the earlier work) or holds
+	// an older copy of it. Empty: the branch is this runner's own (or new, from the base).
+	BranchHead string
 	// Progress, when set, gets the preparation's phases (Phase*) as it reaches them.
 	Progress func(phase string)
 }
@@ -311,9 +320,16 @@ func (m *Manager) checkout(ctx context.Context, r Request, branch, mirror, dir s
 	}
 	r.progress(PhaseFetching)
 	sha, err := m.Git.FetchBase(ctx, mirror, r.Repository, r.Base, r.Token)
+	if err != nil {
+		release()
+		return "", "", fmt.Errorf("fetching %s of %s: %w", r.Base, r.Repository, err)
+	}
+	if r.BranchHead != "" {
+		err = m.Git.SyncBranch(ctx, mirror, r.Repository, branch, r.BranchHead, r.Token)
+	}
 	release()
 	if err != nil {
-		return "", "", fmt.Errorf("fetching %s of %s: %w", r.Base, r.Repository, err)
+		return "", "", fmt.Errorf("continuing %s from its published head %s: %w", branch, r.BranchHead, err)
 	}
 	if release, err = acquire(ctx, m.mirrorSem(&m.worktrees, mirror), r, queued); err != nil {
 		return "", "", err

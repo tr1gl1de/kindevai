@@ -118,6 +118,11 @@ func (h Hooks) PlanAccepted(ctx context.Context, t wf.Task, rev wf.PlanRevision)
 		Revision: rev.Number(), PlanHash: rev.Hash(), Risk: domain.Risk(rev.Risk()), Plan: Snapshot(rev.Plan())})
 }
 
+// TaskVerifying notifies the Owner of a pending integrate_dev approval of the task's revision (KIN-106).
+func (h Hooks) TaskVerifying(ctx context.Context, t wf.Task) error {
+	return h.Svc.TaskVerifying(ctx, t.ID, t.PlanRevision)
+}
+
 // TaskClosed supersedes the task's pending approvals.
 func (h Hooks) TaskClosed(ctx context.Context, t wf.Task) error {
 	return h.Svc.TaskClosed(ctx, t.ID)

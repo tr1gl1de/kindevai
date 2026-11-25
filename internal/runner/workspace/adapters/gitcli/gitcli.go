@@ -258,6 +258,87 @@ func (g *Git) Push(ctx context.Context, mirror, repository, branch, sha string, 
 	return err
 }
 
+// SyncBranch implements app.Git.
+func (g *Git) SyncBranch(ctx context.Context, mirror, repository, branch, head string, tok app.Token) error {
+	if _, _, err := domain.SplitRepository(repository); err != nil {
+		return err
+	}
+	if err := domain.CheckWorkBranch(branch); err != nil {
+		return err
+	}
+	if err := checkSHA(head); err != nil {
+		return err
+	}
+	ref := "refs/heads/" + branch
+	local := ""
+	if out, err := g.mirrorRun(ctx, mirror, nil, "rev-parse", "--verify", "--quiet", "--end-of-options", ref+"^{commit}"); err == nil {
+		local = strings.TrimSpace(string(out))
+		if g.ancestor(ctx, mirror, head, local) {
+			return nil // the cache's branch holds the published head (and maybe this runner's work on top)
+		}
+	}
+	extra, done, err := g.credentials(ctx, tok)
+	if err != nil {
+		return err
+	}
+	defer done()
+	remote := "refs/remotes/origin/" + branch
+	if _, err := g.mirrorRun(ctx, mirror, extra, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+		"--end-of-options", g.URL(repository), "+"+ref+":"+remote); err != nil {
+		return err
+	}
+	out, err := g.mirrorRun(ctx, mirror, nil, "rev-parse", "--verify", "--end-of-options", remote+"^{commit}")
+	if err != nil {
+		return err
+	}
+	if got := strings.TrimSpace(string(out)); got != head {
+		return fmt.Errorf("the remote branch %s is at %s, not at the published %s: someone else pushed to it, and the "+
+			"platform never overwrites that", branch, got, head)
+	}
+	if local != "" && !g.ancestor(ctx, mirror, local, head) {
+		return fmt.Errorf("the cached branch %s (%s) diverged from the published %s", branch, local, head)
+	}
+	if local != "" {
+		held, err := g.checkedOut(ctx, mirror, ref)
+		if err != nil {
+			return err
+		}
+		if held {
+			// Moving the branch under a worktree an earlier attempt left would turn that attempt's files into a
+			// revert of the published work; that work is never discarded either.
+			return fmt.Errorf("a worktree left by an earlier attempt has %s checked out at %s; it is kept, so this "+
+				"runner cannot continue from the published %s", branch, local, head)
+		}
+	}
+	// local "" asks update-ref to create the branch only if it still does not exist.
+	_, err = g.mirrorRun(ctx, mirror, nil, "update-ref", "-m", "kindevai: continue from the published head",
+		"--end-of-options", ref, head, local)
+	return err
+}
+
+// checkedOut reports whether a worktree of the mirror has ref checked out.
+func (g *Git) checkedOut(ctx context.Context, mirror, ref string) (bool, error) {
+	if _, err := g.mirrorRun(ctx, mirror, nil, "worktree", "prune"); err != nil {
+		return false, err
+	}
+	out, err := g.mirrorRun(ctx, mirror, nil, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	for line := range strings.Lines(string(out)) {
+		if strings.TrimSpace(line) == "branch "+ref {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ancestor reports whether commit a is an ancestor of (or equal to) commit b in the mirror.
+func (g *Git) ancestor(ctx context.Context, mirror, a, b string) bool {
+	_, err := g.mirrorRun(ctx, mirror, nil, "merge-base", "--is-ancestor", "--end-of-options", a, b)
+	return err == nil
+}
+
 // AddWorktree implements app.Git. A directory left by an earlier attempt of the same branch (its worktree was
 // not removed) is reused, so its work is never lost.
 func (g *Git) AddWorktree(ctx context.Context, mirror, dir, branch, baseSHA string) (string, string, error) {

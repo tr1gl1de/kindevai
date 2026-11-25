@@ -49,7 +49,7 @@ func startCIReconciler(ctx context.Context, wf *workflowapp.Service, every time.
 
 // ciGitHub is the integrations context's GitHubService as the CI loop needs it.
 type ciGitHub interface {
-	CIStatus(ctx context.Context, projectID, repository, sha string) (state, detail string, err error)
+	CIStatus(ctx context.Context, projectID, repository, sha string) (integrationsapp.CIResult, error)
 	MergePullRequest(ctx context.Context, in integrationsapp.MergeInput) (string, error)
 }
 
@@ -60,15 +60,15 @@ type workflowCI struct{ gh ciGitHub }
 var _ workflowapp.CIChecks = workflowCI{}
 
 func (c workflowCI) CIStatus(ctx context.Context, projectID, repository, sha string) (workflowapp.CIStatus, error) {
-	st, detail, err := c.gh.CIStatus(ctx, projectID, repository, sha)
+	res, err := c.gh.CIStatus(ctx, projectID, repository, sha)
 	if err != nil {
 		return workflowapp.CIStatus{}, ciError(err)
 	}
-	switch st {
+	switch st, detail := res.State, res.Detail; st {
 	case integrations.CIStatePassed:
 		return workflowapp.CIStatus{State: workflow.CIPassed}, nil
 	case integrations.CIStateFailed:
-		return workflowapp.CIStatus{State: workflow.CIFailed, Detail: detail}, nil
+		return workflowapp.CIStatus{State: workflow.CIFailed, Detail: detail, Output: res.Output}, nil
 	case integrations.CIStateNone:
 		return workflowapp.CIStatus{State: workflow.CIPending, NoChecks: true}, nil
 	}

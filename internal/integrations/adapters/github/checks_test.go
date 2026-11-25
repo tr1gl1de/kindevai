@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -37,7 +39,8 @@ func (f *fakeMerge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 2, "check_runs": []map[string]any{
 			{"name": "lint", "status": "completed", "conclusion": "success"},
-			{"name": "test", "status": "completed", "conclusion": "failure"}}})
+			{"name": "test", "status": "completed", "conclusion": "failure",
+				"output": map[string]any{"title": "1 test failed", "summary": "FAIL TestLogin"}}}})
 	case "GET /repos/acme/api/pulls/7":
 		_ = json.NewEncoder(w).Encode(map[string]any{"number": 7, "state": "open", "merged": false,
 			"head": map[string]any{"ref": "feature/t1--s1", "sha": f.head}, "base": map[string]any{"ref": "dev"}})
@@ -67,7 +70,8 @@ func TestChecksPullRequestAndMerge(t *testing.T) {
 	tok, _ := domain.NewSecret("ghs_tok")
 	ctx := t.Context()
 	runs, total, err := c.CheckRuns(ctx, tok, "acme", "api", "h1")
-	if st, detail := domain.CombineChecks(runs, total); err != nil || total != 2 || st != domain.CIStateFailed || detail != "failed checks: test (failure)" {
+	if st, detail := domain.CombineChecks(runs, total); err != nil || total != 2 || st != domain.CIStateFailed ||
+		detail != "failed checks: test (failure)" || domain.FailedOutput(runs) != "### test (failure): 1 test failed\nFAIL TestLogin" {
 		t.Fatalf("checks %+v %v", runs, err)
 	}
 	pr, err := c.PullRequest(ctx, tok, "acme", "api", 7)
@@ -95,5 +99,27 @@ func TestChecksPullRequestAndMerge(t *testing.T) {
 	}
 	if len(f.paths) != sent {
 		t.Fatalf("a protected merge reached GitHub: %v", f.paths[sent:])
+	}
+}
+
+// KIN-106: check runs carry their output (a summary may be up to 64 KiB each), so a page of them may be larger than
+// other GitHub answers; it is still read.
+func TestCheckRunsReadALargePage(t *testing.T) {
+	t.Parallel()
+	big := strings.Repeat("x", 60<<10)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		var runs []map[string]any
+		for i := range 10 {
+			runs = append(runs, map[string]any{"name": "c" + strconv.Itoa(i), "status": "completed", "conclusion": "failure",
+				"output": map[string]any{"title": "failed", "summary": big}})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 10, "check_runs": runs})
+	}))
+	t.Cleanup(srv.Close)
+	c := &github.Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	tok, _ := domain.NewSecret("ghs_tok")
+	runs, total, err := c.CheckRuns(t.Context(), tok, "acme", "api", "h1")
+	if err != nil || total != 10 || len(runs) != 10 || runs[9].Summary != big {
+		t.Fatalf("%d runs of %d: %v", len(runs), total, err)
 	}
 }

@@ -429,6 +429,13 @@ func (r *Repository) ExecutionsHeldBy(ctx context.Context, runnerID string) ([]s
 		WHERE e.state = 'RUNNING' AND s.runner_id = ? ORDER BY e.id`, runnerID)
 }
 
+// ExecutionsPinnedTo implements app.Repo (KIN-106).
+func (r *Repository) ExecutionsPinnedTo(ctx context.Context, runnerID string) ([]string, error) {
+	return r.ids(ctx, "listing executions pinned to a runner", `SELECT DISTINCT e.id FROM executions e
+		JOIN workflow_steps s ON s.execution_id = e.id
+		WHERE e.state = 'RUNNING' AND s.pinned_runner = ? AND s.pinned_runner != '' ORDER BY e.id`, runnerID)
+}
+
 // HeldSteps counts, per runner, the steps of running executions it holds: CLAIMED, RUNNING, or WAITING on a last
 // attempt whose outcome is UNKNOWN (domain.Step.Holding).
 func (r *Repository) HeldSteps(ctx context.Context) (map[string]int, error) {

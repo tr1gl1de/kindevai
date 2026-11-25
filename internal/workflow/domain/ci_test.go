@@ -224,3 +224,24 @@ func TestARefusedMergeCanBeRetried(t *testing.T) {
 		t.Fatalf("after retry: %+v", a)
 	}
 }
+
+// KIN-106: the published head of a step's work branch outlives the CI fix round's reset of its attempt window (and
+// a runner loss's): the next implementer continues from it.
+func TestThePublishedHeadOutlivesACIFixRound(t *testing.T) {
+	t.Parallel()
+	e, id := published(t)
+	s := e.Step(id)
+	if s.PublishedHead() != "head1" {
+		t.Fatalf("published head %q", s.PublishedHead())
+	}
+	if err := e.ReopenForCI(id, "lint (failure)", t0); err != nil {
+		t.Fatal(err)
+	}
+	if s = e.Step(id); s.PublishedHead() != "head1" {
+		t.Fatalf("after the reopen %q", s.PublishedHead())
+	}
+	s.restartReview()
+	if s.PublishedHead() != "head1" {
+		t.Fatalf("after a runner loss %q", s.PublishedHead())
+	}
+}

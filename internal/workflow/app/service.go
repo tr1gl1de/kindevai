@@ -47,6 +47,9 @@ type Repository interface {
 	TasksInState(ctx context.Context, s domain.TaskState) ([]string, error)
 	// ExecutionsHeldBy lists running executions with a step whose claim or unknown attempt is the runner's.
 	ExecutionsHeldBy(ctx context.Context, runnerID string) ([]string, error)
+	// ExecutionsPinnedTo lists running executions with a step pinned to the runner (its review loop's branch lives
+	// there), held or not (KIN-106).
+	ExecutionsPinnedTo(ctx context.Context, runnerID string) ([]string, error)
 	// HeldSteps counts, per runner id, the steps of running executions the runner holds (Step.Holding: CLAIMED,
 	// RUNNING or an unknown attempt) — the scheduler's load measure (KIN-65).
 	HeldSteps(ctx context.Context) (map[string]int, error)
@@ -82,6 +85,9 @@ type RiskPolicy interface {
 type Events interface {
 	PlanAccepted(ctx context.Context, t domain.Task, rev domain.PlanRevision) error
 	TaskClosed(ctx context.Context, t domain.Task) error // CANCELLED or FAILED
+	// TaskVerifying: the task entered VERIFYING on its current plan revision; a pending integrate_dev approval of it
+	// is now actionable and its Owner is notified (KIN-106).
+	TaskVerifying(ctx context.Context, t domain.Task) error
 }
 
 // TaskNotifier is told, inside the use case's transaction, that a task finished: it entered COMPLETED or FAILED

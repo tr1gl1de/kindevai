@@ -558,8 +558,9 @@ must no longer show the "main/master not protected" warning.
 2. Generate a private key (`.pem`), then install the App **only on the repositories** the platform works in.
 3. **Integrations** page: enter the App ID, the private key and the webhook secret.
 4. Per project: register each repository as `owner/name`. The integration branch is `dev` and must exist, never
-   `main`/`master`. Add the test command (e.g. `make test`). Keep CI on the repository: the merge into `dev` is
-   decided by its check runs.
+   `main`/`master`. Add the test command (e.g. `make test`). The repository needs CI that reports **check runs**
+   on pull requests (GitHub Actions does; legacy commit statuses are not read). Without CI nothing is merged: the
+   task is BLOCKED (reason `ci`) after 30 minutes.
 
 ### 5. Connect YouTrack
 

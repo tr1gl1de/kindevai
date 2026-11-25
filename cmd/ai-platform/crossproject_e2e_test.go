@@ -52,8 +52,10 @@ func (s *httpSession) must(want int, method, path, body string) map[string]any {
 }
 
 // AC (KIN-42, KIN-A-25 cross-project isolation): an admin of project Alpha reaches nothing of project Beta through
-// any project- or task-scoped endpoint of the served Control Plane — reads answer 404 like a missing project and
-// writes are refused (403/404) without changing anything, and no answer names Beta's task.
+// any project- or task-scoped endpoint of the served Control Plane. Beta has a real repository, plan revision, step
+// and discussion message, and every read the admin is refused succeeds for the Owner (positive control), so no row
+// passes only because its id does not exist. Reads answer 404 like a missing project, writes are refused (403/404),
+// no answer names Beta's task, and Beta looks exactly the same to the Owner afterwards.
 func TestCrossProjectIsolationOfEveryScopedEndpoint(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
@@ -71,13 +73,46 @@ func TestCrossProjectIsolationOfEveryScopedEndpoint(t *testing.T) {
 	beta := owner.must(201, "POST", "/api/projects", `{"name":"Beta","slug":"beta"}`)["id"].(string)
 	temp := owner.must(201, "POST", "/api/users", `{"login":"carol"}`)["temporaryPassword"].(string)
 	owner.must(200, "PUT", "/api/projects/"+alpha+"/members/carol", `{"role":"project_admin"}`)
+
+	// Beta: a repository, a task planned by the mock planner (revision 1, one step; no runner, so it waits) and a
+	// plan discussion message.
+	repo, _ := owner.must(201, "POST", "/api/projects/"+beta+"/repositories", `{"owner":"acme","name":"beta"}`)["id"].(string)
 	const secret = "Beta confidential roadmap"
 	created := owner.must(201, "POST", "/api/tasks", `{"projectId":"`+beta+`","title":"`+secret+`"}`)
 	view, _ := created["task"].(map[string]any)
 	task, _ := view["id"].(string)
-	if task == "" {
-		t.Fatalf("created task %v", created)
+	if task == "" || repo == "" {
+		t.Fatalf("created task %v, repository %q", created, repo)
 	}
+	p, tk := "/api/projects/"+beta, "/api/tasks/"+task
+	owner.must(200, "POST", tk+"/mock-run", `{"scenario":"success"}`)
+	var step string
+	eventually(t, "Beta's task waiting for a runner", func() bool {
+		d := owner.must(200, "GET", tk, "")
+		task, _ := d["task"].(map[string]any)
+		ex, _ := d["execution"].(map[string]any)
+		steps, _ := ex["steps"].([]any)
+		if len(steps) == 1 {
+			step, _ = steps[0].(map[string]any)["id"].(string)
+		}
+		return task["state"] == "BLOCKED" && step != ""
+	})
+	msg, _ := owner.must(202, "POST", tk+"/discussion/messages", `{"text":"Why this step?"}`)["id"].(string)
+	if msg == "" {
+		t.Fatal("no discussion message id")
+	}
+	snapshot := func() map[string]string {
+		out := map[string]string{}
+		for _, path := range []string{p, p + "/members", p + "/integrations", p + "/youtrack", p + "/risk-policy", p + "/agents",
+			tk + "/revisions/1", tk + "/discussion", "/api/tasks?projectId=" + beta} {
+			_, out[path] = owner.do("GET", path, "")
+		}
+		d := owner.must(200, "GET", tk, "")
+		b, _ := json.Marshal([]any{d["task"], d["execution"]})
+		out[tk] = string(b)
+		return out
+	}
+	before := snapshot()
 
 	carol := newHTTPSession(t, base)
 	carol.must(200, "POST", "/api/auth/login", `{"login":"carol","password":"`+temp+`"}`)
@@ -86,8 +121,10 @@ func TestCrossProjectIsolationOfEveryScopedEndpoint(t *testing.T) {
 	carol.must(200, "GET", "/api/projects/"+alpha, "")
 	carol.must(201, "POST", "/api/tasks", `{"projectId":"`+alpha+`","title":"Alpha task"}`)
 
-	p, tk := "/api/projects/"+beta, "/api/tasks/"+task
 	ownerOnly := map[string]bool{p + "/integrations": true} // refused to every non-Owner (403) whatever the project
+	// No attempt exists without a runner: the attempt reads are checked for the refusal only.
+	noControl := map[string]bool{tk + "/steps/" + step + "/attempts/1/events": true, tk + "/steps/" + step + "/attempts/1/workspace": true}
+	r, st, m := p+"/repositories/"+repo, tk+"/steps/"+step, tk+"/discussion/messages/"+msg
 	for _, c := range []struct{ method, path, body string }{
 		{"GET", p, ""},
 		{"GET", p + "/members", ""},
@@ -100,14 +137,14 @@ func TestCrossProjectIsolationOfEveryScopedEndpoint(t *testing.T) {
 		{"PUT", p + "/integrations/youtrack/trigger", `{"triggerTag":"kindevai"}`},
 		{"GET", p + "/youtrack", ""},
 		{"POST", p + "/youtrack/runs", `{"issueId":"BETA-1"}`},
-		{"POST", p + "/repositories", `{"owner":"acme","name":"beta"}`},
-		{"PUT", p + "/repositories/r1", `{"integrationBranch":"dev"}`},
-		{"DELETE", p + "/repositories/r1", ""},
-		{"POST", p + "/repositories/r1/sync", ""},
+		{"POST", p + "/repositories", `{"owner":"acme","name":"beta2"}`},
+		{"PUT", r, `{"integrationBranch":"release"}`},
+		{"DELETE", r, ""},
+		{"POST", r + "/sync", ""},
 		{"GET", p + "/risk-policy", ""},
 		{"PUT", p + "/risk-policy", `{"rules":[]}`},
 		{"GET", p + "/agents", ""},
-		{"PUT", p + "/agents/switches/claude", `{"enabled":true}`},
+		{"PUT", p + "/agents/switches/claude", `{"enabled":false}`},
 		{"PUT", p + "/agents/bindings/implementer", `{"chain":[{"agent":"claude"}]}`},
 		{"DELETE", p + "/agents/bindings/implementer", ""},
 		{"POST", "/api/tasks", `{"projectId":"` + beta + `","title":"injected"}`},
@@ -115,20 +152,28 @@ func TestCrossProjectIsolationOfEveryScopedEndpoint(t *testing.T) {
 		{"GET", tk + "/revisions/1", ""},
 		{"GET", tk + "/discussion", ""},
 		{"POST", tk + "/discussion/messages", `{"text":"hello"}`},
-		{"POST", tk + "/discussion/messages/m1/retry", ""},
-		{"GET", tk + "/steps/s1/attempts/1/events", ""},
-		{"GET", tk + "/steps/s1/attempts/1/workspace", ""},
+		{"POST", m + "/retry", ""},
+		{"GET", st + "/attempts/1/events", ""},
+		{"GET", st + "/attempts/1/workspace", ""},
 		{"POST", tk + "/plan", ""},
-		{"POST", tk + "/mock-run", `{"scenario":"success"}`},
+		{"POST", tk + "/mock-run", `{"scenario":"fail"}`},
 		{"POST", tk + "/retry", ""},
+		{"POST", tk + "/resume", ""},
+		{"POST", tk + "/retry-merge", ""},
 		{"POST", tk + "/cancel", `{"reason":"no"}`},
 	} {
 		code, body := carol.do(c.method, c.path, c.body)
 		if (code != http.StatusNotFound && code != http.StatusForbidden) || strings.Contains(body, secret) {
 			t.Errorf("%s %s = %d %s, want 404/403 without Beta's data", c.method, c.path, code, body)
 		}
-		if c.method == "GET" && !ownerOnly[c.path] && code != http.StatusNotFound {
+		if c.method != "GET" {
+			continue
+		}
+		if !ownerOnly[c.path] && code != http.StatusNotFound {
 			t.Errorf("%s %s = %d, want 404 (another project looks missing)", c.method, c.path, code)
+		}
+		if oc, ob := owner.do("GET", c.path, ""); !noControl[c.path] && oc != http.StatusOK {
+			t.Errorf("positive control: the Owner's GET %s = %d %s", c.path, oc, ob)
 		}
 	}
 	for _, path := range []string{"/api/tasks", "/api/tasks?projectId=" + beta, "/api/approvals?state=all", "/api/projects"} {
@@ -136,12 +181,11 @@ func TestCrossProjectIsolationOfEveryScopedEndpoint(t *testing.T) {
 			t.Errorf("GET %s = %d %s: lists Beta", path, code, body)
 		}
 	}
-	// Nothing changed in Beta: the task is still new, under its title, and no task was injected.
-	got := owner.must(200, "GET", tk, "")
-	if b, _ := json.Marshal(got); !strings.Contains(string(b), secret) || strings.Contains(string(b), "CANCELLED") {
-		t.Fatalf("Beta's task after the attempts: %s", b)
-	}
-	if _, body := owner.do("GET", "/api/tasks?projectId="+beta, ""); strings.Contains(body, "injected") {
-		t.Fatalf("a task was created in Beta: %s", body)
+	// Nothing changed in Beta: settings, members, repositories, task, plan, step and discussion look the same.
+	after := snapshot()
+	for path, b := range before {
+		if after[path] != b {
+			t.Errorf("Beta changed at %s:\nbefore %s\nafter  %s", path, b, after[path])
+		}
 	}
 }

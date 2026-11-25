@@ -53,6 +53,8 @@ type Repository interface {
 	// HeldSteps counts, per runner id, the steps of running executions the runner holds (Step.Holding: CLAIMED,
 	// RUNNING or an unknown attempt) — the scheduler's load measure (KIN-65).
 	HeldSteps(ctx context.Context) (map[string]int, error)
+	// RecentFailures counts, per runner id, the attempts that FAILED or were lost (UNKNOWN) since (KIN-76).
+	RecentFailures(ctx context.Context, since time.Time) (map[string]int, error)
 	ListTasks(ctx context.Context, f TaskFilter, limit int) ([]domain.Task, error) // newest first
 	LatestExecution(ctx context.Context, taskID string) (domain.Execution, error)  // domain.ErrNotFound
 	// AgentTimes returns the agent time (KIN-25: attempts' work periods and plan discussion answers) of the tasks

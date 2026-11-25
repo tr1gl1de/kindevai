@@ -163,3 +163,14 @@ func TestLogCLILogins(t *testing.T) {
 		t.Fatalf("log:\n%s", s)
 	}
 }
+
+// KIN-76: the operator's parallel-step limit is checked before the runner starts (0..64; 0: none).
+func TestRunRefusesAnOutOfRangeParallelStepLimit(t *testing.T) {
+	t.Parallel()
+	for _, n := range []string{"-1", "65"} {
+		r := cli(t.Context(), filepath.Join(t.TempDir(), "data"), "", nil, "run", "--max-parallel-steps", n)
+		if r.err == nil || !strings.Contains(r.err.Error(), "--max-parallel-steps") {
+			t.Fatalf("%s: %v", n, r.err)
+		}
+	}
+}

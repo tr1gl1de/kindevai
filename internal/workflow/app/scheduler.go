@@ -195,12 +195,9 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 		if err != nil {
 			return fmt.Errorf("runner candidates: %w", err)
 		}
-		held, err := s.Repo.HeldSteps(ctx) // in this transaction: earlier assignments of the pass are committed
+		cands, held, err := s.runnerLoad(ctx, cands) // in this transaction: earlier assignments of the pass count
 		if err != nil {
-			return fmt.Errorf("runner load: %w", err)
-		}
-		if held == nil {
-			held = map[string]int{}
+			return err
 		}
 		now := s.now()
 		before := e.Clone()
@@ -263,6 +260,35 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 	})
 }
 
+// runnerLoad returns the candidates with their recent failures (KIN-76) and the steps each runner holds (KIN-65).
+func (s *Service) runnerLoad(ctx context.Context, cands []Candidate) ([]Candidate, map[string]int, error) {
+	held, err := s.Repo.HeldSteps(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("runner load: %w", err)
+	}
+	if held == nil {
+		held = map[string]int{}
+	}
+	failures, err := s.Repo.RecentFailures(ctx, s.now().Add(-domain.FailureWindow))
+	if err != nil {
+		return nil, nil, fmt.Errorf("runner failures: %w", err)
+	}
+	out := slices.Clone(cands)
+	for i := range out {
+		out[i].RecentFailures = failures[out[i].ID]
+	}
+	return out, held, nil
+}
+
+// noRunner is the WAITING(runner) reason of a step no candidate took: the runners able to take it are all at their
+// parallel-step limit (KIN-76), or there is none.
+func noRunner(cands []Candidate, caps []string, held map[string]int) domain.Reason {
+	if domain.AtLimit(cands, caps, held) {
+		return domain.Reason{Code: domain.WaitRunner, Detail: domain.DetailRunnersAtLimit}
+	}
+	return domain.Reason{Code: domain.WaitRunner, Detail: DetailNoRunner}
+}
+
 // route picks the runner and AI CLI for a step (KIN-33). Unrouted (mock plans, or no router configured) it is a
 // plain runner pick; routed, the permitted chain of the step's role decides, and the reason says why nothing fits.
 func (s *Service) route(ctx context.Context, routed bool, routes map[[2]string]AgentRoute, e *domain.Execution,
@@ -278,7 +304,7 @@ func (s *Service) route(ctx context.Context, routed bool, routes map[[2]string]A
 	if st.Phase == domain.PhasePublish {
 		// KIN-36: the runner's own git push of the reviewed head, no AI CLI to route.
 		c, ok := domain.PickRunner(cands, ps.Capabilities, held)
-		return c, domain.AgentChoice{Agent: domain.AgentPublish}, domain.Reason{Code: domain.WaitRunner, Detail: DetailNoRunner}, ok, nil
+		return c, domain.AgentChoice{Agent: domain.AgentPublish}, noRunner(cands, ps.Capabilities, held), ok, nil
 	}
 	if !routed {
 		c, ok := domain.PickRunner(cands, ps.Capabilities, held)
@@ -286,7 +312,7 @@ func (s *Service) route(ctx context.Context, routed bool, routes map[[2]string]A
 		if s.Agents != nil {
 			choice.Agent = AgentMock
 		}
-		return c, choice, domain.Reason{Code: domain.WaitRunner, Detail: DetailNoRunner}, ok, nil
+		return c, choice, noRunner(cands, ps.Capabilities, held), ok, nil
 	}
 	key := [2]string{ps.StepRole(), author(e, ps)}
 	if st.Phase == domain.PhaseReview {

@@ -53,7 +53,22 @@ type Capabilities struct {
 	WSL          bool
 	StrictEgress bool
 	Tools        []Tool // sorted by name, unique
-	ReportedAt   time.Time
+	// MaxParallelSteps is the parallel-step limit the runner declared (KIN-76): it only ever restricts the runner
+	// itself; 0 = none.
+	MaxParallelSteps int
+	ReportedAt       time.Time
+}
+
+// MaxParallelSteps bounds a declared parallel-step limit.
+const MaxParallelSteps = 64
+
+// WithMaxParallelSteps returns c with the runner's declared parallel-step limit n (0..MaxParallelSteps).
+func (c Capabilities) WithMaxParallelSteps(n int) (Capabilities, error) {
+	if n < 0 || n > MaxParallelSteps {
+		return Capabilities{}, &ValidationError{Field: "maxParallelSteps", Code: "out_of_range"}
+	}
+	c.MaxParallelSteps = n
+	return c, nil
 }
 
 // MaxTools bounds the reported tool list.

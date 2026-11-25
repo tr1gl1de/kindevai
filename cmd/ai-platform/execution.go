@@ -17,8 +17,10 @@ import (
 	runnershttp "github.com/tr1gl1de/kindevai/internal/runners/adapters/httpapi"
 	runnersdb "github.com/tr1gl1de/kindevai/internal/runners/adapters/sqlite"
 	runnersapp "github.com/tr1gl1de/kindevai/internal/runners/app"
+	runnersdomain "github.com/tr1gl1de/kindevai/internal/runners/domain"
 	"github.com/tr1gl1de/kindevai/internal/server"
 	workflowapp "github.com/tr1gl1de/kindevai/internal/workflow/app"
+	workflowdomain "github.com/tr1gl1de/kindevai/internal/workflow/domain"
 )
 
 // DefaultSchedulerInterval is how often the scheduler looks for work when nothing wakes it.
@@ -109,9 +111,22 @@ func schedulable(cs []runnersapp.Candidate, isStrict func(runnerID string) bool)
 		if !c.StrictEgress && isStrict(c.ID) {
 			continue
 		}
-		out = append(out, workflowapp.Candidate{ID: c.ID, Tools: c.Tools, DiskHeavyAllowed: c.DiskHeavyAllowed})
+		out = append(out, workflowapp.Candidate{ID: c.ID, Tools: c.Tools, DiskHeavyAllowed: c.DiskHeavyAllowed,
+			Disk: diskLevel(c.Disk), MaxParallel: c.MaxParallelSteps})
 	}
 	return out
+}
+
+// diskLevel ranks a runner's disk level for placement (KIN-76); critical is excluded by DiskHeavyAllowed already.
+func diskLevel(l runnersdomain.Level) workflowdomain.DiskLevel {
+	switch l {
+	case runnersdomain.LevelWarning:
+		return workflowdomain.DiskWarning
+	case runnersdomain.LevelHigh, runnersdomain.LevelCritical:
+		return workflowdomain.DiskHigh
+	default:
+		return workflowdomain.DiskOK
+	}
 }
 
 // wireStrictEgress makes the scheduler check strict network profiles (KIN-31) once the network service exists.

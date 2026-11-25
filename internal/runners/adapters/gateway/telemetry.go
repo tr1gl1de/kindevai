@@ -61,6 +61,9 @@ func TelemetryMessages(sink TelemetrySink, now func() time.Time, logger *slog.Lo
 				tools = append(tools, domain.Tool(t))
 			}
 			c, err := domain.NewCapabilities(p.OS, p.Arch, p.WSL, p.StrictEgress, tools, now())
+			if err == nil {
+				c, err = c.WithMaxParallelSteps(p.MaxParallelSteps)
+			}
 			if err != nil {
 				return err
 			}

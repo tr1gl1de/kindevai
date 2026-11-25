@@ -39,6 +39,9 @@ type Probe struct {
 	Stat         func(path string) (diskusage.Usage, error)
 	// StrictEgress reports whether the strict egress sandbox verified on this machine (KIN-31); nil: false.
 	StrictEgress func(ctx context.Context) bool
+	// MaxParallelSteps is the parallel-step limit the operator set (ai-runner run --max-parallel-steps, KIN-76);
+	// 0: none.
+	MaxParallelSteps int
 }
 
 // New probes this machine; dataDir is runner-data (repos, worktrees, sessions live on its filesystem).
@@ -100,7 +103,8 @@ func versionLine(out []byte) string {
 // Capabilities reports the platform and the tools found. A tool whose version command fails is still reported
 // (it exists), with an empty version.
 func (p *Probe) Capabilities(ctx context.Context) protocol.Capabilities {
-	c := protocol.Capabilities{OS: p.GOOS, Arch: p.GOARCH, WSL: p.IsWSL(), Tools: []protocol.Tool{}}
+	c := protocol.Capabilities{OS: p.GOOS, Arch: p.GOARCH, WSL: p.IsWSL(), Tools: []protocol.Tool{},
+		MaxParallelSteps: p.MaxParallelSteps}
 	if p.StrictEgress != nil {
 		c.StrictEgress = p.StrictEgress(ctx)
 	}

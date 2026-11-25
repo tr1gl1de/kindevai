@@ -53,6 +53,19 @@ func TestCapabilitiesReportStrictEgress(t *testing.T) {
 	}
 }
 
+// KIN-76: the runner reports the parallel-step limit its operator set (0: none).
+func TestCapabilitiesReportMaxParallelSteps(t *testing.T) {
+	t.Parallel()
+	p := fakeProbe(false)
+	if c := p.Capabilities(t.Context()); c.MaxParallelSteps != 0 {
+		t.Fatalf("default %d", c.MaxParallelSteps)
+	}
+	p.MaxParallelSteps = 3
+	if c := p.Capabilities(t.Context()); c.MaxParallelSteps != 3 {
+		t.Fatalf("limit %d", c.MaxParallelSteps)
+	}
+}
+
 func TestCapabilitiesListFoundToolsWithSanitizedVersions(t *testing.T) {
 	t.Parallel()
 	c := fakeProbe(true).Capabilities(t.Context())

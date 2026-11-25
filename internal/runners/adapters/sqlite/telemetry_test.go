@@ -78,12 +78,14 @@ func TestHeartbeatUnreachableAndCapabilitiesRoundTrip(t *testing.T) {
 	}
 
 	c, _ := domain.NewCapabilities("linux", "arm64", true, false, []domain.Tool{{Name: "codex", Version: "0.5"}, {Name: "git", Version: "2.43"}}, t0)
+	c, _ = c.WithMaxParallelSteps(4)
 	if err := r.SaveCapabilities(ctx, "r1", c); err != nil {
 		t.Fatal(err)
 	}
 	tel, _ = r.Telemetry(ctx)
 	got := tel["r1"].Capabilities
-	if got == nil || got.Arch != "arm64" || !got.WSL || len(got.Tools) != 2 || got.Tools[1].Version != "2.43" || !got.ReportedAt.Equal(t0) {
+	if got == nil || got.Arch != "arm64" || !got.WSL || len(got.Tools) != 2 || got.Tools[1].Version != "2.43" ||
+		!got.ReportedAt.Equal(t0) || got.MaxParallelSteps != 4 {
 		t.Fatalf("capabilities = %+v", got)
 	}
 	if tel["r1"].LastHeartbeatAt == nil {

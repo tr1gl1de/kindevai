@@ -16,6 +16,8 @@ type memRepo struct {
 	tasks     map[string]domain.Task
 	revisions map[string]domain.PlanRevision // taskID/number
 	execs     map[string]domain.Execution
+	failures  map[string]int // RecentFailures' answer
+	since     time.Time      // RecentFailures' last argument
 }
 
 func newMemRepo() *memRepo {
@@ -269,6 +271,17 @@ func (r *memRepo) HeldSteps(context.Context) (map[string]int, error) {
 				out[e.Steps[i].RunnerID]++
 			}
 		}
+	}
+	return out, nil
+}
+
+func (r *memRepo) RecentFailures(_ context.Context, since time.Time) (map[string]int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.since = since
+	out := map[string]int{}
+	for k, v := range r.failures {
+		out[k] = v
 	}
 	return out, nil
 }

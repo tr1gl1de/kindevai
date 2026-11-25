@@ -61,7 +61,7 @@ func TestTelemetryMessagesReachTheSinkStampedWithServerTime(t *testing.T) {
 	e.approve(t)
 	c, _ := e.connect(t)
 	send(t, c, protocol.TypeHeartbeat, map[string]any{"sentAt": "1999-01-01T00:00:00Z", "futureField": 1})
-	send(t, c, protocol.TypeCapabilities, protocol.Capabilities{OS: "linux", Arch: "amd64", WSL: true,
+	send(t, c, protocol.TypeCapabilities, protocol.Capabilities{OS: "linux", Arch: "amd64", WSL: true, MaxParallelSteps: 3,
 		Tools: []protocol.Tool{{Name: "claude", Version: "1.0.3 (Claude Code)"}, {Name: "git", Version: "git version 2.43.0"}}})
 	send(t, c, protocol.TypeStorage, protocol.Storage{Volumes: []protocol.Volume{{ID: "/", Role: protocol.VolumeWorkspaces,
 		Path: "/home/u/.local/share/kindevai-runner", TotalBytes: 100, AvailableBytes: 40, FreeBytes: 45}}})
@@ -71,7 +71,7 @@ func TestTelemetryMessagesReachTheSinkStampedWithServerTime(t *testing.T) {
 	if s.beats[0] != e.runner {
 		t.Fatalf("heartbeat for %q", s.beats[0])
 	}
-	if got := s.caps[0]; !got.WSL || len(got.Tools) != 2 || !got.ReportedAt.Equal(now) {
+	if got := s.caps[0]; !got.WSL || len(got.Tools) != 2 || !got.ReportedAt.Equal(now) || got.MaxParallelSteps != 3 {
 		t.Fatalf("capabilities = %+v", got)
 	}
 	if got := s.vols[0][0]; got.AvailableBytes != 40 || !got.ReportedAt.Equal(now) || got.Role != domain.RoleWorkspaces {
@@ -134,6 +134,10 @@ func TestInvalidTelemetryClosesTheConnection(t *testing.T) {
 			Role: protocol.VolumeData, TotalBytes: 2, AvailableBytes: 1}}}},
 		"too many volumes": {protocol.TypeStorage, protocol.Storage{Volumes: make([]protocol.Volume, 9)}},
 		"not an object":    {protocol.TypeHeartbeat, "beat"},
+		"negative parallel-step limit": {protocol.TypeCapabilities, protocol.Capabilities{OS: "linux", Arch: "amd64",
+			MaxParallelSteps: -1}},
+		"parallel-step limit above the bound": {protocol.TypeCapabilities, protocol.Capabilities{OS: "linux", Arch: "amd64",
+			MaxParallelSteps: protocol.MaxParallelSteps + 1}},
 		"long version": {protocol.TypeCapabilities, protocol.Capabilities{OS: "linux", Arch: "amd64",
 			Tools: []protocol.Tool{{Name: "git", Version: strings.Repeat("9", 200)}}}},
 	}

@@ -132,6 +132,9 @@ func TestAdopt(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	a := l.Adopt(domain.Record{Step: "s", Fence: 1, PID: p.PID(), PGID: p.PGID()}, dir)
+	if r, ok := a.(interface{ Running() bool }); !ok || !r.Running() { // KIN-81: only a live one gets its sandbox back
+		t.Fatal("the adopted live process does not report Running")
+	}
 	done := make(chan domain.Exit, 1)
 	go func() { done <- a.Wait() }()
 	select {
@@ -148,6 +151,9 @@ func TestAdopt(t *testing.T) {
 	}
 
 	gone := l.Adopt(domain.Record{Step: "s", Fence: 2, PID: p.PID(), PGID: p.PGID()}, t.TempDir())
+	if gone.(interface{ Running() bool }).Running() {
+		t.Fatal("a gone process reports Running")
+	}
 	if e := gone.Wait(); !e.Lost {
 		t.Fatalf("gone process %+v", e)
 	}

@@ -1662,6 +1662,7 @@ export const ru: Messages = {
       integration_youtrack_webhook_changed: "Изменён webhook YouTrack",
       integration_youtrack_trigger_changed: "Изменён тег-триггер YouTrack",
       integration_youtrack_autoplan_changed: "Изменено автопланирование задач YouTrack",
+      integration_youtrack_states_changed: "Изменено сопоставление статусов YouTrack",
       integration_youtrack_planning_started: "Задача из YouTrack отправлена AI-планировщику",
       integration_youtrack_planning_skipped: "Задача из YouTrack не запланирована автоматически",
       integration_youtrack_user_linked: "Логин YouTrack связан",

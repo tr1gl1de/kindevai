@@ -1662,6 +1662,7 @@ export const en = {
       integration_youtrack_webhook_changed: "YouTrack webhook changed",
       integration_youtrack_trigger_changed: "YouTrack trigger tag changed",
       integration_youtrack_autoplan_changed: "YouTrack automatic planning changed",
+      integration_youtrack_states_changed: "YouTrack state mapping changed",
       integration_youtrack_planning_started: "Task from YouTrack sent to the AI planner",
       integration_youtrack_planning_skipped: "Task from YouTrack not planned automatically",
       integration_youtrack_user_linked: "YouTrack login linked",

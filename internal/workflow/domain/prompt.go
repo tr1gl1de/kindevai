@@ -60,7 +60,10 @@ type ImplementerInput struct {
 
 // handoffSchema is the implementer's answer format (Handoff).
 const handoffSchema = `{"summary": "what you changed and why (at most 4000 characters)", ` +
-	`"docs": ["documentation affected, or an empty list"], "openQuestions": ["questions for the reviewer or the Owner"]}`
+	`"docs": ["documentation affected, or an empty list"], "openQuestions": ["questions for the reviewer or the Owner"], ` +
+	`"articles": [{"article": "Knowledge Base article id named in the plan's docs impact, e.g. KIN-A-19", ` +
+	`"section": "heading of the section to replace or add", "content": "the section's new Markdown body"}], ` +
+	`"docsNotApplicable": "why no documentation changes, when articles is empty"}`
 
 // verdictSchema is the reviewer's answer format (Review).
 const verdictSchema = `{"verdict": "approve" | "changes_requested", "summary": "your overall assessment", ` +

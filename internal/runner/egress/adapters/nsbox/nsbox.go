@@ -106,6 +106,18 @@ type Manager struct {
 	// zero, never when negative); Prober runs the check (httpprobe when nil).
 	MonitorEvery time.Duration
 	Prober       Prober
+	// InUse returns the adapter sockets of the attempts in the runner's journal (KIN-100): a sweep never removes
+	// their directories, so a sandbox whose adapter died with the runner can still be reattached. nil: none.
+	InUse func() ([]string, error)
+
+	base string // where adapter socket directories live; socketBase() when empty (tests use a private one)
+}
+
+func (m *Manager) socketDir() string {
+	if m.base != "" {
+		return m.base
+	}
+	return socketBase()
 }
 
 // Prober checks a profile's proxy path and egress IP (httpprobe.Prober, as Test Network does).
@@ -186,13 +198,36 @@ func socketBase() string {
 // one; KIN-98). Binding the socket, or replacing it on a reattach, changes the directory.
 const staleAge = time.Minute
 
+// sweep is sweepStale over the socket base, keeping the directories of journalled attempts (KIN-100): after a
+// runner restart their socket is dead and the directory old, yet Reattach serves them again. When the journal
+// cannot be read nothing is swept: an abandoned directory costs a few bytes, a swept live one an attempt.
+func (m *Manager) sweep(now time.Time) []string {
+	keep := map[string]bool{}
+	if m.InUse != nil {
+		socks, err := m.InUse()
+		if err != nil {
+			m.logger().Warn("strict egress: not sweeping adapter directories, the attempts journal is unreadable", "err", err)
+			return nil
+		}
+		// An endpoint recorded under another base (XDG_RUNTIME_DIR changed) matches nothing here; this sweep
+		// never visits that base either.
+		for _, s := range socks {
+			keep[filepath.Dir(filepath.Clean(s))] = true
+		}
+	}
+	return sweepStale(m.socketDir(), now, keep)
+}
+
 // sweepStale removes adapter socket directories nobody serves any more, left by a launcher or runner that was
 // killed before it could clean up, and returns them: unchanged for staleAge and with no socket or one that refuses
-// connections. A directory whose socket still accepts connections is in use.
-func sweepStale(base string, now time.Time) []string {
+// connections. A directory whose socket still accepts connections is in use, and one in keep is never removed.
+func sweepStale(base string, now time.Time, keep map[string]bool) []string {
 	dirs, _ := filepath.Glob(filepath.Join(base, "kindev-egress-*"))
 	var removed []string
 	for _, d := range dirs {
+		if keep[d] {
+			continue // a journalled attempt's sandbox, waiting for Reattach
+		}
 		fi, err := os.Lstat(d)
 		if err != nil || !fi.IsDir() || now.Sub(fi.ModTime()) < staleAge {
 			continue // gone, not ours, or being set up
@@ -262,8 +297,8 @@ func (m *Manager) open(r egress.BoxRequest) (*Box, error) {
 	}
 	// A short private directory: Unix socket paths are limited to 107 bytes, which a data directory path can
 	// exceed. Inside the sandbox only this attempt's socket directory is visible.
-	sweepStale(socketBase(), time.Now())
-	sockDir, err := os.MkdirTemp(socketBase(), "kindev-egress-")
+	m.sweep(time.Now())
+	sockDir, err := os.MkdirTemp(m.socketDir(), "kindev-egress-")
 	if err != nil {
 		return nil, fmt.Errorf("adapter socket directory: %w", err)
 	}
@@ -389,7 +424,7 @@ func (m *Manager) Reattach(_ context.Context, r egress.BoxRequest, endpoint stri
 	if _, err := domain.Ruleset(domain.Policy{Enforcement: p.Enforcement, DNS: p.DNS, HasProxy: p.Proxy != nil}); err != nil {
 		return nil, err
 	}
-	if err := adapterSocket(endpoint); err != nil {
+	if err := m.adapterSocket(endpoint); err != nil {
 		return nil, err
 	}
 	l, err := relisten(endpoint)
@@ -403,7 +438,7 @@ func (m *Manager) Reattach(_ context.Context, r egress.BoxRequest, endpoint stri
 
 // adapterSocket checks that endpoint is the socket of an adapter directory this user created: <base>/kindev-egress-*/s
 // with base the socket base or /tmp, the directory a real one (no symlink) owned by this user and private.
-func adapterSocket(endpoint string) error {
+func (m *Manager) adapterSocket(endpoint string) error {
 	bad := fmt.Errorf("not a strict egress adapter socket: %q", endpoint)
 	if !filepath.IsAbs(endpoint) || filepath.Clean(endpoint) != endpoint || filepath.Base(endpoint) != "s" {
 		return bad
@@ -412,7 +447,7 @@ func adapterSocket(endpoint string) error {
 	if !strings.HasPrefix(filepath.Base(dir), "kindev-egress-") {
 		return bad
 	}
-	if base := filepath.Dir(dir); base != socketBase() && base != "/tmp" {
+	if base := filepath.Dir(dir); base != m.socketDir() && base != "/tmp" {
 		return bad
 	}
 	fi, err := os.Lstat(dir)

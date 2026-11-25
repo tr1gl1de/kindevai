@@ -23,7 +23,7 @@ func TestDiffPlans(t *testing.T) {
 		{Kind: ChangeModified, Field: "maxParallel", Before: "1", After: "2"},
 		{Kind: ChangeModified, Field: "tests", Before: "go test ./...", After: "go test ./..., make e2e", Added: []string{"make e2e"}},
 		{Kind: ChangeModified, Field: "migrations", Before: "", After: "0042_totp", Added: []string{"0042_totp"}},
-		{Kind: ChangeModified, StepKey: "api", Field: "role", Before: "", After: "reviewer"},
+		{Kind: ChangeModified, StepKey: "api", Field: "role", Before: "implementer", After: "reviewer"},
 		{Kind: ChangeModified, StepKey: "api", Field: "scope", Before: "internal/api", After: "internal/api, internal/auth",
 			Added: []string{"internal/auth"}},
 		{Kind: ChangeModified, StepKey: "api", Field: "dependsOn", Before: "", After: "db", Added: []string{"db"}},
@@ -49,6 +49,11 @@ func TestDiffPlansListsAddedAndRemovedItems(t *testing.T) {
 		After: "api, web/src/**, docs", Added: []string{"web/src/**"}, Removed: []string{"web/**"}}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("DiffPlans() =\n%+v\nwant\n%+v", got, want)
+	}
+	// An unnamed role is the implementer.
+	impl := PlanSnapshot{Steps: []StepSnapshot{{Key: "a", Title: "A", Repository: "r", Role: "implementer"}}}
+	if d := DiffPlans(PlanSnapshot{Steps: []StepSnapshot{{Key: "a", Title: "A", Repository: "r"}}}, impl); len(d) != 0 {
+		t.Fatalf("implicit implementer differs: %+v", d)
 	}
 	// Reordering a set is not a change.
 	if d := DiffPlans(step("a", "b"), step("b", "a")); len(d) != 0 {

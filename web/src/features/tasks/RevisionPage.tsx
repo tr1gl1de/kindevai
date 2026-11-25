@@ -325,7 +325,7 @@ function Steps({ revision: r }: { revision: PlanRevision }) {
                 <tr key={s.key}>
                   <td>
                     {s.title} <code>{s.key}</code>
-                    {s.role && <> · {s.role}</>}
+                    {s.role === "reviewer" && <> · {t("tasks.role_reviewer")}</>}
                   </td>
                   <td>
                     <code>{s.repository}</code>

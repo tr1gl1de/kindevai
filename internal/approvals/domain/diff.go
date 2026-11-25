@@ -64,6 +64,14 @@ type Change struct {
 	Removed []string
 }
 
+// roleOf is the step's role with the implementer default spelled out, so "" and "implementer" are the same role.
+func roleOf(s StepSnapshot) string {
+	if s.Role == "" {
+		return "implementer"
+	}
+	return s.Role
+}
+
 // minus returns the items of xs that are not in ys, in xs's order.
 func minus(xs, ys []string) []string {
 	var out []string
@@ -112,7 +120,7 @@ func DiffPlans(prev, cur PlanSnapshot) []Change {
 		}
 		mod(c.Key, "title", p.Title, c.Title)
 		mod(c.Key, "repository", p.Repository, c.Repository)
-		mod(c.Key, "role", p.Role, c.Role)
+		mod(c.Key, "role", roleOf(p), roleOf(c))
 		set(c.Key, "scope", p.Scope, c.Scope)
 		set(c.Key, "dependsOn", p.DependsOn, c.DependsOn)
 		set(c.Key, "capabilities", p.Capabilities, c.Capabilities)

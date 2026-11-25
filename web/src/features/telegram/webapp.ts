@@ -53,6 +53,11 @@ export function readLaunch(loc: Location = window.location): TelegramLaunch | nu
     } catch {
       // storage full or blocked: the launch still works for this page view
     }
+    try {
+      store?.removeItem(THEME_KEY); // a theme from an earlier launch in this tab no longer applies
+    } catch {
+      // storage blocked: nothing was saved either
+    }
     applyThemeParams(new URLSearchParams(loc.hash.slice(1)).get("tgWebAppThemeParams"));
     window.history.replaceState(window.history.state, "", loc.pathname + loc.search);
     return fresh;
@@ -76,9 +81,9 @@ export function readLaunch(loc: Location = window.location): TelegramLaunch | nu
 
 const colorRe = /^#[0-9a-fA-F]{3,8}$/;
 
-/** Relative luminance (WCAG) of a #rgb or #rrggbb colour. */
+/** Relative luminance (WCAG) of a #rgb, #rgba, #rrggbb or #rrggbbaa colour (alpha ignored). */
 function luminance(hex: string): number {
-  const h = hex.length === 4 ? [...hex.slice(1)].map((c) => c + c).join("") : hex.slice(1, 7);
+  const h = hex.length <= 5 ? [...hex.slice(1, 4)].map((c) => c + c).join("") : hex.slice(1, 7);
   const [r, g, b] = [0, 2, 4].map((i) => {
     const c = parseInt(h.slice(i, i + 2), 16) / 255;
     return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
@@ -122,10 +127,13 @@ function applyTheme(params: unknown, root: HTMLElement): boolean {
     root.style.removeProperty(name);
   }
   for (const [name, value] of colours) root.style.setProperty(name, value);
-  const bg = (params as Record<string, unknown>).bg_color;
-  if (typeof bg === "string" && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(bg)) {
+  const bg = colours.get("--tg-theme-bg-color");
+  if (bg && /^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(bg)) {
     // Below 0.179 black text would contrast less than white text: a dark background.
     root.dataset.theme = luminance(bg) < 0.179 ? "dark" : "light";
+  } else {
+    // Without Telegram's background a light/dark choice from an earlier theme would be stale: follow the OS.
+    delete root.dataset.theme;
   }
   return true;
 }
@@ -187,9 +195,10 @@ export function followTheme(root: HTMLElement = document.documentElement): () =>
     gameProxy: gameProxy.receiveEvent,
     legacy: host.TelegramGameProxy_receiveEvent,
   };
-  webView.receiveEvent = chain(before.webView);
-  gameProxy.receiveEvent = chain(before.gameProxy);
-  host.TelegramGameProxy_receiveEvent = chain(before.legacy);
+  const ours = { webView: chain(before.webView), gameProxy: chain(before.gameProxy), legacy: chain(before.legacy) };
+  webView.receiveEvent = ours.webView;
+  gameProxy.receiveEvent = ours.gameProxy;
+  host.TelegramGameProxy_receiveEvent = ours.legacy;
 
   const onMessage = (e: MessageEvent) => {
     if (window.parent === window || e.source !== window.parent || e.origin !== WEB_CLIENT_ORIGIN) return;
@@ -204,11 +213,12 @@ export function followTheme(root: HTMLElement = document.documentElement): () =>
   window.addEventListener("message", onMessage);
   postEvent("web_app_request_theme", {});
 
+  // Restores a receiver only while ours is still installed, so a wrapper set after ours is not dropped.
   return () => {
     window.removeEventListener("message", onMessage);
-    webView.receiveEvent = before.webView;
-    gameProxy.receiveEvent = before.gameProxy;
-    host.TelegramGameProxy_receiveEvent = before.legacy;
+    if (webView.receiveEvent === ours.webView) webView.receiveEvent = before.webView;
+    if (gameProxy.receiveEvent === ours.gameProxy) gameProxy.receiveEvent = before.gameProxy;
+    if (host.TelegramGameProxy_receiveEvent === ours.legacy) host.TelegramGameProxy_receiveEvent = before.legacy;
   };
 }
 

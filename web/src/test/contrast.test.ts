@@ -202,13 +202,14 @@ const TELEGRAM_PALETTES: Record<string, { theme: keyof typeof themes; params: Re
     params: { bg_color: "#17212b", secondary_bg_color: "#232e3c", text_color: "#f5f5f5", hint_color: "#708499", link_color: "#6ab3f3", button_color: "#5288c1", button_text_color: "#ffffff" },
   },
   // A palette that would make warning text vanish if any of it reached a warning surface.
+  // Telegram's background picks the theme (applyThemeParams), so its light/dark side always matches the theme.
   "hostile light": {
     theme: "light",
-    params: { bg_color: "#ffffff", text_color: "#fff6e0", hint_color: "#fff6e0", link_color: "#fff6e0" },
+    params: { bg_color: "#ffffff", secondary_bg_color: "#efefef", text_color: "#fff6e0", hint_color: "#fff6e0", link_color: "#fff6e0" },
   },
   "hostile dark": {
     theme: "dark",
-    params: { bg_color: "#000000", text_color: "#2b2412", hint_color: "#2b2412", link_color: "#2b2412" },
+    params: { bg_color: "#000000", secondary_bg_color: "#2a2a2a", text_color: "#2b2412", hint_color: "#2b2412", link_color: "#2b2412" },
   },
 };
 
@@ -217,7 +218,8 @@ function rawTokens(selector: string): Record<string, string> {
   const body = css.slice(css.indexOf("{", start) + 1, css.indexOf("}", start));
   return Object.fromEntries([...body.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)].map((m) => [m[1]!, m[2]!.trim()]));
 }
-const rawThemes = { light: rawTokens(":root"), dark: rawTokens(':root[data-theme="dark"]') };
+// The dark block overrides the light base, as the cascade does.
+const rawThemes = { light: rawTokens(":root"), dark: { ...rawTokens(":root"), ...rawTokens(':root[data-theme="dark"]') } };
 
 // Resolves a colour value: `#hex`, or `var(--name[, fallback])` looked up in the scopes (innermost first), where
 // --tg-theme-* comes from Telegram's params and falls back when Telegram does not send it.
@@ -262,6 +264,18 @@ describe.each(Object.entries(TELEGRAM_PALETTES))("warning surfaces with the %s p
   });
 
   it.each(cases)("%s: %s %s on %s has at least 4.5:1", (_where, _token, fg, bg) => {
+    expect(ratio(fg, bg)).toBeGreaterThanOrEqual(TEXT);
+  });
+
+  // Controls and code blocks inside a warning card keep Telegram's --bg/--surface fill but take the card's
+  // redefined --text and --muted.
+  const nested = ["--bg", "--surface"].flatMap((fill) =>
+    ["--warn-text", "--warn-muted"].map((fg) => {
+      const scopes = [root];
+      return [fg, fill, resolve(`var(${fg})`, scopes, params), resolve(`var(${fill})`, scopes, params)] as const;
+    }),
+  );
+  it.each(nested)("%s on a nested %s fill (%s on %s) has at least 4.5:1", (_fg, _fill, fg, bg) => {
     expect(ratio(fg, bg)).toBeGreaterThanOrEqual(TEXT);
   });
 });

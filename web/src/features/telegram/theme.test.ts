@@ -31,6 +31,7 @@ afterEach(() => {
   delete host.Telegram;
   delete host.TelegramGameProxy;
   delete host.TelegramWebviewProxy;
+  vi.restoreAllMocks();
 });
 
 describe("Telegram theme", () => {
@@ -121,6 +122,43 @@ describe("Telegram theme", () => {
     } finally {
       parent.mockRestore();
     }
+  });
+
+  it("takes the theme from an alpha background and falls back to the OS scheme without one", () => {
+    readLaunch(at(launchHash(LIGHT)));
+    stop = followTheme();
+    const receive = host.Telegram!.WebView!.receiveEvent;
+    receive("theme_changed", { theme_params: { bg_color: "#17212bff", text_color: "#f5f5f5" } });
+    expect(root.dataset.theme).toBe("dark");
+    receive("theme_changed", { theme_params: { bg_color: "#fffa", text_color: "#000000" } });
+    expect(root.dataset.theme).toBe("light");
+    // No usable background: a stale light/dark choice would pair our warn colours with the wrong Telegram colours.
+    receive("theme_changed", { theme_params: { text_color: "#f5f5f5" } });
+    expect(root.dataset.theme).toBeUndefined();
+  });
+
+  it("forgets the previous launch's theme on a launch without theme params", () => {
+    readLaunch(at(launchHash(DARK)));
+    readLaunch(at(`#tgWebAppData=${encodeURIComponent(INIT)}`));
+    root.removeAttribute("style");
+    delete root.dataset.theme;
+    readLaunch(at(""));
+    expect(root.dataset.theme).toBeUndefined();
+    expect(tg("bg-color")).toBe("");
+  });
+
+  it("stops following the theme when asked", () => {
+    readLaunch(at(launchHash(DARK)));
+    const parent = vi.spyOn(window, "parent", "get").mockReturnValue({ postMessage: vi.fn<() => void>() } as unknown as Window);
+    followTheme()();
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({ eventType: "theme_changed", eventData: { theme_params: LIGHT } }),
+        origin: "https://web.telegram.org",
+        source: parent.getMockImplementation()?.() ?? null,
+      }),
+    );
+    expect(root.dataset.theme).toBe("dark");
   });
 
   it("does nothing outside Telegram", () => {

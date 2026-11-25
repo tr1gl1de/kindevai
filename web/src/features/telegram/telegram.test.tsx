@@ -47,8 +47,9 @@ describe("Telegram launch data", () => {
     expect(el.dataset.theme).toBe("dark");
     applyThemeParams(JSON.stringify({ bg_color: "#fff" }), el);
     expect(el.dataset.theme).toBe("light");
+    // KIN-114: a theme without a background drops the earlier choice instead of keeping it stale.
     applyThemeParams(JSON.stringify({ text_color: "#000" }), el);
-    expect(el.dataset.theme).toBe("light");
+    expect(el.dataset.theme).toBeUndefined();
     const plain = document.createElement("div");
     applyThemeParams(JSON.stringify({ text_color: "#000" }), plain);
     expect(plain.dataset.theme).toBeUndefined();

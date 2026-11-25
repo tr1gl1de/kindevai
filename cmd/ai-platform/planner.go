@@ -26,7 +26,9 @@ func wirePlanner(wf *workflowapp.Service, inst *bootstrap.Installation, msg *mes
 
 // plannerContext translates the integrations context's issue context into the workflow's context package. The
 // text stays untrusted data: the workflow only bounds and fences it.
-type plannerContext struct{ reader integrationsapp.IssueContextReader }
+type plannerContext struct {
+	reader integrationsapp.IssueContextReader
+}
 
 func (p plannerContext) IssueContext(ctx context.Context, _, issueID string) (workflow.PlanningContext, error) {
 	c, err := p.reader.Read(ctx, issueID)

@@ -17,7 +17,7 @@ var ErrContextUnavailable = errors.New("youtrack context unavailable")
 
 // IssueTextSource reads an issue's description and Knowledge Base articles (the YouTrack client).
 type IssueTextSource interface {
-	IssueDescription(ctx context.Context, baseURL string, token domain.Secret, issueID string) (string, error) // domain.ErrIssueNotFound
+	IssueDescription(ctx context.Context, baseURL string, token domain.Secret, issueID string) (string, error)  // domain.ErrIssueNotFound
 	Article(ctx context.Context, baseURL string, token domain.Secret, articleID string) (domain.Article, error) // domain.ErrIssueNotFound
 }
 

@@ -173,8 +173,8 @@ type Intake struct {
 	Inbox        Inbox
 	Health       Health
 	States       StateStore // KIN-38: the projects' task state → YouTrack state maps
-	PageSize     int // issues per poll request (default 50)
-	MaxPages     int // poll requests per binding and cycle (default 10)
+	PageSize     int        // issues per poll request (default 50)
+	MaxPages     int        // poll requests per binding and cycle (default 10)
 	// FetchAttempts must equal the outbox's MaxAttempts (default: the messaging default).
 	FetchAttempts int
 	Tick          time.Duration // how often Run checks whether a poll is due (default 5s)

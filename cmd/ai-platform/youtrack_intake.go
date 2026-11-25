@@ -53,6 +53,7 @@ func newYouTrackIntake(inst *bootstrap.Installation, msg *messagingModule, integ
 		Source:       &youtrack.Client{},
 		Inbox:        msg.Inbox,
 		Health:       msg.Outbox.Health(),
+		States:       integrationsdb.New(inst.DB), // KIN-38 task state → YouTrack state maps
 	}
 	msg.Inbox.Handle(integrationsapp.TopicYouTrackIssue, in.HandleIssue)
 	msg.Inbox.Handle(integrationsapp.TopicYouTrackWebhook, in.HandleWebhook)

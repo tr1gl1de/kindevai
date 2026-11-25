@@ -47,8 +47,9 @@ type Outbox interface {
 }
 
 // saveTask saves t and, with an Outbox, tells the Alert Center when it entered or left BLOCKED since it was stored.
+// With IssueSync, the change is written back to the task's YouTrack issue as well (KIN-38).
 func (s *Service) saveTask(ctx context.Context, t *domain.Task) error {
-	if s.Outbox == nil {
+	if s.Outbox == nil && s.IssueSync == nil {
 		return s.Repo.SaveTask(ctx, t)
 	}
 	stored, err := s.Repo.Task(ctx, t.ID)
@@ -57,6 +58,12 @@ func (s *Service) saveTask(ctx context.Context, t *domain.Task) error {
 	}
 	if err := s.Repo.SaveTask(ctx, t); err != nil {
 		return err
+	}
+	if err := s.syncIssue(ctx, stored, *t); err != nil {
+		return err
+	}
+	if s.Outbox == nil {
+		return nil
 	}
 	was, is := stored.State == domain.TaskBlocked, t.State == domain.TaskBlocked
 	if was == is {

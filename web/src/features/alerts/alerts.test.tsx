@@ -89,6 +89,32 @@ describe("alert center", () => {
     expect(within(row).queryByRole("button")).not.toBeInTheDocument();
   });
 
+  it("describes the KIN-60 alert sources", async () => {
+    const make = (id: string, kind: string, subject: string, details: Record<string, string>): Alert => ({
+      ...runner,
+      id,
+      kind,
+      subject,
+      details,
+    });
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/alerts", () =>
+        json([
+          make("E1", "egress_check_failed", "r1", { code: "egress_ip_mismatch" }),
+          make("C1", "ci_failed", "acme/shop#7", { conclusion: "failure" }),
+          make("I1", "integration_circuit_open", "youtrack", {}),
+          make("T1", "task_blocked", "t9", { reason: "runner" }),
+        ]),
+      ),
+    );
+    await renderApp("/alerts");
+    expect(await screen.findByText("Runner r1: egress check failed (egress_ip_mismatch)")).toBeInTheDocument();
+    expect(screen.getByText("CI failed on acme/shop#7 (failure)")).toBeInTheDocument();
+    expect(screen.getByText("Integration youtrack is failing: calls suspended")).toBeInTheDocument();
+    expect(screen.getByText("Task t9 is blocked (runner)")).toBeInTheDocument();
+  });
+
   it("reports a failed action", async () => {
     server.use(
       http.get("/api/auth/me", () => json(owner)),

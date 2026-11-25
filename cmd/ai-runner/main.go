@@ -332,8 +332,8 @@ func daemon(ctx context.Context, args []string, e *env) error {
 		return err
 	}
 	x := newExecutor(ch, d.Path(), exe, splitList(*projects), logger)
-	x.Workspaces = ws
-	defer x.Close() // running attempts keep running; the next start adopts them
+	x.Workspaces, x.ChangesEvery = ws, changesEvery // KIN-51: interim changed-file reports while an attempt runs
+	defer x.Close()                                 // running attempts keep running; the next start adopts them
 	if err := x.Recover(ctx); err != nil {
 		return fmt.Errorf("recovering running attempts: %w", err)
 	}

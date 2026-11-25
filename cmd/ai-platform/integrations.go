@@ -60,6 +60,7 @@ func newIntegrations(inst *bootstrap.Installation, msg *messagingModule, audit *
 		NewID:    rand.Text,
 		Logger:   logger,
 	}
+	gh.Handlers = append(gh.Handlers, gh.CIAlerts) // KIN-60: CI outcomes become alerts
 	svc.RepositoryAdded = gh.RepositoryAdded
 	msg.Outbox.Handle(integrationsapp.TopicGitHubCheck, gh.HandleGitHubCheck)
 	msg.Outbox.Handle(integrationsapp.TopicRepositorySync, gh.HandleRepositorySync)

@@ -53,6 +53,7 @@ func newApprovals(inst *bootstrap.Installation, msg *messagingModule, audit *aud
 		Access:   taskAccess{projectsSvc},
 		Policy:   hooks,
 		Events:   hooks,
+		Outbox:   msg.Outbox,                                  // KIN-60 BLOCKED alerts
 		Notifier: workflownotify.Notifier{Outbox: msg.Outbox}, // finished tasks → Telegram (KIN-62)
 		Tx:       tx,
 		Now:      time.Now,

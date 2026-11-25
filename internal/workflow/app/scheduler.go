@@ -44,6 +44,9 @@ const (
 	CancelReasonStale     = "stale_fence"
 	// CancelReasonRunnerDisabled: the Owner disabled the runner (KIN-63).
 	CancelReasonRunnerDisabled = "runner_" + ReleaseDisabled
+	// CancelReasonScopeExceeded: the attempt changed files beyond the approved scope; the step waits for a new
+	// approval (KIN-51).
+	CancelReasonScopeExceeded = "scope_exceeded"
 )
 
 // Wait details shown with a task BLOCKED for a runner.
@@ -238,7 +241,7 @@ func (s *Service) blockIfStuck(ctx context.Context, e *domain.Execution, t *doma
 	if t.State == stored.State && t.Reason == stored.Reason {
 		return nil
 	}
-	return s.Repo.SaveTask(ctx, t)
+	return s.saveTask(ctx, t)
 }
 
 // RenewRunnerLeases extends the lease of every RUNNING step the runner holds (its heartbeat, KIN-20). A CLAIMED

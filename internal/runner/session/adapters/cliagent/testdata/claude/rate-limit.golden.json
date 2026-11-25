@@ -1,0 +1,50 @@
+[
+  {
+    "kind": "session",
+    "session": "0d2f3c1e-7a51-4b0e-9a64-3c1d2e5f6a7b",
+    "model": "claude-sonnet-4-5",
+    "version": "2.1.331"
+  },
+  {
+    "kind": "failure",
+    "session": "0d2f3c1e-7a51-4b0e-9a64-3c1d2e5f6a7b",
+    "failure": {
+      "code": "cli_limit",
+      "cause": "rate_limit",
+      "message": "rate limit reached: five_hour",
+      "resetsAt": "2026-11-25T03:00:00Z"
+    }
+  },
+  {
+    "kind": "failure",
+    "session": "0d2f3c1e-7a51-4b0e-9a64-3c1d2e5f6a7b",
+    "failure": {
+      "code": "cli_limit",
+      "cause": "rate_limit",
+      "message": "You've hit your limit · resets 3pm (Europe/Moscow)"
+    }
+  },
+  {
+    "kind": "failure",
+    "session": "0d2f3c1e-7a51-4b0e-9a64-3c1d2e5f6a7b",
+    "failure": {
+      "code": "cli_limit",
+      "cause": "rate_limit",
+      "message": "You've hit your limit · resets 3pm (Europe/Moscow)"
+    }
+  },
+  {
+    "kind": "result",
+    "session": "0d2f3c1e-7a51-4b0e-9a64-3c1d2e5f6a7b",
+    "text": "You've hit your limit · resets 3pm (Europe/Moscow)",
+    "usage": {
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "cacheReadTokens": 0,
+      "cacheWriteTokens": 0,
+      "costUsd": 0,
+      "turns": 1,
+      "durationMs": 120
+    }
+  }
+]

@@ -12,6 +12,7 @@ import { useNotify } from "../../ui/notify";
 import { RiskBadge, StateBadge } from "../approvals/badges";
 import { useProjects } from "../projects/api";
 import { AttemptLog } from "./AttemptLog";
+import { AttemptWorkspace } from "./AttemptWorkspace";
 import { isTerminal, useCancelTask, useMockRun, useRetryTask, useTask, useTaskApprovals } from "./api";
 import { AgentTimeValue, AttemptStateBadge, CalendarValue, StepStateBadge, TaskStateBadge } from "./badges";
 import "./tasks.css";
@@ -141,7 +142,7 @@ function TimeSection({ d }: { d: TaskDetail }) {
   );
 }
 
-const scenarios: MockScenario[] = ["success", "fail", "flaky", "crash", "hang", "gate"];
+const scenarios: MockScenario[] = ["success", "fail", "flaky", "crash", "hang", "gate", "scope"];
 
 function Actions({ d }: { d: TaskDetail }) {
   const { t } = useTranslation();
@@ -358,18 +359,23 @@ function Attempts({ taskId, s, isOwner }: { taskId: string; s: Step; isOwner: bo
   );
 }
 
-/** The log loads only when opened, so a long task page does not poll every attempt. */
+/** The log and the workspace load only when opened, so a long task page does not poll every attempt. */
 function AttemptDetails({ taskId, stepId, a }: { taskId: string; stepId: string; a: Attempt }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const [wsOpen, setWsOpen] = useState(false);
+  const live = a.state === "RUNNING" || a.state === "UNKNOWN";
   return (
-    <details className="attempt-details" onToggle={(e) => setOpen(e.currentTarget.open)}>
-      <summary>{t("tasks.logShow", { n: a.number })}</summary>
-      {open && (
-        <AttemptLog taskId={taskId} stepId={stepId} fence={a.fence} number={a.number}
-          live={a.state === "RUNNING" || a.state === "UNKNOWN"} />
-      )}
-    </details>
+    <>
+      <details className="attempt-details" onToggle={(e) => setWsOpen(e.currentTarget.open)}>
+        <summary>{t("tasks.wsShow", { n: a.number })}</summary>
+        {wsOpen && <AttemptWorkspace taskId={taskId} stepId={stepId} fence={a.fence} number={a.number} live={live} />}
+      </details>
+      <details className="attempt-details" onToggle={(e) => setOpen(e.currentTarget.open)}>
+        <summary>{t("tasks.logShow", { n: a.number })}</summary>
+        {open && <AttemptLog taskId={taskId} stepId={stepId} fence={a.fence} number={a.number} live={live} />}
+      </details>
+    </>
   );
 }
 

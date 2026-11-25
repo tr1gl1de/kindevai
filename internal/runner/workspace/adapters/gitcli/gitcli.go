@@ -304,6 +304,30 @@ func (g *Git) Diff(ctx context.Context, admin, from, to string) ([]domain.Change
 	return domain.ParseNameStatus(out)
 }
 
+// Changes implements app.Git: the worktree against base (tracked paths, the agent's commits included) plus the
+// untracked files a snapshot would add; read-only (nothing is staged or committed).
+func (g *Git) Changes(ctx context.Context, admin, dir, base string) ([]domain.Change, error) {
+	if err := checkSHA(base); err != nil {
+		return nil, err
+	}
+	// The agent may run git in the worktree meanwhile: never take the index lock to refresh it.
+	env := []string{"GIT_DIR=" + admin, "GIT_WORK_TREE=" + dir, "GIT_OPTIONAL_LOCKS=0"}
+	out, err := g.run(ctx, env, nil, "diff", "--name-status", "-z", "--no-renames", "--no-ext-diff",
+		"--no-textconv", "--end-of-options", base, "--")
+	if err != nil {
+		return nil, err
+	}
+	tracked, err := domain.ParseNameStatus(out)
+	if err != nil {
+		return nil, err
+	}
+	out, err = g.run(ctx, env, nil, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return nil, err
+	}
+	return domain.MergeChanges(tracked, domain.ParseUntracked(out)), nil
+}
+
 // RemoveWorktree implements app.Git: git removes the worktree; if it cannot (a corrupted worktree), the
 // directory is deleted without following symlinks and git forgets it.
 func (g *Git) RemoveWorktree(ctx context.Context, mirror, dir string) error {

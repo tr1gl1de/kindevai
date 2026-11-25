@@ -1,0 +1,42 @@
+[
+  {
+    "kind": "session",
+    "session": "0199a213-81c0-7800-8aa1-bbab2a035a53"
+  },
+  {
+    "kind": "tool_use",
+    "session": "0199a213-81c0-7800-8aa1-bbab2a035a53",
+    "tool": "command",
+    "input": "bash -lc ls"
+  },
+  {
+    "kind": "tool_use",
+    "session": "0199a213-81c0-7800-8aa1-bbab2a035a53",
+    "tool": "file_change",
+    "input": "[{\"path\":\"/work/README.md\",\"kind\":\"update\"}]"
+  },
+  {
+    "kind": "tool_use",
+    "session": "0199a213-81c0-7800-8aa1-bbab2a035a53",
+    "tool": "mcp:docs/search"
+  },
+  {
+    "kind": "text",
+    "session": "0199a213-81c0-7800-8aa1-bbab2a035a53",
+    "text": "Updated README.md."
+  },
+  {
+    "kind": "result",
+    "session": "0199a213-81c0-7800-8aa1-bbab2a035a53",
+    "text": "Updated README.md.",
+    "usage": {
+      "inputTokens": 24763,
+      "outputTokens": 122,
+      "cacheReadTokens": 24448,
+      "cacheWriteTokens": 0,
+      "costUsd": 0,
+      "turns": 1,
+      "durationMs": 0
+    }
+  }
+]

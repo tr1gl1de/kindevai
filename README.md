@@ -194,6 +194,17 @@ ai-runner fingerprint                                    # compare with the runn
   `approve | changes_requested` with findings. Changes requested start a fix round with the findings (at most 2), after
   which the step FAILS with the reason; a reviewer that changes the branch fails its attempt. The task page shows the
   phase, the handoff (base/head, changed files, test evidence) and the verdict. Pushing and the PR are KIN-36.
+- Plan discussion API (KIN-43; the chat UI is KIN-44): the Owner and project admins write about the current plan
+  revision of a task awaiting approval or ready (`POST /api/tasks/{id}/discussion/messages`, 202; members and viewers
+  read `GET /api/tasks/{id}/discussion`). Each message is one turn run by the planner role's CLI like a planner
+  attempt (durable runner command log, read-only, no scope), resuming the planner's native session on its runner or
+  starting a fresh one with the plan, the context package and the last 20 messages, all fenced as untrusted text. The
+  answer is stored with its usage and CLI time (agent time); a ```json plan in it becomes the next revision through
+  the plan validation and the risk policy (the AI cannot lower risk; approvals of the old revision go stale), an
+  invalid one is noted and ignored. Status PENDING → DELIVERED → ANSWERED | FAILED; a turn without an answer after the
+  timeout FAILS and may be sent again (`…/messages/{msg}/retry`). Limits (Owner: `PUT /api/plan-discussion/limits`):
+  4000 characters, one answer in flight, 20 messages per task, 30 per user per hour, 10 min timeout; exceeding one is
+  429 with its code. Messages, answers, revisions and limit hits are audited.
 - AI CLIs (runner, KIN-79): an assignment for `claude` or `codex` (chosen by routing) runs the CLI found on the
   runner's PATH with the runner user's HOME (its local login) and a clean environment, as `ai-runner agent-exec` in the
   attempt's process group: the prompt/context package is a file in the attempt's state directory (outside the

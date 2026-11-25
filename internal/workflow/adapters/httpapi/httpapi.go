@@ -414,6 +414,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/tasks/{id}/retry", h.retry)
 	mux.HandleFunc("GET /api/tasks/{id}/steps/{step}/attempts/{fence}/events", h.events)
 	mux.HandleFunc("GET /api/tasks/{id}/steps/{step}/attempts/{fence}/workspace", h.workspace)
+	h.registerDiscussion(mux)
 }
 
 func (h *Handler) now() time.Time { return h.Service.Now().UTC() }

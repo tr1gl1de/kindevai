@@ -1440,6 +1440,22 @@ export const ru: Messages = {
     backupTitle: "Резервная копия и перенос",
     backupText: "Когда шагов в работе не осталось, выполните экспорт на сервере. Ключ шифрования записывается в отдельный файл — храните его отдельно от архива. Весь перенос описан в разделе README «Резервное копирование и восстановление».",
   },
+  // Обсуждение плана с AI (коды API KIN-43; UI чата — KIN-44).
+  planDiscussion: {
+    status: { PENDING: "Ждёт раннер", DELIVERED: "AI отвечает", ANSWERED: "Есть ответ", FAILED: "Нет ответа" },
+    limits: {
+      message_too_long: "Сообщение длиннее {{limit}} символов.",
+      answer_in_flight: "AI ещё отвечает на предыдущее сообщение (или задача планируется).",
+      plan_message_limit: "В обсуждении этого плана уже {{limit}} сообщений — это предел.",
+      hourly_message_limit: "За последний час вы отправили {{limit}} сообщений. Попробуйте через {{minutes}} мин.",
+    },
+    notices: {
+      revision_created: "Из этого ответа создана ревизия {{revision}}.",
+      plan_rejected: "Предложенный план не принят: {{reason}}",
+      plan_outdated: "Предложенный план написан для старой ревизии и не применён.",
+      plan_not_applied: "Задача больше не принимает новый план; предложение не применено.",
+    },
+  },
   audit: {
     title: "Журнал аудита",
     intro: "Действия на платформе, важные для безопасности, — сначала новые. Записи нельзя изменить или удалить.",
@@ -1482,6 +1498,11 @@ export const ru: Messages = {
       routing_cli_switched: "CLI включён или выключен",
       routing_cli_emergency_stop: "Аварийная остановка CLI",
       routing_cli_ready: "CLI отмечен готовым",
+      plan_discussion_message_sent: "Сообщение в обсуждении плана",
+      plan_discussion_answered: "AI ответил в обсуждении плана",
+      plan_discussion_revision_created: "Ревизия плана создана из обсуждения",
+      plan_discussion_limit_hit: "Достигнут лимит обсуждения плана",
+      plan_discussion_limits_changed: "Изменены лимиты обсуждения плана",
       routing_role_bound: "Привязка роли изменена",
       routing_role_binding_reset: "Привязка роли сброшена",
       network_test_requested: "Запрошен Test Network",

@@ -117,6 +117,10 @@ type Service struct {
 	IssueContext IssueContextSource
 	// TestCommands gives a repository's test command for the review loop's implementer attempts (KIN-35); nil: none.
 	TestCommands TestCommands
+	// Discussion stores the plan discussion (KIN-43; with Planning); nil: the plan chat is off. Audit records its
+	// messages, answers and limits (KIN-16); nil: not audited.
+	Discussion DiscussionRepository
+	Audit      AuditLog
 }
 
 // Pause reports whether the scheduler must not hand out new work (maintenance mode, KIN-41). Running attempts

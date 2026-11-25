@@ -501,3 +501,31 @@ func TestRepeatedRateLimitsEscalateAndRecover(t *testing.T) {
 		t.Fatalf("streak survived a success: %+v", h)
 	}
 }
+
+// KIN-88: the alert events carry when routing decided (cli_held) or saw the CLI work again (cli_ready), so the Alert
+// Center ignores a cli_ready delivered after a newer cli_held.
+func TestCLIAlertEventsCarryTheirTime(t *testing.T) {
+	t.Parallel()
+	e := newEnv()
+	ctx := t.Context()
+	if _, err := e.svc.CoolDown(ctx, "r1", "claude", domain.CauseAuth, time.Time{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.MarkReady(ctx, owner, "r1", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	e.out.mu.Lock()
+	defer e.out.mu.Unlock()
+	if len(e.out.msgs) != 2 {
+		t.Fatalf("events %d", len(e.out.msgs))
+	}
+	for _, m := range e.out.msgs {
+		var ev CLIHeldEvent
+		if err := json.Unmarshal(m.Payload, &ev); err != nil {
+			t.Fatal(err)
+		}
+		if at, err := time.Parse(time.RFC3339Nano, ev.At); err != nil || !at.Equal(*e.now) {
+			t.Fatalf("%s at %q, want %v", m.Topic, ev.At, *e.now)
+		}
+	}
+}

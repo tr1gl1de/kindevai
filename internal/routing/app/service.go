@@ -535,7 +535,9 @@ const (
 	TopicCLIReady = "alerts.cli_ready"
 )
 
-// CLIHeldEvent is the payload of TopicCLIHeld (TopicCLIReady carries only runnerId and agent).
+// CLIHeldEvent is the payload of TopicCLIHeld (TopicCLIReady carries only runnerId, agent and at). At is when
+// routing decided (RFC 3339, UTC): the Alert Center ignores a cli_ready older than the alert's last cli_held, as
+// outbox deliveries of different keys may reorder (KIN-88).
 type CLIHeldEvent struct {
 	RunnerID  string `json:"runnerId"`
 	Agent     string `json:"agent"`
@@ -544,13 +546,14 @@ type CLIHeldEvent struct {
 	Escalated bool   `json:"escalated,omitempty"`
 	Parked    bool   `json:"parked,omitempty"`
 	Until     string `json:"until,omitempty"`
+	At        string `json:"at"`
 }
 
 func (s *Service) alert(ctx context.Context, topic, runnerID, agent string, h *domain.Hold, now time.Time) error {
 	if s.Outbox == nil {
 		return nil
 	}
-	ev := CLIHeldEvent{RunnerID: runnerID, Agent: agent}
+	ev := CLIHeldEvent{RunnerID: runnerID, Agent: agent, At: now.UTC().Format(time.RFC3339Nano)}
 	if h != nil {
 		ev.Cause, ev.Strikes, ev.Escalated, ev.Parked = h.Cause, h.Strikes, h.Escalated(), h.Parked
 		ev.Until = h.Until.UTC().Format(time.RFC3339)

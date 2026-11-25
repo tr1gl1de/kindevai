@@ -170,6 +170,13 @@ func (s *Service) Raise(ctx context.Context, event string, o domain.Occurrence) 
 
 // ResolveKey closes the active alert with dedupKey because the monitor saw the anomaly end; no alert is a no-op.
 func (s *Service) ResolveKey(ctx context.Context, dedupKey string) error {
+	return s.ResolveKeyObservedAt(ctx, dedupKey, time.Time{})
+}
+
+// ResolveKeyObservedAt is ResolveKey for an "anomaly ended" event the monitor observed at at: an alert observed
+// after that (a later occurrence whose event was delivered first) stays active (KIN-88). A zero at resolves as
+// ResolveKey.
+func (s *Service) ResolveKeyObservedAt(ctx context.Context, dedupKey string, at time.Time) error {
 	return s.Tx.InTx(ctx, func(ctx context.Context) error {
 		a, err := s.Repo.Active(ctx, dedupKey)
 		if errors.Is(err, domain.ErrNotFound) {
@@ -177,6 +184,9 @@ func (s *Service) ResolveKey(ctx context.Context, dedupKey string) error {
 		}
 		if err != nil {
 			return fmt.Errorf("loading alert: %w", err)
+		}
+		if a.ObservedAfter(at) {
+			return nil
 		}
 		if err := a.Resolve("", s.Now()); err != nil {
 			return err

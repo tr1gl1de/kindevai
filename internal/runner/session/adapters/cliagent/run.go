@@ -37,11 +37,12 @@ type Sandbox interface {
 	Wrap(ctx context.Context, c Command) (Command, error)
 }
 
-// Refuser is implemented by a Sandbox that tells from how the wrapped command ended that the sandbox did not verify
-// and the CLI never started (KIN-31: `ai-runner sandbox-run` exits with nsbox.ExitUnverified after writing
-// nsbox.UnverifiedMarker). Such a run fails with code network: the step waits for the network.
+// Refuser is implemented by a Sandbox that tells, from the wrapped command and how it ended, that the sandbox did
+// not verify and the CLI never started (KIN-31: `ai-runner sandbox-run` exits with nsbox.ExitUnverified; KIN-88: on
+// a signal of its own the CLI cannot forge, never on the exit code or stderr alone). Such a run fails with code
+// network: the step waits for the network.
 type Refuser interface {
-	Refused(exit domain.Exit, stderrTail string) bool
+	Refused(wrapped Command, exit domain.Exit) bool
 }
 
 // Defaults of Config.
@@ -315,7 +316,7 @@ func (a *Adapter) start(ctx context.Context, req domain.AgentRequest, c Command,
 		r.mu.Lock()
 		end := domain.End{Exit: exitOf(state, werr), StderrTail: tail.String(), TimedOut: r.timedOut, Cancelled: r.cancelled}
 		if rf, ok := a.Config.Sandbox.(Refuser); ok {
-			end.SandboxRefused = rf.Refused(end.Exit, end.StderrTail)
+			end.SandboxRefused = rf.Refused(c, end.Exit)
 		}
 		trMu.Lock()
 		r.result = tr.Result(end)

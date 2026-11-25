@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -25,7 +26,7 @@ func strictProfile() protocol.NetworkProfile {
 // line travels to it in RunEnv, never as arguments.
 func TestCLISandboxWrapsTheCommand(t *testing.T) {
 	t.Parallel()
-	m := &nsbox.Manager{Program: "/usr/bin/ai-runner", Args: []string{"sandbox-exec"}, DataDir: "/var/lib/kr"}
+	m := &nsbox.Manager{Program: "/usr/bin/ai-runner", Args: []string{"sandbox-exec"}, DataDir: t.TempDir()}
 	ok := func(context.Context) (bool, string) { return true, "" }
 	s := cliSandbox{supported: ok, boxes: m, profile: strictProfile(), dir: t.TempDir()}
 	if !s.StrictEgress(t.Context()) {
@@ -97,24 +98,51 @@ func TestNewCLISandbox(t *testing.T) {
 	}
 }
 
-// KIN-31 follow-up (KIN-83): only exit ExitUnverified with UnverifiedMarker on stderr is the sandbox refusing the
-// run (the step then waits for the network); a CLI exiting 121 on its own is a CLI error.
+// KIN-31 follow-up (KIN-83, KIN-88): only exit ExitUnverified with the refusal `sandbox-run` recorded outside the
+// sandbox is the sandbox refusing the run (the step then waits for the network); a CLI exiting 121 on its own, even
+// with UnverifiedMarker on stderr, is a CLI error.
 func TestCLISandboxRecognisesAnUnverifiedRun(t *testing.T) {
 	t.Parallel()
-	s := cliSandbox{}
-	tail := "noise\n" + nsbox.UnverifiedMarker + ": egress ip mismatch\n"
-	for _, c := range []struct {
-		exit domain.Exit
-		tail string
-		want bool
-	}{
-		{domain.Exit{Code: nsbox.ExitUnverified}, tail, true},
-		{domain.Exit{Code: nsbox.ExitUnverified}, "error: something else", false},
-		{domain.Exit{Code: 1}, tail, false},
-		{domain.Exit{Signaled: true}, tail, false},
-	} {
-		if got := s.Refused(c.exit, c.tail); got != c.want {
-			t.Errorf("Refused(%+v, %q) = %v, want %v", c.exit, c.tail, got, c.want)
+	data := t.TempDir()
+	attempt := filepath.Join(data, "attempts", "a1")
+	if err := os.MkdirAll(attempt, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ok := func(context.Context) (bool, string) { return true, "" }
+	s := cliSandbox{supported: ok, boxes: &nsbox.Manager{Program: "/x", DataDir: data}, profile: strictProfile(), dir: attempt}
+	wrap := func(record bool) cliagent.Command {
+		t.Helper()
+		c, err := s.Wrap(t.Context(), cliagent.Command{Path: "/usr/bin/claude", Dir: t.TempDir()})
+		if err != nil {
+			t.Fatal(err)
 		}
+		if record { // what `sandbox-run` does before the CLI could start
+			for _, kv := range c.Env {
+				if desc, found := strings.CutPrefix(kv, nsbox.RunEnv+"="); found {
+					st := filepath.Join(data, nsbox.StatusDir, strings.TrimSuffix(filepath.Base(desc), ".json")+".unverified")
+					if err := os.WriteFile(st, nil, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+		}
+		return c
+	}
+	for _, c := range []struct {
+		record bool
+		exit   domain.Exit
+		want   bool
+	}{
+		{true, domain.Exit{Code: nsbox.ExitUnverified}, true},
+		{false, domain.Exit{Code: nsbox.ExitUnverified}, false}, // the CLI's own 121 (and marker)
+		{true, domain.Exit{Code: 1}, false},
+		{true, domain.Exit{Signaled: true}, false},
+	} {
+		if got := s.Refused(wrap(c.record), c.exit); got != c.want {
+			t.Errorf("Refused(record %v, %+v) = %v, want %v", c.record, c.exit, got, c.want)
+		}
+	}
+	if left, _ := filepath.Glob(filepath.Join(data, nsbox.StatusDir, "*")); len(left) != 0 {
+		t.Fatalf("status left behind: %v", left)
 	}
 }

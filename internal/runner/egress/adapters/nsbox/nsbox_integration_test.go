@@ -559,6 +559,10 @@ func TestWrappedRun(t *testing.T) {
 			if left, _ := filepath.Glob(filepath.Join(f.dir, "sandbox-run-*.json")); len(left) != 0 {
 				t.Fatalf("run description left behind: %v", left)
 			}
+			// KIN-88: the refusal is recorded outside the sandbox, only for the unverified run.
+			if got := f.m.Refused(env); got != (tc.exit == ExitUnverified) {
+				t.Fatalf("Refused = %v for exit %d", got, tc.exit)
+			}
 		})
 	}
 }

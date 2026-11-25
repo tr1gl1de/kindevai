@@ -508,6 +508,24 @@ func TestSchedulingAndListingQueries(t *testing.T) {
 	if ids, err := repo.ExecutionsHeldBy(ctx, "r1"); err != nil || len(ids) != 1 || ids[0] != e.ID {
 		t.Fatalf("held %v %v", ids, err)
 	}
+	// KIN-106: executions with a step pinned to a runner (the review loop's branch holder), held or not.
+	if ids, err := repo.ExecutionsPinnedTo(ctx, "r9"); err != nil || len(ids) != 0 {
+		t.Fatalf("pinned to r9 before the pin %v %v", ids, err)
+	}
+	pinned, err := repo.Execution(ctx, e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned.Steps[0].PinnedRunner = "r9"
+	if err := repo.SaveExecution(ctx, &pinned); err != nil {
+		t.Fatal(err)
+	}
+	if ids, err := repo.ExecutionsPinnedTo(ctx, "r9"); err != nil || len(ids) != 1 || ids[0] != e.ID {
+		t.Fatalf("pinned to r9 %v %v", ids, err)
+	}
+	if ids, _ := repo.ExecutionsHeldBy(ctx, "r9"); len(ids) != 0 {
+		t.Fatalf("a pin is no hold %v", ids)
+	}
 	list, err := repo.ListTasks(ctx, app.TaskFilter{ProjectIDs: []string{"p1", "nope"}}, 10)
 	if err != nil || len(list) != 2 {
 		t.Fatalf("list %+v %v", list, err)

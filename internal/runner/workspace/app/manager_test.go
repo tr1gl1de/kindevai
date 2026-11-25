@@ -18,6 +18,7 @@ type fakeGit struct {
 	calls    []string
 	tokens   []string
 	fetchErr error
+	syncErr  error
 	changes  []domain.Change
 	removed  []string
 	// gate, when set, holds every fetch until it is closed (or the fetch's context ends); started gets the
@@ -27,6 +28,14 @@ type fakeGit struct {
 }
 
 func (g *fakeGit) log(s string) { g.mu.Lock(); g.calls = append(g.calls, s); g.mu.Unlock() }
+
+func (g *fakeGit) SyncBranch(_ context.Context, _, repository, branch, head string, tok Token) error {
+	g.log("sync " + repository + " " + branch + " " + head)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.tokens = append(g.tokens, tok.Reveal())
+	return g.syncErr
+}
 
 func (g *fakeGit) FetchBase(ctx context.Context, mirror, repository, base string, tok Token) (string, error) {
 	g.log("fetch " + repository + " " + base)
@@ -178,6 +187,35 @@ func TestPrepareCreatesTheStepBranchFromTheBase(t *testing.T) {
 	}
 	if _, ok, _ := st.LoadMeta("st1", 1); !ok {
 		t.Fatal("no metadata recorded")
+	}
+}
+
+// KIN-106: a CI fix round's workspace continues from the published head of the work branch (BranchHead), synced
+// after the base was fetched and before the worktree is added; a failed sync prepares nothing.
+func TestPrepareContinuesFromThePublishedBranchHead(t *testing.T) {
+	t.Parallel()
+	m, g, _, _ := newManager()
+	r := req()
+	r.BranchHead = "pub-sha"
+	if _, err := m.Prepare(t.Context(), r); err != nil {
+		t.Fatal(err)
+	}
+	want := "fetch acme/api dev;sync acme/api feature/KIN-29--st1 pub-sha;add feature/KIN-29--st1 base-sha"
+	if strings.Join(g.calls, ";") != want || g.tokens[1] != "ghs_x" {
+		t.Fatalf("%v", g.calls)
+	}
+	m, g, st, _ := newManager()
+	g.syncErr = errors.New("the remote branch moved")
+	if _, err := m.Prepare(t.Context(), r); err == nil || !strings.Contains(err.Error(), "the remote branch moved") {
+		t.Fatalf("prepare after a failed sync: %v", err)
+	}
+	if _, ok, _ := st.LoadMeta("st1", 1); ok || strings.Contains(strings.Join(g.calls, ";"), "add ") {
+		t.Fatalf("a workspace was prepared: %v", g.calls)
+	}
+	if _, err := m.Prepare(t.Context(), r); err == nil {
+		t.Fatal("the workspace stayed locked or prepared")
+	} else if errors.Is(err, ErrBusy) {
+		t.Fatalf("the failed preparation kept the lock: %v", err)
 	}
 }
 

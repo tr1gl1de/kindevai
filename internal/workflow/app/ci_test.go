@@ -446,3 +446,83 @@ func TestMultiRepoChangeSetMergesInOrder(t *testing.T) {
 		t.Fatalf("task %s", tk.State)
 	}
 }
+
+// Acceptance (KIN-106): the runner holding the branch is lost during a CI fix round: the step starts over on another
+// runner, which is told the published head of the work branch (BranchHead) so it continues from it and its push is
+// a fast-forward; the CI round and the CI failure stay.
+func TestALostRunnerInACIFixRoundContinuesFromThePublishedBranch(t *testing.T) {
+	t.Parallel()
+	e := newCIEnv()
+	task, a := e.opened(t)
+	e.ci.set("h1", CIStatus{State: domain.CIFailed, Detail: "test (failure): TestLogin",
+		Output: "### test (failure): 1 failed\nlogin_test.go:12: want 200, got 500"})
+	e.ciEvent(t, a, "d1")
+	// KIN-106: the failed checks' output is for the fix round only, never the artifact (API) or the audit.
+	if got := e.artifact(t, task.ID); strings.Contains(got.CIDetail, "login_test.go") {
+		t.Fatalf("output in the artifact %+v", got)
+	}
+	for _, d := range e.audit.details() {
+		if strings.Contains(d, "login_test.go") {
+			t.Fatalf("output in the audit %q", d)
+		}
+	}
+	// The runner holding the branch is gone.
+	if err := e.svc.ReleaseRunner(t.Context(), "r1", ReleaseRevoked); err != nil {
+		t.Fatal(err)
+	}
+	e.pool.set("p1", cliRunner("r2", "claude", "codex"))
+	e.schedule(t)
+	as := e.disp.takeAssigned()
+	if len(as) != 1 || as[0].Role != domain.StepRoleImplementer || as[0].BranchHead != "h1" ||
+		!strings.Contains(as[0].Prompt, "TestLogin") || !strings.Contains(as[0].Prompt, "login_test.go:12: want 200, got 500") {
+		t.Fatalf("fix assignment on the new runner %+v", as)
+	}
+	if _, ex := e.state(t, task.ID); ex.Steps[0].CIRound != 1 {
+		t.Fatalf("ci round %d", ex.Steps[0].CIRound)
+	}
+	fixed := domain.WorkChanges{BaseSHA: "b0", HeadSHA: "h2", Files: []string{"src/a.go"}, Total: 1}
+	runAssigned(t, e.schedEnv, task.ID, "only", "r2", `{"summary":"fixed"}`, nil, fixed)
+	e.schedule(t)
+	if rv := e.disp.takeAssigned(); len(rv) != 1 || rv[0].BranchHead != "" {
+		t.Fatalf("review %+v", rv) // the reviewer runs where the branch now is
+	}
+	runAssigned(t, e.schedEnv, task.ID, "only", "r2", approve, nil, fixed)
+	e.schedule(t)
+	pub := e.disp.takeAssigned()
+	if len(pub) != 1 || pub[0].DiffHead != "h2" {
+		t.Fatalf("publish %+v", pub)
+	}
+	ctx := t.Context()
+	if err := e.svc.StartStep(ctx, pub[0].StepID, "r2", pub[0].Fence); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.RecordPush(ctx, pub[0].StepID, "r2", pub[0].Fence, domain.Push{Repository: "api", Branch: a.Branch, HeadSHA: "h2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.CompleteStep(ctx, pub[0].StepID, "r2", pub[0].Fence); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.drain(t); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.artifact(t, task.ID); got.HeadSHA != "h2" {
+		t.Fatalf("artifact %+v", got)
+	}
+}
+
+// Acceptance (KIN-106): a task entering VERIFYING is announced to the approvals context (which notifies the Owner of
+// a pending integrate_dev approval of its revision); staying VERIFYING announces nothing more.
+func TestEnteringVerifyingIsAnnounced(t *testing.T) {
+	t.Parallel()
+	e := newCIEnv()
+	task, a := e.opened(t)
+	want := []string{task.ID + ":1"}
+	if got := e.events.verifying(); !slices.Equal(got, want) {
+		t.Fatalf("announced %v", got)
+	}
+	e.ci.set("h1", CIStatus{State: domain.CIPending})
+	e.ciEvent(t, a, "pending")
+	if got := e.events.verifying(); !slices.Equal(got, want) {
+		t.Fatalf("announced again %v", got)
+	}
+}

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -37,5 +38,44 @@ func TestCombineChecks(t *testing.T) {
 	}
 	if st, _ := CombineChecks([]CheckRun{done("lint", "failure")}, 150); st != CIStateFailed {
 		t.Errorf("partial red: %s", st)
+	}
+}
+
+// KIN-106: the failed checks' output title and summary are what a CI fix round is told beyond the names, each
+// bounded and sharing the budget; passing checks add nothing; the detail (audit, block reason, API) keeps the names.
+func TestFailedOutputCarriesTheFailedChecksOutput(t *testing.T) {
+	t.Parallel()
+	runs := []CheckRun{
+		{Name: "lint", Status: "completed", Conclusion: "success", Title: "all good", Summary: "nothing"},
+		{Name: "test", Status: "completed", Conclusion: "failure", Title: "2 tests failed",
+			Summary: "--- FAIL: TestLogin\n    login_test.go:12: want 200, got 500"},
+		{Name: "build", Status: "completed", Conclusion: "failure", Title: strings.Repeat("t", 500),
+			Summary: strings.Repeat("s", 5000)},
+	}
+	if st, detail := CombineChecks(runs, len(runs)); st != CIStateFailed || detail != "failed checks: test (failure), build (failure)" {
+		t.Fatalf("%s %q", st, detail)
+	}
+	out := FailedOutput(runs)
+	for _, want := range []string{"### test (failure): 2 tests failed", "--- FAIL: TestLogin", "login_test.go:12: want 200, got 500",
+		"### build (failure): ttt"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "all good") || strings.Contains(out, strings.Repeat("t", maxCheckTitle+1)) ||
+		strings.Contains(out, strings.Repeat("s", maxCheckSummary+1)) || len(out) > maxCIOutput {
+		t.Fatalf("unbounded output (%d bytes)", len(out))
+	}
+	// Many failures share the budget: each one is still named in the output.
+	var many []CheckRun
+	for i := range 40 {
+		many = append(many, CheckRun{Name: fmt.Sprintf("job-%02d", i), Status: "completed", Conclusion: "failure",
+			Title: "failed", Summary: strings.Repeat("x", 900)})
+	}
+	if out := FailedOutput(many); len(out) > maxCIOutput || !strings.Contains(out, "### job-00") || !strings.Contains(out, "### job-15") {
+		t.Fatalf("shared budget: %d bytes", len(out))
+	}
+	if FailedOutput(runs[:1]) != "" {
+		t.Fatal("output of a passing check")
 	}
 }

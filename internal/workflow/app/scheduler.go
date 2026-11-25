@@ -62,6 +62,9 @@ type Assignment struct {
 	TestCommand string
 	DiffBase    string
 	DiffHead    string
+	// BranchHead is the published head of the step's work branch for a CI fix round's implementer (KIN-106): the
+	// runner continues from it even when it does not hold the branch (the runner that did was lost).
+	BranchHead string
 }
 
 // TestCommands gives the test command configured for a project's repository (KIN-35; "" when none is).
@@ -373,7 +376,7 @@ func stepAssignment(e *domain.Execution, t domain.Task, plan domain.Plan, ps dom
 			Handoff: domain.ParseHandoff(impl.Report.Result), Files: impl.Files, Tests: impl.Tests, BaseSHA: impl.BaseSHA,
 			HeadSHA: impl.HeadSHA, Round: st.Round})
 	default:
-		a.TestCommand = st.TestCommand
+		a.TestCommand, a.BranchHead = st.TestCommand, st.PublishedHead()
 		a.Prompt = domain.ImplementerPrompt(domain.ImplementerInput{Task: t, Plan: plan, Step: ps, TestCommand: st.TestCommand,
 			Feedback: st.RetryFeedback(), Round: st.Round})
 	}
@@ -613,6 +616,15 @@ func (s *Service) ReleaseRunner(ctx context.Context, runnerID, reason string) er
 		if err != nil {
 			return err
 		}
+		// A step pinned to the runner but not held by it (a CI fix round waiting for it) starts over elsewhere too
+		// (KIN-106: from its published branch head).
+		pinned, err := s.Repo.ExecutionsPinnedTo(ctx, runnerID)
+		if err != nil {
+			return err
+		}
+		ids = append(ids, pinned...)
+		slices.Sort(ids)
+		ids = slices.Compact(ids)
 		for _, id := range ids {
 			var released []domain.Released
 			err := s.updateExecutionByID(ctx, id, func(_ context.Context, e *domain.Execution, now time.Time) error {

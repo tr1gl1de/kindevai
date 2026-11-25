@@ -30,7 +30,11 @@ func clip(s string) string {
 // ApprovalNotice is what a pending-approval notification says.
 type ApprovalNotice struct {
 	ApprovalID, TaskID, Project, Risk, Reason string
+	Scope                                     string // execute (a plan) or integrate_dev (the merge into dev, KIN-106)
 }
+
+// ScopeIntegrateDev is the scope of an approval of the merge into dev.
+const ScopeIntegrateDev = "integrate_dev"
 
 var severityLabel = map[Language]map[Severity]string{
 	LangEN: {SeverityInfo: "Info", SeverityWarning: "Warning", SeverityCritical: "Critical"},
@@ -154,6 +158,14 @@ func RenderApproval(l Language, n ApprovalNotice) string {
 		project = "—"
 	}
 	n.TaskID, n.Risk, n.Reason = clip(n.TaskID), clip(n.Risk), clip(n.Reason)
+	if n.Scope == ScopeIntegrateDev {
+		if lang(l) == LangRU {
+			return fmt.Sprintf("Проверенная работа ждёт одобрения на мерж в dev.\nПроект: %s\nЗадача: %s\nРиск: %s\nОткройте его в приложении, чтобы проверить и решить.",
+				project, n.TaskID, n.Risk)
+		}
+		return fmt.Sprintf("Verified work waits for your approval to merge into dev.\nProject: %s\nTask: %s\nRisk: %s\nOpen it in the app to review and decide.",
+			project, n.TaskID, n.Risk)
+	}
 	if lang(l) == LangRU {
 		return fmt.Sprintf("Требуется одобрение плана.\nПроект: %s\nЗадача: %s\nРиск: %s, причина: %s\nОткройте его в приложении, чтобы проверить и решить.",
 			project, n.TaskID, n.Risk, n.Reason)

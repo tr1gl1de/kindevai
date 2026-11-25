@@ -179,6 +179,13 @@ func networkDetail(err error) string {
 
 // call sends one request with the given bearer credential and decodes a JSON answer into out (when non-nil).
 // It returns the status code; statuses other than the wanted ones become failures.
+type responseLimitKey struct{}
+
+// withResponseLimit lets one call read a larger answer than maxResponseBytes (check runs with their output).
+func withResponseLimit(ctx context.Context, n int64) context.Context {
+	return context.WithValue(ctx, responseLimitKey{}, n)
+}
+
 func (c *Client) call(ctx context.Context, method, path, bearer string, body any, out any, want ...int) (int, error) {
 	var rd io.Reader
 	if body != nil {
@@ -207,7 +214,11 @@ func (c *Client) call(ctx context.Context, method, path, bearer string, body any
 		return 0, &failure{"unreachable", networkDetail(err)}
 	}
 	defer resp.Body.Close()
-	limited := io.LimitReader(resp.Body, maxResponseBytes)
+	limit := int64(maxResponseBytes)
+	if n, ok := ctx.Value(responseLimitKey{}).(int64); ok {
+		limit = n
+	}
+	limited := io.LimitReader(resp.Body, limit)
 	for _, w := range want {
 		if resp.StatusCode == w {
 			if out != nil && resp.StatusCode != http.StatusNotFound {

@@ -191,6 +191,10 @@ type run struct {
 	// stopPrep stops the attempt's workspace preparation (KIN-71); set while it is prepared in the background.
 	stopPrep context.CancelFunc
 	sandbox  Sandbox // released once the process ended
+	// launching: the process is being started and its sandbox verified, without the executor's lock (KIN-104); a
+	// cancel meanwhile cancels the sandbox, and kill asks for SIGKILL once the process is known.
+	launching bool
+	kill      bool
 	// network is why the attempt lost its strict egress sandbox (KIN-81: a runtime check failed, or a restarted
 	// runner could not serve its adapter again): it was stopped and ends with code network.
 	network  string
@@ -378,11 +382,17 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 		x.wg.Go(func() { x.prepareAndLaunch(pctx, r, a, dir) })
 		return nil
 	}
-	return x.launch(ctx, r, a, dir, "")
+	err = x.launch(ctx, r, a, dir, "")
+	if r.proc == nil { // never launched: a StopAll that saw it launching waits for no process
+		close(r.done)
+	}
+	return err
 }
 
 // launch starts the attempt's process in workdir (its worktree; "" for its journal directory). Called with x.mu
-// held. An error means the attempt was dropped (its record removed): the command should be re-sent.
+// held; it lets go of it while the process starts and its strict egress sandbox verifies (up to the sandbox's verify
+// timeout, KIN-104), so other attempts' commands go on and a cancel reaches the sandbox. An error means the attempt
+// was dropped (its record removed): the command should be re-sent.
 func (x *Executor) launch(ctx context.Context, r *run, a domain.Assignment, dir, workdir string) error {
 	k := key{a.Step, a.Fence}
 	var sandbox Sandbox
@@ -408,15 +418,24 @@ func (x *Executor) launch(ctx context.Context, r *run, a domain.Assignment, dir,
 		}
 	}
 	stdout, stderr := x.redacted(r, "stdout"), x.redacted(r, "stderr")
+	r.sandbox, r.launching = sandbox, true
+	x.runs[k] = r // listed while it launches: a cancel finds it, a repeated assignment is known
+	x.mu.Unlock()
 	proc, err := x.Launcher.Launch(ctx, LaunchSpec{Dir: dir, Workdir: workdir, Scenario: a.ScenarioOrDefault(),
 		Attempt: a.Fence, Stdout: stdout, Stderr: stderr, Sandbox: sandbox, Agent: agent})
+	x.mu.Lock()
+	r.launching = false
 	if err != nil {
+		delete(x.runs, k)
 		if sandbox != nil {
 			sandbox.Release()
 		}
 		return x.launchFailed(r, a, err)
 	}
-	r.proc, r.sandbox = proc, sandbox
+	r.proc = proc
+	if r.cancelled != "" { // cancelled while it launched: its sandbox never starts the agent; stop the process too
+		x.stop(r, r.kill)
+	}
 	if proc.StartTime() == "" {
 		x.logger().Warn("process start time unknown: after a restart a reused pid cannot be told apart", "step", a.Step,
 			"pid", proc.PID())
@@ -588,6 +607,8 @@ func (x *Executor) launchFailed(r *run, a domain.Assignment, err error) error {
 	x.releaseWorkspace(r)
 	f := protocol.Failure{Reason: r.mask("launch failed: " + err.Error())}
 	switch {
+	case r.cancelled != "": // cancelled while it launched (KIN-104): whatever then failed, it was cancelled
+		f = protocol.Failure{Reason: domain.Truncate(r.mask("cancelled: "+r.cancelled), protocol.MaxReasonLen)}
 	case errors.Is(err, ErrNetwork):
 		f = protocol.Failure{Reason: r.mask(err.Error()), Code: protocol.FailureNetwork}
 	case errors.Is(err, ErrAgentLoggedOut):
@@ -1185,9 +1206,24 @@ func (x *Executor) terminate(r *run, reason string) {
 	r.cancelled = reason
 	k := r.key()
 	x.logger().Info("cancelling attempt", "step", k.step, "fence", k.fence, "reason", reason)
-	if r.proc == nil { // still preparing its workspace (KIN-71): stop git; the attempt then fails as cancelled
-		if r.stopPrep != nil {
+	if r.proc == nil {
+		switch {
+		case r.stopPrep != nil: // still preparing its workspace (KIN-71): stop git; the attempt then fails as cancelled
 			r.stopPrep()
+		case r.launching && r.sandbox != nil: // KIN-103/104: its helper then never starts the agent
+			r.sandbox.Cancel()
+		}
+		return // a launching process is stopped once it is known (launch)
+	}
+	x.stop(r, false)
+}
+
+// stop sends SIGTERM to the attempt's process group and SIGKILL after the grace period, or SIGKILL at once.
+func (x *Executor) stop(r *run, kill bool) {
+	k := r.key()
+	if kill {
+		if err := r.proc.Signal(true); err != nil {
+			x.logger().Warn("SIGKILL to the attempt's process group", "step", k.step, "err", err)
 		}
 		return
 	}
@@ -1320,16 +1356,22 @@ func (x *Executor) Close() {
 }
 
 // KillAll stops every running attempt's process group at once and waits for them (tests and shutdown with kill).
+// An attempt launched in the background (with a worktree) is waited for even while it launches; one launched by
+// Assign itself (no worktree) is killed once its launch returns, possibly after KillAll did.
 func (x *Executor) KillAll() {
 	x.mu.Lock()
 	for _, r := range x.runs {
 		if r.cancelled == "" {
 			r.cancelled = protocol.CancelCancelled
 		}
-		if r.proc == nil { // preparing its workspace (KIN-71)
+		if r.proc == nil { // preparing its workspace (KIN-71), or launching (KIN-104: killed once it is known)
 			if r.stopPrep != nil {
 				r.stopPrep()
 			}
+			if r.launching && r.sandbox != nil {
+				r.sandbox.Cancel()
+			}
+			r.kill = true
 			continue
 		}
 		_ = r.proc.Signal(true)

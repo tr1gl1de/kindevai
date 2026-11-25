@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,7 +25,7 @@ import (
 // CLI's SessionDir below the agent's HOME: an attempt sees its own task's sessions only, never another task's or the
 // host's. The store holds transcripts only: the CLI's login stays a copy (or the runner's token) and is never written
 // back. Stores no attempt used for MaxAge are removed. A task's store (all its CLIs together) is kept within Limit
-// (KIN-96): before each attempt, and in the hourly sweep, its oldest session files are removed until it fits again.
+// (KIN-96): before each attempt its oldest session files are removed until it fits again, and the attempt says so.
 type SessionStore struct {
 	Root   string
 	MaxAge time.Duration    // DefaultSessionMaxAge when zero
@@ -35,6 +36,7 @@ type SessionStore struct {
 
 	mu        sync.Mutex
 	lastSweep time.Time
+	shrinking map[string]*sync.Mutex // per task directory: concurrent attempts of a task shrink one at a time
 }
 
 // Store is a task's session store prepared for an attempt.
@@ -117,6 +119,19 @@ type sessionFile struct {
 // shrink removes the oldest session files of the task's store at taskDir until it is within Limit and says what it
 // removed ("" when the store was within it). Only regular files count; symlinks are neither followed nor counted.
 func (s *SessionStore) shrink(taskDir string) (string, error) {
+	s.mu.Lock()
+	if s.shrinking == nil {
+		s.shrinking = map[string]*sync.Mutex{}
+	}
+	m := s.shrinking[taskDir]
+	if m == nil {
+		m = &sync.Mutex{}
+		s.shrinking[taskDir] = m
+	}
+	s.mu.Unlock()
+	m.Lock()
+	defer m.Unlock()
+	unlock(taskDir) // an agent may have made a directory unreadable or read-only
 	var files []sessionFile
 	var total int64
 	err := filepath.WalkDir(taskDir, func(p string, d fs.DirEntry, err error) error {
@@ -150,7 +165,6 @@ func (s *SessionStore) shrink(taskDir string) (string, error) {
 		}
 		return files[i].path < files[j].path
 	})
-	unlock(taskDir) // an agent may have made a directory read-only
 	remove := s.remove
 	if remove == nil {
 		remove = os.Remove
@@ -163,20 +177,38 @@ func (s *SessionStore) shrink(taskDir string) (string, error) {
 		if total <= limit {
 			break
 		}
-		if err := remove(f.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			lastErr = err
+		if err := remove(f.path); err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				lastErr = err
+			}
 			continue
 		}
 		total -= f.size
 		freed += f.size
 		n++
 	}
+	pruneEmpty(taskDir)
 	if total > limit {
 		return "", fmt.Errorf("session store of the task is over its limit (%s > %s) and could not be shrunk: %w",
 			byteSize(total), byteSize(limit), lastErr)
 	}
 	return fmt.Sprintf("session store of the task was over its limit (%s > %s): removed %d oldest session files "+
 		"(%s); sessions in them can no longer be resumed", byteSize(was), byteSize(limit), n, byteSize(freed)), nil
+}
+
+// pruneEmpty removes the directories below the CLIs' stores in taskDir that eviction left empty (the stores
+// themselves stay: they are bound into the sandbox).
+func pruneEmpty(taskDir string) {
+	var dirs []string
+	_ = filepath.WalkDir(taskDir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() && strings.Count(strings.TrimPrefix(p, taskDir), string(filepath.Separator)) > 1 {
+			dirs = append(dirs, p)
+		}
+		return nil
+	})
+	for i := len(dirs) - 1; i >= 0; i-- { // deepest first
+		_ = os.Remove(dirs[i]) // only when empty
+	}
 }
 
 // byteSize formats n bytes for a person.
@@ -214,7 +246,7 @@ func (s *SessionStore) maybeSweep() {
 	}
 }
 
-// Sweep removes the stores of tasks no attempt used for MaxAge and returns them; it brings the others within Limit.
+// Sweep removes the stores of tasks no attempt used for MaxAge and returns them.
 func (s *SessionStore) Sweep() []string {
 	cutoff := s.now().Add(-s.maxAge())
 	var removed []string
@@ -232,8 +264,7 @@ func (s *SessionStore) Sweep() []string {
 			}
 			td := filepath.Join(pd, t.Name())
 			if !fi.ModTime().Before(cutoff) {
-				_, _ = s.shrink(td) // best effort: the next attempt of the task retries and reports
-				continue
+				continue // shrinking is Prepare's: it reports it, and an attempt may be using the store now
 			}
 			unlock(td)
 			if os.RemoveAll(td) == nil { // RemoveAll never follows a symlink inside

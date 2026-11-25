@@ -209,8 +209,9 @@ func TestSessionStoreLimitLockedAndRefused(t *testing.T) {
 	}
 }
 
-// The hourly sweep also brings stores no attempt prepared lately back within the limit.
-func TestSessionStoreSweepEnforcesLimit(t *testing.T) {
+// An agent left a directory of its store unreadable: the next attempt still measures (and runs) instead of being
+// locked out; the sweep never shrinks a store (an attempt may be using it), only Prepare does and says so.
+func TestSessionStoreUnreadableDirAndSweep(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "cli-sessions")
 	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
@@ -219,13 +220,23 @@ func TestSessionStoreSweepEnforcesLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := writeAged(t, st.Source, "a.jsonl", 400, now.Add(-2*time.Hour))
-	recent := writeAged(t, st.Source, "b.jsonl", 400, now.Add(-time.Hour))
-	s.Sweep()
-	if _, err := os.Lstat(old); !os.IsNotExist(err) {
-		t.Errorf("old file kept: %v", err)
+	sub := filepath.Join(st.Source, "sub")
+	writeAged(t, sub, "a.jsonl", 10, now)
+	if err := os.Chmod(sub, 0); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Lstat(recent); err != nil {
-		t.Errorf("recent file removed: %v", err)
+	if st, err := s.Prepare("p", "t", domain.AgentClaude); err != nil || st.Notice != "" {
+		t.Fatalf("unreadable dir under the limit: %+v %v", st, err)
+	}
+	old := writeAged(t, st.Source, "b.jsonl", 600, now.Add(-time.Hour))
+	s.Sweep()
+	if _, err := os.Lstat(old); err != nil {
+		t.Fatalf("the sweep shrank a store: %v", err)
+	}
+	if st, err := s.Prepare("p", "t", domain.AgentClaude); err != nil || !strings.Contains(st.Notice, "removed 1") {
+		t.Fatalf("over the limit: %+v %v", st, err)
+	}
+	if _, err := os.Lstat(old); !os.IsNotExist(err) {
+		t.Fatalf("old file kept: %v", err)
 	}
 }

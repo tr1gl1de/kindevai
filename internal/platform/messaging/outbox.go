@@ -42,6 +42,16 @@ type Delivery struct {
 // is retried with backoff and counts as an outage of the adapter. It must honour ctx (Config.DeliveryTimeout).
 type DeliverFunc func(ctx context.Context, d Delivery) error
 
+// DeadFunc is a topic's dead-letter hook (KIN-108): it runs in the transaction that marks a message dead, whatever
+// the cause (a Permanent rejection, the last attempt, a handler panic, no handler), so domain state that mirrors the
+// message can follow it. cause is the attempt's error. Returning an error rolls the dead mark back: the message stays
+// leased and its next attempt decides again. It must be idempotent and write only through db.Conn(ctx, …).
+type DeadFunc func(ctx context.Context, d Delivery, cause error) error
+
+// RetryFunc is a topic's retry hook (KIN-108): it runs in the transaction of Retry / RetryUnhandled that puts a dead
+// message back; returning an error keeps the message dead. d.Attempt is 0.
+type RetryFunc func(ctx context.Context, d Delivery) error
+
 // Outbox stores outgoing messages and delivers them. Create one per process with NewOutbox, register handlers
 // before Run.
 type Outbox struct {
@@ -49,12 +59,15 @@ type Outbox struct {
 	health   *Health
 	mu       sync.RWMutex
 	handlers map[string]DeliverFunc
+	onDead   map[string]DeadFunc
+	onRetry  map[string]RetryFunc
 }
 
 // NewOutbox returns the outbox backed by d.
 func NewOutbox(d *sql.DB, cfg Config) *Outbox {
 	q := newQueue(d, cfg, outboxTable)
-	return &Outbox{q: q, health: NewHealth(q.cfg), handlers: map[string]DeliverFunc{}}
+	return &Outbox{q: q, health: NewHealth(q.cfg), handlers: map[string]DeliverFunc{},
+		onDead: map[string]DeadFunc{}, onRetry: map[string]RetryFunc{}}
 }
 
 // Health returns the per-adapter state fed by deliveries; pollers of the same adapters report to it too.
@@ -69,6 +82,20 @@ func (o *Outbox) Handle(topic string, fn DeliverFunc) {
 	if adapter, _, ok := strings.Cut(topic, "."); ok && adapter != "" {
 		o.health.Register(adapter)
 	}
+}
+
+// OnDead registers the dead-letter hook of a topic; register it before Run.
+func (o *Outbox) OnDead(topic string, fn DeadFunc) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.onDead[topic] = fn
+}
+
+// OnRetry registers the retry hook of a topic; register it before Run.
+func (o *Outbox) OnRetry(topic string, fn RetryFunc) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.onRetry[topic] = fn
 }
 
 func (o *Outbox) handler(topic string) DeliverFunc {
@@ -125,8 +152,21 @@ func (o *Outbox) deliver(ctx context.Context, r record) error {
 	default:
 		o.health.Failure(r.endpoint, err)
 	}
-	dead, ferr := o.q.finish(ctx, r, err)
-	if dead {
+	var onDead func(context.Context) error
+	o.mu.RLock()
+	if hook := o.onDead[r.topic]; hook != nil {
+		onDead = func(ctx context.Context) (herr error) {
+			defer func() {
+				if p := recover(); p != nil { // the panic value is not logged, it may hold request data
+					herr = errHookPanic
+				}
+			}()
+			return hook(ctx, r.delivery(), err)
+		}
+	}
+	o.mu.RUnlock()
+	dead, ferr := o.q.finish(ctx, r, err, onDead)
+	if dead && ferr == nil { // a failed dead hook rolled the mark back: the message is still leased
 		o.q.cfg.Logger.Warn("outbox message dead", "id", r.id, "adapter", r.endpoint, "topic", r.topic,
 			"attempts", r.attempts, "err", errorText(err))
 	}
@@ -135,6 +175,9 @@ func (o *Outbox) deliver(ctx context.Context, r record) error {
 
 // errMissingHandler: no handler is registered for the topic (a message goes dead; Retry after deploying one).
 var errMissingHandler = errors.New("no handler for topic")
+
+// errHookPanic replaces a dead hook's panic: the dead mark rolls back like on a hook error.
+var errHookPanic = errors.New("dead hook panic")
 
 // errPanic replaces a handler panic; the panic value is not stored or logged, it may hold request data.
 var errPanic = errors.New("handler panic")
@@ -152,7 +195,11 @@ func (o *Outbox) call(ctx context.Context, r record) (err error) {
 			err = errPanic
 		}
 	}()
-	return h(ctx, Delivery{ID: r.id, Adapter: r.endpoint, Topic: r.topic, Key: r.key, Payload: r.payload, Attempt: r.attempts})
+	return h(ctx, r.delivery())
+}
+
+func (r record) delivery() Delivery {
+	return Delivery{ID: r.id, Adapter: r.endpoint, Topic: r.topic, Key: r.key, Payload: r.payload, Attempt: r.attempts}
 }
 
 // Poll claims up to Config.Workers due messages, delivers them concurrently and waits for them. It returns how
@@ -218,8 +265,19 @@ func (o *Outbox) Dead(ctx context.Context, limit int) ([]DeadMessage, error) {
 	return o.q.listDead(ctx, limit)
 }
 
-// Retry puts a dead message back into the queue with a fresh attempt budget and the same idempotency key.
-func (o *Outbox) Retry(ctx context.Context, id int64) error { return o.q.retry(ctx, id) }
+// Retry puts a dead message back into the queue with a fresh attempt budget and the same idempotency key; the
+// topic's retry hook runs in the same transaction.
+func (o *Outbox) Retry(ctx context.Context, id int64) error {
+	return o.q.retry(ctx, id, func(ctx context.Context, r record) error {
+		o.mu.RLock()
+		hook := o.onRetry[r.topic]
+		o.mu.RUnlock()
+		if hook == nil {
+			return nil
+		}
+		return hook(ctx, r.delivery())
+	})
+}
 
 // maxUnhandledScan bounds how many dead messages RetryUnhandled looks at in one call.
 const maxUnhandledScan = 10_000
@@ -236,7 +294,7 @@ func (o *Outbox) RetryUnhandled(ctx context.Context) (int, error) {
 		if m.LastError != errMissingHandler.Error() || o.handler(m.Topic) == nil {
 			continue
 		}
-		if err := o.q.retry(ctx, m.ID); err != nil && !errors.Is(err, ErrNotFound) {
+		if err := o.Retry(ctx, m.ID); err != nil && !errors.Is(err, ErrNotFound) {
 			return n, err
 		}
 		n++

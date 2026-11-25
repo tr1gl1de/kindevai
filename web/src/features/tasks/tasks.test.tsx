@@ -456,6 +456,23 @@ describe("task detail", () => {
     expect(within(docs).getByText(/DOCS_NOT_APPLICABLE — внутренний рефакторинг/)).toBeInTheDocument();
   });
 
+  it("names a write whose delivery died outside the write-back (KIN-108) in English and Russian", async () => {
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/tasks/t1", () => json(detail({ task: { ...detail().task, state: "COMPLETED", youtrackIssue: "KIN-7" },
+        publication: { pending: 0, failed: 1, published: 2, lastError: "dead" } }))),
+      http.get("/api/approvals", () => json([])),
+    );
+    const { unmount } = await renderApp("/tasks/t1");
+    const details = await screen.findByRole("region", { name: "Details" });
+    expect(within(details).getByText(/delivery stopped by an internal error/)).toBeInTheDocument();
+    unmount();
+    await renderApp("/tasks/t1", "ru");
+    const ru = await screen.findByRole("region", { name: "Сведения" });
+    expect(within(ru).getByText(/доставка прервана внутренней ошибкой/)).toBeInTheDocument();
+  });
+
   it("cancels after naming the task, and retries a failed task (Owner / project admin only)", async () => {
     let state: TaskDetail["task"]["state"] = "RUNNING";
     let cancelBody: unknown;

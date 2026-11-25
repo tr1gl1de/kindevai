@@ -156,6 +156,25 @@ func (s *writeStore) MarkIssueWrite(_ context.Context, key string, st domain.Wri
 	return nil
 }
 
+func (s *writeStore) MoveIssueWrite(_ context.Context, key string, from, to domain.WriteStatus, code string, attempts int,
+	_ time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, ok := s.writes[key]
+	if !ok {
+		return false, domain.ErrNotFound
+	}
+	if w.Status != from {
+		return false, nil
+	}
+	w.Status, w.Attempts = to, max(w.Attempts, attempts)
+	if code != "" {
+		w.Error = code
+	}
+	s.writes[key] = w
+	return true, nil
+}
+
 func (s *writeStore) TaskPublication(_ context.Context, taskID string) (domain.Publication, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -557,5 +576,143 @@ func TestIssueSyncMalformedPayloadFailsTheWrite(t *testing.T) {
 	}
 	if status, code := st.status("task/t1/v4/plan"); status != domain.WriteFailed || code != "malformed" {
 		t.Fatalf("write = %s %s", status, code)
+	}
+}
+
+// KIN-108 AC1: an outbox message of a pending write that goes dead outside the handler (handler panic, no handler,
+// a crash on the last attempt) fails the write with code "dead" and raises the write-back alert, once.
+func TestIssueSyncDeadMessageFailsThePendingWrite(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, _, st, q := issueSync(ytConn{})
+	if err := s.Comment(ctx, "task/t1/v4/final", "t1", "p1", "KIN-7", "Done"); err != nil {
+		t.Fatal(err)
+	}
+	d := writeDelivery(q, "task/t1/v4/final", 10)
+	for range 2 { // the hook is idempotent: a second call neither changes the write nor alerts again
+		if err := s.HandleDead(ctx, d, errors.New("handler panic")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if status, code := st.status("task/t1/v4/final"); status != domain.WriteFailed || code != "dead" {
+		t.Fatalf("write = %s %s, want failed dead", status, code)
+	}
+	failed := messagesOf(q, app.TopicYouTrackWriteFailed)
+	if len(failed) != 1 || failed[0].OrderingKey != app.AlertOrderingKey("t1") {
+		t.Fatalf("failure alerts = %+v, want one", failed)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(failed[0].Payload, &body); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"projectId": "p1", "taskId": "t1", "issue": "KIN-7", "kind": "comment", "code": "dead"}
+	if !maps.Equal(body, want) {
+		t.Fatalf("failure alert = %v, want %v", body, want)
+	}
+}
+
+// A write the handler already failed (its message then goes dead) or published keeps its outcome: no second alert.
+func TestIssueSyncDeadMessageKeepsAFinishedWrite(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, c, st, q := issueSync(ytConn{})
+	if err := s.Comment(ctx, "task/t1/v4/final", "t1", "p1", "KIN-7", "Done"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Comment(ctx, "task/t1/v5/note", "t1", "p1", "KIN-7", "Note"); err != nil {
+		t.Fatal(err)
+	}
+	c.err = &app.StatusError{Status: 401}
+	d := writeDelivery(q, "task/t1/v4/final", 1)
+	if err := s.HandleWrite(ctx, d); !messaging.IsPermanent(err) {
+		t.Fatalf("unauthorized = %v", err)
+	}
+	if err := s.HandleDead(ctx, d, err401{}); err != nil {
+		t.Fatal(err)
+	}
+	if status, code := st.status("task/t1/v4/final"); status != domain.WriteFailed || code != "unauthorized" {
+		t.Fatalf("write = %s %s, want the handler's failure kept", status, code)
+	}
+	c.err = nil
+	pub := writeDelivery(q, "task/t1/v5/note", 1)
+	if err := s.HandleWrite(ctx, pub); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.HandleDead(ctx, pub, errors.New("stale")); err != nil {
+		t.Fatal(err)
+	}
+	if status, _ := st.status("task/t1/v5/note"); status != domain.WritePublished {
+		t.Fatalf("published write = %s", status)
+	}
+	if n := len(messagesOf(q, app.TopicYouTrackWriteFailed)); n != 1 {
+		t.Fatalf("failure alerts = %d, want only the handler's", n)
+	}
+	// An untracked key and an undecodable payload are no error (nothing to show; the outbox must not loop).
+	if err := s.HandleDead(ctx, messaging.Delivery{Topic: app.TopicYouTrackWrite, Key: "task/x/none", Payload: []byte("{")},
+		errors.New("x")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type err401 struct{}
+
+func (err401) Error() string { return "401" }
+
+// A write enqueued before the payload carried its project fails without an alert (KIN-107 rule).
+func TestIssueSyncDeadLegacyWriteFailsWithoutAlert(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, _, st, q := issueSync(ytConn{})
+	if err := s.Comment(ctx, "task/t1/v4/final", "t1", "", "KIN-7", "Done"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.HandleDead(ctx, writeDelivery(q, "task/t1/v4/final", 10), errors.New("handler panic")); err != nil {
+		t.Fatal(err)
+	}
+	if status, code := st.status("task/t1/v4/final"); status != domain.WriteFailed || code != "dead" {
+		t.Fatalf("write = %s %s", status, code)
+	}
+	if n := len(messagesOf(q, app.TopicYouTrackWriteFailed)); n != 0 {
+		t.Fatalf("failure alerts = %d, want none without a project", n)
+	}
+}
+
+// KIN-108 AC2: retrying the dead message (outbox API, RetryUnhandled) puts its failed write back to pending.
+func TestIssueSyncRetriedMessageReopensTheWrite(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, _, st, q := issueSync(ytConn{})
+	if err := s.Comment(ctx, "task/t1/v4/final", "t1", "p1", "KIN-7", "Done"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Comment(ctx, "task/t1/v5/note", "t1", "p1", "KIN-7", "Note"); err != nil {
+		t.Fatal(err)
+	}
+	d := writeDelivery(q, "task/t1/v4/final", 0)
+	if err := s.HandleDead(ctx, d, errors.New("handler panic")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.HandleRetried(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	if status, code := st.status("task/t1/v4/final"); status != domain.WritePending || code != "dead" {
+		t.Fatalf("write = %s %s, want pending with its last error", status, code)
+	}
+	if p, _ := s.Publication(ctx, "t1"); p.Pending != 2 || p.Failed != 0 {
+		t.Fatalf("publication = %+v", p)
+	}
+	// A published write and an untracked key are left alone.
+	pub := writeDelivery(q, "task/t1/v5/note", 1)
+	if err := s.HandleWrite(ctx, pub); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.HandleRetried(ctx, pub); err != nil {
+		t.Fatal(err)
+	}
+	if status, _ := st.status("task/t1/v5/note"); status != domain.WritePublished {
+		t.Fatalf("published write = %s", status)
+	}
+	if err := s.HandleRetried(ctx, messaging.Delivery{Key: "task/x/none"}); err != nil {
+		t.Fatal(err)
 	}
 }

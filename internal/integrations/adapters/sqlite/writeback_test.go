@@ -114,3 +114,39 @@ func TestFollowsFailure(t *testing.T) {
 		}
 	}
 }
+
+// KIN-108: the outbox hooks move a write only from the status they expect; an empty code keeps the last error.
+func TestMoveIssueWrite(t *testing.T) {
+	t.Parallel()
+	r := sqlite.New(testDB(t))
+	ctx := t.Context()
+	key := "task/t1/v4/final"
+	if _, err := r.MoveIssueWrite(ctx, key, domain.WritePending, domain.WriteFailed, "dead", 10, t0); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("unknown key: %v", err)
+	}
+	if err := r.SaveIssueWrite(ctx, domain.IssueWrite{Key: key, TaskID: "t1", IssueID: "KIN-7", Kind: domain.WriteComment,
+		CreatedAt: t0}); err != nil {
+		t.Fatal(err)
+	}
+	steps := []struct {
+		from, to domain.WriteStatus
+		code     string
+		moved    bool
+		want     domain.WriteStatus
+		wantCode string
+	}{
+		{domain.WritePending, domain.WriteFailed, "dead", true, domain.WriteFailed, "dead"},
+		{domain.WritePending, domain.WriteFailed, "dead", false, domain.WriteFailed, "dead"}, // already failed
+		{domain.WriteFailed, domain.WritePending, "", true, domain.WritePending, "dead"},     // retried: error kept
+	}
+	for i, s := range steps {
+		moved, err := r.MoveIssueWrite(ctx, key, s.from, s.to, s.code, 10, t0.Add(time.Minute))
+		if err != nil || moved != s.moved {
+			t.Fatalf("step %d: moved = %v, %v", i, moved, err)
+		}
+		w, err := r.IssueWrite(ctx, key)
+		if err != nil || w.Status != s.want || w.Error != s.wantCode || w.Attempts != 10 {
+			t.Fatalf("step %d: write = %+v, %v", i, w, err)
+		}
+	}
+}

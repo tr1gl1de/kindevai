@@ -88,7 +88,7 @@ func (in *Inbox) process(ctx context.Context, r record) error {
 			if err := in.call(ctx, h, r); err != nil {
 				return handlerError{err}
 			}
-			_, err := in.q.finish(ctx, r, nil) // joins the transaction via db.Conn
+			_, err := in.q.finish(ctx, r, nil, nil) // joins the transaction via db.Conn
 			return err
 		})
 		var he handlerError
@@ -100,7 +100,7 @@ func (in *Inbox) process(ctx context.Context, r record) error {
 			return in.q.giveBack(ctx, r)
 		}
 	}
-	dead, err := in.q.finish(ctx, r, cause)
+	dead, err := in.q.finish(ctx, r, cause, nil)
 	if dead {
 		in.q.cfg.Logger.Warn("inbox event dead", "id", r.id, "source", r.endpoint, "topic", r.topic,
 			"attempts", r.attempts, "err", errorText(cause))
@@ -157,7 +157,7 @@ func (in *Inbox) Dead(ctx context.Context, limit int) ([]DeadMessage, error) {
 }
 
 // Retry puts a dead event back into the queue with a fresh attempt budget.
-func (in *Inbox) Retry(ctx context.Context, id int64) error { return in.q.retry(ctx, id) }
+func (in *Inbox) Retry(ctx context.Context, id int64) error { return in.q.retry(ctx, id, nil) }
 
 // Purge deletes done events older than Config.Retention and dead ones older than Config.DeadRetention. A
 // redelivery of a purged event is accepted again, so retention must exceed the senders' redelivery window.

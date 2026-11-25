@@ -181,6 +181,11 @@ func (f fakeLog) AttemptEvents(_ context.Context, _ string, _ int64, after int64
 	return out, nil
 }
 
+func (fakeLog) AttemptWorkspace(_ context.Context, step string, fence int64) (AttemptWorkspace, error) {
+	return AttemptWorkspace{Prepared: &WorkspacePrepared{Branch: "feature/" + step, Base: "dev", BaseSHA: "abc"},
+		Changes: &WorkspaceChanges{HeadSHA: "def", Files: []ChangedFile{{Path: "a.go", Status: "M"}}, FilesTotal: int(fence)}}, nil
+}
+
 // Members read an attempt's events in bounded pages after a cursor; a step or attempt of another task, or a task
 // they cannot see, is not found.
 func TestAttemptEventsArePagedAndScopedToTheTask(t *testing.T) {
@@ -210,6 +215,38 @@ func TestAttemptEventsArePagedAndScopedToTheTask(t *testing.T) {
 		"another task":  func() error { _, err := e.svc.AttemptEvents(ctx, member, otherTask.ID, step, fence, 0); return err },
 		"unknown fence": func() error { _, err := e.svc.AttemptEvents(ctx, member, task.ID, step, fence+1, 0); return err },
 		"unknown step":  func() error { _, err := e.svc.AttemptEvents(ctx, member, task.ID, "nope", fence, 0); return err },
+	} {
+		if err := call(); !errors.Is(err, domain.ErrNotFound) {
+			t.Errorf("%s: %v, want not found", name, err)
+		}
+	}
+}
+
+// Whoever may see the task reads an attempt's latest workspace reports (KIN-70); a step or attempt of another task,
+// or a task they cannot see, is not found; without a recorded log there are no reports.
+func TestAttemptWorkspaceIsScopedToTheTask(t *testing.T) {
+	t.Parallel()
+	e := accessEnv()
+	ctx := t.Context()
+	task, step, fence := mockRunning(t, e, "success")
+	if err := e.svc.StartStepAt(ctx, step, "r1", fence, t0, "mock"); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := e.svc.AttemptWorkspace(ctx, member, task.ID, step, fence); err != nil || w.Prepared != nil || w.Changes != nil {
+		t.Fatalf("without a log %+v %v", w, err)
+	}
+	e.svc.Log = fakeLog{}
+	w, err := e.svc.AttemptWorkspace(ctx, member, task.ID, step, fence)
+	if err != nil || w.Prepared == nil || w.Prepared.Branch != "feature/"+step || w.Changes == nil ||
+		w.Changes.FilesTotal != int(fence) || len(w.Changes.Files) != 1 {
+		t.Fatalf("workspace %+v %v", w, err)
+	}
+	otherTask, _ := e.svc.CreateTaskAs(ctx, admin, "p1", "Other")
+	for name, call := range map[string]func() error{
+		"outsider":      func() error { _, err := e.svc.AttemptWorkspace(ctx, other, task.ID, step, fence); return err },
+		"another task":  func() error { _, err := e.svc.AttemptWorkspace(ctx, member, otherTask.ID, step, fence); return err },
+		"unknown fence": func() error { _, err := e.svc.AttemptWorkspace(ctx, member, task.ID, step, fence+1); return err },
+		"unknown step":  func() error { _, err := e.svc.AttemptWorkspace(ctx, member, task.ID, "nope", fence); return err },
 	} {
 		if err := call(); !errors.Is(err, domain.ErrNotFound) {
 			t.Errorf("%s: %v, want not found", name, err)

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { http } from "msw";
 import { describe, expect, it } from "vitest";
 import type { TelegramLaunch } from "../telegram/webapp";
-import type { Approval, Me, Project, Step, TaskDetail, TaskList, TaskListItem } from "../../api/types";
+import type { Approval, AttemptWorkspace, Me, Project, Step, TaskDetail, TaskList, TaskListItem } from "../../api/types";
 import { apiError, json, owner, server } from "../../test/msw";
 import { expectAccessible, expectStatus, renderApp } from "../../test/render";
 import { stages } from "./TaskPage";
@@ -276,5 +276,109 @@ describe("stages", () => {
     const s = (key: string, dependsOn: string[] = []) => step({ id: key, key, dependsOn });
     const got = stages([s("a"), s("b", ["a"]), s("c"), s("d", ["b", "c"])]).map((g) => g.map((x) => x.key));
     expect(got).toEqual([["a", "c"], ["b"], ["d"]]);
+  });
+});
+
+describe("attempt workspace", () => {
+  const sha = (c: string) => c.repeat(40);
+  const ws: AttemptWorkspace = {
+    prepared: {
+      at: "2026-11-24T10:01:00Z", repository: "acme/app", branch: "feature/t1--s1", base: "dev", baseSha: sha("b"),
+      instructions: [
+        { path: "AGENTS.md", sha256: "a".repeat(64), size: 2048 },
+        { path: "<img src=x onerror=alert(1)>/CLAUDE.md", sha256: "c".repeat(64), size: 10, symlink: true },
+        { path: ".claude/rules/old.md", sha256: "d".repeat(64), size: 5 },
+      ],
+    },
+    changes: {
+      at: "2026-11-24T10:01:40Z", branch: "feature/t1--s1", baseSha: sha("b"), headSha: sha("e"),
+      files: [
+        { path: "api/login.go", status: "A" },
+        { path: "api/server.go", status: "M" },
+        { path: "AGENTS.md", status: "M" },
+        { path: "legacy.go", status: "D" },
+      ],
+      filesTotal: 6, truncated: true,
+      instructionsChanged: [
+        { path: "AGENTS.md", before: "a".repeat(64), after: "f".repeat(64) },
+        { path: ".claude/rules/old.md", before: "d".repeat(64) },
+        { path: ".claude/skills/new/SKILL.md", after: "9".repeat(64) },
+      ],
+    },
+  };
+
+  it("shows the branch, base and head commits, instruction files with changes marked, and changed files with counts", async () => {
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/approvals", () => json([])),
+      http.get("/api/tasks/t1", () => json(detail())),
+      http.get("/api/tasks/t1/steps/s1/attempts/2/workspace", () => json(ws)),
+    );
+    const { container } = await renderApp("/tasks/t1");
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("Workspace of attempt 2"));
+    const facts = await screen.findByRole("region", { name: "Workspace of attempt 2" });
+    expect(within(facts).getByText("feature/t1--s1")).toBeInTheDocument();
+    expect(within(facts).getByText("dev")).toBeInTheDocument();
+    expect(within(facts).getByText("bbbbbbbbbbbb")).toBeInTheDocument();
+    expect(within(facts).getByText("eeeeeeeeeeee")).toBeInTheDocument();
+
+    const instr = screen.getByRole("table", { name: "Instruction files of attempt 2" });
+    const rows = within(instr).getAllByRole("row");
+    expect(rows).toHaveLength(5); // header + 3 prepared + 1 added during the attempt
+    expect(within(instr).getByText("<img src=x onerror=alert(1)>/CLAUDE.md")).toBeInTheDocument(); // text, not markup
+    expect(instr.querySelector("img")).toBeNull();
+    expect(within(instr).getByText("Symlink")).toBeInTheDocument();
+    expect(within(instr).getByText("2 kB")).toBeInTheDocument();
+    const agents = within(instr).getByText("AGENTS.md").closest("tr");
+    expect(agents).toHaveTextContent("aaaaaaaaaaaa");
+    expect(agents).toHaveTextContent("Changed during the attempt");
+    expect(within(instr).getByText(".claude/rules/old.md").closest("tr")).toHaveTextContent("Removed during the attempt");
+    expect(within(instr).getByText(".claude/skills/new/SKILL.md").closest("tr")).toHaveTextContent("Added during the attempt");
+
+    const changed = screen.getByRole("list", { name: "Changed files of attempt 2" });
+    expect(within(changed).getAllByRole("listitem")).toHaveLength(4);
+    expect(within(changed).getByText("legacy.go").closest("li")).toHaveTextContent("Deleted");
+    expect(screen.getByText("1 added · 2 modified · 1 deleted")).toBeInTheDocument();
+    expect(screen.getByText("Showing 4 of 6 changed files.")).toBeInTheDocument();
+    await expectAccessible(container);
+  });
+
+  it("is translated to Russian and explains an attempt without a workspace", async () => {
+    server.use(
+      http.get("/api/auth/me", () => json(member)),
+      http.get("/api/projects", () => json([{ ...alpha, myRole: "member" }])),
+      http.get("/api/tasks/t1", () => json(detail({ canManage: false }))),
+      http.get("/api/tasks/t1/steps/s1/attempts/1/workspace", () => json<AttemptWorkspace>({ prepared: null, changes: null })),
+      http.get("/api/tasks/t1/steps/s1/attempts/2/workspace", () =>
+        json<AttemptWorkspace>({ prepared: { ...ws.prepared!, instructions: [] }, changes: null })),
+    );
+    const { container } = await renderApp("/tasks/t1", "ru");
+    const user = userEvent.setup();
+    await user.click((await screen.findAllByText("Рабочий каталог попытки 1"))[0]!); // step backend
+    expect(await screen.findByText(/Раннер не сообщил о рабочем каталоге/)).toBeInTheDocument();
+    await user.click(screen.getByText("Рабочий каталог попытки 2"));
+    expect(await screen.findByText("Файлы инструкций в репозитории не найдены.")).toBeInTheDocument();
+    expect(screen.getByText("Раннер не сообщил об изменённых файлах.")).toBeInTheDocument();
+    await expectAccessible(container);
+  });
+
+  it("says what failed and retries", async () => {
+    let fail = true;
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/approvals", () => json([])),
+      http.get("/api/tasks/t1", () => json(detail())),
+      http.get("/api/tasks/t1/steps/s1/attempts/2/workspace", () => (fail ? apiError(500, "internal") : json(ws))),
+    );
+    await renderApp("/tasks/t1");
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("Workspace of attempt 2"));
+    const retry = await screen.findByRole("button", { name: /try again/i });
+    fail = false;
+    await user.click(retry);
+    expect(await screen.findByRole("table", { name: "Instruction files of attempt 2" })).toBeInTheDocument();
   });
 });

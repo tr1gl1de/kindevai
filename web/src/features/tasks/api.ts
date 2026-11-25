@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
-import type { Approval, AttemptEventPage, MockScenario, TaskDetail, TaskList, TaskState } from "../../api/types";
+import type { Approval, AttemptEventPage, AttemptWorkspace, MockScenario, TaskDetail, TaskList, TaskState } from "../../api/types";
 
 export interface TaskFilter {
   projectId: string; // "" = every visible project
@@ -13,6 +13,7 @@ const keys = {
   list: (f: TaskFilter) => ["tasks", "list", f.projectId, f.state] as const,
   one: (id: string) => ["tasks", "one", id] as const,
   approvals: (id: string) => ["approvals", "task", id] as const,
+  workspace: (id: string, step: string, fence: number) => ["tasks", "workspace", id, step, fence] as const,
 };
 
 const path = (id: string) => `/api/tasks/${encodeURIComponent(id)}`;
@@ -81,6 +82,16 @@ export const useMockRun = (id: string) =>
 export const useCancelTask = (id: string) =>
   useTaskAction(id, (reason: string) => api<TaskDetail>("POST", `${path(id)}/cancel`, { reason }));
 export const useRetryTask = (id: string) => useTaskAction(id, () => api<TaskDetail>("POST", `${path(id)}/retry`, {}));
+
+/** An attempt's latest workspace reports (KIN-70), refreshed while the attempt runs. */
+export function useAttemptWorkspace(taskId: string, stepId: string, fence: number, isLive: boolean) {
+  return useQuery({
+    queryKey: keys.workspace(taskId, stepId, fence),
+    queryFn: ({ signal }) =>
+      api<AttemptWorkspace>("GET", `${path(taskId)}/steps/${encodeURIComponent(stepId)}/attempts/${fence}/workspace`, undefined, signal),
+    refetchInterval: isLive ? LIVE_REFRESH_MS : false,
+  });
+}
 
 /** One line of an attempt's log: an output chunk or a lifecycle event. */
 export interface LogEntry {

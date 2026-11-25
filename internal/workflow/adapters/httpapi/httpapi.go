@@ -1,6 +1,6 @@
 // Package httpapi exposes the task API of the workflow context (KIN-23, KIN-25): the task list filtered by project
 // and state with agent time, details of a task with its plan revision, latest execution, steps and attempts and
-// their agent time, an attempt's recorded events in bounded pages, creating a manual task, starting a mock run,
+// their agent time, an attempt's recorded events in bounded pages and its workspace reports (KIN-70), creating a manual task, starting a mock run,
 // cancelling and retrying. Members see their projects' tasks; the Owner and project admins manage them.
 package httpapi
 
@@ -159,6 +159,56 @@ type EventPageView struct {
 	More   bool        `json:"more"`
 }
 
+// InstructionFileView is an instruction file of the attempt's worktree: path (untrusted text), SHA-256, size.
+type InstructionFileView struct {
+	Path    string `json:"path"`
+	SHA256  string `json:"sha256"`
+	Size    int64  `json:"size"`
+	Symlink bool   `json:"symlink,omitempty"`
+}
+
+// ChangedFileView is a path the attempt changed: A, M, D or T (renames show as D + A).
+type ChangedFileView struct {
+	Path   string `json:"path"`
+	Status string `json:"status"`
+}
+
+// InstructionChangeView is an instruction file whose hash changed during the attempt (empty: absent).
+type InstructionChangeView struct {
+	Path   string `json:"path"`
+	Before string `json:"before,omitempty"`
+	After  string `json:"after,omitempty"`
+}
+
+// PreparedView is the latest workspace.prepared of an attempt.
+type PreparedView struct {
+	At                    time.Time             `json:"at"`
+	Repository            string                `json:"repository"`
+	Branch                string                `json:"branch"`
+	Base                  string                `json:"base"`
+	BaseSHA               string                `json:"baseSha"`
+	Instructions          []InstructionFileView `json:"instructions"`
+	InstructionsTruncated bool                  `json:"instructionsTruncated,omitempty"`
+}
+
+// ChangesView is the latest workspace.changes of an attempt.
+type ChangesView struct {
+	At                  time.Time               `json:"at"`
+	Branch              string                  `json:"branch"`
+	BaseSHA             string                  `json:"baseSha"`
+	HeadSHA             string                  `json:"headSha"`
+	Files               []ChangedFileView       `json:"files"`
+	FilesTotal          int                     `json:"filesTotal"`
+	Truncated           bool                    `json:"truncated,omitempty"`
+	InstructionsChanged []InstructionChangeView `json:"instructionsChanged"`
+}
+
+// WorkspaceView is GET …/attempts/{fence}/workspace: the attempt's latest workspace reports, null where none.
+type WorkspaceView struct {
+	Prepared *PreparedView `json:"prepared"`
+	Changes  *ChangesView  `json:"changes"`
+}
+
 // CreateRequest is POST /api/tasks.
 type CreateRequest struct {
 	ProjectID string `json:"projectId"`
@@ -184,6 +234,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", h.cancel)
 	mux.HandleFunc("POST /api/tasks/{id}/retry", h.retry)
 	mux.HandleFunc("GET /api/tasks/{id}/steps/{step}/attempts/{fence}/events", h.events)
+	mux.HandleFunc("GET /api/tasks/{id}/steps/{step}/attempts/{fence}/workspace", h.workspace)
 }
 
 func (h *Handler) now() time.Time { return h.Service.Now().UTC() }
@@ -401,4 +452,46 @@ func (h *Handler) events(w http.ResponseWriter, r *http.Request) {
 			Data: e.Data, Bytes: e.Bytes, Reason: e.Reason, Omitted: e.Omitted})
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+func (h *Handler) workspace(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	fence, ok := nonNegative(w, "fence", r.PathValue("fence"))
+	if !ok {
+		return
+	}
+	ws, err := h.Service.AttemptWorkspace(r.Context(), p, r.PathValue("id"), r.PathValue("step"), fence)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, workspaceView(ws))
+}
+
+func workspaceView(ws app.AttemptWorkspace) WorkspaceView {
+	var out WorkspaceView
+	if p := ws.Prepared; p != nil {
+		v := &PreparedView{At: p.At, Repository: p.Repository, Branch: p.Branch, Base: p.Base, BaseSHA: p.BaseSHA,
+			Instructions: make([]InstructionFileView, 0, len(p.Instructions)), InstructionsTruncated: p.InstructionsTruncated}
+		for _, f := range p.Instructions {
+			v.Instructions = append(v.Instructions, InstructionFileView(f))
+		}
+		out.Prepared = v
+	}
+	if c := ws.Changes; c != nil {
+		v := &ChangesView{At: c.At, Branch: c.Branch, BaseSHA: c.BaseSHA, HeadSHA: c.HeadSHA,
+			Files: make([]ChangedFileView, 0, len(c.Files)), FilesTotal: c.FilesTotal, Truncated: c.Truncated,
+			InstructionsChanged: make([]InstructionChangeView, 0, len(c.InstructionsChanged))}
+		for _, f := range c.Files {
+			v.Files = append(v.Files, ChangedFileView(f))
+		}
+		for _, f := range c.InstructionsChanged {
+			v.InstructionsChanged = append(v.InstructionsChanged, InstructionChangeView(f))
+		}
+		out.Changes = v
+	}
+	return out
 }

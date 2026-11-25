@@ -213,6 +213,9 @@ func TestEnrollmentFlowOverHTTP(t *testing.T) {
 			t.Fatalf("%s = %d %s", step.path, w.Code, w.Body)
 		}
 	}
+	if w := e.do(t, "owner", "PUT", limit, map[string]any{"maxParallelSteps": 2}); w.Code != http.StatusConflict {
+		t.Fatalf("limit of a revoked runner = %d %s", w.Code, w.Body) // KIN-116
+	}
 	if w := e.do(t, "owner", "GET", "/api/runners/nope", nil); w.Code != http.StatusNotFound {
 		t.Fatalf("missing runner = %d", w.Code)
 	}

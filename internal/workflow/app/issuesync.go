@@ -29,6 +29,7 @@ type IssueSync interface {
 // unavailable), Failed ones were given up (LastError says why).
 type Publication struct {
 	Pending, Failed, Published int
+	Superseded                 int // outdated writes skipped (KIN-117)
 	LastError                  string
 }
 

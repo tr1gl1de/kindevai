@@ -118,11 +118,35 @@ func (s *writeStore) FollowsFailure(_ context.Context, key string) (bool, error)
 		case w.TaskID != taskID:
 		case w.Status == domain.WriteFailed:
 			failed, between = i, false
-		case w.Status == domain.WritePublished:
+		case w.Status == domain.WritePublished && w.Error != app.SupersededCode:
 			between = true
 		}
 	}
 	return false, nil
+}
+
+func (s *writeStore) NewerWrites(_ context.Context, key string) (superseded, overtaken bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, after := s.writes[key], false
+	for _, k := range s.order {
+		n := s.writes[k]
+		switch {
+		case k == key:
+			after = true
+		case !after:
+		case n.Status != domain.WriteFailed && (w.Kind == domain.WriteState && n.Kind == w.Kind && n.IssueID == w.IssueID ||
+			w.Kind == domain.WriteArticle && n.Kind == w.Kind && n.Target == w.Target && strings.Contains(w.Target, "#")):
+			superseded = true
+			fallthrough
+		default:
+			if n.IssueID == w.IssueID && n.Kind != domain.WriteArticle && n.Status == domain.WritePublished &&
+				n.Error != app.SupersededCode {
+				overtaken = true
+			}
+		}
+	}
+	return superseded, overtaken, nil
 }
 
 func (s *writeStore) StateMap(_ context.Context, projectID string) (domain.StateMap, error) {
@@ -183,11 +207,13 @@ func (s *writeStore) TaskPublication(_ context.Context, taskID string) (domain.P
 		if w.TaskID != taskID {
 			continue
 		}
-		switch w.Status {
-		case domain.WritePending:
+		switch {
+		case w.Status == domain.WritePending:
 			p.Pending++
-		case domain.WriteFailed:
+		case w.Status == domain.WriteFailed:
 			p.Failed++
+		case w.Error == app.SupersededCode:
+			p.Superseded++
 		default:
 			p.Published++
 		}
@@ -425,9 +451,10 @@ func messagesOf(q *queue, topic string) []messaging.Message {
 	return out
 }
 
-// KIN-107 AC3: all writes of one task share an ordering key, so the outbox delivers them in enqueue order: the final
-// comment never lands before the state change enqueued with it.
-func TestIssueSyncWritesOfATaskAreOrdered(t *testing.T) {
+// KIN-107 AC3, KIN-117: writes are ordered per target. A task's comments and state changes share their issue's
+// ordering key, so the final comment never lands before the state change enqueued with it; an article write is
+// ordered with the article's other writes only, so one in retry never holds back the issue's writes.
+func TestIssueSyncWritesAreOrderedPerTarget(t *testing.T) {
 	t.Parallel()
 	s, _, _, q := issueSync(ytConn{})
 	ctx := t.Context()
@@ -443,16 +470,126 @@ func TestIssueSyncWritesOfATaskAreOrdered(t *testing.T) {
 	if err := s.Comment(ctx, "task/t2/v1/final", "t2", "p2", "KIN-8", "Done"); err != nil {
 		t.Fatal(err)
 	}
-	if len(q.msgs) != 4 {
+	if err := s.Article(ctx, "task/t2/e1/article/0", "t2", "p2", "KIN-8", "KIN-A-19", "T", "y"); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.msgs) != 5 {
 		t.Fatalf("messages = %+v", q.msgs)
 	}
-	for _, m := range q.msgs[:3] {
-		if m.OrderingKey != app.WriteOrderingKey("t1") {
-			t.Fatalf("%s ordering key = %q", m.Key, m.OrderingKey)
+	want := []string{app.IssueOrderingKey("KIN-7"), app.IssueOrderingKey("KIN-7"), app.ArticleOrderingKey("KIN-A-19"),
+		app.IssueOrderingKey("KIN-8"), app.ArticleOrderingKey("KIN-A-19")}
+	for i, m := range q.msgs {
+		if m.OrderingKey != want[i] {
+			t.Errorf("%s ordering key = %q, want %q", m.Key, m.OrderingKey, want[i])
 		}
 	}
-	if q.msgs[3].OrderingKey != app.WriteOrderingKey("t2") || app.WriteOrderingKey("t1") == app.WriteOrderingKey("t2") {
-		t.Fatalf("another task shares the ordering key: %q", q.msgs[3].OrderingKey)
+	if app.IssueOrderingKey("KIN-7") == app.IssueOrderingKey("KIN-8") || app.IssueOrderingKey("KIN-A-19") == app.ArticleOrderingKey("KIN-A-19") {
+		t.Fatal("ordering keys of different targets collide")
+	}
+}
+
+// KIN-117 AC: a dead state write retried by hand after a newer state write of the issue went out sends no command
+// (it would set the older state again): it is recorded as superseded, shown on the task page, and closes no alert.
+func TestIssueSyncSkipsASupersededStateWrite(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, c, st, q := issueSync(ytConn{})
+	st.states["p2"] = domain.StateMap{"RUNNING": "In Progress", "COMPLETED": "Done"}
+	if err := s.State(ctx, "task/t1/v4/state", "t1", "p2", "KIN-7", "RUNNING"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.State(ctx, "task/t1/v5/state", "t1", "p2", "KIN-7", "COMPLETED"); err != nil {
+		t.Fatal(err)
+	}
+	old := writeDelivery(q, "task/t1/v4/state", 0)
+	if err := s.HandleDead(ctx, old, errors.New("handler panic")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.HandleWrite(ctx, writeDelivery(q, "task/t1/v5/state", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.HandleRetried(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	closes := len(messagesOf(q, app.TopicYouTrackWritePublished))
+	if err := s.HandleWrite(ctx, writeDelivery(q, "task/t1/v4/state", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"KIN-7 State {Done}"}; strings.Join(c.commands, "|") != strings.Join(want, "|") {
+		t.Fatalf("commands = %q, want only the newer state", c.commands)
+	}
+	if status, code := st.status("task/t1/v4/state"); status != domain.WritePublished || code != app.SupersededCode {
+		t.Fatalf("old write = %s %s, want published superseded", status, code)
+	}
+	if p, _ := s.Publication(ctx, "t1"); p.Superseded != 1 || p.Published != 1 || p.Pending+p.Failed != 0 {
+		t.Fatalf("publication = %+v", p)
+	}
+	if n := len(messagesOf(q, app.TopicYouTrackWritePublished)); n != closes {
+		t.Fatalf("a skipped write closed the alert (%d → %d)", closes, n)
+	}
+}
+
+// KIN-117 AC: an article write arriving after a newer write of the same section is skipped; one of another
+// section is written.
+func TestIssueSyncSkipsASupersededArticleSection(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, c, st, q := issueSync(ytConn{})
+	if err := s.Article(ctx, "task/t1/e1/article/0", "t1", "p1", "KIN-7", "KIN-A-19", "S", "stale"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Article(ctx, "task/t1/e1/article/1", "t1", "p1", "KIN-7", "KIN-A-19", "T", "other"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Article(ctx, "task/t2/e1/article/0", "t2", "p1", "KIN-8", "KIN-A-19", "S", "new"); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"task/t2/e1/article/0", "task/t1/e1/article/0", "task/t1/e1/article/1"} {
+		if err := s.HandleWrite(ctx, writeDelivery(q, k, 1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := c.articles["KIN-A-19"].Content
+	if !strings.Contains(got, "new") || strings.Contains(got, "stale") || !strings.Contains(got, "other") {
+		t.Fatalf("article = %q", got)
+	}
+	if status, code := st.status("task/t1/e1/article/0"); status != domain.WritePublished || code != app.SupersededCode {
+		t.Fatalf("old section = %s %s", status, code)
+	}
+	if _, code := st.status("task/t1/e1/article/1"); code != "" {
+		t.Fatalf("other section = %s", code)
+	}
+}
+
+// KIN-117 AC: YouTrack cannot reorder comments, so a comment delivered after a later write of its issue was published
+// says it is late and when it was written; a comment in order carries no such note.
+func TestIssueSyncMarksADelayedComment(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, c, _, q := issueSync(ytConn{})
+	if err := s.Comment(ctx, "task/t1/v4/plan", "t1", "p1", "KIN-7", "Plan"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Comment(ctx, "task/t1/v5/final", "t1", "p1", "KIN-7", "Done"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Comment(ctx, "task/t1/v6/note", "t1", "p1", "KIN-7", "Note"); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"task/t1/v5/final", "task/t1/v4/plan", "task/t1/v6/note"} {
+		if err := s.HandleWrite(ctx, writeDelivery(q, k, 1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := c.comments["KIN-7"]
+	if len(got) != 3 {
+		t.Fatalf("comments = %q", got)
+	}
+	if strings.Contains(got[0], "Delayed") || strings.Contains(got[2], "Delayed") {
+		t.Fatalf("an in-order comment is marked delayed: %q", got)
+	}
+	if !strings.HasPrefix(got[1], "_Delayed") || !strings.Contains(got[1], "Plan") || !strings.Contains(got[1], "Delayed") || !strings.Contains(got[1], "2023-11-14 22:13 UTC") {
+		t.Fatalf("late comment = %q", got[1])
 	}
 }
 

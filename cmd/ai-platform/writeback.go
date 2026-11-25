@@ -58,5 +58,6 @@ func (w workflowIssueSync) Article(ctx context.Context, key, taskID, projectID, 
 
 func (w workflowIssueSync) Publication(ctx context.Context, taskID string) (workflowapp.Publication, error) {
 	p, err := w.s.Publication(ctx, taskID)
-	return workflowapp.Publication{Pending: p.Pending, Failed: p.Failed, Published: p.Published, LastError: p.LastError}, err
+	return workflowapp.Publication{Pending: p.Pending, Failed: p.Failed, Published: p.Published, Superseded: p.Superseded,
+		LastError: p.LastError}, err
 }

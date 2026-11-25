@@ -8,7 +8,8 @@ const isKnown = (code: string): code is KnownError => (knownErrors as readonly s
 /** The task's YouTrack write-back (KIN-38) as a details row: awaiting publication, failed, or published. */
 export function PublicationStatus({ p }: { p: Publication }) {
   const { t } = useTranslation();
-  if (p.pending + p.failed + p.published === 0) return null;
+  const superseded = p.superseded ?? 0;
+  if (p.pending + p.failed + p.published + superseded === 0) return null;
   const code = p.lastError ?? "";
   let error = "";
   if (code) error = isKnown(code) ? t(`tasks.publicationError_${code}`) : t("tasks.publicationErrorOther", { code });
@@ -27,6 +28,7 @@ export function PublicationStatus({ p }: { p: Publication }) {
         )}
         {p.failed + p.pending === 0 && <span className="badge pr-open">{t("tasks.publicationDone")}</span>}
         {error && <span className="muted"> — {error}</span>}
+        {superseded > 0 && <span className="muted"> · {t("tasks.publicationSuperseded", { n: superseded })}</span>}
       </dd>
     </>
   );

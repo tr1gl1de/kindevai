@@ -984,6 +984,8 @@ export interface Publication {
   pending: number;
   failed: number;
   published: number;
+  /** State/article writes skipped because a newer write of the same target came after them (KIN-117). */
+  superseded?: number;
   lastError?: string;
 }
 

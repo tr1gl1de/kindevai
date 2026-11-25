@@ -513,6 +513,25 @@ describe("task detail", () => {
     expect(within(docs).getByText(/DOCS_NOT_APPLICABLE — внутренний рефакторинг/)).toBeInTheDocument();
   });
 
+  it("counts writes skipped as superseded by newer ones (KIN-117) in English and Russian", async () => {
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/tasks/t1", () => json(detail({ task: { ...detail().task, state: "COMPLETED", youtrackIssue: "KIN-7" },
+        publication: { pending: 0, failed: 0, published: 2, superseded: 1 } }))),
+      http.get("/api/approvals", () => json([])),
+    );
+    const { unmount, container } = await renderApp("/tasks/t1");
+    const details = await screen.findByRole("region", { name: "Details" });
+    expect(within(details).getByText("Published to YouTrack")).toBeInTheDocument();
+    expect(within(details).getByText(/Outdated writes skipped: 1 \(newer ones replaced them\)/)).toBeInTheDocument();
+    await expectAccessible(container);
+    unmount();
+    await renderApp("/tasks/t1", "ru");
+    const ru = await screen.findByRole("region", { name: "Сведения" });
+    expect(within(ru).getByText(/Пропущено устаревших записей: 1 — их заменили более новые/)).toBeInTheDocument();
+  });
+
   it("names a write whose delivery died outside the write-back (KIN-108) in English and Russian", async () => {
     server.use(
       http.get("/api/auth/me", () => json(owner)),

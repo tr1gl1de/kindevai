@@ -27,9 +27,17 @@ const (
 	TopicYouTrackWritePublished = "alerts.youtrack_write_published"
 )
 
-// WriteOrderingKey is the outbox ordering key of a task's writes: they reach YouTrack in the order they were
-// enqueued (the final comment never before the state change of the same transition).
-func WriteOrderingKey(taskID string) string { return "youtrack/task/" + taskID }
+// IssueOrderingKey is the outbox ordering key of an issue's writes (comments, state changes): they reach YouTrack in
+// the order they were enqueued (the final comment never before the state change of the same transition). KIN-117:
+// ordered per target, not per task, so an article write in retry never holds back the issue's writes.
+func IssueOrderingKey(issueID string) string { return "youtrack/issue/" + issueID }
+
+// ArticleOrderingKey orders the writes of one Knowledge Base article (of any task).
+func ArticleOrderingKey(articleID string) string { return "youtrack/article/" + articleID }
+
+// SupersededCode is the code of a state or article write skipped at delivery because a newer write of the same
+// issue state or article section was enqueued after it (KIN-117): sending it would undo the newer one.
+const SupersededCode = "superseded"
 
 // AlertOrderingKey orders a task's write-back alerts, so a close never overtakes the failure it closes.
 func AlertOrderingKey(taskID string) string { return "youtrack-write/task/" + taskID }
@@ -64,6 +72,10 @@ type WriteStore interface {
 	// did; domain.ErrNotFound for an unknown key (KIN-108).
 	MoveIssueWrite(ctx context.Context, key string, from, to domain.WriteStatus, code string, attempts int, at time.Time) (bool, error)
 	TaskPublication(ctx context.Context, taskID string) (domain.Publication, error)
+	// NewerWrites looks at the writes enqueued after key (KIN-117): superseded when one is of the same kind for the
+	// same issue (state) or the same article section (article); overtaken when a comment or state write of the same
+	// issue was already published (not merely superseded).
+	NewerWrites(ctx context.Context, key string) (superseded, overtaken bool, err error)
 	// FollowsFailure reports whether the write key is the first of its task published after the task's latest
 	// failed write (in enqueue order): the publication that closes the task's write-back alert (KIN-107).
 	FollowsFailure(ctx context.Context, key string) (bool, error)
@@ -101,6 +113,7 @@ type writePayload struct {
 	Article   string           `json:"article,omitempty"`
 	Section   string           `json:"section,omitempty"`
 	Content   string           `json:"content,omitempty"`
+	At        int64            `json:"at,omitempty"` // KIN-117: when it was enqueued (Unix s), for a delayed comment's note
 }
 
 // Bounds of a write (the outbox payload holds at most messaging.MaxPayloadBytes).
@@ -182,6 +195,7 @@ func (s *IssueSync) enqueue(ctx context.Context, key string, p writePayload, rej
 	if id, err := domain.NewIssueID(p.Issue); reject == "" && (err != nil || id != p.Issue) {
 		reject = "invalid_issue"
 	}
+	p.At = s.now().Unix()
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false) // Markdown keeps its < > & unexpanded within the payload limit
@@ -193,8 +207,12 @@ func (s *IssueSync) enqueue(ctx context.Context, key string, p writePayload, rej
 		reject = "too_large"
 	}
 	now := s.now()
+	target, order := "", IssueOrderingKey(p.Issue)
+	if p.Kind == domain.WriteArticle {
+		target, order = p.Article+"#"+p.Section, ArticleOrderingKey(p.Article)
+	}
 	if err := s.Store.SaveIssueWrite(ctx, domain.IssueWrite{Key: key, TaskID: p.TaskID, IssueID: clip(p.Issue, 64),
-		Kind: p.Kind, Target: p.Article, CreatedAt: now}); err != nil {
+		Kind: p.Kind, Target: target, CreatedAt: now}); err != nil {
 		return err
 	}
 	if reject != "" {
@@ -204,7 +222,7 @@ func (s *IssueSync) enqueue(ctx context.Context, key string, p writePayload, rej
 		return s.alertFailed(ctx, key, p, reject)
 	}
 	if err := s.Outbox.Enqueue(ctx, messaging.Message{Adapter: AdapterYouTrack, Topic: TopicYouTrackWrite, Key: key,
-		Payload: b, OrderingKey: WriteOrderingKey(p.TaskID)}); err != nil {
+		Payload: b, OrderingKey: order}); err != nil {
 		return fmt.Errorf("enqueueing %s: %w", TopicYouTrackWrite, err)
 	}
 	return nil
@@ -254,6 +272,22 @@ func (s *IssueSync) HandleWrite(ctx context.Context, d messaging.Delivery) error
 	if err := json.Unmarshal(d.Payload, &p); err != nil {
 		return s.fail(ctx, d, writePayload{}, "malformed", errors.New("malformed youtrack write payload"))
 	}
+	superseded, overtaken, err := s.Store.NewerWrites(ctx, d.Key)
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return err
+	}
+	if superseded && (p.Kind == domain.WriteState || p.Kind == domain.WriteArticle) {
+		// KIN-117: e.g. a dead write retried by hand after a newer one went out; it would set the older state or
+		// section again. Nothing is sent; the write is done, shown as superseded, and closes no alert.
+		err := s.Store.MarkIssueWrite(ctx, d.Key, domain.WritePublished, SupersededCode, d.Attempt, s.now())
+		if err != nil && !errors.Is(err, domain.ErrNotFound) {
+			return err
+		}
+		return nil
+	}
+	if overtaken && p.Kind == domain.WriteComment {
+		p.Text = delayedNote(p.At) + p.Text // YouTrack cannot reorder comments: say this one is late
+	}
 	set, err := s.Connection.YouTrackSettings(ctx)
 	switch {
 	case errors.Is(err, domain.ErrNotConfigured), errors.Is(err, domain.ErrSecretNotSet):
@@ -280,6 +314,15 @@ func (s *IssueSync) HandleWrite(ctx context.Context, d messaging.Delivery) error
 		}
 		return s.alertPublished(ctx, d.Key, p)
 	})
+}
+
+// delayedNote heads a comment posted after later updates of its issue (KIN-117).
+func delayedNote(at int64) string {
+	if at <= 0 {
+		return "_Delayed: posted after later updates of this issue._\n\n"
+	}
+	return "_Delayed: written " + time.Unix(at, 0).UTC().Format("2006-01-02 15:04 UTC") +
+		", posted after later updates of this issue._\n\n"
 }
 
 func (s *IssueSync) inTx(ctx context.Context, fn func(ctx context.Context) error) error {

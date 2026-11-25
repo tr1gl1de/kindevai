@@ -87,7 +87,7 @@ func (s *seen) add(auth, target string, atyp byte) {
 	s.auth, s.target, s.atyp = append(s.auth, auth), append(s.target, target), append(s.atyp, atyp)
 }
 
-// connectProxy is an upstream HTTP CONNECT proxy requiring user:pass; "localhost" targets go to 127.0.0.1.
+// connectProxy is an upstream HTTP CONNECT proxy requiring user:pass; "echo.test" targets go to 127.0.0.1.
 func connectProxy(t *testing.T, s *seen) protocol.NetworkProxy {
 	t.Helper()
 	l := listen(t)
@@ -103,7 +103,7 @@ func connectProxy(t *testing.T, s *seen) protocol.NetworkProxy {
 			_, _ = io.WriteString(c, "HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
 			return
 		}
-		up, err := net.Dial("tcp", strings.Replace(req.RequestURI, "localhost", "127.0.0.1", 1))
+		up, err := net.Dial("tcp", strings.Replace(req.RequestURI, "echo.test", "127.0.0.1", 1))
 		if err != nil {
 			_, _ = io.WriteString(c, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 			return
@@ -116,7 +116,7 @@ func connectProxy(t *testing.T, s *seen) protocol.NetworkProxy {
 		Username: "user", Password: "pa:ss"}
 }
 
-// socksProxy is an upstream SOCKS5 proxy requiring user/pass; it resolves names itself ("localhost").
+// socksProxy is an upstream SOCKS5 proxy requiring user/pass; it resolves names itself ("echo.test").
 func socksProxy(t *testing.T, s *seen) protocol.NetworkProxy {
 	t.Helper()
 	l := listen(t)
@@ -160,7 +160,7 @@ func socksProxy(t *testing.T, s *seen) protocol.NetworkProxy {
 		_, _ = io.ReadFull(c, pb[:])
 		target := net.JoinHostPort(host, strconv.Itoa(int(binary.BigEndian.Uint16(pb[:]))))
 		s.add("", target, r[3])
-		up, err := net.Dial("tcp", strings.Replace(target, "localhost", "127.0.0.1", 1))
+		up, err := net.Dial("tcp", strings.Replace(target, "echo.test", "127.0.0.1", 1))
 		if err != nil {
 			_, _ = c.Write([]byte{5, 5, 0, 1, 0, 0, 0, 0, 0, 0})
 			return
@@ -220,9 +220,9 @@ func TestConnectThroughUpstream(t *testing.T) {
 				up = socksProxy(t, &s)
 			}
 			dial := start(t, &Server{Upstream: up, Allow: domain.Allowlist{Restricted: true,
-				Rules: []domain.Rule{{Host: "localhost", Ports: []int{port}}}}})
+				Rules: []domain.Rule{{Host: "echo.test", Ports: []int{port}}}}})
 			c := dial()
-			code, br := tunnel(t, c, net.JoinHostPort("localhost", strconv.Itoa(port)))
+			code, br := tunnel(t, c, net.JoinHostPort("echo.test", strconv.Itoa(port)))
 			if code != http.StatusOK {
 				t.Fatalf("CONNECT status %d", code)
 			}
@@ -233,7 +233,7 @@ func TestConnectThroughUpstream(t *testing.T) {
 			}
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			if len(s.target) != 1 || s.target[0] != "localhost:"+strconv.Itoa(port) {
+			if len(s.target) != 1 || s.target[0] != "echo.test:"+strconv.Itoa(port) {
 				t.Fatalf("upstream saw %v", s.target)
 			}
 			if scheme == "socks5" && s.atyp[0] != 3 {
@@ -248,7 +248,7 @@ func TestRefusals(t *testing.T) {
 	_, port := echoServer(t)
 	var s seen
 	up := connectProxy(t, &s)
-	allow := domain.Allowlist{Restricted: true, Rules: []domain.Rule{{Host: "localhost", Ports: []int{port}}}}
+	allow := domain.Allowlist{Restricted: true, Rules: []domain.Rule{{Host: "echo.test", Ports: []int{port}}}}
 	bad := up
 	bad.Password = "wrong"
 	tests := []struct {
@@ -258,9 +258,9 @@ func TestRefusals(t *testing.T) {
 		want      int
 	}{
 		{"destination not in the allowlist", up, "example.org:443", http.StatusForbidden},
-		{"allowed host on another port", up, "localhost:1", http.StatusForbidden},
-		{"upstream rejects the credentials", bad, net.JoinHostPort("localhost", strconv.Itoa(port)), http.StatusBadGateway},
-		{"malformed authority", up, "localhost", http.StatusBadRequest},
+		{"allowed host on another port", up, "echo.test:1", http.StatusForbidden},
+		{"upstream rejects the credentials", bad, net.JoinHostPort("echo.test", strconv.Itoa(port)), http.StatusBadGateway},
+		{"malformed authority", up, "echo.test", http.StatusBadRequest},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -274,9 +274,27 @@ func TestRefusals(t *testing.T) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, target := range s.target {
-		if strings.HasPrefix(target, "example.org") || target == "localhost:1" {
+		if strings.HasPrefix(target, "example.org") || target == "echo.test:1" {
 			t.Fatalf("a refused destination reached the upstream proxy: %v", s.target)
 		}
+	}
+}
+
+// Even without an allowlist the adapter never opens the host's loopback, localhost names or link-local addresses
+// (a proxy on the host would reach the host itself).
+func TestReservedDestinationsAreRefused(t *testing.T) {
+	t.Parallel()
+	var s seen
+	dial := start(t, &Server{Upstream: connectProxy(t, &s)})
+	for _, a := range []string{"127.0.0.1:22", "localhost:22", "[::1]:22", "169.254.169.254:80"} {
+		if code, _ := tunnel(t, dial(), a); code != http.StatusForbidden {
+			t.Errorf("CONNECT %s: status %d", a, code)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.target) != 0 {
+		t.Fatalf("reserved destinations reached the upstream proxy: %v", s.target)
 	}
 }
 
@@ -304,7 +322,7 @@ func TestPlainHTTPThroughUpstream(t *testing.T) {
 	var s seen
 	dial := start(t, &Server{Upstream: connectProxy(t, &s)})
 	c := dial()
-	fmt.Fprintf(c, "GET http://localhost:%s/ip HTTP/1.1\r\nHost: localhost:%s\r\nProxy-Authorization: Basic eDp5\r\n\r\n",
+	fmt.Fprintf(c, "GET http://echo.test:%s/ip HTTP/1.1\r\nHost: echo.test:%s\r\nProxy-Authorization: Basic eDp5\r\n\r\n",
 		wu.Port(), wu.Port())
 	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
 	if err != nil {
@@ -336,7 +354,7 @@ func TestServeClosesConnectionsOnCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	if code, _ := tunnel(t, c, net.JoinHostPort("localhost", strconv.Itoa(port))); code != http.StatusOK {
+	if code, _ := tunnel(t, c, net.JoinHostPort("echo.test", strconv.Itoa(port))); code != http.StatusOK {
 		t.Fatalf("status %d", code)
 	}
 	cancel()

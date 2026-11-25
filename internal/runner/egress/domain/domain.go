@@ -119,6 +119,23 @@ func (a Allowlist) Allows(host string, port int) bool {
 	return false
 }
 
+// Reserved reports destinations the proxy adapter never opens, whatever the allowlist: localhost names and
+// loopback, link-local (cloud metadata), unspecified and multicast addresses. Through a proxy running on the host
+// they would reach the host itself.
+func Reserved(host string) bool {
+	name := strings.TrimSuffix(strings.ToLower(host), ".")
+	if name == "localhost" || strings.HasSuffix(name, ".localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(name)
+	if err != nil {
+		return false
+	}
+	ip = ip.Unmap()
+	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() ||
+		ip.IsMulticast() || ip.IsInterfaceLocalMulticast()
+}
+
 // Leak tests of the preflight: each must fail inside the sandbox.
 const (
 	LeakTCP4    = "direct_tcp_ipv4"   // a TCP connection to a public IPv4 address

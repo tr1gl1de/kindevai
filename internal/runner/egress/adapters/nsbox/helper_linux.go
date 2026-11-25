@@ -29,12 +29,14 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/runner/egress/domain"
 )
 
-// sysProcAttr starts the helper as root of new user, network and mount namespaces (mapped to the runner's own
-// uid and gid: no privilege on the host), leading its own process group like any attempt process.
+// sysProcAttr starts the helper as root of new user, network, mount and PID namespaces (mapped to the runner's
+// own uid and gid: no privilege on the host), leading its own process group like any attempt process. The PID
+// namespace hides every host process (their /proc/<pid>/root would lead back to the host's sockets) and ends the
+// agent's whole tree with the helper.
 func sysProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{
 		Setpgid:     true,
-		Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET | syscall.CLONE_NEWNS,
+		Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET | syscall.CLONE_NEWNS | syscall.CLONE_NEWPID,
 		UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
 		GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
 	}
@@ -172,6 +174,10 @@ func hideHost(s Spec) error {
 			return fmt.Errorf("hiding %s: %w", h, err)
 		}
 		covered = append(covered, h)
+	}
+	// A /proc of the sandbox's PID namespace only.
+	if err := unix.Mount("proc", "/proc", "proc", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
+		return fmt.Errorf("mounting /proc: %w", err)
 	}
 	for _, k := range keep {
 		if !under(k.path, covered) {
@@ -447,9 +453,7 @@ func runAgent(s Spec, port int, stderr io.Writer) int {
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
 		if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
-			signal.Reset(ws.Signal())
-			_ = syscall.Kill(os.Getpid(), ws.Signal())
-			time.Sleep(time.Second) // the signal ends this process
+			return 128 + int(ws.Signal()) // as a shell reports it (the PID namespace's init cannot re-raise it)
 		}
 		return ee.ExitCode()
 	}

@@ -161,7 +161,7 @@ func (s *Server) handle(ctx context.Context, c net.Conn, track, untrack func(net
 		reply(c, http.StatusBadRequest)
 		return
 	}
-	if !s.Allow.Allows(host, port) {
+	if domain.Reserved(host) || !s.Allow.Allows(host, port) {
 		s.logger().Warn("strict egress: destination not in the allowlist", "host", host, "port", port)
 		reply(c, http.StatusForbidden)
 		return

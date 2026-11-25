@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -70,6 +71,9 @@ func agentMain() int {
 		return nil
 	})
 	check("run-hidden", len(visible) == 0, strings.Join(visible, ","))
+	// Host processes are invisible: their /proc/<pid>/root would lead to the host's /run.
+	_, err = os.Stat("/proc/" + os.Getenv("HOST_PID") + "/root")
+	check("host-processes-hidden", err != nil, "")
 	c := &http.Client{Timeout: 10 * time.Second} // honours HTTP_PROXY
 	resp, err := c.Get(os.Getenv("DIAG_URL"))
 	body := ""
@@ -198,7 +202,7 @@ func (f *fixture) run(t *testing.T, p protocol.NetworkProfile) (error, string, e
 		t.Fatal(err)
 	}
 	cmd, err := b.Command([]string{agent}, []string{"KINDEV_NSBOX_AGENT=1", "HOST_SOCKET=" + f.socket,
-		"DIAG_URL=" + f.diag, "SSH_AUTH_SOCK=/tmp/agent.sock"}, f.workdir)
+		"DIAG_URL=" + f.diag, "HOST_PID=" + strconv.Itoa(os.Getpid()), "SSH_AUTH_SOCK=/tmp/agent.sock"}, f.workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +230,7 @@ func TestSandboxVerifiesThenConfinesTheAgent(t *testing.T) {
 		t.Fatalf("agent: %v\n%s", werr, out)
 	}
 	for _, want := range []string{"ok no-capabilities", "ok direct-tcp-blocked", "ok host-socket-hidden", "ok run-hidden",
-		"ok through-proxy", "ok worktree-writable"} {
+		"ok through-proxy", "ok host-processes-hidden", "ok worktree-writable"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in\n%s", want, out)
 		}

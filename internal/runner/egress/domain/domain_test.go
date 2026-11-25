@@ -99,6 +99,21 @@ func TestAllowlist(t *testing.T) {
 	}
 }
 
+func TestReserved(t *testing.T) {
+	t.Parallel()
+	for _, h := range []string{"localhost", "LOCALHOST.", "db.localhost", "127.0.0.1", "127.8.9.1", "::1",
+		"::ffff:127.0.0.1", "169.254.169.254", "fe80::1", "0.0.0.0", "::", "224.0.0.1", "ff02::1"} {
+		if !Reserved(h) {
+			t.Errorf("Reserved(%q) = false", h)
+		}
+	}
+	for _, h := range []string{"api.github.com", "10.1.2.3", "140.82.112.3", "2001:db8::1", "localhost.example.com"} {
+		if Reserved(h) {
+			t.Errorf("Reserved(%q) = true", h)
+		}
+	}
+}
+
 func allBlocked() []Leak {
 	var ls []Leak
 	for _, t := range LeakTests {

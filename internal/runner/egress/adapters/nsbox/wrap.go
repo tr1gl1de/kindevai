@@ -36,6 +36,7 @@ type RunSpec struct {
 	HelperArgs []string          `json:"helperArgs"` // the inner helper: `<self> <HelperArgs...>`
 	HelperEnv  []string          `json:"helperEnv"`
 	DataDir    string            `json:"dataDir"`
+	Home       string            `json:"home"`
 	Sockets    []string          `json:"sockets,omitempty"`
 }
 
@@ -49,7 +50,7 @@ func (m *Manager) Wrap(r egress.BoxRequest, argv, env []string, dir string) (str
 		return "", nil, nil, errors.New("not a strict profile with a proxy")
 	}
 	rs := RunSpec{Request: r, Argv: argv, Env: env, Dir: dir, HelperArgs: m.Args, HelperEnv: m.Env,
-		DataDir: m.DataDir, Sockets: m.Sockets}
+		DataDir: m.DataDir, Home: m.home(), Sockets: m.Sockets}
 	b, err := json.Marshal(rs)
 	if err != nil {
 		return "", nil, nil, err

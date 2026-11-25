@@ -62,3 +62,27 @@ func TestAttemptWorkspaceDecodesTheLatestReports(t *testing.T) {
 		t.Fatalf("no reports %+v %v", w, err)
 	}
 }
+
+// eventsOnly is an attempt's recorded events in order.
+type eventsOnly []runners.AttemptEvent
+
+func (e eventsOnly) AttemptEvents(context.Context, string, int64, int64, int) ([]runners.AttemptEvent, error) {
+	return e, nil
+}
+
+func (eventsOnly) LatestAttemptEvent(context.Context, string, int64, string) (runners.AttemptEvent, bool, error) {
+	return runners.AttemptEvent{}, false, nil
+}
+
+// KIN-71: the task UI shows a workspace.preparing event's phase; an unknown phase (untrusted text) is not shown.
+func TestAttemptLogShowsThePreparationPhase(t *testing.T) {
+	t.Parallel()
+	log := workflowAttemptLog{log: runnersapp.AttemptLog{Repo: eventsOnly{
+		{AttemptSeq: 2, Kind: protocol.EventWorkspacePreparing, Body: []byte(`{"phase":"fetching","elapsedSec":20}`)},
+		{AttemptSeq: 3, Kind: protocol.EventWorkspacePreparing, Body: []byte(`{"phase":"<b>x</b>"}`)},
+	}}}
+	evs, err := log.AttemptEvents(t.Context(), "s", 1, 0, 10)
+	if err != nil || len(evs) != 2 || evs[0].Reason != protocol.PreparingFetching || evs[1].Reason != "" {
+		t.Fatalf("%+v %v", evs, err)
+	}
+}

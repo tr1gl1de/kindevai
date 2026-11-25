@@ -56,6 +56,9 @@ function LogLine({ e }: { e: LogEntry }) {
     case "execution.accepted":
       text = t("tasks.event_accepted");
       break;
+    case "workspace.preparing": // KIN-71: the phase the runner reported (queued, fetching, checkout)
+      text = t("tasks.event_preparing", { phase: t(`tasks.preparing_${e.text || "unknown"}`, { defaultValue: t("tasks.preparing_unknown") }) });
+      break;
     case "execution.started":
       text = t("tasks.event_started");
       break;

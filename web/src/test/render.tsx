@@ -1,5 +1,6 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import { render } from "@testing-library/react";
+import type { UserEvent } from "@testing-library/user-event";
 import axe from "axe-core";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter } from "react-router";
@@ -35,10 +36,23 @@ export async function renderApp(route = "/", locale: Locale = "en", telegram: Te
 export async function expectAccessible(container: HTMLElement) {
   const result = await axe.run(container, {
     runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"] },
-    rules: { "color-contrast": { enabled: false } }, // jsdom has no layout/colours; contrast is checked in CSS tokens
+    resultTypes: ["violations"], // only violations are reported; skip collecting the passing nodes
+    // jsdom has no layout or colours: contrast is checked in CSS tokens, and target-size would only measure 0x0 boxes
+    // (it was the costliest rule here, KIN-82).
+    rules: { "color-contrast": { enabled: false }, "target-size": { enabled: false } },
   });
   const problems = result.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`);
   if (problems.length) throw new Error(`axe violations:\n${problems.join("\n")}`);
+}
+
+/**
+ * Enters text into a field as one paste (one input event) instead of a keystroke each: user.type re-renders React
+ * per character, which made long form scenarios time out on a loaded machine (KIN-82). Use user.type only where
+ * keystrokes are the behaviour under test (special keys, key-by-key reactions).
+ */
+export async function fill(user: UserEvent, field: HTMLElement, text: string) {
+  await user.click(field);
+  await user.paste(text);
 }
 
 /** Waits until the polite status region announces text (messages are set asynchronously to re-announce repeats). */

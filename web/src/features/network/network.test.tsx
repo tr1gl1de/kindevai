@@ -4,7 +4,7 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import type { NetworkAssignment, NetworkProfile, NetworkProfileRequest, NetworkTest, Runner } from "../../api/types";
 import { apiError, json, owner, server } from "../../test/msw";
-import { expectAccessible, expectStatus, renderApp } from "../../test/render";
+import { expectAccessible, expectStatus, fill, renderApp } from "../../test/render";
 import { parseAllow } from "./NetworkPage";
 
 const profile: NetworkProfile = {
@@ -89,11 +89,11 @@ describe("network page", () => {
     await user.click(screen.getByRole("button", { name: "New profile" }));
     await user.click(screen.getByRole("button", { name: "Save profile" }));
     expect(screen.getByLabelText("Name")).toHaveFocus();
-    await user.type(screen.getByLabelText("Name"), "Corp");
-    await user.type(screen.getByLabelText("Proxy URL"), "socks5://alice:pw@proxy.example:1080");
-    await user.type(screen.getByLabelText("Proxy password"), "s3cret");
+    await fill(user, screen.getByLabelText("Name"), "Corp");
+    await fill(user, screen.getByLabelText("Proxy URL"), "socks5://alice:pw@proxy.example:1080");
+    await fill(user, screen.getByLabelText("Proxy password"), "s3cret");
     await user.selectOptions(screen.getByLabelText("Enforcement"), "strict");
-    await user.type(screen.getByLabelText("Allowed destinations"), "0.0.0.0/0 443");
+    await fill(user, screen.getByLabelText("Allowed destinations"), "0.0.0.0/0 443");
     await user.click(screen.getByRole("button", { name: "Save profile" }));
     expect(await screen.findByText(/The range is too wide/)).toBeInTheDocument();
     expect(screen.getByLabelText("Allowed destinations")).toHaveFocus();

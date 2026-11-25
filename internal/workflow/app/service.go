@@ -55,8 +55,10 @@ type Repository interface {
 	HeldSteps(ctx context.Context) (map[string]int, error)
 	ListTasks(ctx context.Context, f TaskFilter, limit int) ([]domain.Task, error) // newest first
 	LatestExecution(ctx context.Context, taskID string) (domain.Execution, error)  // domain.ErrNotFound
-	// EachAttempt calls fn for every step attempt of the tasks f selects (agent time, KIN-25).
-	EachAttempt(ctx context.Context, f TaskFilter, fn func(taskID string, a domain.Attempt) error) error
+	// AgentTimes returns the agent time (KIN-25: attempts' work periods and plan discussion answers) of the tasks
+	// ids and the sum over every task f selects, a running period counting up to now. It reads a per-task aggregate,
+	// not every attempt (KIN-75).
+	AgentTimes(ctx context.Context, f TaskFilter, ids []string, now time.Time) (map[string]domain.AgentTime, domain.AgentTime, error)
 	// ExecutionSpans returns, per task, when its first execution started and its last one ended.
 	ExecutionSpans(ctx context.Context, taskIDs []string) (map[string]ExecutionSpan, error)
 }

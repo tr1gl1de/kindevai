@@ -34,36 +34,13 @@ type TaskTime struct {
 // taskTimes returns the time of the tasks ids and the agent time of every task f selects.
 func (s *Service) taskTimes(ctx context.Context, f TaskFilter, ids []string) (map[string]TaskTime, domain.AgentTime, error) {
 	now := s.now()
-	out := make(map[string]TaskTime, len(ids))
-	for _, id := range ids {
-		out[id] = TaskTime{Agent: domain.AgentTime{Status: domain.WorkNone}}
-	}
-	total := domain.AgentTime{Status: domain.WorkNone}
-	err := s.Repo.EachAttempt(ctx, f, func(taskID string, a domain.Attempt) error {
-		st, d := a.Work(now)
-		total.Add(st, d)
-		if t, ok := out[taskID]; ok {
-			t.Agent.Add(st, d)
-			out[taskID] = t
-		}
-		return nil
-	})
+	agent, total, err := s.Repo.AgentTimes(ctx, f, ids, now)
 	if err != nil {
 		return nil, total, err
 	}
-	if s.Discussion != nil {
-		// The CLI's time on plan discussion answers (KIN-43) is agent time of the task too.
-		work, err := s.Discussion.DiscussionWork(ctx, f)
-		if err != nil {
-			return nil, total, err
-		}
-		for id, d := range work {
-			total.Add(domain.WorkComplete, d)
-			if t, ok := out[id]; ok {
-				t.Agent.Add(domain.WorkComplete, d)
-				out[id] = t
-			}
-		}
+	out := make(map[string]TaskTime, len(ids))
+	for _, id := range ids {
+		out[id] = TaskTime{Agent: agent[id]}
 	}
 	if len(ids) == 0 {
 		return out, total, nil

@@ -296,32 +296,34 @@ func (r *memRepo) ListTasks(_ context.Context, f TaskFilter, limit int) ([]domai
 	return out, nil
 }
 
-func (r *memRepo) EachAttempt(_ context.Context, f TaskFilter, fn func(string, domain.Attempt) error) error {
+// AgentTimes scans every attempt (the calculation the SQLite aggregate must equal).
+func (r *memRepo) AgentTimes(_ context.Context, f TaskFilter, ids []string, now time.Time) (map[string]domain.AgentTime, domain.AgentTime, error) {
 	r.mu.Lock()
-	var all []struct {
-		task string
-		a    domain.Attempt
+	defer r.mu.Unlock()
+	out := map[string]domain.AgentTime{}
+	for _, id := range ids {
+		out[id] = domain.AgentTime{Status: domain.WorkNone}
 	}
+	total := domain.AgentTime{Status: domain.WorkNone}
 	for _, e := range r.execs {
-		if !f.matches(r.tasks[e.TaskID]) {
-			continue
-		}
+		inTotal := f.matches(r.tasks[e.TaskID])
+		t, listed := out[e.TaskID]
 		for _, s := range e.Clone().Steps {
 			for _, a := range s.Attempts {
-				all = append(all, struct {
-					task string
-					a    domain.Attempt
-				}{e.TaskID, a})
+				st, d := a.Work(now)
+				if inTotal {
+					total.Add(st, d)
+				}
+				if listed {
+					t.Add(st, d)
+				}
 			}
 		}
-	}
-	r.mu.Unlock()
-	for _, x := range all {
-		if err := fn(x.task, x.a); err != nil {
-			return err
+		if listed {
+			out[e.TaskID] = t
 		}
 	}
-	return nil
+	return out, total, nil
 }
 
 func (r *memRepo) ExecutionSpans(_ context.Context, taskIDs []string) (map[string]ExecutionSpan, error) {

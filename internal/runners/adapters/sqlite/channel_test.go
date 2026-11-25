@@ -167,6 +167,9 @@ func TestWorkspaceReports(t *testing.T) {
 	rec("r1", 2, protocol.EventWorkspaceChanges, domain.OutcomeApplied, `{"files":[],"interim":true}`)
 	rec("r1", 2, protocol.EventWorkspaceChanges, domain.OutcomeApplied, `"nope"`)
 	rec("r1", 2, protocol.EventWorkspaceChanges, domain.OutcomeApplied, `{not json`)
+	// Decoded like the scope check decodes it: keys match case-insensitively, the last duplicate wins.
+	rec("r1", 2, protocol.EventWorkspaceChanges, domain.OutcomeApplied, `{"interim":false,"Interim":true}`)
+	rec("r1", 2, protocol.EventWorkspaceChanges, domain.OutcomeApplied, `{"interim":false,"interim":true}`)
 	rec("r1", 2, protocol.EventWorkspaceChanges, domain.OutcomeRejected, "")
 	rec("r2", 2, protocol.EventWorkspaceChanges, domain.OutcomeApplied, `{"files":[]}`)
 	rec("r1", 1, protocol.EventWorkspaceChanges, domain.OutcomeApplied, `{"files":[]}`)

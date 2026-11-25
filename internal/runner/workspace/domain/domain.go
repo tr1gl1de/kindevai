@@ -195,6 +195,33 @@ func ParseNameStatus(out []byte) ([]Change, error) {
 	return cs, nil
 }
 
+// ParseUntracked parses `git ls-files --others -z` (path NUL, repeated) as added files.
+func ParseUntracked(out []byte) []Change {
+	var cs []Change
+	for p := range bytes.SplitSeq(out, []byte{0}) {
+		if len(p) > 0 {
+			cs = append(cs, Change{Path: string(p), Status: "A"})
+		}
+	}
+	return cs
+}
+
+// MergeChanges joins change lists sorted by path; a path listed twice keeps its first entry.
+func MergeChanges(lists ...[]Change) []Change {
+	var out []Change
+	seen := map[string]bool{}
+	for _, l := range lists {
+		for _, c := range l {
+			if !seen[c.Path] {
+				seen[c.Path] = true
+				out = append(out, c)
+			}
+		}
+	}
+	slices.SortFunc(out, func(a, b Change) int { return strings.Compare(a.Path, b.Path) })
+	return out
+}
+
 // Fit keeps the leading items whose summed cost stays within budget (a message must fit the channel frame) and
 // reports whether any were dropped.
 func Fit[T any](items []T, cost func(T) int, budget int) ([]T, bool) {

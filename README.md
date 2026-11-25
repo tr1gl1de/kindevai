@@ -134,6 +134,11 @@ ai-runner fingerprint                                    # compare with the runn
   Control Plane committed and acknowledged them, so a disconnect or a restart of either side loses nothing. Every
   event carries its attempt's fencing token: a stale runner's events are rejected and it is told to cancel the
   process. Each session starts with `runner.reconcile` (running attempts, unacknowledged results, spool offsets).
+- Secrets in runner output: the runner masks the secrets it holds (the assignment's git token, proxy passwords) by
+  exact value and secret shapes (tokens, API keys, passwords in URLs, `key=value` pairs, PEM keys) before output is
+  spooled, holding a partial line back (at most 8 KiB, up to 1 s) so a secret split across writes is masked too; the
+  Control Plane masks every output chunk and failure reason again before it is stored, and once more when the task
+  UI reads them. Lines are kept: a masked value becomes `[redacted]` in place.
 - Retention of recorded runner events: nothing of a running execution is deleted. Output goes 14 days after its
   execution finished (`--runner-output-retention-days` / `KINDEV_RUNNER_OUTPUT_RETENTION_DAYS`), other events after
   30 days (`--runner-event-retention-days` / `KINDEV_RUNNER_EVENT_RETENTION_DAYS`); acknowledged commands after 7
@@ -277,7 +282,23 @@ session; the runner keeps it in a `0600` file and never logs it).
 **Test Network** runs a preflight on a runner — proxy reachability and authentication, the observed egress IP from the
 diagnostic endpoint (default `https://api64.ipify.org`, configurable per profile) compared with the expected one, and
 reachability of the AI providers, GitHub and YouTrack — and shows the result, failure reason and time. On the runner
-machine itself: `ai-runner test-network`. Enforcing strict egress in a sandbox comes with KIN-31.
+machine itself: `ai-runner test-network` (it also says whether strict egress is available there and why not).
+
+**Strict egress** (Linux and WSL2): a step whose effective profile is `strict` runs only in a per-attempt sandbox —
+new user, network and mount namespaces created by the runner without root. Inside, the only interface is the
+sandbox's own loopback; nftables rejects everything else (IPv4, IPv6, DNS, UDP); `/run`, `/tmp`, the WSL mounts and
+the runner's data directory are hidden (no Docker daemon, D-Bus or WSL interop socket); the only way out is the
+runner's local proxy adapter, which applies the profile's allowlist and connects through the upstream proxy (HTTP
+CONNECT, HTTPS proxy or SOCKS5 with remote DNS; the credentials never enter the sandbox). Before the CLI starts, a
+preflight inside the sandbox must pass: proxy reachable, egress IP as expected, and direct TCP (IPv4/IPv6), DNS, a
+client ignoring `HTTP_PROXY` and host sockets all blocked. Otherwise the CLI never starts and the step waits
+(WAITING, reason `network`) and is retried after two minutes; there is no direct fallback. The runner reports
+`strictEgress` only after a self-test sandbox verified, and the scheduler gives strict steps only to such runners
+(macOS: unsupported). CLI permission bypass (`--dangerously-skip-permissions` and the like) is allowed only inside this
+sandbox. Requirements: `nft` installed and unprivileged user namespaces enabled (Ubuntu 24.04:
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`). Known limits: an attempt adopted after a runner
+restart has no network (its proxy adapter is gone); files outside the hidden directories stay readable by the CLI
+(it runs with the runner's uid).
 
 ### Approvals and risk policy
 

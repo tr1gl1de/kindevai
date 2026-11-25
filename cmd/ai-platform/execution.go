@@ -78,18 +78,47 @@ func startScheduler(ctx context.Context, wf *workflowapp.Service, every time.Dur
 type workflowRunners struct {
 	tel *runnersapp.Telemetry
 	hub *runnersapp.Hub
+	// strict says, per project, which runners' network profile is strict (KIN-31); nil: none is.
+	strict func(ctx context.Context, projectID string) (func(runnerID string) bool, error)
 }
 
+// Candidates lists the project's candidate runners. A runner whose effective network profile is strict is a
+// candidate only once its strict egress sandbox verified (runner.capabilities strictEgress): macOS and hosts
+// without namespaces never get such steps (KIN-31).
 func (w workflowRunners) Candidates(ctx context.Context, projectID string) ([]workflowapp.Candidate, error) {
 	cs, err := w.tel.Candidates(ctx, projectID, w.hub.Online)
 	if err != nil {
 		return nil, err
 	}
+	isStrict := func(string) bool { return false }
+	if w.strict != nil && len(cs) > 0 {
+		if isStrict, err = w.strict(ctx, projectID); err != nil {
+			return nil, err
+		}
+	}
+	return schedulable(cs, isStrict), nil
+}
+
+// schedulable converts candidates for the scheduler, dropping those that must enforce strict egress and cannot.
+func schedulable(cs []runnersapp.Candidate, isStrict func(runnerID string) bool) []workflowapp.Candidate {
 	out := make([]workflowapp.Candidate, 0, len(cs))
 	for _, c := range cs {
+		if !c.StrictEgress && isStrict(c.ID) {
+			continue
+		}
 		out = append(out, workflowapp.Candidate{ID: c.ID, Tools: c.Tools, DiskHeavyAllowed: c.DiskHeavyAllowed})
 	}
-	return out, nil
+	return out
+}
+
+// wireStrictEgress makes the scheduler check strict network profiles (KIN-31) once the network service exists.
+func wireStrictEgress(wf *workflowapp.Service, strict func(ctx context.Context, projectID string) (func(string) bool, error)) {
+	r, ok := wf.Runners.(workflowRunners)
+	if !ok { // a wiring error: strict steps would reach runners that cannot enforce them
+		panic("wireStrictEgress: the scheduler's runners are not workflowRunners")
+	}
+	r.strict = strict
+	wf.Runners = r
 }
 
 // runnerDispatcher queues the workflow's commands in the runner's command log (joins the caller's transaction).
@@ -171,4 +200,50 @@ func (l workflowAttemptLog) AttemptEvents(ctx context.Context, stepID string, fe
 		out = append(out, v)
 	}
 	return out, nil
+}
+
+// AttemptWorkspace decodes the attempt's latest workspace reports (KIN-70) — the same recorded events the scope check
+// reads. A missing or unreadable body is no report. Paths and hashes stay the runner's untrusted text.
+func (l workflowAttemptLog) AttemptWorkspace(ctx context.Context, stepID string, fence int64) (workflowapp.AttemptWorkspace, error) {
+	var out workflowapp.AttemptWorkspace
+	var p protocol.WorkspacePrepared
+	at, ok, err := l.latest(ctx, stepID, fence, protocol.EventWorkspacePrepared, &p)
+	if err != nil {
+		return out, err
+	}
+	if ok {
+		v := &workflowapp.WorkspacePrepared{At: at, Repository: p.Repository, Branch: p.Branch, Base: p.Base, BaseSHA: p.BaseSHA,
+			Instructions: make([]workflowapp.InstructionFile, 0, len(p.Instructions)), InstructionsTruncated: p.InstructionsTruncated}
+		for _, f := range p.Instructions {
+			v.Instructions = append(v.Instructions, workflowapp.InstructionFile(f))
+		}
+		out.Prepared = v
+	}
+	var c protocol.WorkspaceChanges
+	at, ok, err = l.latest(ctx, stepID, fence, protocol.EventWorkspaceChanges, &c)
+	if err != nil {
+		return out, err
+	}
+	if ok {
+		v := &workflowapp.WorkspaceChanges{At: at, Branch: c.Branch, BaseSHA: c.BaseSHA, HeadSHA: c.HeadSHA,
+			Files: make([]workflowapp.ChangedFile, 0, len(c.Files)), FilesTotal: c.FilesTotal, Truncated: c.Truncated,
+			InstructionsChanged: make([]workflowapp.InstructionChange, 0, len(c.InstructionsChanged))}
+		for _, f := range c.Files {
+			v.Files = append(v.Files, workflowapp.ChangedFile(f))
+		}
+		for _, f := range c.InstructionsChanged {
+			v.InstructionsChanged = append(v.InstructionsChanged, workflowapp.InstructionChange(f))
+		}
+		out.Changes = v
+	}
+	return out, nil
+}
+
+// latest decodes the attempt's newest event of the kind into body; ok is false when there is none or it is unreadable.
+func (l workflowAttemptLog) latest(ctx context.Context, stepID string, fence int64, kind string, body any) (time.Time, bool, error) {
+	e, ok, err := l.log.Latest(ctx, stepID, fence, kind)
+	if err != nil || !ok || e.Body == nil || json.Unmarshal(e.Body, body) != nil {
+		return time.Time{}, false, err
+	}
+	return e.RunnerAt, true, nil
 }

@@ -84,3 +84,33 @@
 .step-card {
   min-width: 0;
 }
+/* Attempt workspace (KIN-70): paths are long and untrusted text — wrap anywhere, never widen the page */
+.attempt-workspace h5 {
+  margin: var(--space) 0 4px;
+  font-size: 0.95rem;
+}
+.ws-path,
+.attempt-workspace dd code {
+  overflow-wrap: anywhere;
+}
+/* keep long paths readable on phones: the table scrolls inside its wrapper instead of squeezing the path column */
+td.ws-path {
+  min-width: 14rem;
+}
+.ws-files {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 4px;
+}
+.ws-note {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+}
+.ws-status-D {
+  border-color: var(--danger);
+}
+.attempt-workspace .badge + .badge {
+  margin-left: 4px;
+}

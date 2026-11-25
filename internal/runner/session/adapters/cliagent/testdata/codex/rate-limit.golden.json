@@ -1,0 +1,24 @@
+[
+  {
+    "kind": "session",
+    "session": "0199a213-81c0-7800-8aa1-bbab2a035a54"
+  },
+  {
+    "kind": "failure",
+    "session": "0199a213-81c0-7800-8aa1-bbab2a035a54",
+    "failure": {
+      "code": "cli_limit",
+      "cause": "rate_limit",
+      "message": "You've hit your usage limit. Upgrade to Pro (https://openai.com/chatgpt/pricing) or try again in 2 hours 5 minutes."
+    }
+  },
+  {
+    "kind": "failure",
+    "session": "0199a213-81c0-7800-8aa1-bbab2a035a54",
+    "failure": {
+      "code": "cli_limit",
+      "cause": "rate_limit",
+      "message": "You've hit your usage limit. Upgrade to Pro (https://openai.com/chatgpt/pricing) or try again in 2 hours 5 minutes."
+    }
+  }
+]

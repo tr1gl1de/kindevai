@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	approvalsapp "github.com/tr1gl1de/kindevai/internal/approvals/app"
 	auditdb "github.com/tr1gl1de/kindevai/internal/audit/adapters/sqlite"
 	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/integrations/adapters/github"
@@ -95,24 +96,31 @@ func e2eSlot(t *testing.T) {
 var ownerP = auth.Principal{UserID: "owner1", Login: "owner", Owner: true}
 
 type controlPlane struct {
-	dataDir string
-	addr    string
-	inst    *bootstrap.Installation
-	wf      *workflowapp.Service
-	hub     *runnersapp.Hub
-	tel     *runnersapp.Telemetry
-	clock   *e2eClock
-	stop    func()
+	dataDir   string
+	addr      string
+	inst      *bootstrap.Installation
+	wf        *workflowapp.Service
+	approvals *approvalsapp.Service
+	hub       *runnersapp.Hub
+	tel       *runnersapp.Telemetry
+	clock     *e2eClock
+	stop      func()
 }
 
 // startCP runs the Control Plane on addr ("127.0.0.1:0" for a new one) over dataDir.
 func startCP(t *testing.T, dataDir, addr string) *controlPlane {
 	t.Helper()
-	return startCPWithClock(t, dataDir, addr, &e2eClock{})
+	return startCPWith(t, dataDir, addr, nil)
 }
 
-// startCPWithClock is startCP with the workflow on clock (a restarted Control Plane keeps its predecessor's).
-func startCPWithClock(t *testing.T, dataDir, addr string, clock *e2eClock) *controlPlane {
+// startCPWith is startCP with the repositories' checkout sources (KIN-29 worktrees; nil: none registered).
+func startCPWith(t *testing.T, dataDir, addr string, sources checkoutSources) *controlPlane {
+	t.Helper()
+	return startCPWithClock(t, dataDir, addr, sources, &e2eClock{})
+}
+
+// startCPWithClock is startCPWith with the workflow on clock (a restarted Control Plane keeps its predecessor's).
+func startCPWithClock(t *testing.T, dataDir, addr string, sources checkoutSources, clock *e2eClock) *controlPlane {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.WithoutCancel(t.Context()))
 	logger := slog.New(slog.DiscardHandler)
@@ -131,6 +139,10 @@ func startCPWithClock(t *testing.T, dataDir, addr string, clock *e2eClock) *cont
 	channel.PollInterval = 20 * time.Millisecond
 	attachRunnerChannel(gateway, channel)
 	wireExecution(apv.Workflow, channel, gateway, tel, hub, logger)
+	if sources != nil {
+		attachCheckoutSource(channel, sources)
+	}
+	attachScopeCheck(channel, apv.Approvals)
 	mux := http.NewServeMux()
 	gateway.Register(mux)
 	var (
@@ -151,8 +163,8 @@ func startCPWithClock(t *testing.T, dataDir, addr string, clock *e2eClock) *cont
 	srv.RegisterOnShutdown(hub.Shutdown)
 	go func() { _ = srv.Serve(ln) }()
 	stopScheduler := startScheduler(ctx, apv.Workflow, e2eSchedule, logger)
-	cp := &controlPlane{dataDir: dataDir, addr: ln.Addr().String(), inst: inst, wf: apv.Workflow, hub: hub, tel: tel,
-		clock: clock}
+	cp := &controlPlane{dataDir: dataDir, addr: ln.Addr().String(), inst: inst, wf: apv.Workflow, approvals: apv.Approvals,
+		hub: hub, tel: tel, clock: clock}
 	var once sync.Once
 	cp.stop = func() {
 		once.Do(func() {
@@ -261,6 +273,14 @@ type runner struct {
 // then the connector keeps the link to the Control Plane at addr.
 func startRunner(t *testing.T, dir, addr, id string, key ed25519.PrivateKey, allow []string, launches *countingLauncher) *runner {
 	t.Helper()
+	return startRunnerWith(t, dir, addr, id, key, allow, launches, nil, 0)
+}
+
+// startRunnerWith is startRunner with attempt worktrees (KIN-29) and interim change reports every changesEvery
+// (KIN-51; zero: only at the attempt's end).
+func startRunnerWith(t *testing.T, dir, addr, id string, key ed25519.PrivateKey, allow []string, launches *countingLauncher,
+	ws sessionapp.Workspaces, changesEvery time.Duration) *runner {
+	t.Helper()
 	sp, err := spool.Open(spool.Config{Dir: filepath.Join(dir, "events")})
 	if err != nil {
 		t.Fatal(err)
@@ -276,7 +296,8 @@ func startRunner(t *testing.T, dir, addr, id string, key ed25519.PrivateKey, all
 			Poll: 20 * time.Millisecond}}
 	}
 	x := &sessionapp.Executor{Launcher: launches, Journal: journal.Dir{Path: filepath.Join(dir, "attempts")},
-		Events: spoolevents.Events{Channel: ch}, Policy: sessiondomain.Policy{Projects: allow}, Grace: 300 * time.Millisecond}
+		Events: spoolevents.Events{Channel: ch}, Policy: sessiondomain.Policy{Projects: allow}, Grace: 300 * time.Millisecond,
+		Workspaces: ws, ChangesEvery: changesEvery}
 	ch.Commands, ch.Processes = x.Command, x
 	if err := x.Recover(t.Context()); err != nil {
 		t.Fatal(err)
@@ -623,7 +644,7 @@ func TestControlPlaneRestartContinuesTheExecution(t *testing.T) {
 
 	cp.stop()
 	cp.clock.advance(2 * e2eLeaseTTL) // down longer than a lease
-	cp = startCPWithClock(t, dataDir, addr, cp.clock)
+	cp = startCPWithClock(t, dataDir, addr, nil, cp.clock)
 	cp.waitTask(t, task, func(d workflowapp.TaskDetail) bool {
 		return d.Task.State == workflow.TaskRunning && stepRunning(d)
 	})

@@ -131,10 +131,14 @@ const (
 	ScenarioCrash   = "crash"   // kills itself with SIGKILL (no result)
 	ScenarioHang    = "hang"    // runs until it is cancelled
 	ScenarioGate    = "gate"    // waits until the file "release" appears in its working directory, then exits 0
+	// ScenarioScope changes files in its worktree (KIN-51): the first attempt writes mock/scope.txt and outside.txt
+	// (beyond the mock plan's scope "mock") and waits like gate; a later attempt writes mock/scope.txt and exits 0.
+	ScenarioScope = "scope"
 )
 
 // MockScenarios lists every scenario.
-var MockScenarios = []string{ScenarioSuccess, ScenarioFail, ScenarioFlaky, ScenarioCrash, ScenarioHang, ScenarioGate}
+var MockScenarios = []string{ScenarioSuccess, ScenarioFail, ScenarioFlaky, ScenarioCrash, ScenarioHang, ScenarioGate,
+	ScenarioScope}
 
 // Cancel is the body of execution.cancel: the runner stops the attempt's whole process group. Reason
 // "stale_fence": the Control Plane rejected the attempt's events because a newer token exists; "cancelled": the
@@ -159,6 +163,10 @@ const (
 	CancelRunnerRevoked  = "runner_revoked"
 )
 
+// CancelScopeExceeded is Cancel.Reason for an attempt that changed files beyond its approved scope (KIN-51): the
+// step waits for a new approval.
+const CancelScopeExceeded = "scope_exceeded"
+
 // AssignCommandID and CancelCommandID are the deterministic command ids of an attempt's assignment and
 // cancellation: a repeated use case appends nothing, and the stale-fence cancel and a task cancel share one.
 func AssignCommandID(step string, fence int64) string {
@@ -170,7 +178,9 @@ func CancelCommandID(step string, fence int64) string {
 	return fmt.Sprintf("cancel/%s/%d", step, fence)
 }
 
-// Output is the body of execution.output: a chunk of a process stream at byte Offset of that stream.
+// Output is the body of execution.output: a chunk of a process stream at byte Offset of that stream. Offsets count
+// the redacted stream the runner sends (KIN-77) and are informational: the Control Plane may mask the data again, so
+// a stored chunk's length need not match the next chunk's offset.
 type Output struct {
 	Stream string `json:"stream"` // stdout | stderr
 	Offset int64  `json:"offset"`
@@ -190,10 +200,16 @@ type Started struct {
 	Agent string `json:"agent,omitempty"`
 }
 
-// Failure is the body of execution.failed.
+// Failure is the body of execution.failed. Code classifies a failure the Control Plane treats specially.
 type Failure struct {
 	Reason string `json:"reason"`
+	Code   string `json:"code,omitempty"`
 }
+
+// FailureNetwork: the attempt did not run because its strict egress sandbox could not be built or verified
+// (KIN-31, fail-closed). The step waits for the network (WAITING, reason network) instead of using its retry
+// budget.
+const FailureNetwork = "network"
 
 // Reconcile is the payload of runner.reconcile: the Control Plane asks for the runner's process and spool state
 // whenever a session opens (a lost heartbeat means "unknown", never "stopped": reconcile before any retry).

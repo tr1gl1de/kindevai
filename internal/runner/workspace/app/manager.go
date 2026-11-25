@@ -61,6 +61,8 @@ type Git interface {
 	Snapshot(ctx context.Context, admin, dir, message string) (string, error)
 	// Diff lists the paths changed between two commits.
 	Diff(ctx context.Context, admin, from, to string) ([]domain.Change, error)
+	// Changes lists the paths the worktree (untracked files included) changed against base, read-only.
+	Changes(ctx context.Context, admin, dir, base string) ([]domain.Change, error)
 	// RemoveWorktree removes the worktree; the branch stays in the mirror.
 	RemoveWorktree(ctx context.Context, mirror, dir string) error
 }
@@ -202,6 +204,28 @@ func (m *Manager) prepare(ctx context.Context, r Request, branch, mirror, dir st
 	fitted, cut := domain.Fit(files, func(i domain.Instruction) int { return len(i.Path) + entryOverhead }, instructionBudget)
 	return Prepared{Dir: dir, Repository: r.Repository, Branch: branch, Base: r.Base, BaseSHA: fork,
 		Instructions: fitted, InstructionsTruncated: truncated || cut}, nil
+}
+
+// Changes reports what a running attempt changed so far (KIN-51): the worktree against the base, untracked files
+// included, without committing; HeadSHA is empty. It returns nil for an attempt whose workspace this process does
+// not hold (not prepared here, or already finished). Call it only while the attempt is not being finished.
+func (m *Manager) Changes(ctx context.Context, step string, fence int64) (*Result, error) {
+	m.mu.Lock()
+	_, held := m.held[key(step, fence)]
+	m.mu.Unlock()
+	if !held {
+		return nil, nil
+	}
+	meta, ok, err := m.Store.LoadMeta(step, fence)
+	if err != nil || !ok {
+		return nil, err
+	}
+	files, err := m.Git.Changes(ctx, meta.Admin, meta.Dir, meta.BaseSHA)
+	if err != nil {
+		return nil, fmt.Errorf("listing changed files: %w", err)
+	}
+	fitted, cut := domain.Fit(files, func(c domain.Change) int { return len(c.Path) + entryOverhead }, changesBudget)
+	return &Result{Branch: meta.Branch, BaseSHA: meta.BaseSHA, Files: fitted, Total: len(files), Truncated: cut}, nil
 }
 
 // SnapshotMessage is the commit message of work an attempt left uncommitted.

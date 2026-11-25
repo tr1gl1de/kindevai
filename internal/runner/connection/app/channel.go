@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -394,13 +395,7 @@ func (w outputWriter) Write(p []byte) (int, error) {
 	defer a.mu.Unlock()
 	written := 0
 	for len(p) > 0 {
-		n := min(len(p), protocol.MaxOutputChunk)
-		for n < len(p) && n > 0 && !utf8.RuneStart(p[n]) { // keep multi-byte characters whole
-			n--
-		}
-		if n == 0 {
-			n = min(len(p), protocol.MaxOutputChunk)
-		}
+		n := chunkLen(p)
 		body, _ := json.Marshal(protocol.Output{Stream: w.stream, Offset: a.offsets[w.stream], Data: string(p[:n])})
 		if a.dropped.Bytes > 0 && a.ch.room(len(body)) {
 			a.flushDropped() // only once output fits again, so a full spool's reserve is not spent on loss reports
@@ -422,6 +417,29 @@ func (w outputWriter) Write(p []byte) (int, error) {
 		p = p[n:]
 	}
 	return written, nil
+}
+
+// chunkLen is the length of the next output chunk of p: at most protocol.MaxOutputChunk bytes, ending after the
+// last newline that fits, else after the last blank (KIN-77: the Control Plane redacts each chunk on its own, so a
+// line or a word is not cut in two when it fits), else at a character boundary.
+func chunkLen(p []byte) int {
+	n := min(len(p), protocol.MaxOutputChunk)
+	if n == len(p) {
+		return n
+	}
+	if i := bytes.LastIndexByte(p[:n], '\n'); i >= 0 {
+		return i + 1
+	}
+	if i := bytes.LastIndexAny(p[:n], " \t"); i >= 0 {
+		return i + 1
+	}
+	for n > 0 && !utf8.RuneStart(p[n]) { // keep multi-byte characters whole
+		n--
+	}
+	if n == 0 {
+		n = min(len(p), protocol.MaxOutputChunk)
+	}
+	return n
 }
 
 // truncateUTF8 cuts s to at most n bytes without splitting a character.

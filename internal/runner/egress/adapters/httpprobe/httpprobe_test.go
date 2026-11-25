@@ -39,17 +39,49 @@ func connectProxy(t *testing.T) *httptest.Server {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
+		// Add before Hijack: until then httptest's Close waits for this handler, so the cleanup's wg.Wait cannot
+		// start with a zero counter and race this Add.
+		wg.Add(2)
 		c, _, err := http.NewResponseController(w).Hijack()
 		if err != nil {
+			wg.Add(-2)
 			_ = up.Close()
 			return
 		}
-		wg.Add(2)
 		go func() { defer wg.Done(); _, _ = io.Copy(up, c); _ = up.Close() }()
 		go func() { defer wg.Done(); _, _ = io.Copy(c, up); _ = c.Close() }()
 	}))
 	t.Cleanup(func() { srv.Close(); wg.Wait() })
 	return srv
+}
+
+// droppingListener is a peer that accepts TCP connections and closes them at once without a byte, the way a dead
+// local proxy behind a port relay (e.g. WSL2 localhost forwarding) looks. Unlike a closed port, it is held for the
+// whole test, so no parallel listener can take the address over.
+func droppingListener(t *testing.T) (string, int) {
+	t.Helper()
+	// Like httptest: under WSL2 mirrored networking the loopback port space is shared with Windows and an
+	// ephemeral bind on 127.0.0.1 can fail with EADDRINUSE, so fall back to [::1].
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if ln, err = net.Listen("tcp", "[::1]:0"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	t.Cleanup(func() { _ = ln.Close(); <-done })
+	a := ln.Addr().(*net.TCPAddr)
+	return a.IP.String(), a.Port
 }
 
 func hostPort(t *testing.T, raw string) (string, int) {
@@ -90,7 +122,8 @@ func TestProbeThroughProxy(t *testing.T) {
 	f := setup(t)
 	r := f.prober.Probe(t.Context(), protocol.NetworkProfile{Proxy: f.proxy, Enforcement: "strict", ExpectedIPv4: "203.0.113.7",
 		DiagnosticURL: f.diag}, []protocol.NetworkEndpoint{f.ep})
-	if !r.OK || r.ObservedIPv4 != "203.0.113.7" || len(r.Checks) != 1 || !r.Checks[0].OK || r.Checks[0].Host != "127.0.0.1" {
+	epHost, _ := hostPort(t, f.ep.URL) // httptest falls back to [::1] when it cannot bind 127.0.0.1
+	if !r.OK || r.ObservedIPv4 != "203.0.113.7" || len(r.Checks) != 1 || !r.Checks[0].OK || r.Checks[0].Host != strings.Trim(epHost, "[]") {
 		t.Fatalf("result %+v", r)
 	}
 }
@@ -98,10 +131,7 @@ func TestProbeThroughProxy(t *testing.T) {
 func TestProbeFailures(t *testing.T) {
 	t.Parallel()
 	f := setup(t)
-	closed := httptest.NewServer(http.NotFoundHandler())
-	closedURL := closed.URL
-	closed.Close()
-	ch, cp := hostPort(t, closedURL)
+	ch, cp := droppingListener(t)
 
 	bad := *f.proxy
 	bad.Password = "wrong-s3cret"
@@ -114,7 +144,10 @@ func TestProbeFailures(t *testing.T) {
 		code string
 	}{
 		{"wrong password", protocol.NetworkProfile{Proxy: &bad, DiagnosticURL: f.diag}, nil, httpprobe.CodeProxyAuthFailed},
-		{"proxy down", protocol.NetworkProfile{Proxy: &down, DiagnosticURL: f.diag}, nil, httpprobe.CodeProxyUnreachable},
+		{"proxy drops connections", protocol.NetworkProfile{Proxy: &down, DiagnosticURL: f.diag}, nil, httpprobe.CodeProxyUnreachable},
+		// The proxy answers the CONNECT, then the endpoint behind it drops the tunnel: blame the endpoint.
+		{"diagnostic endpoint drops connections", protocol.NetworkProfile{Proxy: f.proxy,
+			DiagnosticURL: "https://" + net.JoinHostPort(ch, strconv.Itoa(cp))}, nil, httpprobe.CodeDiagnosticFailed},
 		{"strict without proxy", protocol.NetworkProfile{Enforcement: "strict", DiagnosticURL: f.diag}, nil, httpprobe.CodeStrictNeedsProxy},
 		{"ip mismatch", protocol.NetworkProfile{Proxy: f.proxy, ExpectedIPv4: "198.51.100.1", DiagnosticURL: f.diag}, nil, httpprobe.CodeIPMismatch},
 		{"endpoint down", protocol.NetworkProfile{Proxy: f.proxy, DiagnosticURL: f.diag},

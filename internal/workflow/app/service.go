@@ -467,6 +467,20 @@ func (s *Service) FailStepAt(ctx context.Context, stepID, runnerID string, fence
 	return s.lateWorkEnd(ctx, err, stepID, runnerID, fence, at)
 }
 
+// HoldStepForNetwork parks a step whose runner could not build or verify the strict egress sandbox (KIN-31): the
+// attempt never ran unconfined; the step WAITs with reason network (no retry budget used) and the scheduler
+// assigns it again after domain.NetworkRetryDelay. at ends the attempt's agent time.
+func (s *Service) HoldStepForNetwork(ctx context.Context, stepID, runnerID string, fence int64, msg string, at time.Time) error {
+	err := s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
+		if err := e.HoldForNetwork(stepID, runnerID, fence, msg, now); err != nil {
+			return refusedReport{err}
+		}
+		e.MarkWorkEnd(stepID, runnerID, fence, at, now)
+		return nil
+	})
+	return s.lateWorkEnd(ctx, err, stepID, runnerID, fence, at)
+}
+
 // refusedReport marks the execution's own refusal of a terminal report (stale token, step already moved on), as
 // opposed to an error from saving or from the task's follow-up transition: only a refusal records a late end.
 type refusedReport struct{ err error }
@@ -656,10 +670,17 @@ func (s *Service) StepInfo(ctx context.Context, stepID string) (StepInfo, error)
 }
 
 // HoldStep stops a step whose runner changed files beyond the approved scope until a new approval: the attempt is
-// cancelled and the step WAITs with reason approval. runnerID and fence come from the authenticated runner report.
+// cancelled, the step WAITs with reason approval and the runner is told to stop the attempt's process in the same
+// transaction (KIN-51). runnerID and fence come from the authenticated runner report.
 func (s *Service) HoldStep(ctx context.Context, stepID, runnerID string, fence int64, msg string) error {
-	return s.updateExecution(ctx, stepID, func(_ context.Context, e *domain.Execution, now time.Time) error {
-		return e.HoldForApproval(stepID, runnerID, fence, msg, now)
+	return s.updateExecution(ctx, stepID, func(ctx context.Context, e *domain.Execution, now time.Time) error {
+		if err := e.HoldForApproval(stepID, runnerID, fence, msg, now); err != nil {
+			return err
+		}
+		if s.Dispatcher == nil {
+			return nil
+		}
+		return s.Dispatcher.Cancel(ctx, runnerID, stepID, fence, CancelReasonScopeExceeded)
 	})
 }
 

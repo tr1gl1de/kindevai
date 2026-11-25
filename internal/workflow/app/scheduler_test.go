@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -432,5 +433,67 @@ func TestSchedulePrefersTheLeastLoadedEligibleRunner(t *testing.T) {
 	}
 	if _, ex := e.state(t, busy.ID); ex.Steps[0].RunnerID != "r1" || ex.Steps[1].RunnerID != "r1" {
 		t.Fatalf("busy %+v", ex.Steps)
+	}
+}
+
+// KIN-31: a runner that cannot verify the strict egress sandbox holds the step WAITING(network); the scheduler
+// leaves it alone until the retry delay passed, then assigns it again (with a new token).
+func TestStepHeldForNetworkIsRetriedAfterTheDelay(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	task := e.task(t, onlyStep())
+	e.pool.set("p1", Candidate{ID: "r1", DiskHeavyAllowed: true})
+	e.schedule(t)
+	_, ex := e.state(t, task.ID)
+	st := ex.Steps[0]
+	_ = e.disp.take()
+	if err := e.svc.HoldStepForNetwork(t.Context(), st.ID, "r1", st.Fence, "strict egress sandbox not verified", e.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got, ex := e.state(t, task.ID)
+	if !ex.Steps[0].WaitingForNetwork() || got.State != domain.TaskRunning {
+		t.Fatalf("task %s step %+v", got.State, ex.Steps[0])
+	}
+	e.clock.Add(domain.NetworkRetryDelay - time.Second)
+	e.schedule(t)
+	if c := e.disp.take(); len(c) != 0 {
+		t.Fatalf("retried before the delay: %v", c)
+	}
+	e.clock.Add(time.Second)
+	e.schedule(t)
+	if c := e.disp.take(); !slices.Equal(c, []string{"assign r1 only/2 p1 api"}) {
+		t.Fatalf("commands %v", c)
+	}
+	if _, ex = e.state(t, task.ID); ex.Steps[0].State != domain.StepClaimed {
+		t.Fatalf("step %+v", ex.Steps[0])
+	}
+}
+
+// KIN-51: holding a step whose runner changed files beyond the approved scope tells the runner to stop the
+// attempt's process (reason scope_exceeded) in the same transaction; a hold with a superseded token sends nothing.
+func TestHoldingAStepStopsItsProcess(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv()
+	task := e.task(t, onlyStep())
+	e.pool.set("p1", Candidate{ID: "r1", DiskHeavyAllowed: true})
+	e.schedule(t)
+	_, ex := e.state(t, task.ID)
+	st := ex.Steps[0]
+	if err := e.svc.StartStep(t.Context(), st.ID, "r1", st.Fence); err != nil {
+		t.Fatal(err)
+	}
+	e.disp.take()
+	if err := e.svc.HoldStep(t.Context(), st.ID, "r1", st.Fence-1, "outside"); !errors.Is(err, domain.ErrStaleFence) {
+		t.Fatalf("stale hold = %v", err)
+	}
+	if err := e.svc.HoldStep(t.Context(), st.ID, "r1", st.Fence, "outside"); err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("cancel r1 %s/%d %s", st.ID, st.Fence, CancelReasonScopeExceeded)
+	if got := e.disp.take(); len(got) != 1 || got[0] != want {
+		t.Fatalf("commands %v, want %s", got, want)
+	}
+	if _, ex = e.state(t, task.ID); ex.Steps[0].State != domain.StepWaiting || ex.Steps[0].WaitReason != domain.WaitApproval {
+		t.Fatalf("step %+v", ex.Steps[0])
 	}
 }

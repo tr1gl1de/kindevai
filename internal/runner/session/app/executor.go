@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tr1gl1de/kindevai/internal/platform/redact"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/domain"
 )
@@ -28,6 +29,8 @@ type LaunchSpec struct {
 	Attempt  int64 // the fencing token: distinct for every attempt of a step
 	Stdout   io.Writer
 	Stderr   io.Writer
+	// Sandbox is set when the attempt's network profile is strict (KIN-31): the process runs only through it.
+	Sandbox Sandbox
 }
 
 // Process is a running attempt process (the leader of its own process group).
@@ -94,6 +97,9 @@ type Workspaces interface {
 	// Finish commits leftover work to the attempt's branch, removes the worktree and returns what changed
 	// (workspace.changes); nil for an attempt without a workspace.
 	Finish(ctx context.Context, step string, fence int64) (*protocol.WorkspaceChanges, error)
+	// Changes lists what the running attempt changed so far without committing (an Interim workspace.changes,
+	// KIN-51); nil for an attempt without a workspace held by this process.
+	Changes(ctx context.Context, step string, fence int64) (*protocol.WorkspaceChanges, error)
 }
 
 // DefaultGrace is how long a cancelled process group has between SIGTERM and SIGKILL.
@@ -108,8 +114,16 @@ type Executor struct {
 	// Workspaces prepares the git worktree of an assignment with a Base (KIN-29); without it such an assignment
 	// fails.
 	Workspaces Workspaces
-	Grace      time.Duration // DefaultGrace when zero
-	Logger     *slog.Logger
+	// Egress confines attempts whose network profile is strict (KIN-31); nil: no attempt is confined.
+	Egress Confiner
+	Grace  time.Duration // DefaultGrace when zero
+	// ChangesEvery is how often a running attempt's worktree changes are reported (KIN-51; only when they differ
+	// from the last report); zero reports them only at the attempt's end.
+	ChangesEvery time.Duration
+	Logger       *slog.Logger
+	// KnownSecrets returns secret values the runner holds besides the assignment's git token (proxy passwords,
+	// KIN-77); they are masked in the attempt's output and failure reasons by exact match.
+	KnownSecrets func() []string
 
 	mu     sync.Mutex
 	runs   map[key]*run
@@ -127,7 +141,10 @@ type run struct {
 	rec       domain.Record
 	proc      Process
 	stream    Stream
+	output    []*redact.Stream // stdout, stderr: flushed before the terminal event
+	known     []string         // secret values masked in the attempt's output and failure reasons (KIN-77)
 	cancelled string
+	sandbox   Sandbox // released once the process ended
 	done      chan struct{}
 	// result is the terminal event kind once the process ended but reporting it failed; the run stays listed
 	// (with the result) and the report is retried.
@@ -276,6 +293,10 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 	if err := x.Journal.Save(r.rec); err != nil {
 		return fmt.Errorf("recording the attempt: %w", err)
 	}
+	r.known = []string{a.Token.Reveal()}
+	if x.KnownSecrets != nil {
+		r.known = append(r.known, x.KnownSecrets()...)
+	}
 	r.stream = x.Events.Attempt(a.Step, a.Fence, 0, x.reserver(r))
 	if err := r.stream.Emit(protocol.EventAccepted, nil); err != nil {
 		return x.abandon(r, fmt.Errorf("emitting accepted: %w", err))
@@ -291,17 +312,24 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 		}
 		workdir = wd
 	}
-	proc, err := x.Launcher.Launch(ctx, LaunchSpec{Dir: dir, Workdir: workdir, Scenario: a.ScenarioOrDefault(),
-		Attempt: a.Fence, Stdout: x.guard(r.stream.Output("stdout")), Stderr: x.guard(r.stream.Output("stderr"))})
-	if err != nil {
-		x.logger().Error("launching the attempt", "step", a.Step, "fence", a.Fence, "err", err)
-		x.releaseWorkspace(r)
-		if err := r.stream.Emit(protocol.EventFailed, protocol.Failure{Reason: "launch failed: " + err.Error()}); err != nil {
-			return x.abandon(r, err) // the re-sent command tries again
+	var sandbox Sandbox
+	if x.Egress != nil {
+		sb, err := x.Egress.Confine(ctx, a, dir, workdir)
+		if err != nil {
+			return x.launchFailed(r, a, fmt.Errorf("%w: %w", ErrNetwork, err))
 		}
-		return x.Journal.Finish(a.Step, a.Fence)
+		sandbox = sb
 	}
-	r.proc = proc
+	stdout, stderr := x.redacted(r, "stdout"), x.redacted(r, "stderr")
+	proc, err := x.Launcher.Launch(ctx, LaunchSpec{Dir: dir, Workdir: workdir, Scenario: a.ScenarioOrDefault(),
+		Attempt: a.Fence, Stdout: stdout, Stderr: stderr, Sandbox: sandbox})
+	if err != nil {
+		if sandbox != nil {
+			sandbox.Release()
+		}
+		return x.launchFailed(r, a, err)
+	}
+	r.proc, r.sandbox = proc, sandbox
 	if proc.StartTime() == "" {
 		x.logger().Warn("process start time unknown: after a restart a reused pid cannot be told apart", "step", a.Step,
 			"pid", proc.PID())
@@ -315,6 +343,21 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 	}
 	x.watch(r)
 	return nil
+}
+
+// launchFailed reports an attempt that could not start. A strict egress failure (ErrNetwork) carries the code
+// network: the step waits for the network instead of using its retry budget, and nothing ran unconfined.
+func (x *Executor) launchFailed(r *run, a domain.Assignment, err error) error {
+	x.logger().Error("launching the attempt", "step", a.Step, "fence", a.Fence, "err", err)
+	x.releaseWorkspace(r)
+	f := protocol.Failure{Reason: r.mask("launch failed: " + err.Error())}
+	if errors.Is(err, ErrNetwork) {
+		f = protocol.Failure{Reason: r.mask(err.Error()), Code: protocol.FailureNetwork}
+	}
+	if err := r.stream.Emit(protocol.EventFailed, f); err != nil {
+		return x.abandon(r, err) // the re-sent command tries again
+	}
+	return x.Journal.Finish(a.Step, a.Fence)
 }
 
 func ended(r *run) bool {
@@ -351,7 +394,7 @@ func (x *Executor) prepareWorkspace(ctx context.Context, a domain.Assignment, r 
 	}
 	if err != nil {
 		x.logger().Warn("preparing the workspace", "step", a.Step, "fence", a.Fence, "err", err)
-		if err := r.stream.Emit(protocol.EventFailed, protocol.Failure{Reason: "workspace: " + err.Error()}); err != nil {
+		if err := r.stream.Emit(protocol.EventFailed, protocol.Failure{Reason: r.mask("workspace: " + err.Error())}); err != nil {
 			return "", false, err
 		}
 		return "", true, nil
@@ -382,13 +425,75 @@ func (x *Executor) finishWorkspace(r *run) {
 	ch, err := x.Workspaces.Finish(context.Background(), step, fence)
 	if err != nil {
 		x.logger().Error("finishing the workspace; the worktree is kept", "step", step, "fence", fence, "err", err)
-		return
+		// The attempt's changes are unknown: a truncated report makes the Control Plane hold the step (KIN-51)
+		// instead of completing it unchecked.
+		ch = &protocol.WorkspaceChanges{Truncated: true}
 	}
 	if ch != nil {
 		if err := r.stream.Emit(protocol.EventWorkspaceChanges, ch); err != nil {
 			x.logger().Error("emitting workspace.changes", "step", step, "fence", fence, "err", err)
 		}
 	}
+}
+
+// reportChanges reports the running attempt's worktree changes every ChangesEvery when they differ from the last
+// report, so the Control Plane can stop a step that leaves its approved scope while it runs (KIN-51). The returned
+// stop ends the reports and waits for one in progress.
+func (x *Executor) reportChanges(r *run) (stop func()) {
+	r.recMu.Lock()
+	step, fence, wd := r.rec.Step, r.rec.Fence, r.rec.Workdir
+	r.recMu.Unlock()
+	if x.ChangesEvery <= 0 || x.Workspaces == nil || wd == "" {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(x.ChangesEvery)
+		defer t.Stop()
+		last := ""
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			if x.closed.Load() {
+				return
+			}
+			ch, err := x.Workspaces.Changes(ctx, step, fence)
+			if err != nil || ch == nil {
+				if err != nil && ctx.Err() == nil {
+					x.logger().Warn("listing the attempt's changes", "step", step, "fence", fence, "err", err)
+				}
+				continue
+			}
+			sig := changesSignature(ch)
+			if sig == last {
+				continue
+			}
+			if err := r.stream.Emit(protocol.EventWorkspaceChanges, ch); err != nil {
+				x.logger().Warn("emitting workspace.changes", "step", step, "fence", fence, "err", err)
+				continue
+			}
+			last = sig
+		}
+	}()
+	return func() { cancel(); <-done }
+}
+
+// changesSignature identifies a change list; an empty list matches the start (nothing to report).
+func changesSignature(ch *protocol.WorkspaceChanges) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d/%t", ch.FilesTotal, ch.Truncated)
+	if ch.FilesTotal == 0 && !ch.Truncated {
+		return ""
+	}
+	for _, f := range ch.Files {
+		b.WriteString("\x00" + f.Status + f.Path)
+	}
+	return b.String()
 }
 
 // releaseWorkspace finishes the workspace of an attempt that never ran (no report). It does not rely on the
@@ -417,6 +522,23 @@ func (x *Executor) reserver(r *run) func(int64) error {
 	}
 }
 
+// mask redacts a failure reason that may quote a git error (KIN-77).
+func (r *run) mask(reason string) string { return redact.Lines(reason, r.known...) }
+
+// outputIdle is how long a partial output line (a prompt, a progress line) is held back for redaction before it
+// is sent anyway.
+const outputIdle = time.Second
+
+// redacted is the attempt's output stream with secrets masked before they are spooled (KIN-77): the git token and
+// the runner's other known secrets by exact value, secret shapes by redact.Lines; a secret split across the
+// process's writes is masked too (the partial last line is held back).
+// The known values are read once per attempt: a proxy password changed while it runs is masked from the next one.
+func (x *Executor) redacted(r *run, name string) io.Writer {
+	s := redact.NewStream(x.guard(r.stream.Output(name)), outputIdle, r.known...)
+	r.output = append(r.output, s)
+	return s
+}
+
 // guard drops output once the executor is shut down (a restarting runner's old pipes keep draining, so the process
 // never blocks on a full pipe).
 func (x *Executor) guard(w io.Writer) io.Writer { return guardedWriter{x, w} }
@@ -439,8 +561,18 @@ const reportRetry = time.Second
 // watch waits for the process in the background and reports its end; a report that fails (e.g. the disk is full)
 // is retried, and until it succeeds the attempt is listed with its result for reconciliation.
 func (x *Executor) watch(r *run) {
+	stopReports := x.reportChanges(r)
 	x.wg.Go(func() {
 		exit := r.proc.Wait()
+		if r.sandbox != nil {
+			r.sandbox.Release()
+		}
+		for _, s := range r.output { // the pipes are drained: send the held-back partial lines before the end
+			if err := s.Flush(); err != nil {
+				x.logger().Warn("sending the attempt's last output", "step", r.rec.Step, "err", err)
+			}
+		}
+		stopReports() // the worktree is about to be saved and removed
 		if !x.closed.Load() {
 			x.finishWorkspace(r) // before done: a newer attempt of the step waits for the worktree's release
 		}

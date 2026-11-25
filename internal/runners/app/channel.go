@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
+	"github.com/tr1gl1de/kindevai/internal/platform/redact"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runners/domain"
 )
@@ -48,6 +49,20 @@ type Executions interface {
 	FailAttempt(ctx context.Context, runnerID, step string, fence int64, reason string, at time.Time) error
 }
 
+// NetworkHolder is implemented by an Executions that can park a step for the network (KIN-31): a failure with
+// code protocol.FailureNetwork (the runner's strict egress sandbox was not verified; nothing ran unconfined) holds
+// the step WAITING(network) instead of failing the attempt. Without it such a failure is an ordinary failure.
+type NetworkHolder interface {
+	HoldAttemptForNetwork(ctx context.Context, runnerID, step string, fence int64, reason string, at time.Time) error
+}
+
+// ScopeChecker evaluates what an attempt reports it changed (workspace.changes) against the step's approved scope
+// (KIN-51), in the event's transaction. runnerID comes from the authenticated session and the attempt's token was
+// checked first. A violation holds the step for a new approval; errors are those of Executions.
+type ScopeChecker interface {
+	CheckChanges(ctx context.Context, runnerID, step string, fence int64, ch protocol.WorkspaceChanges) error
+}
+
 // Reconciler receives the runner's runner.reconcile.response (KIN-23 resolves UNKNOWN attempts with it).
 type Reconciler interface {
 	Reconciled(ctx context.Context, runnerID string, r protocol.ReconcileResponse) error
@@ -63,6 +78,8 @@ type Channel struct {
 	Repo       ChannelRepo
 	Executions Executions
 	Reconciler Reconciler // optional
+	// Scope, if set, checks every workspace.changes report of a current attempt (KIN-51).
+	Scope ScopeChecker
 	// Prepare, if set, transforms a command's stored body right before it is sent on the runner's authenticated
 	// session (KIN-30 opens sealed proxy passwords there, so they never sit in the log in plaintext). On an error
 	// the stored body is sent: the stream must not stall.
@@ -318,6 +335,9 @@ func (c *Channel) commandAck(ctx context.Context, s Session, a protocol.Ack) err
 func (c *Channel) event(ctx context.Context, s Session, e protocol.Event) error {
 	var ack int64 = -1
 	var sig storageSignal
+	// KIN-77: secrets are masked before the event is stored, counted or passed to the workflow — outside the
+	// transaction, so the single SQLite writer is not held while text is scanned.
+	e.Body = redactBody(e.Kind, e.Body)
 	err := c.Tx.InTx(ctx, func(ctx context.Context) error {
 		sig = storageSignal{}
 		st, _, err := c.Repo.Channel(ctx, s.RunnerID)
@@ -502,9 +522,61 @@ func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Ev
 	case protocol.EventFailed:
 		var f protocol.Failure
 		_ = json.Unmarshal(e.Body, &f)
+		if h, ok := c.Executions.(NetworkHolder); ok && f.Code == protocol.FailureNetwork {
+			return h.HoldAttemptForNetwork(ctx, runnerID, e.Step, e.Fence, truncate(f.Reason, protocol.MaxReasonLen), at)
+		}
 		return c.Executions.FailAttempt(ctx, runnerID, e.Step, e.Fence, truncate(f.Reason, protocol.MaxReasonLen), at)
 	}
-	return c.Executions.CheckAttempt(ctx, runnerID, e.Step, e.Fence)
+	if err := c.Executions.CheckAttempt(ctx, runnerID, e.Step, e.Fence); err != nil || e.Kind != protocol.EventWorkspaceChanges ||
+		c.Scope == nil {
+		return err
+	}
+	var ch protocol.WorkspaceChanges
+	if err := json.Unmarshal(e.Body, &ch); err != nil {
+		// An unreadable report lists no file the check could clear: checked as truncated, it stops the step.
+		ch = protocol.WorkspaceChanges{Truncated: true}
+	}
+	return c.Scope.CheckChanges(ctx, runnerID, e.Step, e.Fence, ch)
+}
+
+// redactBody masks secrets in what an event may carry from the attempt's process (KIN-77): the output data (line
+// by line, the lines kept) and a failure reason. The runner masks first, with the secret values it holds and a
+// window across writes; this is the Control Plane's own best-effort pass for whatever runner sent the event. It is
+// stateless per chunk: the runner cuts chunks at line boundaries, so only a line longer than a chunk (or a PEM key
+// spread over chunks) is redacted in parts. An output body that does not decode is not kept (it could not be redacted or shown).
+func redactBody(kind string, body json.RawMessage) json.RawMessage {
+	var v any
+	switch kind {
+	case protocol.EventOutput:
+		var o protocol.Output
+		if body == nil || json.Unmarshal(body, &o) != nil {
+			return nil
+		}
+		red := redact.Lines(o.Data)
+		if red == o.Data {
+			return body
+		}
+		o.Data = red
+		v = o
+	case protocol.EventFailed:
+		var f protocol.Failure
+		if body == nil || json.Unmarshal(body, &f) != nil {
+			return nil // nothing that could not be redacted is kept; the attempt fails without a reason
+		}
+		red := redact.Text(f.Reason)
+		if red == f.Reason {
+			return body
+		}
+		f.Reason = red
+		v = f
+	default:
+		return body
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 func truncate(s string, n int) string {

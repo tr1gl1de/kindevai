@@ -11,6 +11,7 @@ import (
 	"path"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/approvals/domain"
@@ -220,6 +221,17 @@ func (s *Service) notify(ctx context.Context, a domain.Approval) error {
 	return nil
 }
 
+// auditPaths bounds the paths named in one audit entry.
+const auditPaths = 20
+
+// pathSummary lists the first auditPaths paths and counts the rest.
+func pathSummary(paths []string) string {
+	if len(paths) <= auditPaths {
+		return strings.Join(paths, ", ")
+	}
+	return strings.Join(paths[:auditPaths], ", ") + fmt.Sprintf(" (+%d more)", len(paths)-auditPaths)
+}
+
 func (s *Service) request(ctx context.Context, r domain.Request, now time.Time, notify bool) error {
 	a, err := domain.NewRequest(r, now)
 	if err != nil {
@@ -228,7 +240,11 @@ func (s *Service) request(ctx context.Context, r domain.Request, now time.Time, 
 	if err := s.Repo.Create(ctx, a); err != nil {
 		return fmt.Errorf("creating approval: %w", err)
 	}
-	if err := s.record(ctx, auditapp.System(), KindRequested, a, map[string]string{"reason": string(a.Reason)}); err != nil {
+	extra := map[string]string{"reason": string(a.Reason)}
+	if len(a.Paths) > 0 { // the diff summary of a scope_exceeded request (KIN-51)
+		extra["paths"] = pathSummary(a.Paths)
+	}
+	if err := s.record(ctx, auditapp.System(), KindRequested, a, extra); err != nil {
 		return err
 	}
 	if notify {
@@ -322,11 +338,14 @@ func (s *Service) IntegrateDevApproved(ctx context.Context, taskID string) (bool
 }
 
 // StepChanges is a runner's report of the files a step changed (from the authenticated runner channel).
+// Unreported counts changed files the report does not list (truncated or unreadable, KIN-51): they cannot be
+// checked, so any stops the step.
 type StepChanges struct {
-	StepID   string
-	RunnerID string
-	Fence    int64
-	Changed  []string
+	StepID     string
+	RunnerID   string
+	Fence      int64
+	Changed    []string
+	Unreported int
 }
 
 // MaxChangedFiles bounds the files one report is checked against; a longer report stops the step anyway.
@@ -370,8 +389,9 @@ func (s *Service) CheckChanges(ctx context.Context, ch StepChanges) (domain.Viol
 		// cleaned paths can match an approved extension.
 		ext := approvedExtensions(all, st.Revision, st.Key)
 		changed := ch.Changed
-		more := len(changed) - MaxChangedFiles
-		if more > 0 {
+		more := max(ch.Unreported, 0)
+		if len(changed) > MaxChangedFiles {
+			more += len(changed) - MaxChangedFiles
 			changed = changed[:MaxChangedFiles]
 		}
 		changed = slices.DeleteFunc(slices.Clone(changed), func(f string) bool {
@@ -379,7 +399,7 @@ func (s *Service) CheckChanges(ctx context.Context, ch StepChanges) (domain.Viol
 		})
 		v = domain.CheckChanges(st.Scope, st.Risk, pol, st.Repository, changed)
 		if more > 0 { // the rest is checked again after the approval; the step must not run on unchecked files
-			v.Outside = append(v.Outside, fmt.Sprintf("(+%d)", more))
+			v.Outside = append(v.Outside, fmt.Sprintf("(+%d unreported)", more))
 		}
 		if v.Empty() {
 			return nil

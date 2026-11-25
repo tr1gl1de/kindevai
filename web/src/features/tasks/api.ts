@@ -83,13 +83,16 @@ export const useCancelTask = (id: string) =>
   useTaskAction(id, (reason: string) => api<TaskDetail>("POST", `${path(id)}/cancel`, { reason }));
 export const useRetryTask = (id: string) => useTaskAction(id, () => api<TaskDetail>("POST", `${path(id)}/retry`, {}));
 
+/** A running attempt's workspace reports change rarely (prepared once, changes at the end): poll them gently. */
+export const WORKSPACE_REFRESH_MS = 10_000;
+
 /** An attempt's latest workspace reports (KIN-70), refreshed while the attempt runs. */
 export function useAttemptWorkspace(taskId: string, stepId: string, fence: number, isLive: boolean) {
   return useQuery({
     queryKey: keys.workspace(taskId, stepId, fence),
     queryFn: ({ signal }) =>
       api<AttemptWorkspace>("GET", `${path(taskId)}/steps/${encodeURIComponent(stepId)}/attempts/${fence}/workspace`, undefined, signal),
-    refetchInterval: isLive ? LIVE_REFRESH_MS : false,
+    refetchInterval: isLive ? WORKSPACE_REFRESH_MS : false,
   });
 }
 

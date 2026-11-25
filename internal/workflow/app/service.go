@@ -20,6 +20,11 @@ const (
 	DefaultLeaseTTL = 60 * time.Second
 	// DefaultMaxAttempts: one retry after a confirmed failure (KIN-23 decision).
 	DefaultMaxAttempts = 2
+	// DefaultOfflineRunnerGrace: how long a runner may stay offline (no live session or no heartbeat) before the
+	// steps it holds or is pinned to move to another runner (KIN-118). Long enough for a runner restart, an upgrade
+	// or a short network or laptop-sleep outage (its leases already expired after 60 s, so nothing runs twice), short
+	// enough that a review or CI fix round does not stall for long.
+	DefaultOfflineRunnerGrace = 10 * time.Minute
 )
 
 // ErrDuplicateIssue: the project already has a task for this YouTrack issue.
@@ -50,6 +55,9 @@ type Repository interface {
 	// ExecutionsPinnedTo lists running executions with a step pinned to the runner (its review loop's branch lives
 	// there), held or not (KIN-106).
 	ExecutionsPinnedTo(ctx context.Context, runnerID string) ([]string, error)
+	// RunnersWithWork lists the runners that hold a step of a running execution (CLAIMED, RUNNING or an unknown
+	// attempt) or that an unfinished step of one is pinned to (KIN-118).
+	RunnersWithWork(ctx context.Context) ([]string, error)
 	// HeldSteps counts, per runner id, the steps of running executions the runner holds (Step.Holding: CLAIMED,
 	// RUNNING or an unknown attempt) — the scheduler's load measure (KIN-65).
 	HeldSteps(ctx context.Context) (map[string]int, error)
@@ -120,7 +128,11 @@ type Service struct {
 	NewID       func() string
 	LeaseTTL    time.Duration // DefaultLeaseTTL when zero
 	MaxAttempts int           // DefaultMaxAttempts when zero
-	Pause       Pause         // optional: maintenance mode (KIN-41)
+	// Presence tells which runners are offline and since when (KIN-118); nil: an offline runner keeps its steps
+	// until the Owner disables or revokes it. OfflineRunnerGrace is DefaultOfflineRunnerGrace when zero.
+	Presence           RunnerPresence
+	OfflineRunnerGrace time.Duration
+	Pause              Pause // optional: maintenance mode (KIN-41)
 	// Planning stores planner runs (KIN-34); nil: the planner step is off. IssueContext reads a YouTrack issue's
 	// context package from the outbox handler (with Outbox); nil: planners get the task title only.
 	Planning     PlanningRepository
@@ -159,6 +171,13 @@ func (s *Service) leaseTTL() time.Duration {
 		return s.LeaseTTL
 	}
 	return DefaultLeaseTTL
+}
+
+func (s *Service) offlineRunnerGrace() time.Duration {
+	if s.OfflineRunnerGrace > 0 {
+		return s.OfflineRunnerGrace
+	}
+	return DefaultOfflineRunnerGrace
 }
 
 func (s *Service) maxAttempts() int {

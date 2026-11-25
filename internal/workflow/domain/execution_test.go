@@ -758,3 +758,40 @@ func TestNetworkHoldStreak(t *testing.T) {
 		t.Fatalf("NetworkHolds after a failed attempt = %d", n)
 	}
 }
+
+// KIN-118: a runner that went offline (not disabled) loses only the attempts whose lease it lost: an UNKNOWN attempt
+// fails and is retried elsewhere, a step whose lease is still live stays with it (its heartbeats keep it), and the
+// released token is stale for a late report.
+func TestReleaseOfflineRunnerTakesOnlyAttemptsWhoseLeaseIsLost(t *testing.T) {
+	t.Parallel()
+	e := newExecution(t, 3)
+	backend, lint := e.StepByKey("backend").ID, e.StepByKey("lint").ID
+	lb, _ := e.Claim(backend, "r1", t0, ttl)
+	if err := e.Start(backend, "r1", lb.Fence, t0, ttl); err != nil {
+		t.Fatal(err)
+	}
+	later := t0.Add(ttl / 2)
+	ll, _ := e.Claim(lint, "r1", later, ttl)
+	if err := e.Start(lint, "r1", ll.Fence, later, ttl); err != nil {
+		t.Fatal(err)
+	}
+	now := t0.Add(ttl) // backend's lease is lost, lint's is still live
+	e.ExpireLeases(now)
+	got := e.ReleaseOfflineRunner("r1", "runner offline", now, 2)
+	if !slices.Equal(got, []Released{{StepID: backend, Fence: lb.Fence}}) {
+		t.Fatalf("released = %+v", got)
+	}
+	if b := e.StepByKey("backend"); b.State != StepReady || b.RunnerID != "" || b.Attempts[0].State != AttemptFailed ||
+		b.Attempts[0].Error != "runner offline" {
+		t.Fatalf("lost step = %+v", b)
+	}
+	if l := e.StepByKey("lint"); l.State != StepRunning || l.RunnerID != "r1" {
+		t.Fatalf("live step = %+v", l)
+	}
+	if err := e.Succeed(backend, "r1", lb.Fence, now); !errors.Is(err, ErrStaleFence) {
+		t.Fatalf("late report of the released attempt = %v", err)
+	}
+	if got := e.ReleaseOfflineRunner("r2", "runner offline", now, 2); got != nil {
+		t.Fatalf("another runner's release = %+v", got)
+	}
+}

@@ -372,3 +372,32 @@ func TestReleasingThePinnedRunnerStartsTheLoopOver(t *testing.T) {
 		t.Fatalf("a fresh budget was not given: execution %s step %s", e.State, e.Step(id).State)
 	}
 }
+
+// KIN-118: a review loop pinned to a runner that stayed offline starts over elsewhere, as on disable (KIN-35/106);
+// a step whose pinned runner still holds it with a live lease is left alone.
+func TestAnOfflinePinnedRunnerStartsTheLoopOver(t *testing.T) {
+	t.Parallel()
+	e, id := reviewExecution(t)
+	implement(t, &e, id)
+	reviewWith(t, &e, id, changes) // round 1, pinned to r1, READY for its fix
+	f := runPhase(t, &e, id, "r1", implClaim)
+	if got := e.ReleaseOfflineRunner("r1", "runner offline", t0, DefaultMaxAttempts); got != nil {
+		t.Fatalf("a live attempt was released: %+v", got)
+	}
+	if s := e.Step(id); s.PinnedRunner != "r1" || s.State != StepRunning {
+		t.Fatalf("live pinned step: pinned %q state %s", s.PinnedRunner, s.State)
+	}
+	passTests(t, &e, id, "r1", f, 0)
+	if err := e.Succeed(id, "r1", f, t0); err != nil {
+		t.Fatal(err)
+	}
+	if s := e.Step(id); s.PinnedRunner != "r1" || s.Holding() {
+		t.Fatalf("waiting for its review: pinned %q holding %v", s.PinnedRunner, s.Holding())
+	}
+	if got := e.ReleaseOfflineRunner("r1", "runner offline", t0, DefaultMaxAttempts); got != nil {
+		t.Fatalf("released = %+v", got)
+	}
+	if s := e.Step(id); s.PinnedRunner != "" || s.Phase != PhaseImplement || s.Round != 0 || s.State != StepReady {
+		t.Fatalf("after the release: pinned %q phase %q round %d state %s", s.PinnedRunner, s.Phase, s.Round, s.State)
+	}
+}

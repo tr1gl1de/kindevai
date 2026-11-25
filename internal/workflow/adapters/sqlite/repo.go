@@ -439,6 +439,22 @@ func (r *Repository) ExecutionsPinnedTo(ctx context.Context, runnerID string) ([
 		WHERE e.state = 'RUNNING' AND s.pinned_runner = ? AND s.pinned_runner != '' ORDER BY e.id`, runnerID)
 }
 
+// RunnersWithWork implements app.Repo (KIN-118): runners holding a step of a running execution (as HeldSteps
+// counts them) or pinned by one of its unfinished steps.
+func (r *Repository) RunnersWithWork(ctx context.Context) ([]string, error) {
+	return r.ids(ctx, "listing runners with work", `SELECT s.runner_id FROM workflow_steps s
+		JOIN executions e ON e.id = s.execution_id
+		WHERE e.state = 'RUNNING' AND s.runner_id IS NOT NULL AND s.runner_id != '' AND (s.state IN ('CLAIMED', 'RUNNING')
+			OR s.state = 'WAITING' AND (SELECT a.state FROM step_attempts a WHERE a.step_id = s.id
+				ORDER BY a.number DESC LIMIT 1) = 'UNKNOWN')
+		UNION
+		SELECT s.pinned_runner FROM workflow_steps s
+		JOIN executions e ON e.id = s.execution_id
+		WHERE e.state = 'RUNNING' AND s.pinned_runner IS NOT NULL AND s.pinned_runner != ''
+			AND s.state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+		ORDER BY 1`)
+}
+
 // HeldSteps counts, per runner, the steps of running executions it holds: CLAIMED, RUNNING, or WAITING on a last
 // attempt whose outcome is UNKNOWN (domain.Step.Holding).
 func (r *Repository) HeldSteps(ctx context.Context) (map[string]int, error) {

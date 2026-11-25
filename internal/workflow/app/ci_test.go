@@ -510,6 +510,36 @@ func TestALostRunnerInACIFixRoundContinuesFromThePublishedBranch(t *testing.T) {
 	}
 }
 
+// Acceptance (KIN-118): the runner holding the branch simply goes offline during a CI fix round: past the grace
+// period the step moves to another runner, which continues from the published head (as on disable, KIN-106).
+func TestAnOfflineRunnerInACIFixRoundHandsTheBranchOn(t *testing.T) {
+	t.Parallel()
+	e := newCIEnv()
+	pres := &fakePresence{}
+	e.svc.Presence = pres
+	task, a := e.opened(t)
+	e.ci.set("h1", CIStatus{State: domain.CIFailed, Detail: "test (failure): TestLogin"})
+	e.ciEvent(t, a, "d1")
+	pres.set("r1", e.clock.Now())
+	e.pool.set("p1", cliRunner("r2", "claude", "codex"))
+	e.schedule(t)
+	if as := e.disp.takeAssigned(); len(as) != 0 {
+		t.Fatalf("moved within the grace period: %+v", as)
+	}
+	if _, ex := e.state(t, task.ID); ex.Steps[0].PinnedRunner != "r1" {
+		t.Fatalf("pinned %q", ex.Steps[0].PinnedRunner)
+	}
+	e.clock.Add(DefaultOfflineRunnerGrace)
+	e.schedule(t)
+	as := e.disp.takeAssigned()
+	if len(as) != 1 || as[0].Role != domain.StepRoleImplementer || as[0].BranchHead != "h1" || !strings.Contains(as[0].Prompt, "TestLogin") {
+		t.Fatalf("fix assignment on the new runner %+v", as)
+	}
+	if _, ex := e.state(t, task.ID); ex.Steps[0].CIRound != 1 || ex.Steps[0].RunnerID != "r2" {
+		t.Fatalf("step %+v", ex.Steps[0])
+	}
+}
+
 // Acceptance (KIN-106): a task entering VERIFYING is announced to the approvals context (which notifies the Owner of
 // a pending integrate_dev approval of its revision); staying VERIFYING announces nothing more.
 func TestEnteringVerifyingIsAnnounced(t *testing.T) {

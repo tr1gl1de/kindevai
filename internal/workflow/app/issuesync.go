@@ -47,8 +47,17 @@ func (s *Service) taskLink(taskID string) string {
 }
 
 // syncIssue writes back the change of a saved task (from the stored one): its state, a new plan revision, the end.
+// The documentation decision of a completed run is taken (and stored) for every task, with or without an issue.
 func (s *Service) syncIssue(ctx context.Context, stored, t domain.Task) error {
-	if s.IssueSync == nil || t.YouTrackIssue == "" {
+	writeBack := s.IssueSync != nil && t.YouTrackIssue != ""
+	var docs *domain.DocsDecision
+	if stored.State != t.State && t.State == domain.TaskCompleted && (s.Docs != nil || writeBack) {
+		var err error
+		if docs, err = s.decideDocs(ctx, t, writeBack); err != nil {
+			return err
+		}
+	}
+	if !writeBack {
 		return nil
 	}
 	prefix := "task/" + t.ID + "/"
@@ -64,7 +73,7 @@ func (s *Service) syncIssue(ctx context.Context, stored, t domain.Task) error {
 		}
 	}
 	if stored.State != t.State && t.State.Terminal() {
-		return s.finalComment(ctx, prefix+"v"+strconv.FormatInt(t.Version, 10)+"/final", t)
+		return s.finalComment(ctx, prefix+"v"+strconv.FormatInt(t.Version, 10)+"/final", t, docs)
 	}
 	return nil
 }
@@ -85,8 +94,8 @@ func (s *Service) planComment(ctx context.Context, key string, t domain.Task) er
 
 // finalComment reports the end: the pull requests, the agent time (CLI process time, KIN-25) and, for a completed
 // task, the documentation decision, whose in-scope article changes are written as well.
-func (s *Service) finalComment(ctx context.Context, key string, t domain.Task) error {
-	n := domain.FinalNote{State: t.State, Reason: t.Reason.Detail, Link: s.taskLink(t.ID)}
+func (s *Service) finalComment(ctx context.Context, key string, t domain.Task, docs *domain.DocsDecision) error {
+	n := domain.FinalNote{State: t.State, Reason: t.Reason.Detail, Link: s.taskLink(t.ID), Docs: docs}
 	if s.ChangeSets != nil {
 		arts, err := s.ChangeSets.TaskArtifacts(ctx, t.ID)
 		if err != nil {
@@ -103,13 +112,6 @@ func (s *Service) finalComment(ctx context.Context, key string, t domain.Task) e
 		return err
 	}
 	n.AgentTime = times[t.ID].Agent
-	if t.State == domain.TaskCompleted {
-		d, err := s.decideDocs(ctx, t)
-		if err != nil {
-			return err
-		}
-		n.Docs = d
-	}
 	if err := s.IssueSync.Comment(ctx, key, t.ID, t.YouTrackIssue, domain.FinalComment(n)); err != nil {
 		return fmt.Errorf("youtrack final comment: %w", err)
 	}
@@ -117,8 +119,8 @@ func (s *Service) finalComment(ctx context.Context, key string, t domain.Task) e
 }
 
 // decideDocs takes the documentation step of the completed run: the implementers' handoffs of the latest execution
-// against the approved plan's docs scope. The decision is stored; its article changes are written.
-func (s *Service) decideDocs(ctx context.Context, t domain.Task) (*domain.DocsDecision, error) {
+// against the approved plan's docs scope. The decision is stored; with writeBack its article changes are written.
+func (s *Service) decideDocs(ctx context.Context, t domain.Task, writeBack bool) (*domain.DocsDecision, error) {
 	e, err := s.Repo.LatestExecution(ctx, t.ID)
 	if errors.Is(err, domain.ErrNotFound) {
 		return nil, nil
@@ -147,6 +149,9 @@ func (s *Service) decideDocs(ctx context.Context, t domain.Task) (*domain.DocsDe
 		if err := s.Docs.SaveDocs(ctx, d); err != nil {
 			return nil, err
 		}
+	}
+	if !writeBack {
+		return &d, nil
 	}
 	for i, a := range d.Articles {
 		key := "task/" + t.ID + "/" + e.ID + "/article/" + strconv.Itoa(i)

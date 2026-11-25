@@ -250,3 +250,24 @@ func TestTaskDetailShowsThePublication(t *testing.T) {
 		t.Fatalf("publication %+v %v", d.Publication, err)
 	}
 }
+
+// Review finding: the documentation decision of a task without a YouTrack issue is stored as well.
+func TestDocsDecisionIsStoredWithoutAnIssue(t *testing.T) {
+	t.Parallel()
+	e, s, docs := newSyncEnv()
+	task, a := e.reviewed(t, onlyStep())
+	if err := e.push(t, a, domain.Push{Repository: "api", Branch: "feature/" + task.ID + "--" + a.StepID, HeadSHA: "h1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.drain(t); err != nil {
+		t.Fatal(err)
+	}
+	e.ci.set("h1", CIStatus{State: domain.CIPassed})
+	e.ciEvent(t, e.artifact(t, task.ID), "d1")
+	if tk, _ := e.state(t, task.ID); tk.State != domain.TaskCompleted {
+		t.Fatalf("task %s", tk.State)
+	}
+	if len(docs.docs) != 1 || docs.docs[0].Status != domain.DocsUnstated || len(s.states)+len(s.comments) != 0 {
+		t.Fatalf("docs %+v, writes %v %v", docs.docs, s.states, s.comments)
+	}
+}

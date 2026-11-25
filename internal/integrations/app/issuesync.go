@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tr1gl1de/kindevai/internal/integrations/domain"
 	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
@@ -54,6 +56,16 @@ type IssueSync struct {
 	Outbox     Outbox
 	Store      WriteStore
 	Now        func() time.Time
+	// MaxAttempts must equal the outbox's MaxAttempts (default: the messaging default): the last attempt's failure
+	// fails the write.
+	MaxAttempts int
+}
+
+func (s *IssueSync) maxAttempts() int {
+	if s.MaxAttempts > 0 {
+		return s.MaxAttempts
+	}
+	return messaging.Config{}.WithDefaults().MaxAttempts
 }
 
 type writePayload struct {
@@ -71,7 +83,7 @@ type writePayload struct {
 const (
 	MaxCommentBytes = 16 << 10
 	MaxSectionBytes = 1 << 10
-	MaxContentBytes = 32 << 10
+	MaxContentBytes = 24 << 10
 	maxWriteKey     = 200
 )
 
@@ -84,12 +96,15 @@ func (s *IssueSync) now() time.Time {
 	return s.Now().UTC()
 }
 
-// Comment enqueues a comment on the task's issue.
+// Comment enqueues a comment on the task's issue; a text over MaxCommentBytes is cut (a comment never fails the
+// task change that writes it).
 func (s *IssueSync) Comment(ctx context.Context, key, taskID, issueID, text string) error {
-	if strings.TrimSpace(text) == "" || len(text) > MaxCommentBytes {
-		return &domain.ValidationError{Field: "text", Code: "invalid"}
+	code := ""
+	if strings.TrimSpace(text) == "" {
+		code = "invalid_text"
 	}
-	return s.enqueue(ctx, key, writePayload{Kind: domain.WriteComment, TaskID: taskID, Issue: issueID, Text: text})
+	text = clip(text, MaxCommentBytes)
+	return s.enqueue(ctx, key, writePayload{Kind: domain.WriteComment, TaskID: taskID, Issue: issueID, Text: text}, code)
 }
 
 // State enqueues the YouTrack state the project maps taskState to; an unmapped state or an unbound project writes
@@ -106,21 +121,22 @@ func (s *IssueSync) State(ctx context.Context, key, taskID, projectID, issueID, 
 	if cmd == "" {
 		return nil
 	}
-	return s.enqueue(ctx, key, writePayload{Kind: domain.WriteState, TaskID: taskID, Issue: issueID, Command: cmd})
+	return s.enqueue(ctx, key, writePayload{Kind: domain.WriteState, TaskID: taskID, Issue: issueID, Command: cmd}, "")
 }
 
 // Article enqueues a Knowledge Base section (replaced or added) for the task.
 func (s *IssueSync) Article(ctx context.Context, key, taskID, issueID, articleID, section, content string) error {
+	code := ""
 	switch {
 	case !articleRE.MatchString(articleID):
-		return &domain.ValidationError{Field: "article", Code: "article_format"}
+		code, articleID = "invalid_article", ""
 	case strings.TrimSpace(section) == "" || len(section) > MaxSectionBytes || strings.ContainsAny(section, "\r\n"):
-		return &domain.ValidationError{Field: "section", Code: "invalid"}
+		code = "invalid_section"
 	case strings.TrimSpace(content) == "" || len(content) > MaxContentBytes:
-		return &domain.ValidationError{Field: "content", Code: "invalid"}
+		code = "invalid_content"
 	}
 	return s.enqueue(ctx, key, writePayload{Kind: domain.WriteArticle, TaskID: taskID, Issue: issueID, Article: articleID,
-		Section: strings.TrimSpace(section), Content: content})
+		Section: strings.TrimSpace(section), Content: content}, code)
 }
 
 // Publication sums the task's writes for the task page.
@@ -128,21 +144,33 @@ func (s *IssueSync) Publication(ctx context.Context, taskID string) (domain.Publ
 	return s.Store.TaskPublication(ctx, taskID)
 }
 
-func (s *IssueSync) enqueue(ctx context.Context, key string, p writePayload) error {
-	id, err := domain.NewIssueID(p.Issue)
-	if err != nil || id != p.Issue {
-		return &domain.ValidationError{Field: "issueId", Code: "issue_format"}
-	}
+// enqueue records the write and its outbox message. A write that cannot be sent (reject, a malformed issue id, a
+// payload over the outbox limit) is recorded as failed instead: the write-back never fails the task change that
+// asked for it. Only storage errors are returned.
+func (s *IssueSync) enqueue(ctx context.Context, key string, p writePayload, reject string) error {
 	if key == "" || len(key) > maxWriteKey || p.TaskID == "" {
 		return &domain.ValidationError{Field: "key", Code: "invalid"}
 	}
-	b, err := json.Marshal(p)
-	if err != nil {
+	if id, err := domain.NewIssueID(p.Issue); reject == "" && (err != nil || id != p.Issue) {
+		reject = "invalid_issue"
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false) // Markdown keeps its < > & unexpanded within the payload limit
+	if err := enc.Encode(p); err != nil {
 		return err
 	}
-	if err := s.Store.SaveIssueWrite(ctx, domain.IssueWrite{Key: key, TaskID: p.TaskID, IssueID: p.Issue, Kind: p.Kind,
-		Target: p.Article, CreatedAt: s.now()}); err != nil {
+	b := bytes.TrimSpace(buf.Bytes())
+	if reject == "" && len(b) > messaging.MaxPayloadBytes {
+		reject = "too_large"
+	}
+	now := s.now()
+	if err := s.Store.SaveIssueWrite(ctx, domain.IssueWrite{Key: key, TaskID: p.TaskID, IssueID: clip(p.Issue, 64),
+		Kind: p.Kind, Target: p.Article, CreatedAt: now}); err != nil {
 		return err
+	}
+	if reject != "" {
+		return s.Store.MarkIssueWrite(ctx, key, domain.WriteFailed, reject, 0, now)
 	}
 	if err := s.Outbox.Enqueue(ctx, messaging.Message{Adapter: AdapterYouTrack, Topic: TopicYouTrackWrite, Key: key,
 		Payload: b}); err != nil {
@@ -250,9 +278,25 @@ func (s *IssueSync) classify(ctx context.Context, d messaging.Delivery, err erro
 	if errors.As(err, &se) {
 		code = fmt.Sprintf("http_%d", se.Status)
 	}
+	if d.Attempt >= s.maxAttempts() {
+		return s.fail(ctx, d, code, err) // the outbox gives up now: the write is not "awaiting publication" any more
+	}
 	if merr := s.Store.MarkIssueWrite(ctx, d.Key, domain.WritePending, code, d.Attempt, s.now()); merr != nil &&
 		!errors.Is(merr, domain.ErrNotFound) {
 		return errors.Join(err, merr)
 	}
 	return err
+}
+
+// clip cuts s to at most n bytes on a rune boundary, marking the cut.
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	const mark = "\n…"
+	s = s[:n-len(mark)]
+	for !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s + mark
 }

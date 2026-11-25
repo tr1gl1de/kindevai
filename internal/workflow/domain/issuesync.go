@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -16,7 +17,7 @@ import (
 const (
 	maxArticleChanges = 8
 	maxArticleSection = 200
-	maxArticleContent = 16 << 10
+	maxArticleContent = 6 << 10 // runes: at most 24 KiB, under the write-back's limit
 )
 
 // ArticleChange replaces (or adds) one section of a Knowledge Base article: the heading's text and the section's
@@ -97,11 +98,21 @@ func DecideDocs(taskID, executionID string, h Handoff, scope []string) DocsDecis
 		}
 	}
 	d := DocsDecision{TaskID: taskID, ExecutionID: executionID, Status: DocsUnstated}
+	at := map[[2]string]int{} // (article, section) -> index: a later change of the same section wins
 	for _, c := range h.Articles {
-		if ValidArticleID(c.Article) && allowed[c.Article] {
-			d.Articles = append(d.Articles, c)
-		} else {
-			d.Rejected = append(d.Rejected, c.Article)
+		switch k, seen := [2]string{c.Article, c.Section}, false; {
+		case !ValidArticleID(c.Article) || !allowed[c.Article]:
+			if !slices.Contains(d.Rejected, c.Article) && len(d.Rejected) < maxArticleChanges {
+				d.Rejected = append(d.Rejected, c.Article)
+			}
+		default:
+			var i int
+			if i, seen = at[k]; seen {
+				d.Articles[i] = c
+			} else if len(d.Articles) < maxArticleChanges {
+				at[k] = len(d.Articles)
+				d.Articles = append(d.Articles, c)
+			}
 		}
 	}
 	if len(d.Articles) > 0 {
@@ -137,7 +148,7 @@ func PlanComment(n PlanNote) string {
 	} else {
 		b.WriteString(" is accepted")
 	}
-	b.WriteString(".\n\n> " + strings.ReplaceAll(boundText(n.Summary, maxCommentSummary), "\n", "\n> "))
+	b.WriteString(".\n\n> " + strings.ReplaceAll(noMentions(boundText(n.Summary, maxCommentSummary)), "\n", "\n> "))
 	if n.Link != "" {
 		if n.NeedsApproval {
 			fmt.Fprintf(&b, "\n\nReview and approve: %s", n.Link)
@@ -162,7 +173,7 @@ type FinalNote struct {
 func FinalComment(n FinalNote) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "**kindevai:** task %s", n.State)
-	if r := boundText(n.Reason, maxHandoffItem); r != "" {
+	if r := noMentions(boundText(n.Reason, maxHandoffItem)); r != "" {
 		b.WriteString(": " + r)
 	}
 	b.WriteString(".\n")
@@ -214,3 +225,7 @@ func formatAgentTime(t AgentTime) string {
 	}
 	return s
 }
+
+// noMentions keeps untrusted text (the planner's summary, a CLI's error) from mentioning YouTrack users: a zero-width
+// space after "@" leaves it readable but inert.
+func noMentions(s string) string { return strings.ReplaceAll(s, "@", "@\u200b") }

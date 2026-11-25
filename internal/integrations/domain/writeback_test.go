@@ -2,6 +2,7 @@ package domain
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -58,5 +59,28 @@ func TestIssueWriteMarker(t *testing.T) {
 	a, b := WriteMarker("task/t1/v3/plan"), WriteMarker("task/t1/v4/plan")
 	if a == b || len(a) != len("kindev-")+16 || a != WriteMarker("task/t1/v3/plan") {
 		t.Fatalf("markers %q %q", a, b)
+	}
+}
+
+// Review findings: headings in code fences do not end a section, "C#" is a heading text, and a body's own headings
+// are demoted so a repeated write stays idempotent.
+func TestReplaceSectionEdgeCases(t *testing.T) {
+	t.Parallel()
+	doc := "## A\n\n```\n## not a heading\n```\n\n## C#\n\nold\n\n## D\n\nd\n"
+	got := ReplaceSection(doc, "A", "new")
+	if got != "## A\n\nnew\n\n## C#\n\nold\n\n## D\n\nd\n" {
+		t.Fatalf("fenced: %q", got)
+	}
+	if got := ReplaceSection(doc, "C#", "x"); !strings.Contains(got, "## C#\n\nx\n\n## D") || strings.Count(got, "C#") != 1 {
+		t.Fatalf("C#: %q", got)
+	}
+	body := "intro\n\n## Sub\n\ntext"
+	once := ReplaceSection(doc, "D", body)
+	if !strings.Contains(once, "### Sub") || ReplaceSection(once, "D", body) != once {
+		t.Fatalf("not idempotent: %q", once)
+	}
+	appended := ReplaceSection("# T\n", "N", body)
+	if ReplaceSection(appended, "N", body) != appended {
+		t.Fatalf("append not idempotent: %q", appended)
 	}
 }

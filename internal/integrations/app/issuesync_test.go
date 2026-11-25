@@ -189,8 +189,8 @@ func TestIssueSyncCommentThroughTheOutboxIsIdempotent(t *testing.T) {
 	if err := s.Comment(ctx, "task/t1/v3/plan", "t1", "KIN-7", "Plan revision 1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Comment(ctx, "task/t1/v3/plan", "t1", "kin-x", "x"); err == nil {
-		t.Fatal("a malformed issue id was accepted")
+	if err := s.Comment(ctx, "task/t1/v3/bad", "t1", "kin-x", "x"); err != nil {
+		t.Fatalf("a malformed issue id must not fail the caller: %v", err)
 	}
 	if len(c.comments) != 0 {
 		t.Fatal("YouTrack was called inline")
@@ -199,7 +199,7 @@ func TestIssueSyncCommentThroughTheOutboxIsIdempotent(t *testing.T) {
 	if len(q.msgs) != 1 || m.Adapter != app.AdapterYouTrack || m.Topic != app.TopicYouTrackWrite || m.Key != "task/t1/v3/plan" {
 		t.Fatalf("messages = %+v", q.msgs)
 	}
-	if p, _ := s.Publication(ctx, "t1"); p != (domain.Publication{Pending: 1}) {
+	if p, _ := s.Publication(ctx, "t1"); p != (domain.Publication{Pending: 1, Failed: 1, LastError: "invalid_issue"}) {
 		t.Fatalf("publication before delivery = %+v", p)
 	}
 	c.lost = true
@@ -216,7 +216,7 @@ func TestIssueSyncCommentThroughTheOutboxIsIdempotent(t *testing.T) {
 		!strings.Contains(got[0], domain.WriteMarker("task/t1/v3/plan")) {
 		t.Fatalf("comments = %q", got)
 	}
-	if p, _ := s.Publication(ctx, "t1"); p != (domain.Publication{Published: 1}) {
+	if p, _ := s.Publication(ctx, "t1"); p != (domain.Publication{Published: 1, Failed: 1, LastError: "invalid_issue"}) {
 		t.Fatalf("publication = %+v", p)
 	}
 }
@@ -254,8 +254,11 @@ func TestIssueSyncArticleChecksTheRevisionBeforeWriting(t *testing.T) {
 	if err := s.Article(ctx, "task/t1/v9/article/KIN-A-19", "t1", "KIN-7", "KIN-A-19", "KIN-38", "Write-back."); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Article(ctx, "k", "t1", "KIN-7", "../admin", "S", "x"); err == nil {
-		t.Fatal("a malformed article id was accepted")
+	if err := s.Article(ctx, "k", "t1", "KIN-7", "../admin", "S", "x"); err != nil {
+		t.Fatalf("a malformed article id must not fail the caller: %v", err)
+	}
+	if len(q.msgs) != 1 {
+		t.Fatalf("a malformed article was enqueued: %+v", q.msgs)
 	}
 	c.race = 1 // a person edits the article between our read and our check
 	if err := s.HandleWrite(ctx, deliveries(q, 1)[0]); err != nil {
@@ -303,6 +306,14 @@ func TestIssueSyncRetriesWhileYouTrackIsDown(t *testing.T) {
 	if p, _ := s.Publication(ctx, "t1"); p != (domain.Publication{Pending: 1, LastError: "http_503"}) {
 		t.Fatalf("publication = %+v", p)
 	}
+	d := deliveries(q, 10) // the outbox's last attempt: the write is given up, not awaiting publication forever
+	s.MaxAttempts = 10
+	if err := s.HandleWrite(ctx, d[0]); !messaging.IsPermanent(err) {
+		t.Fatalf("last attempt = %v", err)
+	}
+	if status, code := st.status("task/t1/v3/final"); status != domain.WriteFailed || code != "http_503" {
+		t.Fatalf("after the last attempt: %s %s", status, code)
+	}
 	c.err = &app.StatusError{Status: 403}
 	if err := s.HandleWrite(ctx, deliveries(q, 2)[0]); !messaging.IsPermanent(err) {
 		t.Fatalf("forbidden = %v, want permanent", err)
@@ -320,5 +331,33 @@ func TestIssueSyncRetriesWhileYouTrackIsDown(t *testing.T) {
 	}
 	if status, code := st2.status("task/t3/v1/final"); status != domain.WriteFailed || code != "not_configured" {
 		t.Fatalf("write = %s %s", status, code)
+	}
+}
+
+// A comment never fails the task change that writes it: an oversized text is cut, and the largest article and
+// Markdown full of < > & stay within the outbox payload limit.
+func TestIssueSyncBounds(t *testing.T) {
+	t.Parallel()
+	s, _, _, q := issueSync(ytConn{})
+	ctx := t.Context()
+	if err := s.Comment(ctx, "k1", "t1", "KIN-7", strings.Repeat("é", app.MaxCommentBytes)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Article(ctx, "k2", "t1", "KIN-7", "KIN-A-1", "S", strings.Repeat("<&>\"", app.MaxContentBytes/4)); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range q.msgs {
+		if len(m.Payload) > messaging.MaxPayloadBytes {
+			t.Fatalf("%s: payload %d bytes", m.Key, len(m.Payload))
+		}
+	}
+	if err := s.Article(ctx, "k3", "t1", "KIN-7", "KIN-A-1", "S", strings.Repeat("x", app.MaxContentBytes+1)); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.msgs) != 2 {
+		t.Fatalf("an oversized article was enqueued: %d messages", len(q.msgs))
+	}
+	if p, _ := s.Publication(ctx, "t1"); p.Failed != 1 || p.LastError != "invalid_content" {
+		t.Fatalf("publication = %+v", p)
 	}
 }

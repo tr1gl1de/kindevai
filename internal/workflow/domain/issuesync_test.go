@@ -104,3 +104,21 @@ func TestIssueComments(t *testing.T) {
 		}
 	}
 }
+
+// Review finding: changes are deduplicated per (article, section), the last one winning, and capped in total; an
+// untrusted summary cannot mention YouTrack users.
+func TestDecideDocsDedupesAndCaps(t *testing.T) {
+	t.Parallel()
+	var h Handoff
+	for i := range 3 * maxArticleChanges {
+		h.Articles = append(h.Articles, ArticleChange{Article: "KIN-A-19", Section: string(rune('a' + i%20)), Content: "v" + string(rune('0'+i/20))})
+	}
+	h.Articles = append(h.Articles, ArticleChange{Article: "KIN-A-19", Section: "a", Content: "last"})
+	d := DecideDocs("t", "e", h, []string{"KIN-A-19"})
+	if len(d.Articles) != maxArticleChanges || d.Articles[0].Content != "last" {
+		t.Fatalf("articles %d, first %+v", len(d.Articles), d.Articles[0])
+	}
+	if c := PlanComment(PlanNote{Revision: 1, Summary: "ping @admin", Risk: RiskL0, Steps: 1}); strings.Contains(c, "@admin") {
+		t.Fatalf("mention kept: %q", c)
+	}
+}

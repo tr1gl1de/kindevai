@@ -1,17 +1,17 @@
 import { useTranslation } from "react-i18next";
 import type { DocsDecision, Publication } from "../../api/types";
 
-const knownErrors = new Set(["conflict", "unauthorized", "not_configured", "not_found"]);
+const knownErrors = ["conflict", "unauthorized", "not_configured", "not_found"] as const;
+type KnownError = (typeof knownErrors)[number];
+const isKnown = (code: string): code is KnownError => (knownErrors as readonly string[]).includes(code);
 
 /** The task's YouTrack write-back (KIN-38) as a details row: awaiting publication, failed, or published. */
 export function PublicationStatus({ p }: { p: Publication }) {
   const { t } = useTranslation();
   if (p.pending + p.failed + p.published === 0) return null;
-  const error = p.lastError
-    ? knownErrors.has(p.lastError)
-      ? t(`tasks.publicationError_${p.lastError}`)
-      : t("tasks.publicationErrorOther", { code: p.lastError })
-    : "";
+  const code = p.lastError ?? "";
+  let error = "";
+  if (code) error = isKnown(code) ? t(`tasks.publicationError_${code}`) : t("tasks.publicationErrorOther", { code });
   return (
     <>
       <dt>{t("tasks.publicationTitle")}</dt>
@@ -20,7 +20,7 @@ export function PublicationStatus({ p }: { p: Publication }) {
         {p.pending > 0 && (
           <>
             {p.failed > 0 && " "}
-            <span className="badge pr-opening" role="status">
+            <span className="badge pr-opening">
               {t("tasks.publicationPending", { n: p.pending })}
             </span>
           </>

@@ -97,35 +97,76 @@ func (m StateMap) Command(taskState string) string {
 	return ""
 }
 
-var headingRe = regexp.MustCompile(`^(#{1,6})[ \t]+(.*?)[ \t#]*$`)
+// headingRe is an ATX heading; a closing sequence of "#" counts only after a space ("C#" keeps its "#").
+var headingRe = regexp.MustCompile(`^(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$`)
+
+// headings returns, per line, the heading level (0 for none) and text, skipping fenced code blocks.
+func headings(lines []string) ([]int, []string) {
+	levels, texts := make([]int, len(lines)), make([]string, len(lines))
+	fence := ""
+	for i, l := range lines {
+		t := strings.TrimLeft(l, " ")
+		switch {
+		case fence != "":
+			if strings.HasPrefix(t, fence) {
+				fence = ""
+			}
+			continue
+		case strings.HasPrefix(t, "```"):
+			fence = "```"
+			continue
+		case strings.HasPrefix(t, "~~~"):
+			fence = "~~~"
+			continue
+		}
+		if m := headingRe.FindStringSubmatch(l); m != nil {
+			levels[i], texts[i] = len(m[1]), strings.TrimSpace(m[2])
+		}
+	}
+	return levels, texts
+}
+
+// demote pushes the body's headings below level, so the section keeps its own extent on the next replace.
+func demote(body string, level int) string {
+	lines := strings.Split(body, "\n")
+	levels, _ := headings(lines)
+	for i, l := range levels {
+		if l > 0 && l <= level {
+			lines[i] = strings.Repeat("#", min(level+1, 6)-l) + lines[i]
+		}
+	}
+	return strings.Join(lines, "\n")
+}
 
 // ReplaceSection replaces the body of the first Markdown section whose heading text is heading (up to the next
-// heading of the same or a higher level), or appends "## heading" with body. Replacing with the same body changes
-// nothing, so a repeated write is idempotent.
+// heading of the same or a higher level, outside code fences), or appends "## heading" with body. Headings inside
+// body are demoted below the section, so replacing with the same body changes nothing and a repeated write is
+// idempotent.
 func ReplaceSection(content, heading, body string) string {
 	body = strings.Trim(body, "\n")
 	lines := strings.Split(content, "\n")
-	start, level := -1, 0
-	for i, l := range lines {
-		m := headingRe.FindStringSubmatch(l)
-		if m == nil {
+	levels, texts := headings(lines)
+	start := -1
+	for i, l := range levels {
+		if l == 0 {
 			continue
 		}
 		if start < 0 {
-			if strings.TrimSpace(m[2]) == heading {
-				start, level = i, len(m[1])
+			if texts[i] == heading {
+				start = i
 			}
 			continue
 		}
-		if len(m[1]) <= level {
-			out := append(slices.Clone(lines[:start+1]), "", body, "")
+		if l <= levels[start] {
+			out := append(slices.Clone(lines[:start+1]), "", demote(body, levels[start]), "")
 			return strings.Join(append(out, lines[i:]...), "\n")
 		}
 	}
 	if start >= 0 {
-		out := append(slices.Clone(lines[:start+1]), "", body, "")
+		out := append(slices.Clone(lines[:start+1]), "", demote(body, levels[start]), "")
 		return strings.Join(out, "\n")
 	}
+	body = demote(body, 2)
 	if strings.TrimSpace(content) == "" {
 		return "## " + heading + "\n\n" + body + "\n"
 	}

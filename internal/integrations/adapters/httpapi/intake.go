@@ -76,10 +76,20 @@ type TriggerTagRequest struct {
 	TriggerTag string `json:"triggerTag"`
 }
 
+// AutoPlanRequest turns automatic planning of the project's intake tasks on or off (KIN-85).
+type AutoPlanRequest struct {
+	AutoPlan bool `json:"autoPlan"`
+}
+
 // Binding is a project's YouTrack binding as members see it.
 type Binding struct {
 	ShortName  string `json:"shortName"`
 	TriggerTag string `json:"triggerTag"`
+	AutoPlan   bool   `json:"autoPlan"` // KIN-85: intake tasks go to the AI planner at once
+}
+
+func bindingView(b domain.Binding) Binding {
+	return Binding{ShortName: b.ShortName, TriggerTag: b.TriggerTag, AutoPlan: b.AutoPlan}
 }
 
 // IntakeEntry is one intake decision.
@@ -117,6 +127,7 @@ func (h *IntakeHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/integrations/youtrack/users", h.link)
 	mux.HandleFunc("DELETE /api/integrations/youtrack/users/{user}", h.unlink)
 	mux.HandleFunc("PUT /api/projects/{id}/integrations/youtrack/trigger", h.trigger)
+	mux.HandleFunc("PUT /api/projects/{id}/integrations/youtrack/autoplan", h.autoPlan)
 	mux.HandleFunc("GET /api/projects/{id}/youtrack", h.project)
 	mux.HandleFunc("POST /api/projects/{id}/youtrack/runs", h.run)
 	mux.HandleFunc("POST "+WebhookPath, h.webhook)
@@ -258,7 +269,24 @@ func (h *IntakeHandler) trigger(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, Binding{ShortName: b.ShortName, TriggerTag: b.TriggerTag})
+	httpx.WriteJSON(w, http.StatusOK, bindingView(b))
+}
+
+func (h *IntakeHandler) autoPlan(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal(w, r)
+	if !ok {
+		return
+	}
+	var req AutoPlanRequest
+	if !httpx.DecodeJSON(w, r, &req) {
+		return
+	}
+	b, err := h.Intake.SetAutoPlan(r.Context(), p, r.PathValue("id"), req.AutoPlan)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, bindingView(b))
 }
 
 func entryView(e app.IntakeEntry) IntakeEntry {
@@ -282,7 +310,8 @@ func (h *IntakeHandler) project(w http.ResponseWriter, r *http.Request) {
 		out.Status = "ok"
 	}
 	if v.Binding != nil {
-		out.Binding = &Binding{ShortName: v.Binding.ShortName, TriggerTag: v.Binding.TriggerTag}
+		b := bindingView(*v.Binding)
+		out.Binding = &b
 	}
 	for _, e := range v.Recent {
 		out.Recent = append(out.Recent, entryView(e))

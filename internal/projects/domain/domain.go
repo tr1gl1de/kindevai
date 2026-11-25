@@ -123,6 +123,11 @@ func (a Access) CanRunAI() bool {
 	return a.actor.Owner || (a.isMember && (a.role == RoleProjectAdmin || a.role == RoleMember))
 }
 
+// CanManageAI: the Owner and the project's admin decide how AI works in the project (KIN-85 auto-planning).
+func (a Access) CanManageAI() bool {
+	return a.actor.Owner || (a.isMember && a.role == RoleProjectAdmin)
+}
+
 // Role is the actor's project role, if a member.
 func (a Access) Role() (Role, bool) { return a.role, a.isMember }
 

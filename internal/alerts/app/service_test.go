@@ -19,9 +19,10 @@ import (
 )
 
 type memRepo struct {
-	mu     sync.Mutex
-	alerts []domain.Alert
-	prefs  map[string]domain.Preferences
+	mu       sync.Mutex
+	alerts   []domain.Alert
+	prefs    map[string]domain.Preferences
+	analyses *memAnalyses
 }
 
 func (r *memRepo) Active(_ context.Context, key string) (domain.Alert, error) {

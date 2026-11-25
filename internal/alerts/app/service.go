@@ -57,6 +57,12 @@ type Repository interface {
 	List(ctx context.Context, q ListQuery) ([]domain.Alert, error)              // newest activity first
 	Preferences(ctx context.Context, userID string) (domain.Preferences, error) // defaults when never saved
 	SavePreferences(ctx context.Context, p domain.Preferences, now time.Time) error
+
+	// Analysis tasks (KIN-61): at most one per alert.
+	Analysis(ctx context.Context, alertID string) (domain.AnalysisTask, error) // domain.ErrNotFound
+	Analyses(ctx context.Context, alertIDs []string) (map[string]domain.AnalysisTask, error)
+	CreateAnalysis(ctx context.Context, t domain.AnalysisTask) error
+	SaveAnalysis(ctx context.Context, t domain.AnalysisTask) error
 }
 
 // ProjectRef is a project visible to a user, with the user's role ("owner" for the platform Owner).
@@ -108,6 +114,7 @@ type Service struct {
 	Tx        TxRunner
 	Audit     AuditLog
 	Outbox    Outbox
+	Tracker   IssueTracker // YouTrack, for analysis tasks (KIN-61); nil disables them
 	Now       func() time.Time
 	NewID     func() string
 }
@@ -183,6 +190,8 @@ type View struct {
 	Alert       domain.Alert
 	ProjectName string
 	CanManage   bool
+	CanSuggest  bool                 // may suggest an analysis task (Owner / Project Admin), whatever the state
+	Analysis    *domain.AnalysisTask // the alert's analysis task, nil if none was requested
 }
 
 // access is what a principal may see: every project for the Owner, else the visible projects with their role.
@@ -234,10 +243,22 @@ func (s *Service) List(ctx context.Context, p auth.Principal, activeOnly bool) (
 	if err != nil {
 		return nil, fmt.Errorf("listing alerts: %w", err)
 	}
+	ids := make([]string, 0, len(as))
+	for _, a := range as {
+		ids = append(ids, a.ID)
+	}
+	tasks, err := s.Repo.Analyses(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("listing analysis tasks: %w", err)
+	}
 	out := make([]View, 0, len(as))
 	for _, a := range as {
 		if acc.sees(a) { // defence in depth: the query already filters
-			out = append(out, View{Alert: a, ProjectName: acc.roles[a.ProjectID].Name, CanManage: acc.manages(a)})
+			v := View{Alert: a, ProjectName: acc.roles[a.ProjectID].Name, CanManage: acc.manages(a), CanSuggest: acc.manages(a)}
+			if t, ok := tasks[a.ID]; ok {
+				v.Analysis = &t
+			}
+			out = append(out, v)
 		}
 	}
 	return out, nil
@@ -289,7 +310,10 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id string, act Acti
 		if err := s.Repo.Save(ctx, a); err != nil {
 			return fmt.Errorf("saving alert: %w", err)
 		}
-		out = View{Alert: a, ProjectName: acc.roles[a.ProjectID].Name, CanManage: true}
+		out = View{Alert: a, ProjectName: acc.roles[a.ProjectID].Name, CanManage: true, CanSuggest: true}
+		if out.Analysis, err = s.analysis(ctx, a.ID); err != nil {
+			return err
+		}
 		return s.Audit.Record(ctx, auditapp.Entry{Actor: auditapp.UserActor(p), Kind: kind, ProjectID: a.ProjectID,
 			Subject: "alert:" + a.ID, Details: map[string]string{"kind": string(a.Kind), "severity": string(a.Severity)}})
 	})

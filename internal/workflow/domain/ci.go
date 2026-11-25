@@ -149,8 +149,44 @@ func (a *GitArtifact) CIPassedOnHead() bool {
 	return a.State == ArtifactOpen && a.CI == CIPassed && a.CIHeadSHA == a.HeadSHA && a.HeadSHA != ""
 }
 
+// NoChecksOnHead reports that the artifact's open pull request has no check run at all on its current head (a
+// repository without CI, KIN-105).
+func (a *GitArtifact) NoChecksOnHead() bool {
+	return a.State == ArtifactOpen && a.CI == CIPending && !a.NoChecksSince.IsZero() && a.CIHeadSHA == a.HeadSHA &&
+		a.HeadSHA != ""
+}
+
+// WaiveCI records the Owner's explicit "merge without CI" of the current head (KIN-113). Only a head with no check
+// run at all may be waived: red or running CI, a merged pull request or a main/master base are refused.
+func (a *GitArtifact) WaiveCI(now time.Time) error {
+	switch {
+	case IsProtectedBranch(a.PRBase):
+		return fmt.Errorf("merge into %q: %w", a.PRBase, ErrProtectedBranch)
+	case a.Merge == MergeMerged || a.PRNumber <= 0 || a.PRBase == "":
+		return fmt.Errorf("pull request of %s: merge without CI: %w", a.Branch, ErrInvalidTransition)
+	case !a.NoChecksOnHead():
+		return fmt.Errorf("%s has CI (%s) on %s: merge without CI is only for a head with no check runs: %w",
+			a.Branch, ciName(a.CI), a.HeadSHA, ErrInvalidTransition)
+	}
+	a.CIWaivedHead, a.UpdatedAt = a.HeadSHA, now
+	return nil
+}
+
+func ciName(s CIState) string {
+	if s == "" {
+		return "no result yet"
+	}
+	return string(s)
+}
+
+// CIWaivedOnHead reports the Owner's waiver of CI for the current head, which still has no check run at all.
+func (a *GitArtifact) CIWaivedOnHead() bool {
+	return a.CIWaivedHead != "" && a.CIWaivedHead == a.HeadSHA && a.NoChecksOnHead()
+}
+
 // CheckMergeable says why the artifact may not be merged now ("" error: it may): its pull request must be open
-// into a base other than main/master, CI must have passed on its head, and it must not be merged already.
+// into a base other than main/master, CI must have passed on its head (or the Owner waived CI for a head without
+// any check run, KIN-113), and it must not be merged already.
 func (a *GitArtifact) CheckMergeable() error {
 	switch {
 	case IsProtectedBranch(a.PRBase):
@@ -159,7 +195,7 @@ func (a *GitArtifact) CheckMergeable() error {
 		return fmt.Errorf("pull request #%d is merged already: %w", a.PRNumber, ErrInvalidTransition)
 	case a.State != ArtifactOpen || a.PRNumber <= 0 || a.PRBase == "":
 		return fmt.Errorf("no open pull request for %s: %w", a.Branch, ErrInvalidTransition)
-	case !a.CIPassedOnHead():
+	case !a.CIPassedOnHead() && !a.CIWaivedOnHead():
 		return fmt.Errorf("CI has not passed on %s: %w", a.HeadSHA, ErrInvalidTransition)
 	}
 	return nil

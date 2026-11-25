@@ -65,6 +65,7 @@ const detail = (over: Partial<TaskDetail> = {}): TaskDetail => ({
     ],
   },
   canManage: true,
+  canMergeWithoutCI: false,
   pullRequests: [],
   time: { agentMs: 70_000, agentStatus: "incomplete", calendarMs: 300_000, running: false, started: true },
   ...over,
@@ -383,6 +384,62 @@ describe("task detail", () => {
     expect(calls).toEqual(["resume", "retry-merge"]);
     expect(screen.queryByRole("button", { name: "Retry merge" })).not.toBeInTheDocument();
     await expectAccessible(container);
+  });
+
+  it("merges a pull request without CI checks only after the Owner confirms (KIN-113)", async () => {
+    let body: unknown;
+    let ci: "pending" | "failed" = "pending";
+    const noCI = () => detail({ canMergeWithoutCI: true, task: { ...detail().task, state: "BLOCKED", blockReason: "ci" },
+      pullRequests: [{ repository: "acme/app", branch: "feature/t1--s1", headSha: "bbbbbbbbbbbb", state: "open", number: 7,
+        url: "https://github.com/acme/app/pull/7", base: "dev", ci, ciRound: 0, ciMaxRounds: 3,
+        ciNoChecksSince: ci === "pending" ? "2026-11-24T10:06:00Z" : undefined, ciNoChecksBlockMinutes: 30,
+        updatedAt: "2026-11-24T10:06:00Z" }] });
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/approvals", () => json([])),
+      http.get("/api/tasks/t1", () => json(noCI())),
+      http.post("/api/tasks/t1/merge-without-ci", async ({ request }) => {
+        body = await request.json();
+        return json(noCI());
+      }),
+    );
+    const { container, unmount } = await renderApp("/tasks/t1");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Merge without CI" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Merge without CI?" });
+    expect(body).toBeUndefined();
+    await user.click(within(dialog).getByRole("button", { name: "Keep waiting for CI" }));
+    expect(body).toBeUndefined();
+    await user.click(screen.getByRole("button", { name: "Merge without CI" }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Merge without CI" }));
+    await expectStatus("Merging without CI: the merge gate runs now.");
+    expect(body).toEqual({ confirm: true });
+    await expectAccessible(container);
+    unmount();
+    const ru = await renderApp("/tasks/t1", "ru");
+    expect(await screen.findByRole("button", { name: "Мерж без CI" })).toBeInTheDocument();
+    ru.unmount();
+    ci = "failed";
+    await renderApp("/tasks/t1");
+    await screen.findByRole("button", { name: "Resume" });
+    expect(screen.queryByRole("button", { name: "Merge without CI" })).not.toBeInTheDocument();
+  });
+
+  it("offers no merge without CI to a project admin (KIN-113)", async () => {
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/approvals", () => json([])),
+      http.get("/api/tasks/t1", () => json(detail({ canMergeWithoutCI: false,
+        task: { ...detail().task, state: "BLOCKED", blockReason: "ci" },
+        pullRequests: [{ repository: "acme/app", branch: "feature/t1--s1", headSha: "bbbbbbbbbbbb", state: "open",
+          number: 7, base: "dev", ci: "pending", ciNoChecksSince: "2026-11-24T10:06:00Z", ciNoChecksBlockMinutes: 30,
+          updatedAt: "2026-11-24T10:06:00Z" }] }))),
+    );
+    await renderApp("/tasks/t1");
+    await screen.findByRole("button", { name: "Resume" });
+    expect(screen.queryByRole("button", { name: "Merge without CI" })).not.toBeInTheDocument();
   });
 
   it("shows a head without CI check runs, in English and Russian (KIN-105)", async () => {

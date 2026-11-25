@@ -19,36 +19,88 @@ import (
 
 // ResumeCIAs resumes a task BLOCKED on CI of a project p manages (Owner or project admin).
 func (s *Service) ResumeCIAs(ctx context.Context, p auth.Principal, taskID string) (domain.Task, error) {
-	return s.ownerCIAction(ctx, p, taskID, KindCIResumed, func(ctx context.Context, t domain.Task, arts []domain.GitArtifact, now time.Time) error {
+	return s.ownerCIAction(ctx, p, taskID, KindCIResumed, s.mayManage, func(ctx context.Context, t domain.Task, arts []domain.GitArtifact, now time.Time) (map[string]string, error) {
 		for _, a := range arts {
 			if a.RestartNoChecksWindow() {
 				if err := s.ChangeSets.SaveArtifact(ctx, a); err != nil {
-					return err
+					return nil, err
 				}
 			}
 		}
-		return s.checkCINow(ctx, t, arts, now)
+		return nil, s.checkCINow(ctx, t, arts, now)
 	})
 }
 
 // RetryMergeAs clears the refused merge of a task BLOCKED on CI of a project p manages (Owner or project admin); CI
 // is checked again at once and a green head goes through the merge gate again.
 func (s *Service) RetryMergeAs(ctx context.Context, p auth.Principal, taskID string) (domain.Task, error) {
-	return s.ownerCIAction(ctx, p, taskID, KindMergeRetried, func(ctx context.Context, t domain.Task, arts []domain.GitArtifact, now time.Time) error {
+	return s.ownerCIAction(ctx, p, taskID, KindMergeRetried, s.mayManage, func(ctx context.Context, t domain.Task, arts []domain.GitArtifact, now time.Time) (map[string]string, error) {
 		retried := false
 		for _, a := range arts {
 			if a.RetryMerge(now) {
 				if err := s.ChangeSets.SaveArtifact(ctx, a); err != nil {
-					return err
+					return nil, err
 				}
 				retried = true
 			}
 		}
 		if !retried {
-			return fmt.Errorf("task %s has no refused merge: retry merge: %w", t.ID, domain.ErrInvalidTransition)
+			return nil, fmt.Errorf("task %s has no refused merge: retry merge: %w", t.ID, domain.ErrInvalidTransition)
 		}
-		return s.checkCINow(ctx, t, arts, now)
+		return nil, s.checkCINow(ctx, t, arts, now)
 	})
+}
+
+// MergeWithoutCIAs is the Owner's explicit "merge without CI" of a task BLOCKED on CI whose pull requests have no
+// check run at all (KIN-113, owner decision 2026-11-26). Every open, unmerged pull request of the current run must
+// have either green CI or no check run on its head (at least one without): red or running CI, or a refused merge,
+// are refused. The waiver is bound to each head and holds only while it has no check run; the merge gate still
+// requires integrate_dev and the reviewed, published head, and main/master stay refused. Approving a merge is the
+// Owner's (KB KIN-A-21), so a project admin may not.
+func (s *Service) MergeWithoutCIAs(ctx context.Context, p auth.Principal, taskID string) (domain.Task, error) {
+	return s.ownerCIAction(ctx, p, taskID, KindMergedWithoutCI, s.mayApproveMerge, func(ctx context.Context, t domain.Task, arts []domain.GitArtifact, now time.Time) (map[string]string, error) {
+		details := map[string]string{}
+		executions := map[string]bool{}
+		for _, a := range arts {
+			switch {
+			case a.Merge == domain.MergeFailed:
+				return nil, fmt.Errorf("the merge of %s (%s) was refused: retry merge instead: %w", a.Repository,
+					a.Branch, domain.ErrInvalidTransition)
+			case a.CIPassedOnHead():
+			default:
+				if err := a.WaiveCI(now); err != nil {
+					return nil, err
+				}
+				if err := s.ChangeSets.SaveArtifact(ctx, a); err != nil {
+					return nil, err
+				}
+				details[a.Repository+" "+a.Branch] = a.HeadSHA
+			}
+			executions[a.ExecutionID] = true
+		}
+		if len(details) == 0 {
+			return nil, fmt.Errorf("task %s has no pull request without CI checks: %w", t.ID, domain.ErrInvalidTransition)
+		}
+		for id := range executions {
+			key := hashKey("merge/", "without-ci", t.ID, strconv.FormatInt(now.UnixNano(), 10), id)
+			if err := s.enqueue(ctx, TopicMerge, key, mergePayload{id}); err != nil {
+				return nil, err
+			}
+		}
+		return details, nil
+	})
+}
+
+// mayApproveMerge lets only the platform Owner approve a merge (KB KIN-A-21: approvals are the Owner's); others who
+// see the project get ErrForbidden, others ErrNotFound.
+func (s *Service) mayApproveMerge(ctx context.Context, p auth.Principal, projectID string) error {
+	if err := s.mayManage(ctx, p, projectID); err != nil {
+		return err
+	}
+	if !p.Owner {
+		return ErrForbidden
+	}
+	return nil
 }
 
 // checkCINow queues a CI check of each artifact (HandleCICheck: red blocks again, green goes to the merge gate).
@@ -65,12 +117,13 @@ func (s *Service) checkCINow(ctx context.Context, t domain.Task, arts []domain.G
 // ownerCIAction resumes a task BLOCKED on CI (to VERIFYING), runs act on the open, unmerged artifacts of its current
 // run in the same transaction and audits kind as the principal's action.
 func (s *Service) ownerCIAction(ctx context.Context, p auth.Principal, taskID, kind string,
-	act func(context.Context, domain.Task, []domain.GitArtifact, time.Time) error) (domain.Task, error) {
+	may func(context.Context, auth.Principal, string) error,
+	act func(context.Context, domain.Task, []domain.GitArtifact, time.Time) (map[string]string, error)) (domain.Task, error) {
 	t, err := s.Repo.Task(ctx, taskID)
 	if err != nil {
 		return domain.Task{}, err
 	}
-	if err := s.mayManage(ctx, p, t.ProjectID); err != nil {
+	if err := may(ctx, p, t.ProjectID); err != nil {
 		return domain.Task{}, err
 	}
 	if s.ChangeSets == nil || s.Outbox == nil {
@@ -97,14 +150,15 @@ func (s *Service) ownerCIAction(ctx context.Context, p auth.Principal, taskID, k
 		if err := t.Resume(now); err != nil {
 			return err
 		}
-		if err := act(ctx, t, arts, now); err != nil {
+		details, err := act(ctx, t, arts, now)
+		if err != nil {
 			return err
 		}
 		if err := s.saveTask(ctx, &t); err != nil {
 			return err
 		}
 		return s.record(ctx, auditapp.Entry{Actor: auditapp.UserActor(p), Kind: kind, ProjectID: t.ProjectID,
-			Subject: auditSubjectTaskPrefix + t.ID})
+			Subject: auditSubjectTaskPrefix + t.ID, Details: details})
 	})
 	if err != nil {
 		return domain.Task{}, err

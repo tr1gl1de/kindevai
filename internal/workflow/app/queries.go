@@ -117,7 +117,9 @@ type TaskDetail struct {
 	Execution *domain.Execution
 	Planning  *domain.PlanningRun // the latest planner run (KIN-34); nil when the task was never planned by AI
 	CanManage bool
-	Time      TaskTime // over all the task's executions
+	// CanMergeWithoutCI: p may approve a merge without CI checks (KIN-113: the platform Owner only).
+	CanMergeWithoutCI bool
+	Time              TaskTime // over all the task's executions
 	// ChangeSet is the task's published branches and their pull requests (KIN-36), oldest first.
 	ChangeSet []domain.GitArtifact
 	// Publication is the task's YouTrack write-back (KIN-38; nil without an issue or a write-back), Docs the
@@ -140,7 +142,8 @@ func (s *Service) TaskDetail(ctx context.Context, p auth.Principal, id string) (
 	if !ok {
 		return TaskDetail{}, domain.ErrNotFound
 	}
-	d := TaskDetail{Task: t, CanManage: p.Owner || role == RoleOwner || role == RoleProjectAdmin}
+	d := TaskDetail{Task: t, CanManage: p.Owner || role == RoleOwner || role == RoleProjectAdmin,
+		CanMergeWithoutCI: p.Owner}
 	if t.PlanRevision > 0 {
 		rev, err := s.Repo.Revision(ctx, t.ID, t.PlanRevision)
 		if err != nil {

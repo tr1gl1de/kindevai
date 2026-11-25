@@ -130,6 +130,16 @@ func TestCIAndMergeStateAreStored(t *testing.T) {
 	if got, err := repo.Artifact(ctx, a.ExecutionID, a.Repository, a.Branch); err != nil || !got.NoChecksSince.Equal(since) {
 		t.Fatalf("no-checks window %+v %v", got.NoChecksSince, err)
 	}
+	// KIN-113: the Owner's waiver of CI for the head is kept.
+	if err := a.WaiveCI(since); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveArtifact(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := repo.Artifact(ctx, a.ExecutionID, a.Repository, a.Branch); err != nil || got.CIWaivedHead != "h1" || !got.CIWaivedOnHead() {
+		t.Fatalf("CI waiver %+v %v", got, err)
+	}
 	a.Merged("m1", t0)
 	if err := repo.SaveArtifact(ctx, a); err != nil {
 		t.Fatal(err)

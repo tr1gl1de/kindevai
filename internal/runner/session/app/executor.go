@@ -387,6 +387,10 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 		x.wg.Go(func() { x.prepareAndLaunch(pctx, r, a, dir) })
 		return nil
 	}
+	// KIN-112: KillAll waits for this launch as for a background one. Added under x.mu before launch lists the run,
+	// so a KillAll that finds it waits for it; the process's watch joins the group before the launch returns.
+	x.wg.Add(1)
+	defer x.wg.Done()
 	err = x.launch(ctx, r, a, dir, "")
 	if r.proc == nil { // never launched: a StopAll that saw it launching waits for no process
 		close(r.done)
@@ -1416,8 +1420,8 @@ func (x *Executor) Close() {
 }
 
 // KillAll stops every running attempt's process group at once and waits for them (tests and shutdown with kill).
-// An attempt launched in the background (with a worktree) is waited for even while it launches; one launched by
-// Assign itself (no worktree) is killed once its launch returns, possibly after KillAll did.
+// An attempt still launching (in the background with a worktree, or by Assign itself without one, KIN-112) is
+// waited for too: its sandbox is cancelled now and its process killed once the launch knows it.
 func (x *Executor) KillAll() {
 	x.mu.Lock()
 	for _, r := range x.runs {

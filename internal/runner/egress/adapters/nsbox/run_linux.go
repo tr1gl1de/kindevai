@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"syscall"
 )
 
@@ -59,14 +60,31 @@ func RunMain(stderr io.Writer) int {
 	// Pdeathsig follows the thread that started the child: RunMain runs on main's goroutine, which keeps this
 	// thread until the process exits.
 	runtime.LockOSThread()
-	// Signals to the group reach the agent itself; this process waits to report its status.
+	// Signals to the group reach the agent itself; this process waits to report its status. A signal that came
+	// before the helper could catch it (the helper is its PID namespace's init: an uncaught signal is dropped) is
+	// remembered: the sandbox is then not started, or the signal is passed on once the helper verified.
 	sigs := make(chan os.Signal, 8)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	defer signal.Stop(sigs)
+	var mu sync.Mutex
+	var first os.Signal
 	go func() {
-		for range sigs { //nolint:revive // drained
+		for sig := range sigs {
+			mu.Lock()
+			if first == nil {
+				first = sig
+			}
+			mu.Unlock()
 		}
 	}()
+	received := func() os.Signal {
+		mu.Lock()
+		defer mu.Unlock()
+		return first
+	}
+	if sig := received(); sig != nil {
+		return 128 + int(sig.(syscall.Signal))
+	}
 	if err := cmd.Start(); err != nil {
 		return unverified(stderr, err)
 	}
@@ -74,6 +92,9 @@ func RunMain(stderr io.Writer) int {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		return unverified(stderr, err)
+	}
+	if sig := received(); sig != nil { // the helper catches it now and passes it to the agent
+		_ = cmd.Process.Signal(sig)
 	}
 	err = cmd.Wait()
 	var ee *exec.ExitError

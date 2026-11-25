@@ -134,7 +134,7 @@ describe("plan discussion on the task page", () => {
     server.use(
       http.post("/api/tasks/t1/discussion/messages", async ({ request }) => {
         posted = await request.json();
-        state.th = thread({ limits: state.th.limits, inFlight: true, used: 1, messages: [pending] });
+        state.th = thread({ limits: state.th.limits, inFlight: true, used: 1, messages: [{ ...pending, status: "DELIVERED" }] });
         return json(pending, 202);
       }),
     );
@@ -161,14 +161,12 @@ describe("plan discussion on the task page", () => {
     await expectStatus("Message sent. The AI will answer here.");
     expect(posted).toEqual({ text: "Add tests" });
     expect(box).toHaveValue("");
-    const log = screen.getByRole("log", { name: "Messages" });
-    expect(await within(log).findByText("Waiting for a runner")).toBeInTheDocument();
+    const log = await screen.findByRole("log", { name: "Messages" });
+    expect(await within(log).findByText("AI is answering")).toBeInTheDocument();
     expect(screen.getByText(/The AI is answering the last message/)).toBeInTheDocument();
 
-    // The runner picks it up, then the answer arrives: the thread is polled while a message is in flight.
+    // The answer arrives: the thread is polled while the AI works on a message.
     const before = polls;
-    state.th = thread({ inFlight: true, used: 1, messages: [{ ...pending, status: "DELIVERED" }] });
-    expect(await within(log).findByText("AI is answering")).toBeInTheDocument();
     state.th = thread({ used: 1, messages: [{ ...pending, status: "ANSWERED" },
       msg({ id: "m6", role: "assistant", author: "planner/codex", agent: "codex", planRevision: 2, text: "Tests added." })] });
     expect(await within(log).findByText("Tests added.")).toBeInTheDocument();
@@ -224,12 +222,14 @@ describe("plan discussion on the task page", () => {
 
   it("is read-only for a project member and explains why", async () => {
     server.use(http.get("/api/auth/me", () => json(member)));
-    taskPage(thread({ canWrite: false, messages: [msg({})] }), task({ canManage: false }));
+    taskPage(thread({ canWrite: false, messages: [msg({}), msg({ id: "m4", text: "Queued one", status: "PENDING" })] }),
+      task({ canManage: false }));
     const { container } = await renderApp("/tasks/t1");
     const panel = await screen.findByRole("region", { name: "Plan discussion" });
     expect(await within(panel).findByText("Split the API step in two")).toBeInTheDocument();
     expect(within(panel).queryByLabelText("Message to the AI")).not.toBeInTheDocument();
     expect(within(panel).getByText(/Only the Owner and project admins can write/)).toBeInTheDocument();
+    expect(within(panel).getByText("Waiting for a runner")).toBeInTheDocument(); // queued: the runner may be offline
     expect(within(panel).queryByRole("button", { name: "Send again" })).not.toBeInTheDocument();
     await expectAccessible(container);
   });
@@ -254,6 +254,22 @@ describe("plan discussion on the task page", () => {
     fail = false;
     await user.click(within(panel).getByRole("button", { name: "Try again" }));
     expect(await within(panel).findByLabelText("Message to the AI")).toBeInTheDocument();
+  });
+
+  it("keeps the thread and the draft when a background poll fails", async () => {
+    server.use(http.get("/api/auth/me", () => json(owner)));
+    let fail = false;
+    const busy = thread({ inFlight: true, used: 1, messages: [msg({ status: "DELIVERED" })] });
+    taskPage(busy);
+    server.use(http.get("/api/tasks/t1/discussion", () => (fail ? apiError(500, "internal") : json(busy))));
+    await renderApp("/tasks/t1");
+    const user = userEvent.setup();
+    const box = await screen.findByLabelText("Message to the AI");
+    await fill(user, box, "Half-written idea");
+    fail = true;
+    expect(await screen.findByText(/Could not refresh the discussion/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Message to the AI")).toHaveValue("Half-written idea");
+    expect(screen.getByRole("log", { name: "Messages" })).toHaveTextContent("Split the API step in two");
   });
 
   it("is translated to Russian", async () => {
@@ -311,6 +327,24 @@ describe("plan discussion in the approval center", () => {
   });
 });
 
+describe("stale decision without a pending current revision", () => {
+  it("links to the task's current plan", async () => {
+    const stale = approval({ id: "a1", planRevision: 1, planHash: H("a") });
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/approvals/a1", () => json<ApprovalDetail>({ approval: stale,
+        task: { id: "t1", title: "Add login", state: "READY", planRevision: 2 }, revision: rev(1, H("a")), previous: null,
+        changes: [], related: [stale], canDecide: true })),
+      http.post("/api/approvals/a1/approve", () => apiError(409, "stale_revision")),
+    );
+    await renderApp("/approvals/a1");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Approve revision 1" }));
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByRole("link", { name: "Open the task's current plan" })).toHaveAttribute("href", "/tasks/t1");
+  });
+});
+
 describe("plan discussion limits (Owner)", () => {
   it("edits the limits with range checks before saving", async () => {
     let saved: unknown;
@@ -318,7 +352,7 @@ describe("plan discussion limits (Owner)", () => {
     server.use(
       http.get("/api/auth/me", () => json(owner)),
       http.get("/api/agents", () => json(settings)),
-      http.get("/api/plan-discussion/limits", () => json(limits)),
+      http.get("/api/plan-discussion/limits", () => json({ ...limits, answerTimeoutSec: 630 })),
       http.put("/api/plan-discussion/limits", async ({ request }) => {
         saved = await request.json();
         return json(saved);
@@ -329,6 +363,7 @@ describe("plan discussion limits (Owner)", () => {
     const section = await screen.findByRole("region", { name: "Plan discussion limits" });
     const chars = await within(section).findByLabelText("Characters per message");
     await waitFor(() => expect(chars).toHaveValue(4000));
+    expect(chars).toHaveAccessibleDescription(/From 1 to 8000/);
     await expectAccessible(container);
 
     await user.clear(chars);
@@ -340,11 +375,15 @@ describe("plan discussion limits (Owner)", () => {
 
     await user.clear(chars);
     await fill(user, chars, "2000");
+    await user.click(within(section).getByRole("button", { name: "Save limits" }));
+    await expectStatus("Plan discussion limits saved.");
+    // The timeout field shows whole minutes; untouched, its exact seconds are kept.
+    expect(saved).toEqual({ maxMessageChars: 2000, maxMessagesPerPlan: 20, maxMessagesPerHour: 30, answerTimeoutSec: 630 });
     const timeout = within(section).getByLabelText("Answer timeout, minutes");
     await user.clear(timeout);
     await fill(user, timeout, "15");
     await user.click(within(section).getByRole("button", { name: "Save limits" }));
-    await expectStatus("Plan discussion limits saved.");
-    expect(saved).toEqual({ maxMessageChars: 2000, maxMessagesPerPlan: 20, maxMessagesPerHour: 30, answerTimeoutSec: 900 });
+    await waitFor(() =>
+      expect(saved).toEqual({ maxMessageChars: 2000, maxMessagesPerPlan: 20, maxMessagesPerHour: 30, answerTimeoutSec: 900 }));
   });
 });

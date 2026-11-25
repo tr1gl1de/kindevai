@@ -11,6 +11,8 @@ const path = (taskId: string) => `/api/tasks/${encodeURIComponent(taskId)}/discu
 
 /** While the AI works on a message the thread is polled often, so states and the answer show up without a reload. */
 export const ACTIVE_POLL_MS = 1500;
+/** A message waits for a runner (possibly offline for long): a medium pace. */
+export const QUEUED_POLL_MS = 5000;
 /** Otherwise slowly: another admin's messages and answers still appear. */
 export const IDLE_POLL_MS = 15_000;
 
@@ -24,8 +26,10 @@ export function useDiscussion(taskId: string) {
     refetchInterval: (q) => {
       const d = q.state.data;
       if (!d) return false;
-      return d.inFlight || d.messages.some(isOpen) ? ACTIVE_POLL_MS : IDLE_POLL_MS;
+      if (d.messages.some((m) => m.role === "user" && m.status === "DELIVERED")) return ACTIVE_POLL_MS;
+      return d.inFlight || d.messages.some(isOpen) ? QUEUED_POLL_MS : IDLE_POLL_MS;
     },
+    refetchIntervalInBackground: false,
   });
 }
 

@@ -30,12 +30,12 @@ export function LimitsSection() {
     <section aria-labelledby="discussion-limits-title" className="page-section">
       <h2 id="discussion-limits-title">{t("planDiscussion.limitsTitle")}</h2>
       <p className="muted">{t("planDiscussion.limitsIntro")}</p>
-      {q.isPending ? (
-        <Loading />
+      {q.data ? (
+        <LimitsForm limits={q.data} />
       ) : q.isError ? (
         <ErrorState message={errorMessage(t, q.error)} onRetry={() => void q.refetch()} />
       ) : (
-        <LimitsForm limits={q.data} />
+        <Loading />
       )}
     </section>
   );
@@ -45,11 +45,12 @@ function LimitsForm({ limits }: { limits: DiscussionLimits }) {
   const { t } = useTranslation();
   const notify = useNotify();
   const save = useSaveDiscussionLimits();
+  const initialMin = String(Math.max(1, Math.round(limits.answerTimeoutSec / 60)));
   const [values, setValues] = useState<Record<Key, string>>({
     maxMessageChars: String(limits.maxMessageChars),
     maxMessagesPerPlan: String(limits.maxMessagesPerPlan),
     maxMessagesPerHour: String(limits.maxMessagesPerHour),
-    answerTimeoutMin: String(Math.round(limits.answerTimeoutSec / 60)),
+    answerTimeoutMin: initialMin,
   });
   const [submitted, setSubmitted] = useState(false);
   const [serverErrors, setServerErrors] = useState<Partial<Record<Key, string>>>({});
@@ -81,7 +82,8 @@ function LimitsForm({ limits }: { limits: DiscussionLimits }) {
         maxMessageChars: Number(values.maxMessageChars),
         maxMessagesPerPlan: Number(values.maxMessagesPerPlan),
         maxMessagesPerHour: Number(values.maxMessagesPerHour),
-        answerTimeoutSec: Number(values.answerTimeoutMin) * 60,
+        // An untouched timeout keeps its exact seconds (the field shows whole minutes).
+        answerTimeoutSec: values.answerTimeoutMin === initialMin ? limits.answerTimeoutSec : Number(values.answerTimeoutMin) * 60,
       },
       {
         onSuccess: () => notify(t("planDiscussion.limitsSaved")),
@@ -109,7 +111,7 @@ function LimitsForm({ limits }: { limits: DiscussionLimits }) {
             refs.current[k] = el;
           }}
           label={t(`planDiscussion.limit_${k}`)}
-          hint={t(`planDiscussion.limitHint_${k}`)}
+          hint={`${t(`planDiscussion.limitHint_${k}`)} ${t("planDiscussion.rangeHint", { min: ranges[k][0], max: ranges[k][1] })}`}
           error={errors[k]}
           keepHint
           type="number"

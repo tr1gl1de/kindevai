@@ -41,12 +41,16 @@ export function DiscussionPanel({ taskId, currentRevision, canManage, approvals,
     <section aria-labelledby={titleId} className={`discussion ${level === 2 ? "page-section" : "card"}`}>
       <H id={titleId}>{t("planDiscussion.title")}</H>
       <p className="muted">{t("planDiscussion.intro")}</p>
-      {q.isPending ? (
-        <Loading label={t("planDiscussion.loading")} />
+      {q.data ? (
+        <>
+          {/* A failed background poll keeps the thread and the draft; polling goes on and recovers by itself. */}
+          {q.isError && <p className="card warn">{t("planDiscussion.refreshFailed")}</p>}
+          <Thread level={level} taskId={taskId} th={q.data} currentRevision={currentRevision} canManage={canManage} approvals={approvals} />
+        </>
       ) : q.isError ? (
         <ErrorState message={errorMessage(t, q.error)} onRetry={() => void q.refetch()} />
       ) : (
-        <Thread level={level} taskId={taskId} th={q.data} currentRevision={currentRevision} canManage={canManage} approvals={approvals} />
+        <Loading label={t("planDiscussion.loading")} />
       )}
     </section>
   );
@@ -55,14 +59,17 @@ export function DiscussionPanel({ taskId, currentRevision, canManage, approvals,
 /** A new answer or notice may have changed the plan: refresh the task and its approvals. */
 function useRefreshOnNews(taskId: string, th: DiscussionThread | undefined) {
   const qc = useQueryClient();
-  const last = th?.messages.at(-1);
-  const mark = last ? `${last.id}|${last.status}|${th?.messages.length ?? 0}` : "";
+  // Only an answer, a notice or a message that ended can change the plan; PENDING → DELIVERED cannot.
+  const settled = th?.messages.filter((m) => m.role !== "user" || m.status === "ANSWERED" || m.status === "FAILED") ?? [];
+  const last = settled.at(-1);
+  const mark = last ? `${last.id}|${last.status}|${settled.length}` : "";
   const seen = useRef<string>(undefined);
   useEffect(() => {
     if (!mark) return;
     if (seen.current !== undefined && seen.current !== mark) {
       void qc.invalidateQueries({ queryKey: ["tasks", "one", taskId] });
-      void qc.invalidateQueries({ queryKey: ["approvals"] });
+      void qc.invalidateQueries({ queryKey: ["approvals", "task", taskId] });
+      void qc.invalidateQueries({ queryKey: ["approvals", "one"] });
     }
     seen.current = mark;
   }, [mark, qc, taskId]);
@@ -97,7 +104,7 @@ function Thread({ level, taskId, th, currentRevision, canManage, approvals }: {
       )}
       <p className="muted">{t("planDiscussion.used", { used: th.used, max: th.limits.maxMessagesPerPlan })}</p>
       {th.inFlight && (
-        <p className="discussion-busy" aria-busy="true">
+        <p className="discussion-busy" aria-live="polite">
           <span className="spinner" aria-hidden="true" /> {t("planDiscussion.inFlight")}
         </p>
       )}

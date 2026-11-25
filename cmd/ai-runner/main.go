@@ -341,7 +341,7 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	x := newExecutor(ch, d.Path(), exe, splitList(*projects), logger)
 	x.Workspaces, x.ChangesEvery = ws, changesEvery // KIN-51: interim changed-file reports while an attempt runs
 	defer x.Close()                                 // running attempts keep running; the next start adopts them
-	if home, err := os.UserHomeDir(); err == nil { // KIN-79: claude/codex assignments run the CLI (before Recover: adopted CLI attempts are read on)
+	if home, err := os.UserHomeDir(); err == nil {  // KIN-79 CLI agents (set before Recover)
 		x.Agents = cliAgents(home, exec.LookPath, logger)
 	}
 	if err := x.Recover(ctx); err != nil {

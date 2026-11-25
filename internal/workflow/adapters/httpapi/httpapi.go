@@ -307,6 +307,52 @@ type DetailView struct {
 	Time      TimeView       `json:"time"`
 	// PullRequests is the task's change set (KIN-36): each published branch and its pull request.
 	PullRequests []PullRequestView `json:"pullRequests"`
+	// KIN-38: the YouTrack write-back (null without an issue) and the documentation decision (null when none).
+	Publication *PublicationView `json:"publication"`
+	Docs        *DocsView        `json:"docs"`
+}
+
+// PublicationView is the task's YouTrack write-back: pending writes are awaiting publication (retried while
+// YouTrack is unavailable), failed ones were given up (lastError says why).
+type PublicationView struct {
+	Pending   int    `json:"pending"`
+	Failed    int    `json:"failed"`
+	Published int    `json:"published"`
+	LastError string `json:"lastError,omitempty"`
+}
+
+// DocsView is the documentation decision of the latest completed run: updated | not_applicable (with the reason)
+// | unstated; rejected lists articles outside the approved scope.
+type DocsView struct {
+	Status   string            `json:"status"`
+	Reason   string            `json:"reason,omitempty"`
+	Articles []DocsArticleView `json:"articles"`
+	Rejected []string          `json:"rejected"`
+}
+
+// DocsArticleView is one updated article section.
+type DocsArticleView struct {
+	Article string `json:"article"`
+	Section string `json:"section"`
+}
+
+func publicationView(p *app.Publication) *PublicationView {
+	if p == nil {
+		return nil
+	}
+	return &PublicationView{Pending: p.Pending, Failed: p.Failed, Published: p.Published, LastError: p.LastError}
+}
+
+func docsView(d *domain.DocsDecision) *DocsView {
+	if d == nil {
+		return nil
+	}
+	v := &DocsView{Status: string(d.Status), Reason: d.Reason, Articles: []DocsArticleView{}, Rejected: []string{}}
+	for _, a := range d.Articles {
+		v.Articles = append(v.Articles, DocsArticleView{Article: a.Article, Section: a.Section})
+	}
+	v.Rejected = append(v.Rejected, d.Rejected...)
+	return v
 }
 
 // PullRequestView is one published branch of the task and its pull request into the integration branch: state
@@ -574,7 +620,8 @@ func (h *Handler) detail(w http.ResponseWriter, r *http.Request, p auth.Principa
 		return
 	}
 	v := DetailView{Task: taskView(d.Task), CanManage: d.CanManage, Time: timeView(d.Time),
-		PullRequests: pullRequestViews(d.ChangeSet, d.Execution)}
+		PullRequests: pullRequestViews(d.ChangeSet, d.Execution), Publication: publicationView(d.Publication),
+		Docs: docsView(d.Docs)}
 	if d.Revision != nil {
 		v.Revision = revisionView(*d.Revision)
 	}

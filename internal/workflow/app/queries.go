@@ -120,6 +120,10 @@ type TaskDetail struct {
 	Time      TaskTime // over all the task's executions
 	// ChangeSet is the task's published branches and their pull requests (KIN-36), oldest first.
 	ChangeSet []domain.GitArtifact
+	// Publication is the task's YouTrack write-back (KIN-38; nil without an issue or a write-back), Docs the
+	// documentation decision of its latest completed run (nil when none).
+	Publication *Publication
+	Docs        *domain.DocsDecision
 }
 
 // TaskDetail returns a task p may see (domain.ErrNotFound otherwise).
@@ -167,6 +171,22 @@ func (s *Service) TaskDetail(ctx context.Context, p auth.Principal, id string) (
 	d.Time = times[t.ID]
 	if d.ChangeSet, err = s.TaskChangeSet(ctx, t.ID); err != nil {
 		return TaskDetail{}, err
+	}
+	if s.IssueSync != nil && t.YouTrackIssue != "" {
+		pub, err := s.IssueSync.Publication(ctx, t.ID)
+		if err != nil {
+			return TaskDetail{}, err
+		}
+		d.Publication = &pub
+	}
+	if s.Docs != nil {
+		docs, err := s.Docs.LatestDocs(ctx, t.ID)
+		switch {
+		case err == nil:
+			d.Docs = &docs
+		case !errors.Is(err, domain.ErrNotFound):
+			return TaskDetail{}, err
+		}
 	}
 	return d, nil
 }

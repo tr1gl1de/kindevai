@@ -420,6 +420,9 @@ type Handoff struct {
 	Summary       string   `json:"summary"`
 	Docs          []string `json:"docs"`
 	OpenQuestions []string `json:"openQuestions"`
+	// KIN-38: the Knowledge Base sections the change updates, or why documentation does not apply.
+	Articles          []ArticleChange `json:"articles,omitempty"`
+	DocsNotApplicable string          `json:"docsNotApplicable,omitempty"`
 }
 
 // ParseHandoff reads the implementer's final answer leniently: the JSON object {summary, docs, openQuestions}, or
@@ -429,6 +432,7 @@ func ParseHandoff(answer string) Handoff {
 	if obj, ok := jsonObject(answer); ok && json.Unmarshal([]byte(obj), &h) == nil && strings.TrimSpace(h.Summary) != "" {
 		h.Summary = boundText(h.Summary, maxHandoffSummary)
 		h.Docs, h.OpenQuestions = boundList(h.Docs), boundList(h.OpenQuestions)
+		h.Articles, h.DocsNotApplicable = boundArticles(h.Articles), boundText(h.DocsNotApplicable, maxHandoffItem)
 		return h
 	}
 	return Handoff{Summary: boundText(answer, maxHandoffSummary)}

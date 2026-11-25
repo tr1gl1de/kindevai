@@ -365,6 +365,43 @@ describe("task detail", () => {
     expect(within(prs).getByText("Пул-реквест открывается…")).toBeInTheDocument();
   });
 
+  it("shows the YouTrack write-back awaiting publication and the documentation decision (KIN-38)", async () => {
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/tasks/t1", () => json(detail({ task: { ...detail().task, state: "COMPLETED", youtrackIssue: "KIN-7" },
+        publication: { pending: 2, failed: 0, published: 3, lastError: "http_503" },
+        docs: { status: "updated", articles: [{ article: "KIN-A-19", section: "KIN-38" }], rejected: ["KIN-A-12"] } }))),
+      http.get("/api/approvals", () => json([])),
+    );
+    const { container } = await renderApp("/tasks/t1");
+    const details = await screen.findByRole("region", { name: "Details" });
+    expect(within(details).getByText(/Awaiting publication to YouTrack \(2\)/)).toBeInTheDocument();
+    expect(within(details).getByText(/YouTrack unavailable: http_503/)).toBeInTheDocument();
+    const docs = screen.getByRole("region", { name: "Knowledge Base" });
+    expect(within(docs).getByText("KIN-A-19")).toBeInTheDocument();
+    expect(within(docs).getByText(/KIN-38/)).toBeInTheDocument();
+    expect(within(docs).getByText(/Not written \(outside the approved scope\): KIN-A-12/)).toBeInTheDocument();
+    await expectAccessible(container);
+  });
+
+  it("shows a failed write-back and DOCS_NOT_APPLICABLE with its reason in Russian", async () => {
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/tasks/t1", () => json(detail({ task: { ...detail().task, state: "COMPLETED", youtrackIssue: "KIN-7" },
+        publication: { pending: 0, failed: 1, published: 2, lastError: "conflict" },
+        docs: { status: "not_applicable", reason: "внутренний рефакторинг", articles: [], rejected: [] } }))),
+      http.get("/api/approvals", () => json([])),
+    );
+    await renderApp("/tasks/t1", "ru");
+    const details = await screen.findByRole("region", { name: "Сведения" });
+    expect(within(details).getByText(/Не опубликовано в YouTrack \(1\)/)).toBeInTheDocument();
+    expect(within(details).getByText(/статья изменилась во время записи/)).toBeInTheDocument();
+    const docs = screen.getByRole("region", { name: "База знаний" });
+    expect(within(docs).getByText(/DOCS_NOT_APPLICABLE — внутренний рефакторинг/)).toBeInTheDocument();
+  });
+
   it("cancels after naming the task, and retries a failed task (Owner / project admin only)", async () => {
     let state: TaskDetail["task"]["state"] = "RUNNING";
     let cancelBody: unknown;

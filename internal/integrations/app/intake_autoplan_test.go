@@ -2,7 +2,9 @@ package app_test
 
 import (
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,6 +134,45 @@ func TestDeclinedAutoPlanIsAudited(t *testing.T) {
 		t.Fatalf("audit %v", e.audit.kinds())
 	}
 	if r := e.record(t, "p1", "KIN-1"); r.Outcome != domain.OutcomeCreated {
+		t.Fatalf("record %+v", r)
+	}
+}
+
+// KIN-38 AC2: the platform's own writes (a comment, a state change, even resolving the issue) change the issue's
+// `updated` and come back through the webhook and the poller; they never create a second task or plan again.
+func TestOwnWriteBackDoesNotLoopIntoNewTasks(t *testing.T) {
+	t.Parallel()
+	e := newIntakeEnv(t)
+	ctx := t.Context()
+	if _, err := e.intake.SetAutoPlan(ctx, owner, "p1", true); err != nil {
+		t.Fatal(err)
+	}
+	secret := strings.Repeat("s", 40)
+	if err := e.intake.SetWebhookSecret(ctx, owner, secret); err != nil {
+		t.Fatal(err)
+	}
+	e.src.put(issue("KIN-5", 100, "jdoe"))
+	e.poll(t)
+	if len(e.tasks.titles) != 1 || len(e.tasks.planned) != 1 {
+		t.Fatalf("setup: tasks %v planned %v", e.tasks.titles, e.tasks.planned)
+	}
+	for i, updated := range []int64{200, 300, 400} { // plan comment, state change, final comment + resolved
+		after := issue("KIN-5", updated, "jdoe")
+		after.Resolved = i == 2
+		e.src.put(after)
+		body := []byte(fmt.Sprintf(`{"issueId":"KIN-5","updated":%d}`, updated))
+		if err := e.intake.ReceiveWebhook(ctx, secret, body); err != nil {
+			t.Fatal(err)
+		}
+		e.drain(t)
+		e.deliver(t)
+		e.drain(t)
+		e.poll(t)
+	}
+	if len(e.tasks.titles) != 1 || len(e.tasks.planned) != 1 || countKind(e, app.KindYouTrackTaskCreated) != 1 {
+		t.Fatalf("write-back looped: tasks %v planned %v", e.tasks.titles, e.tasks.planned)
+	}
+	if r := e.record(t, "p1", "KIN-5"); r.Outcome != domain.OutcomeUnchanged || r.IssueUpdated != 400 {
 		t.Fatalf("record %+v", r)
 	}
 }

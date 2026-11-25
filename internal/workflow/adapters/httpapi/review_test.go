@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tr1gl1de/kindevai/internal/workflow/app"
 	"github.com/tr1gl1de/kindevai/internal/workflow/domain"
 )
 
@@ -106,5 +107,27 @@ func TestPullRequestsViewShowsCIAndMerge(t *testing.T) {
 	}
 	if v[1].CI != "passed" || v[1].Merge != "merged" || v[1].MergeSHA != "m1" || v[1].CIRound != 0 {
 		t.Fatalf("second %+v", v[1])
+	}
+}
+
+// KIN-38: the task page gets the YouTrack write-back (pending = "awaiting publication", failed with the error) and
+// the documentation decision.
+func TestPublicationAndDocsViews(t *testing.T) {
+	t.Parallel()
+	if publicationView(nil) != nil || docsView(nil) != nil {
+		t.Fatal("views without data")
+	}
+	b, err := json.Marshal(publicationView(&app.Publication{Pending: 2, Failed: 1, Published: 3, LastError: "http_503"}))
+	if err != nil || string(b) != `{"pending":2,"failed":1,"published":3,"lastError":"http_503"}` {
+		t.Fatalf("publication %s %v", b, err)
+	}
+	b, err = json.Marshal(docsView(&domain.DocsDecision{Status: domain.DocsUpdated, Rejected: []string{"KIN-A-12"},
+		Articles: []domain.ArticleChange{{Article: "KIN-A-19", Section: "KIN-38", Content: "long body"}}}))
+	if err != nil || string(b) != `{"status":"updated","articles":[{"article":"KIN-A-19","section":"KIN-38"}],"rejected":["KIN-A-12"]}` {
+		t.Fatalf("docs %s %v", b, err)
+	}
+	b, _ = json.Marshal(docsView(&domain.DocsDecision{Status: domain.DocsNotApplicable, Reason: "n/a"}))
+	if string(b) != `{"status":"not_applicable","reason":"n/a","articles":[],"rejected":[]}` {
+		t.Fatalf("docs %s", b)
 	}
 }

@@ -160,7 +160,7 @@ func newIntakeEnv(t *testing.T) *intakeEnv {
 	t.Cleanup(srv.Close)
 	e.inbox = messaging.NewInbox(e.db, messaging.Config{})
 	e.intake = &app.Intake{Integrations: e.svc, Store: sqlite.New(e.db), Tasks: e.tasks, Access: memAccess{}, Users: memUsers{},
-		Source: &youtrack.Client{HTTP: srv.Client()}, Inbox: e.inbox, Health: e.outbox.Health()}
+		Source: &youtrack.Client{HTTP: srv.Client()}, Inbox: e.inbox, Health: e.outbox.Health(), States: sqlite.New(e.db)}
 	e.inbox.Handle(app.TopicYouTrackIssue, e.intake.HandleIssue)
 	e.inbox.Handle(app.TopicYouTrackWebhook, e.intake.HandleWebhook)
 	e.outbox.Handle(app.TopicYouTrackFetch, e.intake.HandleFetch)
@@ -402,6 +402,36 @@ func TestAutoPlanAPI(t *testing.T) {
 	}
 	w = e.do(t, "owner", "GET", "/api/projects/p1/youtrack", nil)
 	if v := decode[ProjectYouTrack](t, w); v.Binding == nil || !v.Binding.AutoPlan {
+		t.Fatalf("view: %s", w.Body)
+	}
+}
+
+// KIN-38: PUT /api/projects/{id}/integrations/youtrack/states sets the task state → YouTrack state map (empty by
+// default: comments only); the project view shows it.
+func TestStateMapAPI(t *testing.T) {
+	t.Parallel()
+	e := newIntakeEnv(t)
+	path := "/api/projects/p1/integrations/youtrack/states"
+	req := StatesRequest{States: map[string]string{"RUNNING": "In Progress"}}
+	w := e.do(t, "owner", "GET", "/api/projects/p1/youtrack", nil)
+	if v := decode[ProjectYouTrack](t, w); v.Binding == nil || v.Binding.States == nil || len(v.Binding.States) != 0 {
+		t.Fatalf("default view: %s", w.Body)
+	}
+	if w := e.do(t, "bob", "PUT", path, req); w.Code != http.StatusNotFound {
+		t.Fatalf("outsider: %d", w.Code)
+	}
+	if w := e.do(t, "owner", "PUT", path, StatesRequest{States: map[string]string{"WEATHER": "x"}}); w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid: %d %s", w.Code, w.Body)
+	}
+	if w := e.do(t, "owner", "PUT", "/api/projects/p2/integrations/youtrack/states", req); w.Code != http.StatusConflict {
+		t.Fatalf("unbound: %d", w.Code)
+	}
+	w = e.do(t, "owner", "PUT", path, req)
+	if w.Code != http.StatusOK || decode[StatesRequest](t, w).States["RUNNING"] != "In Progress" {
+		t.Fatalf("set: %d %s", w.Code, w.Body)
+	}
+	w = e.do(t, "owner", "GET", "/api/projects/p1/youtrack", nil)
+	if v := decode[ProjectYouTrack](t, w); v.Binding == nil || v.Binding.States["RUNNING"] != "In Progress" {
 		t.Fatalf("view: %s", w.Body)
 	}
 }

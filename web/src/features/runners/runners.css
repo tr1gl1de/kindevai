@@ -118,6 +118,7 @@ table.compact td {
 }
 .segmented label:has(input:checked) {
   border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent); /* 2px ring: the state is not a colour change alone */
   font-weight: 600;
 }
 .history-chart {

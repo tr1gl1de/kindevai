@@ -23,8 +23,11 @@
   line-height: 1.5;
 }
 
+/* Dark tokens: for the OS dark scheme unless the Telegram Mini App chose light, and whenever it chose dark.
+   applyThemeParams sets data-theme from Telegram's background, so the tokens Telegram does not set (warn, danger,
+   borders) match its text colour (KIN-111). Keep both blocks identical; contrast.test.ts checks it. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: var(--tg-theme-bg-color, #14161a);
     --surface: var(--tg-theme-secondary-bg-color, #1e2128);
     --text: var(--tg-theme-text-color, #e9ecf1);
@@ -33,13 +36,35 @@
     --accent-text: var(--tg-theme-button-text-color, #0b1220);
     --link: var(--tg-theme-link-color, #8ab4ff);
     --border: #343944;
-    --border-strong: #7c8494; /* 3.5:1 on --surface and --warn-bg */
+    --border-strong: #7c8494; /* 4.3:1 on --surface, 4.1:1 on --warn-bg */
     --danger: #ff8a80;
     --danger-text: #1a0503;
     --warn-bg: #2b2412;
     --warn-border: #d9a520; /* 6.9:1 on --warn-bg, 7.2:1 on --surface */
     --focus: #8ab4ff;
   }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: var(--tg-theme-bg-color, #14161a);
+  --surface: var(--tg-theme-secondary-bg-color, #1e2128);
+  --text: var(--tg-theme-text-color, #e9ecf1);
+  --muted: var(--tg-theme-hint-color, #a6adbb);
+  --accent: var(--tg-theme-button-color, #6c9eff);
+  --accent-text: var(--tg-theme-button-text-color, #0b1220);
+  --link: var(--tg-theme-link-color, #8ab4ff);
+  --border: #343944;
+  --border-strong: #7c8494;
+  --danger: #ff8a80;
+  --danger-text: #1a0503;
+  --warn-bg: #2b2412;
+  --warn-border: #d9a520;
+  --focus: #8ab4ff;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
 }
 
 *,

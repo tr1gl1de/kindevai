@@ -65,7 +65,20 @@ export function readLaunch(loc: Location = window.location): TelegramLaunch | nu
 
 const colorRe = /^#[0-9a-fA-F]{3,8}$/;
 
-/** Sets --tg-theme-* variables (which the design tokens prefer) from Telegram's theme params JSON. */
+/** Relative luminance (WCAG) of a #rgb or #rrggbb colour. */
+function luminance(hex: string): number {
+  const h = hex.length === 4 ? [...hex.slice(1)].map((c) => c + c).join("") : hex.slice(1, 7);
+  const [r, g, b] = [0, 2, 4].map((i) => {
+    const c = parseInt(h.slice(i, i + 2), 16) / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
+}
+
+/**
+ * Sets --tg-theme-* variables (which the design tokens prefer) from Telegram's theme params JSON, and data-theme
+ * from its background, so the tokens Telegram does not provide follow its light or dark theme, not the OS scheme.
+ */
 export function applyThemeParams(json: string | null, root: HTMLElement = document.documentElement) {
   if (!json) return;
   let params: Record<string, unknown>;
@@ -78,6 +91,11 @@ export function applyThemeParams(json: string | null, root: HTMLElement = docume
     if (/^[a-z_]+$/.test(key) && typeof value === "string" && colorRe.test(value)) {
       root.style.setProperty(`--tg-theme-${key.replaceAll("_", "-")}`, value);
     }
+  }
+  const bg = params.bg_color;
+  if (typeof bg === "string" && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(bg)) {
+    // Below 0.179 black text would contrast less than white text: a dark background.
+    root.dataset.theme = luminance(bg) < 0.179 ? "dark" : "light";
   }
 }
 

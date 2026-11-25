@@ -525,3 +525,31 @@ func TestUnreportedFilesStopTheStep(t *testing.T) {
 		t.Fatalf("truncated report = %+v, %v (held %v)", v.Outside, err, e.wf.held)
 	}
 }
+
+// KIN-78: an attempt that worked in a worktree and completed without a final changes report stops the step like a
+// truncated report: a scope_exceeded request names the missing report, and the attempt's reason says why.
+func TestMissingChangesReportStopsTheStep(t *testing.T) {
+	t.Parallel()
+	e := newEnv()
+	e.submit(t, 1, snapshot(domain.RiskL1, "internal/api"))
+	e.wf.mu.Lock()
+	e.wf.tasks["t1"].State = TaskRunning
+	e.wf.steps["s1"] = StepRef{StepID: "s1", TaskID: "t1", Key: "backend", Repository: "api", Revision: 1,
+		PlanHash: hashOf(1), Risk: domain.RiskL1, Scope: []string{"internal/api"}}
+	e.wf.mu.Unlock()
+	v, err := e.svc.CheckChanges(t.Context(), StepChanges{StepID: "s1", RunnerID: "r1", Fence: 1, Missing: true})
+	if err != nil || !slices.Equal(v.Outside, []string{MissingChangesReport}) || len(e.wf.held) != 1 ||
+		e.wf.holdMsgs[0] != "no changes report from the attempt" {
+		t.Fatalf("missing report = %+v, %v (held %v %q)", v.Outside, err, e.wf.held, e.wf.holdMsgs)
+	}
+	all, _ := e.repo.ForTask(t.Context(), "t1")
+	var paths []string
+	for _, a := range all {
+		if a.Reason == domain.ReasonScopeExceeded {
+			paths = a.Paths
+		}
+	}
+	if !slices.Equal(paths, []string{MissingChangesReport}) {
+		t.Fatalf("scope_exceeded request paths %v", paths)
+	}
+}

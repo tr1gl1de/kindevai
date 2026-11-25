@@ -79,6 +79,8 @@ type Manager struct {
 	// Program and Args start the helper: `<Program> <Args...>` (the runner's own binary with "sandbox-exec").
 	Program string
 	Args    []string
+	// RunArgs start the outer launcher of a wrapped run (Wrap): `<Program> <RunArgs...>`; "sandbox-run" when nil.
+	RunArgs []string
 	Env     []string // the helper's environment (empty: none)
 	DataDir string   // the runner's data directory, hidden from agents
 	// Sockets are extra host Unix sockets the leak test must not reach.
@@ -148,6 +150,29 @@ func socketBase() string {
 	return "/tmp"
 }
 
+// staleAge is how old a socket directory must be before a sweep may remove it (one being created has no
+// listener yet).
+const staleAge = time.Minute
+
+// sweepStale removes adapter socket directories nobody serves any more: left by a launcher or runner that was
+// killed before it could clean up. A directory whose socket still accepts connections is in use.
+func sweepStale(base string, now time.Time) {
+	dirs, _ := filepath.Glob(filepath.Join(base, "kindev-egress-*"))
+	for _, d := range dirs {
+		fi, err := os.Lstat(d)
+		if err != nil || !fi.IsDir() || now.Sub(fi.ModTime()) < staleAge {
+			continue
+		}
+		dl := net.Dialer{Timeout: 200 * time.Millisecond}
+		c, err := dl.DialContext(context.Background(), "unix", filepath.Join(d, "s"))
+		if err == nil {
+			_ = c.Close()
+			continue
+		}
+		_ = os.RemoveAll(d) // fails harmlessly for another user's directory (sticky /tmp)
+	}
+}
+
 // Box is one attempt's sandbox: its proxy adapter and the helper's verdict pipe.
 type Box struct {
 	m      *Manager
@@ -186,6 +211,7 @@ func (m *Manager) open(r egress.BoxRequest) (*Box, error) {
 	}
 	// A short private directory: Unix socket paths are limited to 107 bytes, which a data directory path can
 	// exceed. Inside the sandbox only this attempt's socket directory is visible.
+	sweepStale(socketBase(), time.Now())
 	sockDir, err := os.MkdirTemp(socketBase(), "kindev-egress-")
 	if err != nil {
 		return nil, fmt.Errorf("adapter socket directory: %w", err)

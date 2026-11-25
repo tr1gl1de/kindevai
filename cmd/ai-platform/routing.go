@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"log/slog"
 	"time"
 
@@ -10,6 +9,7 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
 	projectsdb "github.com/tr1gl1de/kindevai/internal/projects/adapters/sqlite"
 	projectsapp "github.com/tr1gl1de/kindevai/internal/projects/app"
+	"github.com/tr1gl1de/kindevai/internal/protocol"
 	routinghttp "github.com/tr1gl1de/kindevai/internal/routing/adapters/httpapi"
 	routingdb "github.com/tr1gl1de/kindevai/internal/routing/adapters/sqlite"
 	routingapp "github.com/tr1gl1de/kindevai/internal/routing/app"

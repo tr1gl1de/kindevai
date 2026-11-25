@@ -36,21 +36,21 @@ func RunMain(stderr io.Writer) int {
 		return ExitUsage
 	}
 	if !profileStrict(rs.Request.Profile) || rs.DataDir == "" {
-		return unverified(stderr, errors.New("the run description is not a strict sandbox"))
+		return unverified(stderr, rs.DataDir, path, errors.New("the run description is not a strict sandbox"))
 	}
 	exe, err := os.Executable()
 	if err != nil {
-		return unverified(stderr, err)
+		return unverified(stderr, rs.DataDir, path, err)
 	}
 	m := &Manager{Program: exe, Args: rs.HelperArgs, Env: rs.HelperEnv, DataDir: rs.DataDir, Home: rs.Home, Sockets: rs.Sockets}
 	b, err := m.open(rs.Request)
 	if err != nil {
-		return unverified(stderr, err)
+		return unverified(stderr, rs.DataDir, path, err)
 	}
 	defer b.Release()
 	cmd, err := b.Command(rs.Argv, rs.Env, rs.Dir)
 	if err != nil {
-		return unverified(stderr, err)
+		return unverified(stderr, rs.DataDir, path, err)
 	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// The sandbox stays in this process group (the launcher's cancel reaches the agent) and dies with this
@@ -86,12 +86,12 @@ func RunMain(stderr io.Writer) int {
 		return 128 + int(sig.(syscall.Signal))
 	}
 	if err := cmd.Start(); err != nil {
-		return unverified(stderr, err)
+		return unverified(stderr, rs.DataDir, path, err)
 	}
 	if err := b.Await(context.Background()); err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return unverified(stderr, err)
+		return unverified(stderr, rs.DataDir, path, err)
 	}
 	if sig := received(); sig != nil { // the helper catches it now and passes it to the agent
 		_ = cmd.Process.Signal(sig)
@@ -110,8 +110,10 @@ func RunMain(stderr io.Writer) int {
 	return ExitAgentStart
 }
 
-// unverified reports a sandbox that did not verify: UnverifiedMarker, the reason, ExitUnverified.
-func unverified(stderr io.Writer, err error) int {
+// unverified reports a sandbox that did not verify: the status file in the data directory (the launcher's signal,
+// KIN-88), UnverifiedMarker and the reason on stderr (for people), ExitUnverified. The agent has not started.
+func unverified(stderr io.Writer, dataDir, desc string, err error) int {
+	recordUnverified(dataDir, desc)
 	fmt.Fprintf(stderr, "%s: %v\n", UnverifiedMarker, err)
 	return ExitUnverified
 }

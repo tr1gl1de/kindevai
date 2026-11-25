@@ -141,3 +141,57 @@ func TestPreferences(t *testing.T) {
 		t.Fatalf("type err = %v", err)
 	}
 }
+
+// KIN-88: an occurrence that asks to notify again (a CLI hold parked) re-notifies and re-opens an acknowledged alert
+// though its severity did not rise.
+func TestAlertRecurNotifiesWhenAsked(t *testing.T) {
+	t.Parallel()
+	a, _ := domain.NewAlert("a1", occ(domain.SeverityCritical), t0)
+	if err := a.Acknowledge("u1", t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	again := occ(domain.SeverityCritical)
+	again.Notify = true
+	if esc, err := a.Recur(again, t0.Add(2*time.Minute)); !esc || err != nil {
+		t.Fatalf("notify = %v, %v", esc, err)
+	}
+	if a.State != domain.StateOpen || a.AckedBy != "" || a.Severity != domain.SeverityCritical {
+		t.Fatalf("after notify = %+v", a)
+	}
+	if esc, _ := a.Recur(occ(domain.SeverityCritical), t0.Add(3*time.Minute)); esc {
+		t.Fatal("a plain repeat notified")
+	}
+}
+
+// KIN-88: an alert remembers when its monitor last observed the anomaly (the event's time, not the delivery's), so an
+// "anomaly ended" event observed before that does not resolve it; an older occurrence delivered late keeps the newer
+// time and details.
+func TestAlertObservedAt(t *testing.T) {
+	t.Parallel()
+	o := occ(domain.SeverityWarning)
+	o.ObservedAt = t0
+	a, _ := domain.NewAlert("a1", o, t0)
+	if !a.ObservedAfter(t0.Add(-time.Second)) || a.ObservedAfter(t0) || a.ObservedAfter(t0.Add(time.Second)) {
+		t.Fatalf("observed %v", a.Details)
+	}
+	if a.ObservedAfter(time.Time{}) {
+		t.Fatal("an event without a time must resolve as before")
+	}
+	newer := occ(domain.SeverityWarning)
+	newer.ObservedAt, newer.Details = t0.Add(time.Minute), map[string]string{"runnerId": "r1", "since": "newer"}
+	if _, err := a.Recur(newer, t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	older := occ(domain.SeverityWarning)
+	older.ObservedAt, older.Details = t0.Add(30*time.Second), map[string]string{"runnerId": "r1", "since": "older"}
+	if _, err := a.Recur(older, t0.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if !a.ObservedAfter(t0.Add(59*time.Second)) || a.Details["since"] != "newer" || a.Occurrences != 3 {
+		t.Fatalf("a late older occurrence replaced the newer one: %+v", a)
+	}
+	untimed, _ := domain.NewAlert("a2", occ(domain.SeverityWarning), t0)
+	if untimed.ObservedAfter(t0.Add(-time.Hour)) {
+		t.Fatal("an alert without an observation time is never newer")
+	}
+}

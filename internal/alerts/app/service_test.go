@@ -471,3 +471,24 @@ func TestNotifyTaskHonoursPreferencesAndValidates(t *testing.T) {
 		}
 	}
 }
+
+// KIN-88: an occurrence that asks to notify again (a CLI hold parked) is sent though the alert is already critical.
+func TestRaiseNotifiesAgainWhenAsked(t *testing.T) {
+	t.Parallel()
+	f := newFixture()
+	ctx := t.Context()
+	if err := f.svc.Raise(ctx, "e1", runnerDown(domain.SeverityCritical)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.Raise(ctx, "e2", runnerDown(domain.SeverityCritical)); err != nil {
+		t.Fatal(err)
+	}
+	parked := runnerDown(domain.SeverityCritical)
+	parked.Notify = true
+	if err := f.svc.Raise(ctx, "e3", parked); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(f.out.sent(t)); got != 2 {
+		t.Fatalf("sent %d messages, want 2 (the new alert and the parked hold)", got)
+	}
+}

@@ -168,3 +168,31 @@ func TestProbes(t *testing.T) {
 		t.Fatalf("budget not kept: %v", got)
 	}
 }
+
+func TestRootProbes(t *testing.T) {
+	t.Parallel()
+	data, _ := filepath.EvalSymlinks(t.TempDir())
+	write(t, filepath.Join(data, "keys", "ed25519.pem"), "k", 0o600)
+	write(t, filepath.Join(data, "attempts", "s-1", "prompt"), "p", 0o600)
+	tests := []struct {
+		name          string
+		units, points []string
+		want          []string
+	}{
+		{"nothing visible inside: the root itself", []string{"/usr"}, nil, []string{data}},
+		{"an attempt inside: everything else", []string{filepath.Join(data, "attempts", "s-1")}, nil,
+			[]string{filepath.Join(data, "keys")}},
+		{"inside a visible directory: a certain leak", []string{filepath.Dir(data)}, nil, []string{data}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := rootProbes(data, tc.units, tc.points); !slices.Equal(got, tc.want) {
+				t.Fatalf("rootProbes = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if got := rootProbes("", nil, nil); got != nil {
+		t.Fatalf("no root: %v", got)
+	}
+}

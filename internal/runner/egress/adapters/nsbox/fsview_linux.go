@@ -5,7 +5,6 @@ package nsbox
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,25 +22,13 @@ const newRoot = "/tmp"
 // maxHomeFile bounds a CLI file copied into the agent's HOME (Claude Code's ~/.claude.json grows with use).
 const maxHomeFile = 16 << 20
 
-// maxProbes bounds the paths each filesystem leak test checks.
-const maxProbes = 512
-
 // devNodes are the host devices the sandbox's /dev holds.
 var devNodes = []string{"null", "zero", "full", "random", "urandom", "tty"}
 
-// view is the sandbox's filesystem view once built: the preflight's probes and the CLI logins to write back.
+// view is the sandbox's filesystem view once built: the preflight's probes.
 type view struct {
 	home, data []string // host paths that must not exist in the view
-	readonly   []string // directories a write to must fail
-	creds      []cred
-}
-
-// cred is a CLI credential file copied into the agent's HOME.
-type cred struct {
-	inView string // its path in the view
-	dirfd  int    // the host directory holding it (O_PATH)
-	name   string
-	orig   []byte
+	readonly   []string // paths a write below must fail
 }
 
 // source is a host path to bind into the view, opened before the view covers anything.
@@ -80,17 +67,19 @@ type homeFile struct {
 	rel  string
 	data []byte
 	mode os.FileMode
-	cred bool
 }
 
-// readHomeFiles reads the CLI's login files (domain.CLIHomeFiles) from home; a file that resolves into the
-// runner's data directory or is not a regular file is skipped.
-func readHomeFiles(home, dataDir string) []homeFile {
+// readHomeFiles reads the CLI's login files (domain.CLIHomeFiles) from home; a file that resolves outside home
+// (a symlink elsewhere) or into the runner's data directory, or is not a regular file, is skipped.
+func readHomeFiles(home string, dataDirs []string) []homeFile {
+	realHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return nil
+	}
 	var out []homeFile
-	for _, f := range domain.CLIHomeFiles {
-		p := filepath.Join(home, f.Path)
-		r, err := filepath.EvalSymlinks(p)
-		if err != nil || dataDir != "" && within(r, dataDir) {
+	for _, rel := range domain.CLIHomeFiles {
+		r, err := filepath.EvalSymlinks(filepath.Join(home, rel))
+		if err != nil || !within(r, realHome) || withinAny(r, dataDirs) {
 			continue
 		}
 		fi, err := os.Stat(r)
@@ -101,7 +90,19 @@ func readHomeFiles(home, dataDir string) []homeFile {
 		if err != nil {
 			continue
 		}
-		out = append(out, homeFile{rel: f.Path, data: b, mode: fi.Mode().Perm() | 0o600, cred: f.Credential})
+		out = append(out, homeFile{rel: rel, data: b, mode: fi.Mode().Perm() | 0o600})
+	}
+	return out
+}
+
+// both is p and, when it differs, the path it resolves to.
+func both(p string) []string {
+	if p == "" {
+		return nil
+	}
+	out := []string{p}
+	if r, err := filepath.EvalSymlinks(p); err == nil && r != p {
+		out = append(out, r)
 	}
 	return out
 }
@@ -112,11 +113,20 @@ func buildView(s Spec) (*view, error) {
 	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
 		return nil, fmt.Errorf("private mounts: %w", err)
 	}
+	for _, k := range s.Keep {
+		if !filepath.IsAbs(k) || filepath.Clean(k) != k || k == "/" {
+			return nil, fmt.Errorf("kept directory %q is not a clean absolute path", k)
+		}
+	}
+	system := visibleSystem()
 	home := envValue(s.Env, "HOME")
 	if home != "" && (!filepath.IsAbs(home) || filepath.Clean(home) != home || home == "/" ||
-		withinAny(home, systemDirs) || withinAny(home, s.Keep)) {
+		withinAny(home, system) || withinAny(home, []string{"/etc", "/dev", "/proc"}) || withinAny(home, s.Keep)) {
 		return nil, errors.New("the agent's HOME is not a separate absolute directory")
 	}
+	// The runner's HOME and data directory as given and as resolved: a symlink must not let a hidden directory
+	// show up under its real path (inside a visible one) while the probes look at the link.
+	homes, datas := both(s.Home), both(s.DataDir)
 	var srcs []source
 	defer func() {
 		for _, src := range srcs {
@@ -131,31 +141,57 @@ func buildView(s Spec) (*view, error) {
 		srcs = append(srcs, src)
 		return nil
 	}
+	var mirrors []string // directories holding read-only entries only: a read-only tmpfs in the view
 	units := append([]string{}, s.Keep...)
 	for _, k := range s.Keep {
 		if err := add(k, false); err != nil {
 			return nil, err
 		}
 	}
-	var readonly []string
+	readonly := []string{"/", "/etc"}
 	for _, k := range s.Keep {
-		if mirror, admin, ok := gitDirs(k, s.DataDir); ok {
-			// The shared mirror read-only (an agent cannot plant hooks or rewrite other branches); this worktree's
-			// index, HEAD and logs writable.
-			if err := add(mirror, true); err != nil {
-				return nil, err
+		mirror, admin, ok := "", "", false
+		for _, wk := range both(k) { // git may have recorded the worktree's path as given or as resolved
+			for _, d := range datas {
+				if mirror, admin, ok = gitDirs(wk, d); ok {
+					break
+				}
 			}
-			if err := add(admin, false); err != nil {
-				return nil, err
+			if ok {
+				break
 			}
-			units = append(units, mirror)
-			readonly = append(readonly, filepath.Join(mirror, "objects"))
 		}
+		if !ok {
+			continue
+		}
+		// Of the shared mirror only what git needs, read-only (an agent can neither plant hooks nor rewrite other
+		// branches); this worktree's index, HEAD and logs writable.
+		for _, e := range mirrorEntries {
+			p := filepath.Join(mirror, e)
+			if _, err := os.Lstat(p); err != nil {
+				continue
+			}
+			if err := add(p, true); err != nil {
+				return nil, err
+			}
+			units = append(units, p)
+		}
+		if err := add(admin, false); err != nil {
+			return nil, err
+		}
+		units = append(units, admin)
+		mirrors = append(mirrors, mirror, filepath.Dir(admin))
+		readonly = append(readonly, mirror, filepath.Dir(admin), filepath.Join(mirror, "objects"), filepath.Join(mirror, "refs"))
 	}
 	var exps []exposure
 	if len(s.Argv) > 0 {
 		var err error
-		if exps, err = expose(s.Argv[0], envValue(s.Env, "PATH"), s.DataDir, []string{s.Home, home}, units); err != nil {
+		hidden := append(append([]string{home}, homes...), datas...)
+		visible := append([]string{}, units...)
+		for _, k := range s.Keep {
+			visible = append(visible, both(k)...)
+		}
+		if exps, err = expose(s.Argv[0], envValue(s.Env, "PATH"), s.DataDir, hidden, visible); err != nil {
 			return nil, err
 		}
 	}
@@ -165,86 +201,52 @@ func buildView(s Spec) (*view, error) {
 			return nil, err
 		}
 		units = append(units, e.unit)
+		readonly = append(readonly, e.unit)
 		if e.link != "" {
 			points = append(points, e.link)
 		}
 	}
 	var files []homeFile
-	var creds []cred
 	if home != "" {
 		points = append(points, home)
-		files = readHomeFiles(home, s.DataDir)
+		files = readHomeFiles(home, datas)
 		for _, f := range files {
 			points = append(points, filepath.Join(home, f.rel))
-			if !f.cred {
-				continue
-			}
-			dir := filepath.Join(home, filepath.Dir(f.rel))
-			fd, err := unix.Open(dir, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-			if err != nil {
-				continue
-			}
-			creds = append(creds, cred{inView: filepath.Join(home, f.rel), dirfd: fd, name: filepath.Base(f.rel), orig: f.data})
 		}
 	}
-	v := &view{creds: creds}
-	all := append(append([]string{}, units...), systemDirs...)
-	v.home = rootProbes(s.Home, all, points)
-	v.data = rootProbes(s.DataDir, all, points)
-	if err := assemble(home, srcs, files, exps); err != nil {
-		v.close()
+	v := &view{}
+	all := append(append([]string{}, units...), system...)
+	for _, h := range homes {
+		v.home = append(v.home, rootProbes(h, all, points)...)
+	}
+	for _, d := range datas {
+		v.data = append(v.data, rootProbes(d, all, points)...)
+	}
+	if err := assemble(home, srcs, files, exps, mirrors); err != nil {
 		return nil, err
 	}
-	v.readonly = append([]string{"/"}, readonly...)
 	for _, d := range systemDirs {
 		if fi, err := os.Lstat(d); err == nil && fi.IsDir() {
 			v.readonly = append(v.readonly, d)
 		}
 	}
+	v.readonly = append(v.readonly, readonly...)
 	return v, nil
 }
 
-// rootProbes are the probes of a hidden root: the root itself when nothing visible lies inside it, its other
-// entries when something does, and the root (a certain leak) when it lies inside something visible.
-func rootProbes(root string, units, points []string) []string {
-	switch {
-	case root == "":
-		return nil
-	case withinAny(root, units):
-		return []string{root}
-	case ancestor(root, units) || ancestor(root, points) || contains(points, root):
-		return probes(root, units, points, maxProbes)
-	}
-	return []string{root}
-}
-
 // assemble mounts the view on newRoot and pivots into it.
-func assemble(home string, srcs []source, files []homeFile, exps []exposure) error {
+func assemble(home string, srcs []source, files []homeFile, exps []exposure, roDirs []string) error {
 	r := newRoot
 	if err := unix.Mount("tmpfs", r, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0755,size=16m"); err != nil {
 		return fmt.Errorf("the sandbox root: %w", err)
 	}
 	for _, d := range systemDirs {
-		fi, err := os.Lstat(d)
-		switch {
-		case err != nil:
-			continue
-		case fi.Mode()&os.ModeSymlink != 0: // /bin -> usr/bin
-			t, err := os.Readlink(d)
-			if err != nil {
-				return err
-			}
-			if err := os.Symlink(t, r+d); err != nil {
-				return fmt.Errorf("the sandbox root: %w", err)
-			}
-		case fi.IsDir():
-			if err := os.Mkdir(r+d, 0o750); err != nil {
-				return fmt.Errorf("the sandbox root: %w", err)
-			}
-			if err := bind(d, r+d, true); err != nil {
-				return err
-			}
+		if err := mirrorHost(r, d); err != nil {
+			return err
 		}
+	}
+	if err := etc(r); err != nil {
+		return err
 	}
 	if err := devices(r); err != nil {
 		return err
@@ -271,6 +273,14 @@ func assemble(home string, srcs []source, files []homeFile, exps []exposure) err
 			return err
 		}
 	}
+	for _, d := range roDirs {
+		if err := mkdirIn(r, d); err != nil {
+			return err
+		}
+		if err := unix.Mount("tmpfs", r+d, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0755,size=64k"); err != nil {
+			return fmt.Errorf("placing %s: %w", d, err)
+		}
+	}
 	for _, src := range srcs {
 		if err := place(r, src); err != nil {
 			return err
@@ -287,9 +297,13 @@ func assemble(home string, srcs []source, files []homeFile, exps []exposure) err
 			return fmt.Errorf("linking %s: %w", filepath.Base(e.link), err)
 		}
 	}
-	// The root and /dev themselves read-only: the agent writes only to the worktree, its state directory, /tmp
-	// and its private HOME.
-	for _, d := range []string{r + "/dev", r} {
+	// The root, /etc, /dev and the mirror's directories themselves read-only: the agent writes only to the worktree, its state directory,
+	// /tmp and its private HOME.
+	ro := []string{r + "/etc", r + "/dev", r}
+	for i := len(roDirs) - 1; i >= 0; i-- {
+		ro = append([]string{r + roDirs[i]}, ro...)
+	}
+	for _, d := range ro {
 		if err := unix.Mount("", d, "", unix.MS_REMOUNT|unix.MS_BIND|unix.MS_RDONLY|unix.MS_NOSUID|unix.MS_NODEV, ""); err != nil {
 			return fmt.Errorf("the sandbox root read-only: %w", err)
 		}
@@ -305,6 +319,58 @@ func assemble(home string, srcs []source, files []homeFile, exps []exposure) err
 		return fmt.Errorf("detaching the host root: %w", err)
 	}
 	return unix.Chdir("/")
+}
+
+// mirrorHost places the host path p (absolute) read-only in the view below r: a symlink is recreated (/bin ->
+// usr/bin), a directory or file bound; a missing one is skipped.
+func mirrorHost(r, p string) error {
+	fi, err := os.Lstat(p)
+	switch {
+	case err != nil:
+		return nil
+	case fi.Mode()&os.ModeSymlink != 0:
+		t, err := os.Readlink(p)
+		if err != nil {
+			return err
+		}
+		if err := mkdirIn(r, filepath.Dir(p)); err != nil {
+			return err
+		}
+		if err := os.Symlink(t, r+p); err != nil {
+			return fmt.Errorf("the sandbox root: %w", err)
+		}
+		return nil
+	case fi.IsDir():
+		if err := mkdirIn(r, p); err != nil {
+			return err
+		}
+	case fi.Mode().IsRegular():
+		if err := mkdirIn(r, filepath.Dir(p)); err != nil {
+			return err
+		}
+		if err := os.WriteFile(r+p, nil, 0o600); err != nil {
+			return fmt.Errorf("the sandbox root: %w", err)
+		}
+	default:
+		return nil
+	}
+	return bind(p, r+p, true)
+}
+
+// etc builds the sandbox's /etc from etcEntries: a tmpfs, so nothing else of the host's /etc shows.
+func etc(r string) error {
+	if err := os.Mkdir(r+"/etc", 0o750); err != nil {
+		return err
+	}
+	if err := unix.Mount("tmpfs", r+"/etc", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0755,size=1m"); err != nil {
+		return fmt.Errorf("the sandbox's /etc: %w", err)
+	}
+	for _, e := range etcEntries {
+		if err := mirrorHost(r, "/etc/"+e); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // devices builds /dev: a few host device nodes, the usual links, a private /dev/shm.
@@ -389,17 +455,9 @@ func bind(src, dst string, ro bool) error {
 	if !ro {
 		return nil
 	}
+	// Every mount below dst too (Linux 5.12+; an older kernel fails here and strict egress is unsupported).
 	attr := &unix.MountAttr{Attr_set: unix.MOUNT_ATTR_RDONLY | unix.MOUNT_ATTR_NOSUID | unix.MOUNT_ATTR_NODEV}
-	err := unix.MountSetattr(-1, dst, unix.AT_RECURSIVE, attr)
-	if errors.Is(err, unix.ENOSYS) { // before Linux 5.12: the top mount only, keeping its locked flags
-		var st unix.Statfs_t
-		if err = unix.Statfs(dst, &st); err == nil {
-			flags := uintptr(unix.MS_REMOUNT | unix.MS_BIND | unix.MS_RDONLY | unix.MS_NOSUID | unix.MS_NODEV)
-			flags |= uintptr(st.Flags) & (unix.MS_NOEXEC | unix.MS_NOATIME | unix.MS_NODIRATIME | unix.MS_RELATIME) //nolint:gosec // G115: mount flags
-			err = unix.Mount("", dst, "", flags, "")
-		}
-	}
-	if err != nil {
+	if err := unix.MountSetattr(-1, dst, unix.AT_RECURSIVE, attr); err != nil {
 		return fmt.Errorf("making %s read-only: %w", dst, err)
 	}
 	return nil
@@ -452,59 +510,4 @@ func (v *view) leaks() []domain.Leak {
 		}
 	}
 	return append(out, write)
-}
-
-// writeBack returns the CLI logins the agent's CLI refreshed to the host (domain.CredentialUpdate decides).
-func (v *view) writeBack() {
-	for _, c := range v.creds {
-		updated, err := readNoFollow(unix.AT_FDCWD, c.inView, domain.MaxCredentialSize+1)
-		if err != nil {
-			continue
-		}
-		current, err := readNoFollow(c.dirfd, c.name, domain.MaxCredentialSize+1)
-		if err != nil || !domain.CredentialUpdate(c.orig, current, updated) {
-			continue
-		}
-		tmp := "." + c.name + ".kindev-" + strconv.Itoa(os.Getpid())
-		fd, err := unix.Openat(c.dirfd, tmp, unix.O_CREAT|unix.O_EXCL|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
-		if err != nil {
-			continue
-		}
-		f := os.NewFile(uintptr(fd), tmp)
-		_, werr := f.Write(updated)
-		if serr := f.Sync(); werr == nil {
-			werr = serr
-		}
-		if cerr := f.Close(); werr == nil {
-			werr = cerr
-		}
-		if werr == nil {
-			werr = unix.Renameat(c.dirfd, tmp, c.dirfd, c.name)
-		}
-		if werr != nil {
-			_ = unix.Unlinkat(c.dirfd, tmp, 0)
-		}
-	}
-}
-
-// readNoFollow reads a regular file (never through a final symlink), at most limit bytes.
-func readNoFollow(dirfd int, name string, limit int64) ([]byte, error) {
-	fd, err := unix.Openat(dirfd, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, err
-	}
-	f := os.NewFile(uintptr(fd), name)
-	defer func() { _ = f.Close() }()
-	fi, err := f.Stat()
-	if err != nil || !fi.Mode().IsRegular() {
-		return nil, errors.New("not a regular file")
-	}
-	return io.ReadAll(io.LimitReader(f, limit))
-}
-
-func (v *view) close() {
-	for _, c := range v.creds {
-		_ = unix.Close(c.dirfd)
-	}
-	v.creds = nil
 }

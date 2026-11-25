@@ -262,3 +262,10 @@ func HostPort(authority string) (string, int, error) {
 	}
 	return host, port, nil
 }
+
+// CLIHomeFiles are the CLI login and settings files (relative to the CLI's HOME) copied into the private HOME of an
+// agent in a strict sandbox (KIN-80): Claude Code's and Codex's. Nothing else of the CLI's HOME (keys, other
+// projects, history) enters the sandbox, and nothing the agent changes is copied back: an agent must never be able
+// to change the login or settings later host runs use.
+var CLIHomeFiles = []string{".claude/.credentials.json", ".claude.json", ".claude/settings.json", ".codex/auth.json",
+	".codex/config.toml"}

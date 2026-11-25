@@ -106,7 +106,6 @@ func Main(args []string, stderr io.Writer) int {
 	if err != nil {
 		return report(verdict, domain.Verdict{Setup: err.Error()}, stderr)
 	}
-	defer fs.close()
 	// Not dumpable: the agent (same kuid) can neither ptrace this helper, which holds CAP_NET_ADMIN over the
 	// namespace, nor open its /proc entries.
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
@@ -123,9 +122,7 @@ func Main(args []string, stderr io.Writer) int {
 	if code := report(verdict, v, stderr); code != 0 || len(s.Argv) == 0 {
 		return code
 	}
-	code := runAgent(s, port, sigs, stderr)
-	fs.writeBack()
-	return code
+	return runAgent(s, port, sigs, stderr)
 }
 
 func report(f *os.File, v domain.Verdict, stderr io.Writer) int {
@@ -164,7 +161,6 @@ func setup(ctx context.Context, s Spec) (int, *view, error) {
 	}
 	port, err := forward(ctx, dirfd, filepath.Base(s.Socket))
 	if err != nil {
-		v.close()
 		return 0, nil, err
 	}
 	return port, v, nil

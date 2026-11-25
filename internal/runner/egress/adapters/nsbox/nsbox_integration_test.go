@@ -133,6 +133,12 @@ func agentMain() int {
 		check("other-repo-hidden", err != nil, "")
 		_, err = os.Stat("/mnt/c")
 		check("windows-drive-hidden", err != nil, "")
+		_, err = os.ReadFile("/etc/passwd")
+		check("etc-passwd-readable", err == nil, fmt.Sprint(err))
+		_, err = os.Stat("/etc/hostname") // host configuration outside the allowlist
+		check("etc-rest-hidden", err != nil, "")
+		_, err = os.Stat(filepath.Join(os.Getenv("MIRROR"), "worktrees", "sibling"))
+		check("sibling-worktree-hidden", err != nil, "")
 		if r := os.Getenv("REFRESHED"); r != "" {
 			_ = os.WriteFile(filepath.Join(home, ".claude", ".credentials.json"), []byte(r), 0o600)
 		}
@@ -272,10 +278,11 @@ func newFixture(t *testing.T) *fixture {
 		filepath.Join(f.home, ".claude", "history.jsonl"):     "history",
 		f.key:                           "runner key",
 		filepath.Join(f.mirror, "HEAD"): "ref: refs/heads/main\n",
-		filepath.Join(f.mirror, "objects", "pack", "p"): "objects",
-		filepath.Join(f.admin, "gitdir"):                filepath.Join(f.workdir, ".git") + "\n",
-		filepath.Join(f.workdir, ".git"):                "gitdir: " + f.admin + "\n",
-		filepath.Join(f.other, "HEAD"):                  "ref: refs/heads/main\n",
+		filepath.Join(f.mirror, "objects", "pack", "p"):          "objects",
+		filepath.Join(f.admin, "gitdir"):                         filepath.Join(f.workdir, ".git") + "\n",
+		filepath.Join(f.workdir, ".git"):                         "gitdir: " + f.admin + "\n",
+		filepath.Join(f.other, "HEAD"):                           "ref: refs/heads/main\n",
+		filepath.Join(f.mirror, "worktrees", "sibling", "index"): "another attempt",
 	} {
 		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 			t.Fatal(err)
@@ -350,12 +357,13 @@ func TestSandboxVerifiesThenConfinesTheAgent(t *testing.T) {
 		"ok helper-not-readable", "ok worktree-writable", "ok home-hidden", "ok home-history-hidden",
 		"ok cli-login-copied", "ok home-private", "ok runner-key-hidden", "ok readonly /", "ok readonly /usr",
 		"ok readonly /etc", "ok readonly " + filepath.Join(f.mirror, "objects"), "ok mirror-readable", "ok admin-writable",
-		"ok other-repo-hidden", "ok windows-drive-hidden"} {
+		"ok other-repo-hidden", "ok windows-drive-hidden", "ok etc-passwd-readable", "ok etc-rest-hidden",
+		"ok sibling-worktree-hidden"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in\n%s", want, out)
 		}
 	}
-	// Nothing the agent wrote outside the worktree reached the host, but its refreshed CLI login did.
+	// Nothing the agent wrote outside the worktree reached the host, not even its CLI login.
 	if _, err := os.Stat(filepath.Join(f.home, "agent-note")); !os.IsNotExist(err) {
 		t.Errorf("the agent's private HOME leaked to the host: %v", err)
 	}
@@ -365,8 +373,8 @@ func TestSandboxVerifiesThenConfinesTheAgent(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(f.admin, "index")); string(b) != "x" {
 		t.Errorf("the worktree's index was not writable: %q", b)
 	}
-	if b, _ := os.ReadFile(filepath.Join(f.home, ".claude", ".credentials.json")); string(b) != credRefreshed {
-		t.Errorf("the refreshed CLI login was not written back: %s", b)
+	if b, _ := os.ReadFile(filepath.Join(f.home, ".claude", ".credentials.json")); string(b) != credOrig {
+		t.Errorf("the agent changed the host's CLI login: %s", b)
 	}
 	if _, err := os.Stat(filepath.Join(f.workdir, "agent-was-here")); err != nil {
 		t.Fatalf("the agent's write did not reach the real worktree: %v", err)
@@ -570,4 +578,84 @@ func (s *syncBuf) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// A runner data directory reached through a symlink: hidden under its link and its real path alike, and the
+// worktree's mirror still found.
+func TestSandboxWithSymlinkedDataDir(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	link := filepath.Join(t.TempDir(), "data-link")
+	if err := os.Symlink(f.m.DataDir, link); err != nil {
+		t.Fatal(err)
+	}
+	real := f.m.DataDir
+	f.m.DataDir = link
+	f.dir = strings.Replace(f.dir, real, link, 1)
+	f.workdir = strings.Replace(f.workdir, real, link, 1)
+	verr, out, werr := f.run(t, f.profile("203.0.113.7"))
+	if verr != nil || werr != nil || strings.Contains(out, "FAIL") {
+		t.Fatalf("verdict %v, agent %v\n%s", verr, werr, out)
+	}
+	for _, want := range []string{"ok runner-key-hidden", "ok runner-data-hidden", "ok mirror-readable", "ok admin-writable"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in\n%s", want, out)
+		}
+	}
+}
+
+// git works in a real worktree of a mirror (KIN-29's layout): it reads the mirror and updates the worktree's own
+// index, while the shared mirror stays unwritable.
+func TestGitInSandbox(t *testing.T) {
+	t.Parallel()
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is not installed")
+	}
+	f := newFixture(t)
+	data := f.m.DataDir
+	mirror := filepath.Join(data, "repos", "g", "r.git")
+	src := filepath.Join(t.TempDir(), "src")
+	wt := filepath.Join(data, "workspaces", "g", "r", "leaf")
+	env := []string{"HOME=" + t.TempDir(), "GIT_CONFIG_NOSYSTEM=1", "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t", "PATH=/usr/bin:/bin"}
+	for _, args := range [][]string{{"init", "-q", "-b", "main", src}, {"-C", src, "commit", "-q", "--allow-empty", "-m", "base"},
+		{"init", "-q", "--bare", mirror}, {"-C", src, "push", "-q", mirror, "main"},
+		{"--git-dir=" + mirror, "worktree", "add", "-q", wt, "main"}} {
+		cmd := exec.Command(gitBin, args...) //nolint:noctx // a short local git command
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	f.workdir = wt
+	box, err := f.m.Open(t.Context(), egress.BoxRequest{Dir: f.dir, Workdir: wt, Profile: f.profile("203.0.113.7")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := box.(*Box)
+	t.Cleanup(b.Release)
+	script := "echo x > new && git status --porcelain && git log -1 --format=%s && git add new && echo added; " +
+		"touch " + mirror + "/hooks-x 2>/dev/null && echo MIRROR-WRITABLE; exit 0"
+	cmd, err := b.Command([]string{"/bin/sh", "-c", script}, []string{"PATH=/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM=1"}, wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	if err := b.Await(ctx); err != nil {
+		t.Fatalf("verdict: %v\n%s", err, out.String())
+	}
+	_ = cmd.Wait()
+	got := out.String()
+	if !strings.Contains(got, "?? new") || !strings.Contains(got, "base") || strings.Contains(got, "MIRROR-WRITABLE") {
+		t.Fatalf("git in the sandbox:\n%s", got)
+	}
+	t.Logf("git in the sandbox:\n%s", got)
 }

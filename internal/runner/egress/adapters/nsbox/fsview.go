@@ -13,17 +13,40 @@ import (
 // The sandbox's filesystem view (KIN-80, KB KIN-A-22). The helper builds a new root on an empty tmpfs and pivots
 // into it, so nothing of the host is visible unless placed there:
 //
-//   - systemDirs, bound read-only (symlinks such as /bin -> usr/bin are recreated);
+//   - systemDirs, bound read-only (symlinks such as /bin -> usr/bin are recreated), and of /etc only etcEntries
+//     (no service configuration of the host: /etc/<service> may hold tokens the runner's uid can read);
 //   - its own /dev (null, zero, full, random, urandom, tty), /proc, /tmp, /var/tmp and /dev/shm;
-//   - the agent's HOME: a private tmpfs with copies of the CLI's login files (domain.CLIHomeFiles);
+//   - the agent's HOME: a private tmpfs with copies of the CLI's login files (domain.CLIHomeFiles), never copied
+//     back;
 //   - the attempt's worktree and state directory, read-write;
-//   - the worktree's repository mirror read-only, its own administrative directory (index, HEAD) read-write;
+//   - of the worktree's repository mirror only mirrorEntries, read-only, and the worktree's own administrative
+//     directory (index, HEAD) read-write;
 //   - the agent's binary (and its script interpreter) when it lives outside the system directories, read-only.
 //
 // This file holds the host-side path logic (no namespaces needed); fsview_linux.go builds the view.
 
 // systemDirs are bound read-only into every sandbox (those that exist).
-var systemDirs = []string{"/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc", "/opt", "/nix"}
+var systemDirs = []string{"/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/nix/store"}
+
+// etcEntries are the parts of /etc the sandbox's /etc holds, read-only (those that exist): users, name resolution,
+// the dynamic linker, TLS roots, time zone, alternatives.
+var etcEntries = []string{"passwd", "group", "nsswitch.conf", "hosts", "host.conf", "gai.conf", "resolv.conf",
+	"protocols", "services", "ld.so.cache", "ld.so.conf", "ld.so.conf.d", "ssl", "ca-certificates",
+	"ca-certificates.conf", "pki", "localtime", "timezone", "alternatives", "os-release", "lsb-release",
+	"debian_version", "mime.types", "gitconfig", "inputrc", "shells", "environment", "locale.alias", "locale.conf"}
+
+// visibleSystem are the host paths the view shows read-only, for the preflight's probes.
+func visibleSystem() []string {
+	out := append([]string{}, systemDirs...)
+	for _, e := range etcEntries {
+		out = append(out, "/etc/"+e)
+	}
+	return out
+}
+
+// mirrorEntries are what git in a worktree needs of its mirror (read-only); the other worktrees' administrative
+// directories, FETCH_HEAD and the like stay hidden.
+var mirrorEntries = []string{"HEAD", "config", "objects", "refs", "packed-refs", "shallow", "info"}
 
 // within reports p == dir or p below dir.
 func within(p, dir string) bool {
@@ -235,6 +258,23 @@ func probes(root string, units, points []string, budget int) []string {
 	walk(root, 0)
 	return out
 }
+
+// rootProbes are the probes of a hidden root: the root itself when nothing visible lies inside it, its other
+// entries when something does, and the root (a certain leak) when it lies inside something visible.
+func rootProbes(root string, units, points []string) []string {
+	switch {
+	case root == "":
+		return nil
+	case withinAny(root, units):
+		return []string{root}
+	case ancestor(root, units) || ancestor(root, points) || contains(points, root):
+		return probes(root, units, points, maxProbes)
+	}
+	return []string{root}
+}
+
+// maxProbes bounds the paths each filesystem leak test checks.
+const maxProbes = 512
 
 func contains(list []string, p string) bool {
 	for _, l := range list {

@@ -306,10 +306,11 @@ sandbox's own loopback; nftables rejects everything else (IPv4, IPv6, DNS, UDP).
 (KIN-80): system directories (`/usr`, `/etc`, `/lib`, …) read-only, the attempt's worktree and state directory
 writable, the repository mirror read-only (only the worktree's own index/HEAD writable), a private `/tmp`, and a
 private per-attempt `HOME` holding copies of the CLI's login files only (`~/.claude/.credentials.json`,
-`~/.claude.json`, `~/.claude/settings.json`, `~/.codex/auth.json`, `~/.codex/config.toml`; a refreshed login is
-written back only when it keeps the same shape and account). The runner's real `HOME` (SSH keys, other repositories),
-its data directory (Ed25519 key, other attempts), `/run` (Docker, D-Bus, WSL interop), `/mnt` (Windows drives) and
-everything else are absent; a CLI installed under `HOME` is exposed read-only. The only way out is the
+`~/.claude.json`, `~/.claude/settings.json`, `~/.codex/auth.json`, `~/.codex/config.toml`; nothing is copied back,
+so an agent cannot change the login or settings of later runs). Of `/etc` only what programs need (users, name
+resolution, TLS roots, time zone, linker) is shown. The runner's real `HOME` (SSH keys, other repositories), its data
+directory (Ed25519 key, other attempts), `/opt`, `/run` (Docker, D-Bus, WSL interop), `/mnt` (Windows drives) and
+everything else are absent; a CLI installed outside the system directories is exposed read-only. The only way out is the
 runner's local proxy adapter, which applies the profile's allowlist and connects through the upstream proxy (HTTP
 CONNECT, HTTPS proxy or SOCKS5 with remote DNS; the credentials never enter the sandbox). Before the CLI starts, a
 preflight inside the sandbox must pass: proxy reachable, egress IP as expected, and direct TCP (IPv4/IPv6), DNS, a
@@ -320,9 +321,10 @@ and the system directories unwritable. Otherwise the CLI never starts and the st
 (macOS: unsupported). CLI permission bypass (`--dangerously-skip-permissions` and the like) is allowed only inside this
 sandbox. Requirements: `nft` installed and unprivileged user namespaces enabled (Ubuntu 24.04:
 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`). Known limits: an attempt adopted after a runner
-restart has no network (its proxy adapter is gone); inside the sandbox `git commit` by the agent fails (the mirror's
+restart has no network (its proxy adapter is gone); inside the sandbox `git add`/`git commit` by the agent fail (the mirror's
 objects are read-only; the runner commits after the run); `--resume` across sandboxed attempts does not find the
-earlier session (each attempt has a fresh `HOME`). **Without the sandbox** (macOS, no user namespaces, or a profile
+earlier session (each attempt has a fresh `HOME`); a CLI login refreshed inside the sandbox is not kept (prefer a
+long-lived token such as `claude setup-token` for runners); Linux 5.12+ is required. **Without the sandbox** (macOS, no user namespaces, or a profile
 that is not `strict`) the CLI runs on the host with the runner's uid and its real `HOME`: it can read everything the
 runner user can (SSH keys, the runner's key and data directory, other repositories). That is why the permission bypass
 stays off there and the CLI keeps asking before acting; use strict egress for untrusted tasks.

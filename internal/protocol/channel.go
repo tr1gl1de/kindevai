@@ -254,12 +254,18 @@ type Completed struct {
 }
 
 // AgentReport is an AI CLI run's report (KIN-79): its native session id (to resume), model, CLI version and usage.
+// Result is the run's final answer (KIN-34: the planner's plan), masked and at most MaxAgentResult bytes, cut
+// further so the event body stays within MaxBodyBytes; it is untrusted text.
 type AgentReport struct {
 	Session string      `json:"session,omitempty"`
 	Model   string      `json:"model,omitempty"`
 	Version string      `json:"version,omitempty"`
 	Usage   *AgentUsage `json:"usage,omitempty"`
+	Result  string      `json:"result,omitempty"`
 }
+
+// MaxAgentResult bounds AgentReport.Result (bytes).
+const MaxAgentResult = 24 << 10
 
 // AgentUsage is the token usage and cost of a run as the CLI reported it (Codex reports no cost).
 type AgentUsage struct {

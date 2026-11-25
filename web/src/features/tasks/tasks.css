@@ -114,3 +114,23 @@ td.ws-path {
 .attempt-workspace .badge + .badge {
   margin-left: 4px;
 }
+
+/* KIN-34: the plan's steps and the AI planner's run */
+.plain-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.plan-summary {
+  white-space: pre-wrap;
+}
+.planner {
+  margin-bottom: 1rem;
+}
+.planner h3 {
+  margin-top: 0;
+}
+.planner-feedback {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

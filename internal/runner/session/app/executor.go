@@ -447,6 +447,8 @@ func (r *run) agentEnd(res domain.AgentResult) (string, any) {
 	rep := &protocol.AgentReport{Session: r.ident(res.Session, 128), Model: r.ident(res.Model, 128),
 		Version: r.ident(res.Version, 64), Usage: usage(&res.Usage)}
 	if res.Failure == nil {
+		rep.Result = domain.Truncate(r.mask(res.Text), protocol.MaxAgentResult-len("…"))
+		fitResult(rep)
 		return protocol.EventCompleted, protocol.Completed{Agent: rep}
 	}
 	f := res.Failure
@@ -460,6 +462,19 @@ func (r *run) agentEnd(res domain.AgentResult) (string, any) {
 		body.ResetsAt = f.ResetsAt.UnixMilli()
 	}
 	return protocol.EventFailed, body
+}
+
+// fitResult cuts the final answer until the execution.completed body fits the channel's limit (escaped control
+// characters may grow it up to six times); a margin is left for the event envelope.
+func fitResult(rep *protocol.AgentReport) {
+	const room = protocol.MaxBodyBytes - 1<<10
+	for rep.Result != "" {
+		b, err := json.Marshal(protocol.Completed{Agent: rep})
+		if err == nil && len(b) <= room {
+			return
+		}
+		rep.Result = domain.Truncate(rep.Result, len(rep.Result)/2)
+	}
 }
 
 // launchFailed reports an attempt that could not start. A strict egress failure (ErrNetwork) carries the code

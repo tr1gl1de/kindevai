@@ -110,6 +110,10 @@ type Service struct {
 	LeaseTTL    time.Duration // DefaultLeaseTTL when zero
 	MaxAttempts int           // DefaultMaxAttempts when zero
 	Pause       Pause         // optional: maintenance mode (KIN-41)
+	// Planning stores planner runs (KIN-34); nil: the planner step is off. IssueContext reads a YouTrack issue's
+	// context package from the outbox handler (with Outbox); nil: planners get the task title only.
+	Planning     PlanningRepository
+	IssueContext IssueContextSource
 }
 
 // Pause reports whether the scheduler must not hand out new work (maintenance mode, KIN-41). Running attempts
@@ -636,6 +640,9 @@ func (s *Service) CancelTask(ctx context.Context, taskID, reason string) (domain
 				return err
 			}
 		}
+		if err := s.cancelPlanning(ctx, t.ID, reason, now); err != nil {
+			return err
+		}
 		e, err := s.Repo.RunningExecution(ctx, t.ID)
 		if errors.Is(err, domain.ErrNotFound) {
 			return nil
@@ -771,6 +778,16 @@ func (s *Service) FinishedSteps(ctx context.Context, stepIDs []string) (map[stri
 	}
 	for _, id := range stepIDs {
 		if known[id] {
+			continue
+		}
+		if _, ok := domain.PlanningRunID(id); ok {
+			at, done, err := s.finishedPlanningStep(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			if known[id] = true; done {
+				out[id] = at
+			}
 			continue
 		}
 		e, err := s.Repo.ExecutionByStep(ctx, id)

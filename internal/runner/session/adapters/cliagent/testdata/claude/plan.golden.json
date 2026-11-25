@@ -1,0 +1,33 @@
+[
+  {
+    "kind": "session",
+    "session": "5f0c7a2e-1b3d-4c5e-8f9a-0b1c2d3e4f50",
+    "model": "claude-opus-5-5",
+    "version": "2.1.331"
+  },
+  {
+    "kind": "tool_use",
+    "session": "5f0c7a2e-1b3d-4c5e-8f9a-0b1c2d3e4f50",
+    "tool": "Grep",
+    "input": "{\"pattern\":\"login\"}"
+  },
+  {
+    "kind": "text",
+    "session": "5f0c7a2e-1b3d-4c5e-8f9a-0b1c2d3e4f50",
+    "text": "```json\n{\"summary\": \"Add a login endpoint and a review\", \"risk\": \"L1\", \"maxParallel\": 1, \"steps\": [{\"key\": \"api\", \"title\": \"Login endpoint\", \"repository\": \"acme/app\", \"scope\": [\"internal/login/**\"], \"dependsOn\": [], \"capabilities\": [\"go\"]}, {\"key\": \"review\", \"title\": \"Review the endpoint\", \"repository\": \"acme/app\", \"role\": \"reviewer\", \"scope\": [], \"dependsOn\": [\"api\"], \"capabilities\": []}], \"tests\": [\"login handler unit tests\"], \"docs\": [\"README: login\"]}\n```"
+  },
+  {
+    "kind": "result",
+    "session": "5f0c7a2e-1b3d-4c5e-8f9a-0b1c2d3e4f50",
+    "text": "```json\n{\"summary\": \"Add a login endpoint and a review\", \"risk\": \"L1\", \"maxParallel\": 1, \"steps\": [{\"key\": \"api\", \"title\": \"Login endpoint\", \"repository\": \"acme/app\", \"scope\": [\"internal/login/**\"], \"dependsOn\": [], \"capabilities\": [\"go\"]}, {\"key\": \"review\", \"title\": \"Review the endpoint\", \"repository\": \"acme/app\", \"role\": \"reviewer\", \"scope\": [], \"dependsOn\": [\"api\"], \"capabilities\": []}], \"tests\": [\"login handler unit tests\"], \"docs\": [\"README: login\"]}\n```",
+    "usage": {
+      "inputTokens": 7,
+      "outputTokens": 252,
+      "cacheReadTokens": 9000,
+      "cacheWriteTokens": 1200,
+      "costUsd": 0.0412,
+      "turns": 2,
+      "durationMs": 9100
+    }
+  }
+]

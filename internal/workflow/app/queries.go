@@ -115,6 +115,7 @@ type TaskDetail struct {
 	Task      domain.Task
 	Revision  *domain.PlanRevision
 	Execution *domain.Execution
+	Planning  *domain.PlanningRun // the latest planner run (KIN-34); nil when the task was never planned by AI
 	CanManage bool
 	Time      TaskTime // over all the task's executions
 }
@@ -147,6 +148,15 @@ func (s *Service) TaskDetail(ctx context.Context, p auth.Principal, id string) (
 		d.Execution = &e
 	case !errors.Is(err, domain.ErrNotFound):
 		return TaskDetail{}, err
+	}
+	if s.Planning != nil {
+		run, err := s.Planning.LatestPlanningRun(ctx, t.ID)
+		switch {
+		case err == nil:
+			d.Planning = &run
+		case !errors.Is(err, domain.ErrNotFound):
+			return TaskDetail{}, err
+		}
 	}
 	times, _, err := s.taskTimes(ctx, TaskFilter{TaskIDs: []string{t.ID}}, []string{t.ID})
 	if err != nil {

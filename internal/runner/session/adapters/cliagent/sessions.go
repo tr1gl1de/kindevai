@@ -3,7 +3,11 @@
 package cliagent
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -57,16 +61,14 @@ func (s *SessionStore) Prepare(project, task, agent string) (source, rel string,
 	if err != nil {
 		return "", "", err
 	}
-	for _, n := range []string{project, task} {
-		if !storeNameRe.MatchString(n) {
-			return "", "", fmt.Errorf("session store: %q is not a plain name", n)
-		}
+	if project == "" || task == "" {
+		return "", "", errors.New("session store: no project or task")
 	}
 	s.maybeSweep()
-	taskDir := filepath.Join(s.Root, project, task)
+	taskDir := filepath.Join(s.Root, storeName(project), storeName(task))
 	source = filepath.Join(taskDir, agent)
 	// Every level owner-only and no symlink (EnsureDir refuses one): the runner binds exactly this directory.
-	for _, dir := range []string{s.Root, filepath.Join(s.Root, project), taskDir, source} {
+	for _, dir := range []string{s.Root, filepath.Dir(taskDir), taskDir, source} {
 		if err := secfile.EnsureDir(dir); err != nil {
 			return "", "", fmt.Errorf("session store: %w", err)
 		}
@@ -76,6 +78,15 @@ func (s *SessionStore) Prepare(project, task, agent string) (source, rel string,
 		return "", "", fmt.Errorf("session store: %w", err)
 	}
 	return source, d.SessionDir(), nil
+}
+
+// storeName is an id as a directory name: itself when it is a plain name, else a hash of it (never a path).
+func storeName(id string) string {
+	if storeNameRe.MatchString(id) && id != "." && id != ".." {
+		return id
+	}
+	h := sha256.Sum256([]byte(id))
+	return "h-" + hex.EncodeToString(h[:16])
 }
 
 func (s *SessionStore) maybeSweep() {
@@ -107,6 +118,7 @@ func (s *SessionStore) Sweep() []string {
 				continue
 			}
 			td := filepath.Join(pd, t.Name())
+			unlock(td)
 			if os.RemoveAll(td) == nil { // RemoveAll never follows a symlink inside
 				removed = append(removed, td)
 			}
@@ -114,4 +126,15 @@ func (s *SessionStore) Sweep() []string {
 		_ = os.Remove(pd) // only when empty
 	}
 	return removed
+}
+
+// unlock makes every directory below dir owner-writable again (an agent may have made one read-only), so the sweep
+// can remove it; symlinks are not followed (WalkDir reports them as such).
+func unlock(dir string) {
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			_ = os.Chmod(p, 0o700) //nolint:gosec // G302: directories need the x bit; 0700 is owner-only
+		}
+		return nil
+	})
 }

@@ -180,7 +180,8 @@ func loginState(agent, home string, now time.Time) (state string, ok bool) {
 		}
 	case sessiondomain.AgentCodex:
 		if fi, err := os.Stat(filepath.Join(home, ".codex", "auth.json")); err == nil && fi.Mode().IsRegular() { //nolint:gosec // G703: the CLI home
-			return "logged in (auth.json)", true
+			return "logged in (auth.json; a ChatGPT login refreshed inside the sandbox is lost: prefer " +
+				"`ai-runner cli-login codex -- --with-api-key`)", true
 		}
 	}
 	return "not logged in", false

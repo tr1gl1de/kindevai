@@ -381,7 +381,7 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	ch.Commands = withNetwork(agent, ch.Commands)
 	strict := strictEgress(d, exe, logger) // KIN-31: strict profiles run only in a verified sandbox
 	// KIN-86: a sandboxed CLI attempt gets its task's session store, so the next attempt can resume.
-	x.Egress = confiner{s: strict, sessions: sessionBinds(&cliagent.SessionStore{Root: filepath.Join(d.Path(), "cli-sessions")})}
+	x.Egress = confiner{s: strict, sessions: sessionBinds(&cliagent.SessionStore{Root: filepath.Join(resolved(d.Path()), "cli-sessions")})}
 	pr := probe.New(d.Path())
 	pr.StrictEgress = func(ctx context.Context) bool { ok, _ := strict.Supported(ctx); return ok }
 	rep := &app.Reporter{Probe: pr} // KIN-20 heartbeat, capabilities, storage

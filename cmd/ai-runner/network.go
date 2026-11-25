@@ -132,11 +132,14 @@ var _ sessionapp.Confiner = confiner{}
 func (c confiner) Confine(ctx context.Context, a sessiondomain.Assignment, dir, workdir string) (sessionapp.Sandbox, error) {
 	r := egress.BoxRequest{Dir: dir, Workdir: workdir}
 	if c.sessions != nil && a.CLI() {
-		binds, err := c.sessions(a)
-		if err != nil {
-			return nil, err
+		// Only a sandboxed run uses the store (on the host the CLI keeps its sessions in its own home).
+		if _, strict, err := c.s.StrictProfile(ctx, a.Project, a.Adapter); err == nil && strict {
+			binds, err := c.sessions(a)
+			if err != nil {
+				return nil, err
+			}
+			r.HomeBinds = binds
 		}
-		r.HomeBinds = binds
 	}
 	b, err := c.s.Confine(ctx, a.Project, a.Adapter, r)
 	if err != nil || b == nil {

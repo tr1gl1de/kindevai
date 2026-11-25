@@ -498,7 +498,16 @@ func place(r string, src source) error {
 		}
 		_ = f.Close()
 	}
-	return bind("/proc/self/fd/"+strconv.Itoa(src.fd), r+src.path, src.ro)
+	if err := bind("/proc/self/fd/"+strconv.Itoa(src.fd), r+src.path, src.ro); err != nil {
+		return err
+	}
+	if src.target != "" && !src.ro { // a store below HOME: no setuid files or devices, whatever the host mount allows
+		attr := &unix.MountAttr{Attr_set: unix.MOUNT_ATTR_NOSUID | unix.MOUNT_ATTR_NODEV}
+		if err := unix.MountSetattr(-1, r+src.path, unix.AT_RECURSIVE, attr); err != nil {
+			return fmt.Errorf("restricting %s: %w", src.path, err)
+		}
+	}
+	return nil
 }
 
 // bind binds src at dst, with every mount below it; ro makes them all read-only.

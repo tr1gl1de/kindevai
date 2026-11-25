@@ -5,6 +5,7 @@ package cliagent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,9 +36,16 @@ func TestSessionStorePrepare(t *testing.T) {
 	if err != nil || other == src {
 		t.Fatalf("another task's store %s %v", other, err)
 	}
-	for _, bad := range [][2]string{{"", "t"}, {"p", ""}, {"..", "t"}, {"p", "../x"}, {"p/q", "t"}, {".", "t"}} {
+	for _, bad := range [][2]string{{"", "t"}, {"p", ""}} {
 		if _, _, err := s.Prepare(bad[0], bad[1], domain.AgentClaude); err == nil {
 			t.Errorf("project %q task %q accepted", bad[0], bad[1])
+		}
+	}
+	// Ids that are not plain names become hashed directory names, never paths.
+	for _, odd := range [][2]string{{"..", "t"}, {"p", "../x"}, {"p/q", "t"}, {".", "t"}} {
+		src, _, err := s.Prepare(odd[0], odd[1], domain.AgentClaude)
+		if err != nil || !strings.HasPrefix(src, root+"/") || strings.Count(strings.TrimPrefix(src, root+"/"), "/") != 2 {
+			t.Errorf("project %q task %q: %s %v", odd[0], odd[1], src, err)
 		}
 	}
 	if _, _, err := s.Prepare("p", "t", "zcode"); err == nil {
@@ -66,6 +74,14 @@ func TestSessionStoreSweepsOldTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(old, "s.jsonl"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// An agent made a directory of its store read-only: the sweep still removes it.
+	locked := filepath.Join(old, "locked")
+	if err := os.MkdirAll(filepath.Join(locked, "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o500); err != nil {
 		t.Fatal(err)
 	}
 	recent, _, err := s.Prepare("p", "recent", domain.AgentClaude)

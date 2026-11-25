@@ -129,11 +129,13 @@ func (Claude) LoggedIn(home string, env []string, now time.Time) bool {
 	return err == nil && ok && !t.Expired(now)
 }
 
-// LoginEnv passes the runner's stored token (if any) as CLAUDE_CODE_OAUTH_TOKEN.
+// LoginEnv passes the runner's stored token as CLAUDE_CODE_OAUTH_TOKEN when it is usable: an unreadable or expired
+// one is left out (it would override a working login file or key; a sandboxed run without any login is refused by
+// LoggedIn instead).
 func (Claude) LoginEnv(home string) ([]string, []string, error) {
 	t, ok, err := LoadClaudeToken(home)
-	if err != nil || !ok {
-		return nil, nil, err
+	if err != nil || !ok || t.Expired(time.Now()) {
+		return nil, nil, nil //nolint:nilerr // an unusable token is no login, reported by LoggedIn and the start-up log
 	}
 	return []string{ClaudeTokenEnv + "=" + t.Value}, []string{t.Value}, nil
 }

@@ -3,11 +3,13 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/platform/db"
+	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runners/app"
 	"github.com/tr1gl1de/kindevai/internal/runners/domain"
 )
@@ -152,6 +154,43 @@ func (r *Repository) RecordEvent(ctx context.Context, e domain.AttemptEvent) err
 		return fmt.Errorf("recording runner event: %w", err)
 	}
 	return nil
+}
+
+// WorkspaceReports returns what the attempt's applied events reported about its worktree (KIN-78): a
+// workspace.prepared, and a final workspace.changes. Final is decided by decoding the body into
+// protocol.WorkspaceChanges, as the scope check does (one parser: a body the check read as interim, or could not
+// read, is never final). Reports are read newest first: the final one is normally the last.
+func (r *Repository) WorkspaceReports(ctx context.Context, runnerID, step string, fence int64) (domain.WorkspaceReports, error) {
+	var w domain.WorkspaceReports
+	conn := db.Conn(ctx, r.db)
+	err := conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM runner_attempt_events WHERE runner_id = ? AND
+		step_id = ? AND fence = ? AND outcome = 'applied' AND kind = ?)`,
+		runnerID, step, fence, protocol.EventWorkspacePrepared).Scan(&w.Prepared)
+	if err != nil {
+		return domain.WorkspaceReports{}, fmt.Errorf("reading the attempt's workspace reports: %w", err)
+	}
+	rows, err := conn.QueryContext(ctx, `SELECT body FROM runner_attempt_events WHERE runner_id = ? AND step_id = ? AND
+		fence = ? AND outcome = 'applied' AND kind = ? ORDER BY attempt_seq DESC`,
+		runnerID, step, fence, protocol.EventWorkspaceChanges)
+	if err != nil {
+		return domain.WorkspaceReports{}, fmt.Errorf("reading the attempt's changes reports: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var body []byte
+		if err := rows.Scan(&body); err != nil {
+			return domain.WorkspaceReports{}, fmt.Errorf("reading a changes report: %w", err)
+		}
+		var ch protocol.WorkspaceChanges
+		if json.Unmarshal(body, &ch) == nil && !ch.Interim {
+			w.Final = true
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return domain.WorkspaceReports{}, fmt.Errorf("reading the attempt's changes reports: %w", err)
+	}
+	return w, nil
 }
 
 // AddOutput counts n bytes of the attempt's output at now if they fit the attempt's and the total limit; it

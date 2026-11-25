@@ -120,6 +120,27 @@ func (r *memChannelRepo) RecordEvent(_ context.Context, e domain.AttemptEvent) e
 	return nil
 }
 
+func (r *memChannelRepo) WorkspaceReports(_ context.Context, runnerID, step string, fence int64) (domain.WorkspaceReports, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var w domain.WorkspaceReports
+	for _, e := range r.events {
+		if e.RunnerID != runnerID || e.Step != step || e.Fence != fence || e.Outcome != domain.OutcomeApplied {
+			continue
+		}
+		switch e.Kind {
+		case protocol.EventWorkspacePrepared:
+			w.Prepared = true
+		case protocol.EventWorkspaceChanges:
+			var ch protocol.WorkspaceChanges
+			if json.Unmarshal(e.Body, &ch) == nil && !ch.Interim {
+				w.Final = true
+			}
+		}
+	}
+	return w, nil
+}
+
 func (r *memChannelRepo) AddOutput(_ context.Context, step string, fence, n int64, l domain.OutputLimits, _ time.Time) (domain.OutputVerdict, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

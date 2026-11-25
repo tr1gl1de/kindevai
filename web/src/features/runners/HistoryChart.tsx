@@ -2,6 +2,7 @@ import { useState, type PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type { StorageSample } from "../../api/types";
 import { formatBytes, formatDateTime } from "../../ui/format";
+import "./runners.css";
 
 const HOUR = 3_600_000;
 /** Levels of KB KIN-A-26, drawn as labelled reference lines (never colour alone). */

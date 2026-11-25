@@ -1,7 +1,10 @@
 /* Plan discussion with the AI (KIN-44): mobile first, works from 320 px and in the Telegram Mini App theme. */
 .discussion {
-  margin-top: var(--space);
   min-width: 0;
+}
+/* As a page section (level 2) the base .page-section margin applies. */
+.discussion.card {
+  margin-top: var(--space);
 }
 .discussion-log {
   margin-bottom: 8px;
@@ -32,9 +35,6 @@
   border: 0;
   background: none;
 }
-.discussion-revision-current {
-  border: 2px solid var(--accent);
-}
 .discussion-revision h3,
 .discussion-revision h4 {
   margin: 0 0 8px;
@@ -51,22 +51,10 @@
   display: inline-flex;
   align-items: center;
 }
-.discussion-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
 .discussion-status .spinner,
 .discussion-busy .spinner {
   width: 14px;
   height: 14px;
-}
-.status-FAILED {
-  border-color: var(--danger);
-}
-.status-PENDING,
-.status-DELIVERED {
-  border-color: var(--warn-border);
 }
 .discussion-text {
   white-space: pre-wrap;

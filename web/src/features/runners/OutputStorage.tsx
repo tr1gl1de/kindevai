@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import type { RunnerOutputStorage, StorageMachine } from "../../api/types";
 import { formatBytes, formatDateTime } from "../../ui/format";
+import "./runners.css";
 
 // Runner output stored in the Control Plane's database against its limit (KIN-52, KIN-59, KB KIN-A-18).
 

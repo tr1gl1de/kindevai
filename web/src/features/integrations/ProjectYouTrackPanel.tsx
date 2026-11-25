@@ -21,6 +21,7 @@ import {
   type ProjectYouTrack,
   type TaskStateName,
 } from "./intakeApi";
+import "./integrations.css";
 
 const knownReasons = ["unknown_user", "not_allowed", "tag_not_allowed", "issue_not_found", "other_project", "invalid_issue", "unavailable"];
 

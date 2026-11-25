@@ -1,0 +1,26 @@
+/* Approval Center (KIN-24): the risk policy rules. */
+.policy-rules {
+  display: grid;
+  gap: var(--space);
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+textarea {
+  min-height: 8rem;
+  resize: vertical;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+}
+.code-value {
+  font-family: ui-monospace, monospace;
+  word-break: break-all;
+}
+.repo-github {
+  font-weight: normal;
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+}
+.repo-github p {
+  margin: 0;
+  font-size: 0.9rem;
+}
+} /* closes .policy-rules (its nested rules above were left unclosed) */

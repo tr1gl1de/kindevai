@@ -21,6 +21,7 @@ import {
   useRequestNetworkTest,
   useSaveNetworkProfile,
 } from "./api";
+import "./network.css";
 
 /** CLI roles a profile can be assigned to (the most specific level). */
 export const cliRoles = ["claude", "codex", "zcode"] as const;

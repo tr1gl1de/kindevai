@@ -22,6 +22,7 @@ import {
 } from "./api";
 import { LimitsSection } from "../planDiscussion/LimitsSection";
 import { BindingsEditor } from "./BindingsEditor";
+import "./agents.css";
 
 /** Agent Management (Owner): global CLI switches, emergency stop, global role bindings and CLI cool-downs. */
 export function AgentsPage() {

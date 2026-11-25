@@ -7,6 +7,7 @@ import { errorMessage } from "../../ui/errors";
 import { useNotify } from "../../ui/notify";
 import { useProjectAgents, useSetAgentSwitch } from "./api";
 import { BindingsEditor } from "./BindingsEditor";
+import "./agents.css";
 
 /** A project's AI CLI allowlist and role binding overrides (Owner or the project's admin). */
 export function ProjectAgentsPanel({ projectId }: { projectId: string }) {

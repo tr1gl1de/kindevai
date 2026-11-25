@@ -10,6 +10,7 @@ import { formatDateTime } from "../../ui/format";
 import { useProjects } from "../projects/api";
 import { useAuditEvents, useAuditKinds } from "./api";
 import { isKnownKind, kindKey } from "./kinds";
+import "./audit.css";
 
 /** Filter fields as kept in the URL (dates as YYYY-MM-DD in the viewer's time zone). */
 interface Draft {

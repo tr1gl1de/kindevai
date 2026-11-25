@@ -3,6 +3,7 @@ import { Link } from "react-router";
 import { ErrorState } from "../../ui/feedback";
 import { errorMessage } from "../../ui/errors";
 import { useRunners } from "../runners/api";
+import "./dashboard.css";
 
 /** Overview card (KIN-55): live runner counts — online, unreachable, waiting for approval — refreshed every 30 s. */
 export function RunnersCard() {

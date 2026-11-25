@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { LanguageSwitcher } from "../../i18n/LanguageSwitcher";
+import "./identity.css";
 
 /** Centered single-column layout for the wizard and the sign-in page. */
 export function AuthLayout({ children }: { children: ReactNode }) {

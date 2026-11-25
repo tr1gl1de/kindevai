@@ -20,7 +20,7 @@ type fakeIssueSync struct {
 	pub      Publication
 }
 
-func (f *fakeIssueSync) Comment(_ context.Context, key, _, issueID, text string) error {
+func (f *fakeIssueSync) Comment(_ context.Context, key, _, _, issueID, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.comments == nil {
@@ -37,7 +37,7 @@ func (f *fakeIssueSync) State(_ context.Context, key, _, _, _, state string) err
 	return nil
 }
 
-func (f *fakeIssueSync) Article(_ context.Context, key, _, _, article, section, _ string) error {
+func (f *fakeIssueSync) Article(_ context.Context, key, _, _, _, article, section, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.articles = append(f.articles, key+" "+article+" "+section)

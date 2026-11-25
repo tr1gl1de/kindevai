@@ -101,3 +101,18 @@ func (r *Repository) TaskPublication(ctx context.Context, taskID string) (domain
 	p.LastError = last.String
 	return p, nil
 }
+
+// FollowsFailure reports whether key is a published write of a task whose latest failed write was enqueued before it
+// (rowid order = enqueue order) with no other published write in between.
+func (r *Repository) FollowsFailure(ctx context.Context, key string) (bool, error) {
+	var ok bool
+	err := r.conn(ctx).QueryRowContext(ctx, `SELECT coalesce((
+		  SELECT f.rowid < w.rowid AND NOT EXISTS (SELECT 1 FROM youtrack_writes x WHERE x.task_id = w.task_id
+		    AND x.status = 'published' AND x.rowid > f.rowid AND x.rowid < w.rowid)
+		  FROM youtrack_writes w JOIN youtrack_writes f ON f.task_id = w.task_id AND f.status = 'failed'
+		  WHERE w.key = ? ORDER BY f.rowid DESC LIMIT 1), 0)`, key).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("reading youtrack writes: %w", err)
+	}
+	return ok, nil
+}

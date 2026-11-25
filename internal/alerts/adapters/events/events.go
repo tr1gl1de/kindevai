@@ -366,6 +366,49 @@ func (h Handlers) TaskUnblocked(ctx context.Context, d messaging.Delivery) error
 	return h.Svc.ResolveKey(ctx, TaskDedupKey(p.TaskID))
 }
 
+// YouTrackWriteDedupKey groups a task's failed YouTrack write-backs until one of its writes is published (KIN-107).
+func YouTrackWriteDedupKey(taskID string) string { return "youtrack/task/" + taskID + "/write" }
+
+// YouTrackWriteFailed handles alerts.youtrack_write_failed {projectId, taskId, issue, kind, code}: a project alert
+// naming the issue and why the write was given up.
+func (h Handlers) YouTrackWriteFailed(ctx context.Context, d messaging.Delivery) error {
+	var p struct {
+		ProjectID string `json:"projectId"`
+		TaskID    string `json:"taskId"`
+		Issue     string `json:"issue"`
+		Kind      string `json:"kind"`
+		Code      string `json:"code"`
+	}
+	if err := decode(d, &p); err != nil {
+		return err
+	}
+	if p.ProjectID == "" || p.TaskID == "" {
+		return messaging.Permanent(errors.New("youtrack_write_failed: no project or task"))
+	}
+	subject := p.Issue
+	if subject == "" {
+		subject = p.TaskID
+	}
+	return permanent(h.Svc.Raise(ctx, d.Key, domain.Occurrence{ProjectID: p.ProjectID, Kind: domain.KindYouTrackWriteFailed,
+		Severity: domain.SeverityWarning, DedupKey: clip(YouTrackWriteDedupKey(p.TaskID)), Subject: clip(subject),
+		Details: map[string]string{"taskId": clip(p.TaskID), "issue": clip(p.Issue), "write": clip(p.Kind),
+			"code": clip(p.Code)}}))
+}
+
+// YouTrackWritePublished handles alerts.youtrack_write_published {taskId}: a later write of the task was published.
+func (h Handlers) YouTrackWritePublished(ctx context.Context, d messaging.Delivery) error {
+	var p struct {
+		TaskID string `json:"taskId"`
+	}
+	if err := decode(d, &p); err != nil {
+		return err
+	}
+	if p.TaskID == "" {
+		return messaging.Permanent(errors.New("youtrack_write_published: no taskId"))
+	}
+	return h.Svc.ResolveKey(ctx, clip(YouTrackWriteDedupKey(p.TaskID)))
+}
+
 // CLIDedupKey groups a runner's CLI hold alerts until it works again or the Owner marks it ready (KIN-83).
 func CLIDedupKey(runnerID, agent string) string { return "cli/" + runnerID + "/" + agent }
 

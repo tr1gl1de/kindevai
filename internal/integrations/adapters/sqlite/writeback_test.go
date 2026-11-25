@@ -85,3 +85,32 @@ func TestIssueWritesAndPublication(t *testing.T) {
 		t.Fatalf("no writes = %+v", p)
 	}
 }
+
+// KIN-107: only the first write published after the task's latest failure (in enqueue order) closes its alert.
+func TestFollowsFailure(t *testing.T) {
+	t.Parallel()
+	r := sqlite.New(testDB(t))
+	ctx := t.Context()
+	save := func(key, task string, s domain.WriteStatus) {
+		t.Helper()
+		if err := r.SaveIssueWrite(ctx, domain.IssueWrite{Key: key, TaskID: task, IssueID: "KIN-7", Kind: domain.WriteComment,
+			CreatedAt: t0}); err != nil {
+			t.Fatal(err)
+		}
+		if s != domain.WritePending {
+			if err := r.MarkIssueWrite(ctx, key, s, "", 1, t0); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	save("before", "t1", domain.WritePublished) // enqueued before the failure
+	save("fail", "t1", domain.WriteFailed)
+	save("other", "t2", domain.WritePublished) // another task's write does not count
+	save("next", "t1", domain.WritePublished)
+	save("later", "t1", domain.WritePublished)
+	for key, want := range map[string]bool{"before": false, "next": true, "later": false, "other": false, "nope": false} {
+		if got, err := r.FollowsFailure(ctx, key); err != nil || got != want {
+			t.Errorf("FollowsFailure(%s) = %v, %v; want %v", key, got, err, want)
+		}
+	}
+}

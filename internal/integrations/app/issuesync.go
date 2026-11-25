@@ -19,6 +19,20 @@ import (
 // Knowledge Base section. The message key is the write's correlation id.
 const TopicYouTrackWrite = "youtrack.write"
 
+// Alert Center hooks of the write-back (KIN-107): a write marked failed raises a project alert; the next write of
+// the task that is published closes it.
+const (
+	TopicYouTrackWriteFailed    = "alerts.youtrack_write_failed"
+	TopicYouTrackWritePublished = "alerts.youtrack_write_published"
+)
+
+// WriteOrderingKey is the outbox ordering key of a task's writes: they reach YouTrack in the order they were
+// enqueued (the final comment never before the state change of the same transition).
+func WriteOrderingKey(taskID string) string { return "youtrack/task/" + taskID }
+
+// AlertOrderingKey orders a task's write-back alerts, so a close never overtakes the failure it closes.
+func AlertOrderingKey(taskID string) string { return "youtrack-write/task/" + taskID }
+
 // MaxArticleAttempts bounds the read → recompute → revision check rounds of one article write.
 const MaxArticleAttempts = 3
 
@@ -46,6 +60,9 @@ type WriteStore interface {
 	SaveIssueWrite(ctx context.Context, w domain.IssueWrite) error
 	MarkIssueWrite(ctx context.Context, key string, s domain.WriteStatus, code string, attempts int, at time.Time) error
 	TaskPublication(ctx context.Context, taskID string) (domain.Publication, error)
+	// FollowsFailure reports whether the write key is the first of its task published after the task's latest
+	// failed write (in enqueue order): the publication that closes the task's write-back alert (KIN-107).
+	FollowsFailure(ctx context.Context, key string) (bool, error)
 }
 
 // IssueSync is the write-back: the request methods run in the caller's transaction (the workflow's task change)
@@ -55,7 +72,9 @@ type IssueSync struct {
 	Client     SyncClient
 	Outbox     Outbox
 	Store      WriteStore
-	Now        func() time.Time
+	// Tx (optional) records a delivery's outcome and its alert atomically.
+	Tx  TxRunner
+	Now func() time.Time
 	// MaxAttempts must equal the outbox's MaxAttempts (default: the messaging default): the last attempt's failure
 	// fails the write.
 	MaxAttempts int
@@ -69,14 +88,15 @@ func (s *IssueSync) maxAttempts() int {
 }
 
 type writePayload struct {
-	Kind    domain.WriteKind `json:"kind"`
-	TaskID  string           `json:"taskId"`
-	Issue   string           `json:"issue"`
-	Text    string           `json:"text,omitempty"`
-	Command string           `json:"command,omitempty"`
-	Article string           `json:"article,omitempty"`
-	Section string           `json:"section,omitempty"`
-	Content string           `json:"content,omitempty"`
+	Kind      domain.WriteKind `json:"kind"`
+	TaskID    string           `json:"taskId"`
+	ProjectID string           `json:"projectId,omitempty"` // KIN-107: the project of the failure alert
+	Issue     string           `json:"issue"`
+	Text      string           `json:"text,omitempty"`
+	Command   string           `json:"command,omitempty"`
+	Article   string           `json:"article,omitempty"`
+	Section   string           `json:"section,omitempty"`
+	Content   string           `json:"content,omitempty"`
 }
 
 // Bounds of a write (the outbox payload holds at most messaging.MaxPayloadBytes).
@@ -85,6 +105,7 @@ const (
 	MaxSectionBytes = 1 << 10
 	MaxContentBytes = 24 << 10
 	maxWriteKey     = 200
+	maxAlertKey     = 256
 )
 
 var articleRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,19}-A-[1-9][0-9]{0,9}$`)
@@ -98,13 +119,14 @@ func (s *IssueSync) now() time.Time {
 
 // Comment enqueues a comment on the task's issue; a text over MaxCommentBytes is cut (a comment never fails the
 // task change that writes it).
-func (s *IssueSync) Comment(ctx context.Context, key, taskID, issueID, text string) error {
+func (s *IssueSync) Comment(ctx context.Context, key, taskID, projectID, issueID, text string) error {
 	code := ""
 	if strings.TrimSpace(text) == "" {
 		code = "invalid_text"
 	}
 	text = clip(text, MaxCommentBytes)
-	return s.enqueue(ctx, key, writePayload{Kind: domain.WriteComment, TaskID: taskID, Issue: issueID, Text: text}, code)
+	return s.enqueue(ctx, key, writePayload{Kind: domain.WriteComment, TaskID: taskID, ProjectID: projectID, Issue: issueID,
+		Text: text}, code)
 }
 
 // State enqueues the YouTrack state the project maps taskState to; an unmapped state or an unbound project writes
@@ -121,11 +143,12 @@ func (s *IssueSync) State(ctx context.Context, key, taskID, projectID, issueID, 
 	if cmd == "" {
 		return nil
 	}
-	return s.enqueue(ctx, key, writePayload{Kind: domain.WriteState, TaskID: taskID, Issue: issueID, Command: cmd}, "")
+	return s.enqueue(ctx, key, writePayload{Kind: domain.WriteState, TaskID: taskID, ProjectID: projectID, Issue: issueID,
+		Command: cmd}, "")
 }
 
 // Article enqueues a Knowledge Base section (replaced or added) for the task.
-func (s *IssueSync) Article(ctx context.Context, key, taskID, issueID, articleID, section, content string) error {
+func (s *IssueSync) Article(ctx context.Context, key, taskID, projectID, issueID, articleID, section, content string) error {
 	code := ""
 	switch {
 	case !articleRE.MatchString(articleID):
@@ -135,7 +158,8 @@ func (s *IssueSync) Article(ctx context.Context, key, taskID, issueID, articleID
 	case strings.TrimSpace(content) == "" || len(content) > MaxContentBytes:
 		code = "invalid_content"
 	}
-	return s.enqueue(ctx, key, writePayload{Kind: domain.WriteArticle, TaskID: taskID, Issue: issueID, Article: articleID,
+	return s.enqueue(ctx, key, writePayload{Kind: domain.WriteArticle, TaskID: taskID, ProjectID: projectID, Issue: issueID,
+		Article: articleID,
 		Section: strings.TrimSpace(section), Content: content}, code)
 }
 
@@ -170,10 +194,13 @@ func (s *IssueSync) enqueue(ctx context.Context, key string, p writePayload, rej
 		return err
 	}
 	if reject != "" {
-		return s.Store.MarkIssueWrite(ctx, key, domain.WriteFailed, reject, 0, now)
+		if err := s.Store.MarkIssueWrite(ctx, key, domain.WriteFailed, reject, 0, now); err != nil {
+			return err
+		}
+		return s.alertFailed(ctx, key, p, reject)
 	}
 	if err := s.Outbox.Enqueue(ctx, messaging.Message{Adapter: AdapterYouTrack, Topic: TopicYouTrackWrite, Key: key,
-		Payload: b}); err != nil {
+		Payload: b, OrderingKey: WriteOrderingKey(p.TaskID)}); err != nil {
 		return fmt.Errorf("enqueueing %s: %w", TopicYouTrackWrite, err)
 	}
 	return nil
@@ -188,12 +215,12 @@ var errConflict = errors.New("youtrack article changed while writing")
 func (s *IssueSync) HandleWrite(ctx context.Context, d messaging.Delivery) error {
 	var p writePayload
 	if err := json.Unmarshal(d.Payload, &p); err != nil {
-		return messaging.Permanent(errors.New("malformed youtrack write payload"))
+		return s.fail(ctx, d, writePayload{}, "malformed", errors.New("malformed youtrack write payload"))
 	}
 	set, err := s.Connection.YouTrackSettings(ctx)
 	switch {
 	case errors.Is(err, domain.ErrNotConfigured), errors.Is(err, domain.ErrSecretNotSet):
-		return s.fail(ctx, d, "not_configured", fmt.Errorf("youtrack: %w", err))
+		return s.fail(ctx, d, p, "not_configured", fmt.Errorf("youtrack: %w", err))
 	case err != nil:
 		return err
 	}
@@ -205,12 +232,63 @@ func (s *IssueSync) HandleWrite(ctx context.Context, d messaging.Delivery) error
 	case domain.WriteArticle:
 		err = s.article(ctx, set, p)
 	default:
-		return s.fail(ctx, d, "malformed", fmt.Errorf("youtrack write kind %q", p.Kind))
+		return s.fail(ctx, d, p, "malformed", fmt.Errorf("youtrack write kind %q", p.Kind))
 	}
 	if err != nil {
-		return s.classify(ctx, d, err)
+		return s.classify(ctx, d, p, err)
 	}
-	return s.Store.MarkIssueWrite(ctx, d.Key, domain.WritePublished, "", d.Attempt, s.now())
+	return s.inTx(ctx, func(ctx context.Context) error {
+		if err := s.Store.MarkIssueWrite(ctx, d.Key, domain.WritePublished, "", d.Attempt, s.now()); err != nil {
+			return err
+		}
+		return s.alertPublished(ctx, d.Key, p)
+	})
+}
+
+func (s *IssueSync) inTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	if s.Tx == nil {
+		return fn(ctx)
+	}
+	return s.Tx.InTx(ctx, fn)
+}
+
+// alertFailed raises the Alert Center's project alert of a failed write (KIN-107). A write enqueued before the
+// payload carried its project raises none.
+func (s *IssueSync) alertFailed(ctx context.Context, key string, p writePayload, code string) error {
+	if p.ProjectID == "" {
+		return nil
+	}
+	return s.alert(ctx, TopicYouTrackWriteFailed, "youtrack/"+key+"/failed", p.TaskID, map[string]string{
+		"projectId": p.ProjectID, "taskId": p.TaskID, "issue": clip(p.Issue, 64), "kind": string(p.Kind), "code": code})
+}
+
+// alertPublished closes the task's write-back alert when this is the first write published after its latest
+// failure; a write enqueued before that failure does not close it.
+func (s *IssueSync) alertPublished(ctx context.Context, key string, p writePayload) error {
+	if p.ProjectID == "" {
+		return nil
+	}
+	closes, err := s.Store.FollowsFailure(ctx, key)
+	if err != nil || !closes {
+		return err
+	}
+	return s.alert(ctx, TopicYouTrackWritePublished, "youtrack/"+key+"/published", p.TaskID,
+		map[string]string{"projectId": p.ProjectID, "taskId": p.TaskID})
+}
+
+func (s *IssueSync) alert(ctx context.Context, topic, key, taskID string, body map[string]string) error {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	if len(key) > maxAlertKey { // the write key is at most maxWriteKey; keep the alert's within the outbox limit
+		key = key[:maxAlertKey]
+	}
+	if err := s.Outbox.Enqueue(ctx, messaging.Message{Adapter: AdapterAlerts, Topic: topic, Key: key, Payload: b,
+		OrderingKey: AlertOrderingKey(taskID)}); err != nil {
+		return fmt.Errorf("enqueueing %s: %w", topic, err)
+	}
+	return nil
 }
 
 func (s *IssueSync) comment(ctx context.Context, set YouTrackSettings, key string, p writePayload) error {
@@ -252,34 +330,44 @@ func (s *IssueSync) article(ctx context.Context, set YouTrackSettings, p writePa
 	return errConflict
 }
 
-// fail marks the write failed and drops the message; if that cannot be recorded, the delivery is retried.
-func (s *IssueSync) fail(ctx context.Context, d messaging.Delivery, code string, cause error) error {
-	if err := s.Store.MarkIssueWrite(ctx, d.Key, domain.WriteFailed, code, d.Attempt, s.now()); err != nil &&
-		!errors.Is(err, domain.ErrNotFound) {
+// fail marks the write failed, raises its alert and drops the message; if that cannot be recorded, the delivery is
+// retried.
+func (s *IssueSync) fail(ctx context.Context, d messaging.Delivery, p writePayload, code string, cause error) error {
+	err := s.inTx(ctx, func(ctx context.Context) error {
+		err := s.Store.MarkIssueWrite(ctx, d.Key, domain.WriteFailed, code, d.Attempt, s.now())
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil // not tracked (a write enqueued before its record): nothing to show or alert
+		}
+		if err != nil {
+			return err
+		}
+		return s.alertFailed(ctx, d.Key, p, code)
+	})
+	if err != nil {
 		return fmt.Errorf("recording failure %s: %w", code, err)
 	}
 	return messaging.Permanent(cause)
 }
 
 // classify fails permanently on what a retry cannot fix; anything else stays pending with its error and is retried.
-func (s *IssueSync) classify(ctx context.Context, d messaging.Delivery, err error) error {
+func (s *IssueSync) classify(ctx context.Context, d messaging.Delivery, p writePayload, err error) error {
 	var se *StatusError
 	switch {
 	case errors.Is(err, errConflict):
-		return s.fail(ctx, d, "conflict", err)
+		return s.fail(ctx, d, p, "conflict", err)
 	case errors.As(err, &se) && (se.Status == 401 || se.Status == 403):
-		return s.fail(ctx, d, "unauthorized", err)
+		return s.fail(ctx, d, p, "unauthorized", err)
 	case errors.As(err, &se) && se.Permanent():
-		return s.fail(ctx, d, fmt.Sprintf("http_%d", se.Status), err)
+		return s.fail(ctx, d, p, fmt.Sprintf("http_%d", se.Status), err)
 	case errors.Is(err, domain.ErrIssueNotFound):
-		return s.fail(ctx, d, "not_found", err)
+		return s.fail(ctx, d, p, "not_found", err)
 	}
 	code := "unavailable"
 	if errors.As(err, &se) {
 		code = fmt.Sprintf("http_%d", se.Status)
 	}
 	if d.Attempt >= s.maxAttempts() {
-		return s.fail(ctx, d, code, err) // the outbox gives up now: the write is not "awaiting publication" any more
+		return s.fail(ctx, d, p, code, err) // the outbox gives up now: the write is not "awaiting publication" any more
 	}
 	if merr := s.Store.MarkIssueWrite(ctx, d.Key, domain.WritePending, code, d.Attempt, s.now()); merr != nil &&
 		!errors.Is(merr, domain.ErrNotFound) {

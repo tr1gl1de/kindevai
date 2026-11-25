@@ -20,6 +20,12 @@ type Message struct {
 	// does not send twice; empty means a random key assigned now, stable across retries.
 	Key     string
 	Payload []byte // JSON without secrets, at most MaxPayloadBytes
+	// OrderingKey (optional) serialises the adapter's messages that share it (KIN-107): one is delivered only after
+	// every earlier one with the same key is done or dead, so they reach the system in enqueue order. Different
+	// keys and unordered messages are delivered concurrently as before. A message backing off after a transient
+	// failure holds its successors back for its whole retry schedule. The order holds for first deliveries: Retry of
+	// a dead message delivers it after the later ones that already went (it does hold back those enqueued since).
+	OrderingKey string
 }
 
 // Delivery is a message handed to a handler.
@@ -85,11 +91,16 @@ func (o *Outbox) Enqueue(ctx context.Context, m Message) error {
 			return err
 		}
 	}
+	if m.OrderingKey != "" {
+		if err := checkField("ordering key", m.OrderingKey, maxKeyBytes); err != nil {
+			return err
+		}
+	}
 	p, err := outboxPayload(m.Payload)
 	if err != nil {
 		return fmt.Errorf("outbox %s: %w", m.Topic, err)
 	}
-	if _, err := o.q.insert(ctx, m.Adapter, m.Topic, m.Key, p); err != nil {
+	if _, err := o.q.insert(ctx, m.Adapter, m.Topic, m.Key, p, m.OrderingKey); err != nil {
 		return fmt.Errorf("outbox %s: %w", m.Topic, err)
 	}
 	return nil

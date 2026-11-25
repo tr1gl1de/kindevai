@@ -69,6 +69,7 @@ const (
 	KindTaskBlocked            Kind = "task_blocked"             // a task is BLOCKED
 	KindRunnerOutputFull       Kind = "runner_output_full"       // KIN-59: runner output is dropped, the Control Plane's output storage is full
 	KindCLIHeld                Kind = "cli_held"                 // KIN-83: a runner's AI CLI is logged out, refused by billing or keeps hitting its limit
+	KindYouTrackWriteFailed    Kind = "youtrack_write_failed"    // KIN-107: a task's write-back to YouTrack was given up
 )
 
 // Limits of stored alert fields.

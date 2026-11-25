@@ -2,7 +2,9 @@ package app_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -101,6 +103,26 @@ type writeStore struct {
 	mu     sync.Mutex
 	states map[string]domain.StateMap
 	writes map[string]domain.IssueWrite
+	order  []string // keys in enqueue order
+}
+
+func (s *writeStore) FollowsFailure(_ context.Context, key string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	taskID, failed, between := s.writes[key].TaskID, -1, false
+	for i, k := range s.order {
+		w := s.writes[k]
+		switch {
+		case k == key:
+			return failed >= 0 && !between && failed < i, nil
+		case w.TaskID != taskID:
+		case w.Status == domain.WriteFailed:
+			failed, between = i, false
+		case w.Status == domain.WritePublished:
+			between = true
+		}
+	}
+	return false, nil
 }
 
 func (s *writeStore) StateMap(_ context.Context, projectID string) (domain.StateMap, error) {
@@ -117,6 +139,7 @@ func (s *writeStore) SaveIssueWrite(_ context.Context, w domain.IssueWrite) erro
 	if _, ok := s.writes[w.Key]; !ok {
 		w.Status = domain.WritePending
 		s.writes[w.Key] = w
+		s.order = append(s.order, w.Key)
 	}
 	return nil
 }
@@ -186,17 +209,17 @@ func TestIssueSyncCommentThroughTheOutboxIsIdempotent(t *testing.T) {
 	t.Parallel()
 	s, c, _, q := issueSync(ytConn{})
 	ctx := t.Context()
-	if err := s.Comment(ctx, "task/t1/v3/plan", "t1", "KIN-7", "Plan revision 1"); err != nil {
+	if err := s.Comment(ctx, "task/t1/v3/plan", "t1", "p1", "KIN-7", "Plan revision 1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Comment(ctx, "task/t1/v3/bad", "t1", "kin-x", "x"); err != nil {
+	if err := s.Comment(ctx, "task/t1/v3/bad", "t1", "p1", "kin-x", "x"); err != nil {
 		t.Fatalf("a malformed issue id must not fail the caller: %v", err)
 	}
 	if len(c.comments) != 0 {
 		t.Fatal("YouTrack was called inline")
 	}
 	m := q.msgs[0]
-	if len(q.msgs) != 1 || m.Adapter != app.AdapterYouTrack || m.Topic != app.TopicYouTrackWrite || m.Key != "task/t1/v3/plan" {
+	if len(messagesOf(q, app.TopicYouTrackWrite)) != 1 || m.Adapter != app.AdapterYouTrack || m.Topic != app.TopicYouTrackWrite || m.Key != "task/t1/v3/plan" {
 		t.Fatalf("messages = %+v", q.msgs)
 	}
 	if p, _ := s.Publication(ctx, "t1"); p != (domain.Publication{Pending: 1, Failed: 1, LastError: "invalid_issue"}) {
@@ -251,13 +274,13 @@ func TestIssueSyncArticleChecksTheRevisionBeforeWriting(t *testing.T) {
 	t.Parallel()
 	s, c, _, q := issueSync(ytConn{})
 	ctx := t.Context()
-	if err := s.Article(ctx, "task/t1/v9/article/KIN-A-19", "t1", "KIN-7", "KIN-A-19", "KIN-38", "Write-back."); err != nil {
+	if err := s.Article(ctx, "task/t1/v9/article/KIN-A-19", "t1", "p1", "KIN-7", "KIN-A-19", "KIN-38", "Write-back."); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Article(ctx, "k", "t1", "KIN-7", "../admin", "S", "x"); err != nil {
+	if err := s.Article(ctx, "k", "t1", "p1", "KIN-7", "../admin", "S", "x"); err != nil {
 		t.Fatalf("a malformed article id must not fail the caller: %v", err)
 	}
-	if len(q.msgs) != 1 {
+	if len(messagesOf(q, app.TopicYouTrackWrite)) != 1 {
 		t.Fatalf("a malformed article was enqueued: %+v", q.msgs)
 	}
 	c.race = 1 // a person edits the article between our read and our check
@@ -277,7 +300,7 @@ func TestIssueSyncArticleChecksTheRevisionBeforeWriting(t *testing.T) {
 	}
 
 	s2, c2, st2, q2 := issueSync(ytConn{})
-	if err := s2.Article(ctx, "task/t2/v1/article/KIN-A-19", "t2", "KIN-8", "KIN-A-19", "S", "x"); err != nil {
+	if err := s2.Article(ctx, "task/t2/v1/article/KIN-A-19", "t2", "p1", "KIN-8", "KIN-A-19", "S", "x"); err != nil {
 		t.Fatal(err)
 	}
 	c2.race = 100
@@ -296,7 +319,7 @@ func TestIssueSyncRetriesWhileYouTrackIsDown(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	s, c, st, q := issueSync(ytConn{})
-	if err := s.Comment(ctx, "task/t1/v3/final", "t1", "KIN-7", "Done"); err != nil {
+	if err := s.Comment(ctx, "task/t1/v3/final", "t1", "p1", "KIN-7", "Done"); err != nil {
 		t.Fatal(err)
 	}
 	c.err = &app.StatusError{Status: 503}
@@ -323,7 +346,7 @@ func TestIssueSyncRetriesWhileYouTrackIsDown(t *testing.T) {
 	}
 
 	s2, _, st2, q2 := issueSync(ytConn{err: domain.ErrNotConfigured})
-	if err := s2.Comment(ctx, "task/t3/v1/final", "t3", "KIN-9", "Done"); err != nil {
+	if err := s2.Comment(ctx, "task/t3/v1/final", "t3", "p1", "KIN-9", "Done"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s2.HandleWrite(ctx, deliveries(q2, 1)[0]); !messaging.IsPermanent(err) {
@@ -340,10 +363,10 @@ func TestIssueSyncBounds(t *testing.T) {
 	t.Parallel()
 	s, _, _, q := issueSync(ytConn{})
 	ctx := t.Context()
-	if err := s.Comment(ctx, "k1", "t1", "KIN-7", strings.Repeat("é", app.MaxCommentBytes)); err != nil {
+	if err := s.Comment(ctx, "k1", "t1", "p1", "KIN-7", strings.Repeat("é", app.MaxCommentBytes)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Article(ctx, "k2", "t1", "KIN-7", "KIN-A-1", "S", strings.Repeat("<&>\"", app.MaxContentBytes/4)); err != nil {
+	if err := s.Article(ctx, "k2", "t1", "p1", "KIN-7", "KIN-A-1", "S", strings.Repeat("<&>\"", app.MaxContentBytes/4)); err != nil {
 		t.Fatal(err)
 	}
 	for _, m := range q.msgs {
@@ -351,13 +374,188 @@ func TestIssueSyncBounds(t *testing.T) {
 			t.Fatalf("%s: payload %d bytes", m.Key, len(m.Payload))
 		}
 	}
-	if err := s.Article(ctx, "k3", "t1", "KIN-7", "KIN-A-1", "S", strings.Repeat("x", app.MaxContentBytes+1)); err != nil {
+	if err := s.Article(ctx, "k3", "t1", "p1", "KIN-7", "KIN-A-1", "S", strings.Repeat("x", app.MaxContentBytes+1)); err != nil {
 		t.Fatal(err)
 	}
-	if len(q.msgs) != 2 {
-		t.Fatalf("an oversized article was enqueued: %d messages", len(q.msgs))
+	if n := len(messagesOf(q, app.TopicYouTrackWrite)); n != 2 {
+		t.Fatalf("an oversized article was enqueued: %d messages", n)
 	}
 	if p, _ := s.Publication(ctx, "t1"); p.Failed != 1 || p.LastError != "invalid_content" {
 		t.Fatalf("publication = %+v", p)
+	}
+}
+
+func writeDelivery(q *queue, key string, attempt int) messaging.Delivery {
+	for _, d := range deliveries(q, attempt) {
+		if d.Topic == app.TopicYouTrackWrite && d.Key == key {
+			return d
+		}
+	}
+	panic("no write " + key)
+}
+
+func messagesOf(q *queue, topic string) []messaging.Message {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	var out []messaging.Message
+	for _, m := range q.msgs {
+		if m.Topic == topic {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// KIN-107 AC3: all writes of one task share an ordering key, so the outbox delivers them in enqueue order: the final
+// comment never lands before the state change enqueued with it.
+func TestIssueSyncWritesOfATaskAreOrdered(t *testing.T) {
+	t.Parallel()
+	s, _, _, q := issueSync(ytConn{})
+	ctx := t.Context()
+	if err := s.State(ctx, "task/t1/v4/state", "t1", "p2", "KIN-7", "RUNNING"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Comment(ctx, "task/t1/v4/final", "t1", "p2", "KIN-7", "Done"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Article(ctx, "task/t1/e1/article/0", "t1", "p2", "KIN-7", "KIN-A-19", "S", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Comment(ctx, "task/t2/v1/final", "t2", "p2", "KIN-8", "Done"); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.msgs) != 4 {
+		t.Fatalf("messages = %+v", q.msgs)
+	}
+	for _, m := range q.msgs[:3] {
+		if m.OrderingKey != app.WriteOrderingKey("t1") {
+			t.Fatalf("%s ordering key = %q", m.Key, m.OrderingKey)
+		}
+	}
+	if q.msgs[3].OrderingKey != app.WriteOrderingKey("t2") || app.WriteOrderingKey("t1") == app.WriteOrderingKey("t2") {
+		t.Fatalf("another task shares the ordering key: %q", q.msgs[3].OrderingKey)
+	}
+}
+
+// KIN-107 AC2: a write marked failed (rejected at enqueue, conflict, unauthorized, attempts exhausted) raises a
+// project alert in the Alert Center; the next write of the task that is published closes it. Both alert messages
+// share the task's ordering key, so a close never overtakes the failure it closes.
+func TestIssueSyncFailedWriteRaisesAnAlertTheNextPublicationClosesIt(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, c, _, q := issueSync(ytConn{})
+	if err := s.Comment(ctx, "task/t1/v3/plan", "t1", "p1", "KIN-7", "Plan"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.HandleWrite(ctx, deliveries(q, 1)[0]); err != nil { // nothing failed yet: no alert at all
+		t.Fatal(err)
+	}
+	if n := len(q.msgs); n != 1 {
+		t.Fatalf("a publication without a failure enqueued alerts: %+v", q.msgs[1:])
+	}
+	if err := s.Comment(ctx, "task/t1/v4/final", "t1", "p1", "KIN-7", "Done"); err != nil {
+		t.Fatal(err)
+	}
+	c.err = &app.StatusError{Status: 401}
+	if err := s.HandleWrite(ctx, deliveries(q, 1)[1]); !messaging.IsPermanent(err) {
+		t.Fatalf("unauthorized = %v", err)
+	}
+	failed := messagesOf(q, app.TopicYouTrackWriteFailed)
+	if len(failed) != 1 || failed[0].Adapter != app.AdapterAlerts || failed[0].OrderingKey != app.AlertOrderingKey("t1") {
+		t.Fatalf("failure alerts = %+v", failed)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(failed[0].Payload, &body); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"projectId": "p1", "taskId": "t1", "issue": "KIN-7", "kind": "comment", "code": "unauthorized"}
+	if !maps.Equal(body, want) {
+		t.Fatalf("failure alert = %v, want %v", body, want)
+	}
+
+	c.err = nil
+	if err := s.Comment(ctx, "task/t1/v5/note", "t1", "p1", "KIN-7", "Again"); err != nil {
+		t.Fatal(err)
+	}
+	ds := deliveries(q, 1)
+	if err := s.HandleWrite(ctx, ds[len(ds)-1]); err != nil {
+		t.Fatal(err)
+	}
+	closed := messagesOf(q, app.TopicYouTrackWritePublished)
+	if len(closed) != 1 || closed[0].OrderingKey != app.AlertOrderingKey("t1") ||
+		!strings.Contains(string(closed[0].Payload), `"taskId":"t1"`) {
+		t.Fatalf("close alerts = %+v", closed)
+	}
+
+	// Rejected at enqueue (in the caller's transaction) and exhausted attempts alert too.
+	s2, c2, _, q2 := issueSync(ytConn{})
+	if err := s2.Comment(ctx, "task/t2/v1/bad", "t2", "p1", "kin-x", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.Comment(ctx, "task/t2/v2/final", "t2", "p1", "KIN-8", "x"); err != nil {
+		t.Fatal(err)
+	}
+	c2.err = &app.StatusError{Status: 503}
+	s2.MaxAttempts = 3
+	if err := s2.HandleWrite(ctx, writeDelivery(q2, "task/t2/v2/final", 3)); !messaging.IsPermanent(err) {
+		t.Fatalf("last attempt = %v", err)
+	}
+	var codes []string
+	for _, m := range messagesOf(q2, app.TopicYouTrackWriteFailed) {
+		var b map[string]string
+		_ = json.Unmarshal(m.Payload, &b)
+		codes = append(codes, b["code"])
+	}
+	if strings.Join(codes, ",") != "invalid_issue,http_503" {
+		t.Fatalf("failure alert codes = %v", codes)
+	}
+}
+
+// Review finding: only the first write published after the task's latest failure closes the alert. A write enqueued
+// before a failure (published later) does not close it, nor does every later publication enqueue a close again.
+func TestIssueSyncOnlyAPublicationAfterTheFailureClosesTheAlert(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, _, _, q := issueSync(ytConn{})
+	if err := s.Comment(ctx, "task/t1/v4/plan", "t1", "p1", "KIN-7", "Plan"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Comment(ctx, "task/t1/v5/final", "t1", "p1", "KIN-7", " "); err != nil { // rejected: invalid_text
+		t.Fatal(err)
+	}
+	if err := s.HandleWrite(ctx, writeDelivery(q, "task/t1/v4/plan", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(messagesOf(q, app.TopicYouTrackWritePublished)); n != 0 {
+		t.Fatalf("a write enqueued before the failure closed its alert (%d closes)", n)
+	}
+	for _, k := range []string{"task/t1/v6/a", "task/t1/v7/b"} {
+		if err := s.Comment(ctx, k, "t1", "p1", "KIN-7", "x"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.HandleWrite(ctx, writeDelivery(q, k, 1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if closes := messagesOf(q, app.TopicYouTrackWritePublished); len(closes) != 1 || closes[0].Key != "youtrack/task/t1/v6/a/published" {
+		t.Fatalf("closes = %+v, want one for the first write after the failure", closes)
+	}
+}
+
+// Review finding: an undecodable delivery fails its write (shown on the task) instead of leaving it pending.
+func TestIssueSyncMalformedPayloadFailsTheWrite(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, _, st, q := issueSync(ytConn{})
+	if err := s.Comment(ctx, "task/t1/v4/plan", "t1", "p1", "KIN-7", "Plan"); err != nil {
+		t.Fatal(err)
+	}
+	d := writeDelivery(q, "task/t1/v4/plan", 1)
+	d.Payload = []byte("{")
+	if err := s.HandleWrite(ctx, d); !messaging.IsPermanent(err) {
+		t.Fatalf("malformed = %v", err)
+	}
+	if status, code := st.status("task/t1/v4/plan"); status != domain.WriteFailed || code != "malformed" {
+		t.Fatalf("write = %s %s", status, code)
 	}
 }

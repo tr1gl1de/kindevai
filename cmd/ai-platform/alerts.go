@@ -73,9 +73,11 @@ func newAlerts(inst *bootstrap.Installation, msg *messagingModule, audit *auditM
 	msg.Outbox.Handle(runnersapp.TopicRunnerOutputFull, ev.RunnerOutputFull)           // KIN-59
 	msg.Outbox.Handle(runnersapp.TopicRunnerOutputRecovered, ev.RunnerOutputRecovered) // KIN-59
 	msg.Outbox.Handle(approvalsapp.TopicApprovalRequested, ev.ApprovalRequested)
-	msg.Outbox.Handle(workflownotify.TopicTaskFinished, ev.TaskFinished) // KIN-62
-	msg.Outbox.Handle(routingapp.TopicCLIHeld, ev.CLIHeld)               // KIN-83
-	msg.Outbox.Handle(routingapp.TopicCLIReady, ev.CLIReady)             // KIN-83
+	msg.Outbox.Handle(workflownotify.TopicTaskFinished, ev.TaskFinished)                      // KIN-62
+	msg.Outbox.Handle(routingapp.TopicCLIHeld, ev.CLIHeld)                                    // KIN-83
+	msg.Outbox.Handle(routingapp.TopicCLIReady, ev.CLIReady)                                  // KIN-83
+	msg.Outbox.Handle(integrationsapp.TopicYouTrackWriteFailed, ev.YouTrackWriteFailed)       // KIN-107
+	msg.Outbox.Handle(integrationsapp.TopicYouTrackWritePublished, ev.YouTrackWritePublished) // KIN-107
 	bot := alertBot{
 		vault:    botTokenVault{&integrationsapp.Vault{Store: integrationsdb.New(inst.DB), Cipher: inst.Box, Now: time.Now}},
 		settings: tgRepo,

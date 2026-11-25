@@ -396,6 +396,9 @@ func (x *Executor) follow(r *run, dir string, from domain.OutputOffsets, stdout,
 	f, err := x.Agents.Follow(r.agent, dir, AgentFollow{From: from, Stdout: stdout, Stderr: stderr,
 		OnEvent: func(e domain.AgentEvent) { x.emitAgent(r, e) },
 		Progress: func(o domain.OutputOffsets) {
+			if x.closed.Load() {
+				return // the output is no longer sent (guard): the next runner process reads on from the last offsets
+			}
 			if err := r.save(x.Journal, func(rec *domain.Record) { rec.Output = o }); err != nil {
 				x.logger().Warn("recording the attempt's output offsets", "step", k.step, "fence", k.fence, "err", err)
 			}

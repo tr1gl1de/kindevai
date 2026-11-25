@@ -301,3 +301,21 @@ func TestCLIOutputOffsetsAreRecorded(t *testing.T) {
 	l.proc(0).end(domain.Exit{})
 	waitFor(t, "completed", func() bool { return len(ev.ofKind(protocol.EventCompleted)) == 1 })
 }
+
+// Offsets reached after the executor closed are not recorded: that output was not sent, the next runner process
+// reads on from the last recorded offsets.
+func TestCLIOutputOffsetsAreNotRecordedAfterClose(t *testing.T) {
+	t.Parallel()
+	x, l, j, _, ag := newCLIExecutor()
+	if err := x.Assign(t.Context(), cliAssignment(domain.AgentClaude)); err != nil {
+		t.Fatal(err)
+	}
+	ag.follows[0].Progress(domain.OutputOffsets{Stdout: 5})
+	x.Close()
+	ag.follows[0].Progress(domain.OutputOffsets{Stdout: 99})
+	recs, _ := j.List()
+	if len(recs) != 1 || recs[0].Output.Stdout != 5 {
+		t.Fatalf("records %+v", recs)
+	}
+	l.proc(0).end(domain.Exit{})
+}

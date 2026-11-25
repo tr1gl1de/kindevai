@@ -14,6 +14,10 @@
   --danger-text: #ffffff;
   --warn-bg: #fff6e0;
   --warn-border: #a87300; /* 4.1:1 on --bg, 3.8:1 on --surface and --warn-bg (KIN-110) */
+  /* Text, hints and links on --warn-bg. Never Telegram's colours: nothing bounds those against --warn-bg (KIN-114). */
+  --warn-text: #16181d;
+  --warn-muted: #5b6270;
+  --warn-link: #1a56c4;
   --focus: #1f5fd6;
   --radius: 10px;
   --space: 16px;
@@ -41,6 +45,9 @@
     --danger-text: #1a0503;
     --warn-bg: #2b2412;
     --warn-border: #d9a520; /* 6.9:1 on --warn-bg, 7.2:1 on --surface */
+    --warn-text: #e9ecf1;
+    --warn-muted: #a6adbb;
+    --warn-link: #8ab4ff;
     --focus: #8ab4ff;
   }
 }
@@ -60,6 +67,9 @@
   --danger-text: #1a0503;
   --warn-bg: #2b2412;
   --warn-border: #d9a520;
+  --warn-text: #e9ecf1;
+  --warn-muted: #a6adbb;
+  --warn-link: #8ab4ff;
   --focus: #8ab4ff;
 }
 
@@ -210,6 +220,10 @@ a {
 }
 .card.warn {
   background: var(--warn-bg);
+  color: var(--warn-text);
+  --text: var(--warn-text);
+  --muted: var(--warn-muted);
+  --link: var(--warn-link);
   border-color: var(--warn-border);
 }
 .project-list {
@@ -619,6 +633,10 @@ textarea {
 .approval-pending {
   border-color: var(--warn-border);
   background: var(--warn-bg);
+  color: var(--warn-text);
+  --text: var(--warn-text);
+  --muted: var(--warn-muted);
+  --link: var(--warn-link);
 }
 .approval-rejected {
   border-color: var(--danger);
@@ -631,6 +649,10 @@ textarea {
 .level-badge.level-warning,
 .level-badge.level-high {
   background: var(--warn-bg);
+  color: var(--warn-text);
+  --text: var(--warn-text);
+  --muted: var(--warn-muted);
+  --link: var(--warn-link);
   border-color: var(--warn-border);
 }
 .level-badge.level-critical {
@@ -662,6 +684,10 @@ textarea {
   padding: 0 6px;
   border-radius: 999px;
   background: var(--warn-bg);
+  color: var(--warn-text);
+  --text: var(--warn-text);
+  --muted: var(--warn-muted);
+  --link: var(--warn-link);
   border: 1px solid var(--warn-border);
   font-size: 0.8rem;
   text-align: center;

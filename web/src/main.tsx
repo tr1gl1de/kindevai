@@ -8,7 +8,7 @@ import { BrowserRouter } from "react-router";
 import { App } from "./app/App";
 import { createQueryClient } from "./app/queryClient";
 import { createI18n, LOCALE_STORAGE_KEY } from "./i18n";
-import { readLaunch, seedLocale, signalReady } from "./features/telegram/webapp";
+import { followTheme, readLaunch, seedLocale, signalReady } from "./features/telegram/webapp";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("#root element missing");
@@ -29,4 +29,7 @@ createRoot(root).render(
     </QueryClientProvider>
   </StrictMode>,
 );
-if (telegram) signalReady();
+if (telegram) {
+  signalReady();
+  followTheme();
+}

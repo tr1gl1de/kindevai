@@ -405,6 +405,7 @@ func TestReviewerRunsReadOnlyWithTheDiffInItsPrompt(t *testing.T) {
 	if err := x.Assign(t.Context(), a); err != nil {
 		t.Fatal(err)
 	}
+	waitFor(t, "launch", func() bool { return l.count() == 1 })
 	if ag.perms[0] != domain.PermissionsReadOnly || ag.prepared[0].TestCommand != "" {
 		t.Fatalf("perms %v request %+v", ag.perms[0], ag.prepared[0])
 	}
@@ -434,6 +435,7 @@ func TestImplementerTestResultIsReportedBeforeTheEnd(t *testing.T) {
 	if err := x.Assign(t.Context(), a); err != nil {
 		t.Fatal(err)
 	}
+	waitFor(t, "launch", func() bool { return l.count() == 1 })
 	if r := ag.prepared[0]; r.TestCommand != "make test" || r.TestsTimeout != time.Minute || ag.perms[0] != domain.PermissionsSafe {
 		t.Fatalf("request %+v perms %v", r, ag.perms[0])
 	}

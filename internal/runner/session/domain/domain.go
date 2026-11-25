@@ -248,8 +248,11 @@ type Record struct {
 	Project   string `json:"project"`
 	Scenario  string `json:"scenario"`
 	Workdir   string `json:"workdir,omitempty"` // the attempt's git worktree (KIN-29); empty: its journal directory
-	PID       int    `json:"pid,omitempty"`     // 0 until the process was launched
-	PGID      int    `json:"pgid,omitempty"`
+	// Preparing: the attempt has a workspace to prepare (KIN-71), in the background after the assignment was
+	// acknowledged; with no Workdir yet, a restart interrupted the preparation.
+	Preparing bool `json:"preparing,omitempty"`
+	PID       int  `json:"pid,omitempty"` // 0 until the process was launched
+	PGID      int  `json:"pgid,omitempty"`
 	// Start is the process's start time as the kernel reports it (KIN-64): with PID it identifies the process, so
 	// a pid reused by another process is never adopted. Empty for records written before KIN-64 or where the
 	// system does not report it (adoption then relies on the pid leading PGID).

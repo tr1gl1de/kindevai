@@ -180,6 +180,8 @@ func wireAttemptLog(wf *workflowapp.Service, inst *bootstrap.Installation) {
 	wf.Log = workflowAttemptLog{log: runnersapp.AttemptLog{Repo: runnersdb.New(inst.DB)}}
 }
 
+var preparingPhases = []string{protocol.PreparingQueued, protocol.PreparingFetching, protocol.PreparingCheckout}
+
 // workflowAttemptLog translates the runners context's recorded events into what the task UI shows. Bodies are
 // the runner's (untrusted) data: they are decoded into typed fields and served as text, never interpreted.
 type workflowAttemptLog struct{ log runnersapp.AttemptLog }
@@ -211,6 +213,11 @@ func (l workflowAttemptLog) AttemptEvents(ctx context.Context, stepID string, fe
 			var f protocol.Failure
 			_ = json.Unmarshal(e.Body, &f)
 			v.Reason = f.Reason
+		case protocol.EventWorkspacePreparing: // KIN-71: only a known phase is shown
+			var p protocol.WorkspacePreparing
+			if json.Unmarshal(e.Body, &p) == nil && slices.Contains(preparingPhases, p.Phase) {
+				v.Reason = p.Phase
+			}
 		case protocol.EventAgent:
 			var ag protocol.AgentEvent
 			if e.Body == nil || json.Unmarshal(e.Body, &ag) != nil {

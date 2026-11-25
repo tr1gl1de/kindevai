@@ -91,6 +91,8 @@ type WorkspaceRequest struct {
 	Repository string
 	Base       string
 	Token      domain.Secret
+	// Progress gets the preparation's phases (protocol.Preparing*) as it reaches them (KIN-71).
+	Progress func(phase string)
 }
 
 // Workspaces prepares and finishes attempt worktrees (the workspace context's Manager).
@@ -106,6 +108,14 @@ type Workspaces interface {
 	// Diff is the attempt's worktree diff from..to (commits), at most limit bytes (cut reports a longer one; KIN-35).
 	Diff(ctx context.Context, step string, fence int64, from, to string, limit int) (diff string, cut bool, err error)
 }
+
+// DefaultPrepareTimeout bounds an attempt's whole workspace preparation (KIN-71; each git command has its own
+// bound too); DefaultPrepareKeepalive is how often a preparation in progress is reported (the Control Plane extends
+// the claim's lease with it, so it stays well below the lease, 60 s).
+const (
+	DefaultPrepareTimeout   = 30 * time.Minute
+	DefaultPrepareKeepalive = 20 * time.Second
+)
 
 // DefaultGrace is how long a cancelled process group has between SIGTERM and SIGKILL.
 const DefaultGrace = 5 * time.Second
@@ -133,11 +143,18 @@ type Executor struct {
 	// KnownSecrets returns secret values the runner holds besides the assignment's git token (proxy passwords,
 	// KIN-77); they are masked in the attempt's output and failure reasons by exact match.
 	KnownSecrets func() []string
+	// PrepareTimeout bounds a workspace preparation (DefaultPrepareTimeout when zero); PrepareKeepalive is how
+	// often one in progress is reported (DefaultPrepareKeepalive when zero).
+	PrepareTimeout   time.Duration
+	PrepareKeepalive time.Duration
 
-	mu     sync.Mutex
-	runs   map[key]*run
-	closed atomic.Bool
-	wg     sync.WaitGroup
+	mu       sync.Mutex
+	runs     map[key]*run
+	closed   atomic.Bool
+	wg       sync.WaitGroup
+	lifeOnce sync.Once
+	life     context.Context // ends with Close: background work of this runner process (workspace preparations)
+	stopLife context.CancelFunc
 }
 
 type key struct {
@@ -153,10 +170,12 @@ type run struct {
 	output    []*redact.Stream // stdout, stderr: flushed before the terminal event
 	known     []string         // secret values masked in the attempt's output and failure reasons (KIN-77)
 	cancelled string
-	sandbox   Sandbox       // released once the process ended
-	follower  AgentFollower // the AI CLI's output (KIN-79); nil for the mock agent
-	agent     string
-	done      chan struct{}
+	// stopPrep stops the attempt's workspace preparation (KIN-71); set while it is prepared in the background.
+	stopPrep context.CancelFunc
+	sandbox  Sandbox       // released once the process ended
+	follower AgentFollower // the AI CLI's output (KIN-79); nil for the mock agent
+	agent    string
+	done     chan struct{}
 	// result is the terminal event kind once the process ended but reporting it failed; the run stays listed
 	// (with the result) and the report is retried.
 	result string
@@ -192,6 +211,11 @@ func (x *Executor) grace() time.Duration {
 		return x.Grace
 	}
 	return DefaultGrace
+}
+
+func (x *Executor) lifetime() context.Context {
+	x.lifeOnce.Do(func() { x.life, x.stopLife = context.WithCancel(context.Background()) })
+	return x.life
 }
 
 func (x *Executor) init() {
@@ -305,7 +329,7 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 		return fmt.Errorf("preparing the attempt directory: %w", err)
 	}
 	r := &run{rec: domain.Record{Step: a.Step, Fence: a.Fence, Execution: a.Execution, Project: a.Project,
-		Scenario: a.ScenarioOrDefault()}, done: make(chan struct{})}
+		Scenario: a.ScenarioOrDefault(), Preparing: a.Base != ""}, done: make(chan struct{})}
 	if err := x.Journal.Save(r.rec); err != nil {
 		return fmt.Errorf("recording the attempt: %w", err)
 	}
@@ -317,17 +341,22 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 	if err := r.stream.Emit(protocol.EventAccepted, nil); err != nil {
 		return x.abandon(r, fmt.Errorf("emitting accepted: %w", err))
 	}
-	var workdir string
 	if a.Base != "" {
-		wd, failed, err := x.prepareWorkspace(ctx, a, r)
-		switch {
-		case err != nil:
-			return x.abandon(r, err)
-		case failed:
-			return x.Journal.Finish(a.Step, a.Fence)
-		}
-		workdir = wd
+		// KIN-71: the worktree (possibly a first clone) is prepared in the background, so the command is
+		// acknowledged now and the channel keeps applying commands (a cancel stops the preparation).
+		pctx, stop := context.WithTimeoutCause(x.lifetime(), x.prepareTimeout(), errPrepareTimeout)
+		r.stopPrep = stop
+		x.runs[k] = r
+		x.wg.Go(func() { x.prepareAndLaunch(pctx, r, a, dir) })
+		return nil
 	}
+	return x.launch(ctx, r, a, dir, "")
+}
+
+// launch starts the attempt's process in workdir (its worktree; "" for its journal directory). Called with x.mu
+// held. An error means the attempt was dropped (its record removed): the command should be re-sent.
+func (x *Executor) launch(ctx context.Context, r *run, a domain.Assignment, dir, workdir string) error {
+	k := key{a.Step, a.Fence}
 	var sandbox Sandbox
 	if x.Egress != nil {
 		sb, err := x.Egress.Confine(ctx, a, dir, workdir)
@@ -546,35 +575,186 @@ func (x *Executor) abandon(r *run, err error) error {
 	return err
 }
 
-// prepareWorkspace creates the attempt's worktree and reports it. failed: the attempt failed (reported); err: the
-// command should be re-sent.
-func (x *Executor) prepareWorkspace(ctx context.Context, a domain.Assignment, r *run) (string, bool, error) {
-	var (
-		dir  string
-		prep protocol.WorkspacePrepared
-		err  = errors.New("this runner has no workspace manager")
-	)
+var errPrepareTimeout = errors.New("workspace preparation timed out")
+
+func (x *Executor) prepareTimeout() time.Duration {
+	if x.PrepareTimeout > 0 {
+		return x.PrepareTimeout
+	}
+	return DefaultPrepareTimeout
+}
+
+func (x *Executor) prepareKeepalive() time.Duration {
+	if x.PrepareKeepalive > 0 {
+		return x.PrepareKeepalive
+	}
+	return DefaultPrepareKeepalive
+}
+
+// prepareAndLaunch prepares the attempt's worktree in the background and launches the attempt in it (KIN-71). A
+// cancel, a newer token or StopAll stops the preparation (git is killed through ctx) and the attempt fails as
+// cancelled; a preparation over PrepareTimeout fails it; when the executor is closed (the runner stops) nothing is
+// reported: the next runner process fails the attempt from its journal record (Recover).
+func (x *Executor) prepareAndLaunch(ctx context.Context, r *run, a domain.Assignment, dir string) {
+	defer r.stopPrep()
+	workdir, failure, err := x.prepareWorkspace(ctx, a, r)
+	x.mu.Lock()
+	r.stopPrep = nil
+	switch {
+	case x.closed.Load():
+		x.mu.Unlock()
+		close(r.done)
+		return
+	case r.cancelled != "":
+		failure = "cancelled: " + r.cancelled
+	case err != nil:
+		x.mu.Unlock()
+		x.logger().Error("preparing the attempt", "step", a.Step, "fence", a.Fence, "err", err)
+		x.releaseWorkspace(r)
+		f := protocol.Failure{Reason: domain.Truncate(r.mask("workspace: "+err.Error()), protocol.MaxReasonLen)}
+		if x.report(r, protocol.EventFailed, f) {
+			close(r.done)
+			return
+		}
+		x.drop(r)
+		return
+	case failure == "":
+		// Not the lifetime context itself: a Close racing with the launch must not turn it into a failure.
+		err := x.launch(context.WithoutCancel(x.lifetime()), r, a, dir, workdir)
+		launched := r.proc != nil
+		if !launched {
+			delete(x.runs, key{a.Step, a.Fence})
+		}
+		x.mu.Unlock()
+		if err != nil {
+			x.logger().Error("launching the attempt; dropped (the Control Plane assigns its step again)", "step", a.Step,
+				"fence", a.Fence, "err", err)
+		}
+		if !launched {
+			close(r.done)
+		}
+		return
+	}
+	x.mu.Unlock()
+	x.releaseWorkspace(r)
+	x.reportEnd(r, protocol.EventFailed, protocol.Failure{Reason: domain.Truncate(failure, protocol.MaxReasonLen)})
+}
+
+// drop forgets an attempt whose end cannot be reported either (the spool is unavailable): its record is removed
+// and it is no longer listed, so the Control Plane's claim runs out (at most its lease, 60 s, after the last
+// workspace.preparing) and the step is assigned again. The workspace was released already.
+func (x *Executor) drop(r *run) {
+	k := r.key()
+	x.logger().Error("the attempt's failure cannot be reported; dropped", "step", k.step, "fence", k.fence)
+	_ = x.Journal.Delete(k.step, k.fence)
+	x.mu.Lock()
+	delete(x.runs, r.key())
+	x.mu.Unlock()
+	close(r.done)
+}
+
+// reportEnd reports the end of an attempt that never launched; done is closed after the first try (a newer attempt
+// of the step waits for it) and a failed report is retried like a process's end.
+func (x *Executor) reportEnd(r *run, kind string, body any) {
+	ok := x.report(r, kind, body)
+	close(r.done)
+	for !ok && !x.closed.Load() {
+		select {
+		case <-x.lifetime().Done():
+			return // the next runner process reports it from the journal
+		case <-time.After(reportRetry):
+		}
+		ok = x.report(r, kind, body)
+	}
+}
+
+// preparing reports the preparation's phase now and every PrepareKeepalive until stop (which waits for a report in
+// progress, so nothing follows it on the stream).
+type preparing struct {
+	x     *Executor
+	r     *run
+	start time.Time
+	mu    sync.Mutex
+	phase string
+	stop  chan struct{}
+	done  chan struct{}
+}
+
+func (x *Executor) startProgress(r *run) *preparing {
+	p := &preparing{x: x, r: r, start: time.Now(), phase: protocol.PreparingQueued, stop: make(chan struct{}),
+		done: make(chan struct{})}
+	p.emit()
+	go func() {
+		defer close(p.done)
+		t := time.NewTicker(x.prepareKeepalive())
+		defer t.Stop()
+		for {
+			select {
+			case <-p.stop:
+				return
+			case <-t.C:
+				p.emit()
+			}
+		}
+	}()
+	return p
+}
+
+func (p *preparing) set(phase string) {
+	p.mu.Lock()
+	changed := p.phase != phase
+	p.phase = phase
+	p.mu.Unlock()
+	if changed {
+		p.emit()
+	}
+}
+
+func (p *preparing) emit() {
+	if p.x.closed.Load() {
+		return
+	}
+	p.mu.Lock()
+	body := protocol.WorkspacePreparing{Phase: p.phase, ElapsedSec: int64(time.Since(p.start) / time.Second)}
+	p.mu.Unlock()
+	if err := p.r.stream.Emit(protocol.EventWorkspacePreparing, body); err != nil {
+		k := p.r.key()
+		p.x.logger().Warn("reporting the workspace preparation", "step", k.step, "fence", k.fence, "err", err)
+	}
+}
+
+func (p *preparing) end() {
+	close(p.stop)
+	<-p.done
+}
+
+// prepareWorkspace creates the attempt's worktree and reports it. failure: why the attempt fails (to be reported);
+// err: the attempt could not be recorded or reported and is dropped.
+func (x *Executor) prepareWorkspace(ctx context.Context, a domain.Assignment, r *run) (dir, failure string, err error) {
+	progress := x.startProgress(r)
+	var prep protocol.WorkspacePrepared
+	err = errors.New("this runner has no workspace manager")
 	if x.Workspaces != nil {
 		dir, prep, err = x.Workspaces.Prepare(ctx, WorkspaceRequest{Step: a.Step, Fence: a.Fence, Task: a.Task,
-			Repository: a.Repository, Base: a.Base, Token: a.Token})
+			Repository: a.Repository, Base: a.Base, Token: a.Token, Progress: progress.set})
 	}
-	if err != nil && ctx.Err() != nil {
-		return "", false, fmt.Errorf("preparing the workspace: %w", ctx.Err()) // re-sent on the next connection
-	}
+	progress.end()
 	if err != nil {
-		x.logger().Warn("preparing the workspace", "step", a.Step, "fence", a.Fence, "err", err)
-		if err := r.stream.Emit(protocol.EventFailed, protocol.Failure{Reason: r.mask("workspace: " + err.Error())}); err != nil {
-			return "", false, err
+		if errors.Is(context.Cause(ctx), errPrepareTimeout) {
+			return "", fmt.Sprintf("%v after %s", errPrepareTimeout, x.prepareTimeout()), nil
 		}
-		return "", true, nil
+		if ctx.Err() == nil {
+			x.logger().Warn("preparing the workspace", "step", a.Step, "fence", a.Fence, "err", err)
+		}
+		return "", r.mask("workspace: " + err.Error()), nil // a cancel's reason replaces it (prepareAndLaunch)
 	}
 	if err := r.save(x.Journal, func(rec *domain.Record) { rec.Workdir = dir }); err != nil {
-		return "", false, fmt.Errorf("recording the workspace: %w", err)
+		return "", "", fmt.Errorf("recording the workspace: %w", err)
 	}
 	if err := r.stream.Emit(protocol.EventWorkspacePrepared, prep); err != nil {
-		return "", false, fmt.Errorf("emitting workspace.prepared: %w", err)
+		return "", "", fmt.Errorf("emitting workspace.prepared: %w", err)
 	}
-	return dir, false, nil
+	return dir, "", nil
 }
 
 // finishWorkspace saves the attempt's work to its branch, reports the changes and removes the worktree. A failure
@@ -843,6 +1023,12 @@ func (x *Executor) terminate(r *run, reason string) {
 	r.cancelled = reason
 	k := r.key()
 	x.logger().Info("cancelling attempt", "step", k.step, "fence", k.fence, "reason", reason)
+	if r.proc == nil { // still preparing its workspace (KIN-71): stop git; the attempt then fails as cancelled
+		if r.stopPrep != nil {
+			r.stopPrep()
+		}
+		return
+	}
 	if err := r.proc.Signal(false); err != nil {
 		x.logger().Warn("SIGTERM to the attempt's process group", "step", k.step, "err", err)
 	}
@@ -879,7 +1065,11 @@ func (x *Executor) Recover(_ context.Context) error {
 		r.stream = x.Events.Attempt(rec.Step, rec.Fence, rec.Reserved, x.reserver(r))
 		if rec.PID == 0 {
 			x.releaseWorkspace(r)
-			if err := r.stream.Emit(protocol.EventFailed, protocol.Failure{Reason: "launch interrupted by a runner restart"}); err != nil {
+			reason := "launch interrupted by a runner restart"
+			if rec.Preparing && rec.Workdir == "" {
+				reason = "workspace preparation interrupted by a runner restart"
+			}
+			if err := r.stream.Emit(protocol.EventFailed, protocol.Failure{Reason: reason}); err != nil {
 				return err
 			}
 			if err := x.Journal.Finish(rec.Step, rec.Fence); err != nil {
@@ -935,7 +1125,7 @@ func (x *Executor) StopAll(reason string) {
 	x.mu.Lock()
 	runs := make([]*run, 0, len(x.runs))
 	for _, r := range x.runs {
-		if r.proc != nil && !ended(r) {
+		if r.result == "" && !ended(r) { // a running process, or an attempt still preparing (KIN-71)
 			x.terminate(r, reason)
 			runs = append(runs, r)
 		}
@@ -959,6 +1149,8 @@ func (x *Executor) StopAll(reason string) {
 // Close stops reporting and leaves the processes running for the next runner process to adopt.
 func (x *Executor) Close() {
 	x.closed.Store(true)
+	x.lifetime()
+	x.stopLife() // workspace preparations stop; the next runner process fails their attempts (Recover)
 }
 
 // KillAll stops every running attempt's process group at once and waits for them (tests and shutdown with kill).
@@ -967,6 +1159,12 @@ func (x *Executor) KillAll() {
 	for _, r := range x.runs {
 		if r.cancelled == "" {
 			r.cancelled = protocol.CancelCancelled
+		}
+		if r.proc == nil { // preparing its workspace (KIN-71)
+			if r.stopPrep != nil {
+				r.stopPrep()
+			}
+			continue
 		}
 		_ = r.proc.Signal(true)
 	}

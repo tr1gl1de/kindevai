@@ -19,6 +19,17 @@ var (
 	ErrDiskFull = errors.New("not enough free disk space for a workspace")
 )
 
+// DefaultMaxPreparing bounds how many workspaces are prepared at once (KIN-71): each preparation may be a first
+// clone of a large repository, which takes the network and the disk.
+const DefaultMaxPreparing = 2
+
+// Preparation phases, reported through Request.Progress (KIN-71).
+const (
+	PhaseQueued   = "queued"   // waiting for a preparation slot or for another preparation of the repository
+	PhaseFetching = "fetching" // fetching the base into the repository's mirror
+	PhaseCheckout = "checkout" // creating the worktree and scanning its instructions
+)
+
 // DefaultMinFree is the free space a workspace needs to be prepared: the "critical" threshold of KB KIN-A-26.
 const DefaultMinFree = 2 << 30
 
@@ -110,6 +121,14 @@ type Request struct {
 	Repository string
 	Base       string
 	Token      Token
+	// Progress, when set, gets the preparation's phases (Phase*) as it reaches them.
+	Progress func(phase string)
+}
+
+func (r Request) progress(phase string) {
+	if r.Progress != nil {
+		r.Progress(phase)
+	}
 }
 
 // Prepared is a ready worktree.
@@ -140,9 +159,72 @@ type Manager struct {
 	Scanner Scanner
 	Store   Store
 	MinFree uint64 // free space needed to prepare one (0: none)
+	// MaxPreparing bounds the preparations running at once (DefaultMaxPreparing when zero); more wait, queued.
+	MaxPreparing int
 
 	mu   sync.Mutex
 	held map[string]func() // step/fence → unlock
+	// Per mirror: fetches holds one fetch at a time (it can take long: a first clone); worktrees one worktree add or
+	// remove at a time (fast: an attempt's end never waits for another attempt's fetch).
+	fetches   map[string]chan struct{}
+	worktrees map[string]chan struct{}
+	once      sync.Once
+	slots     chan struct{}
+}
+
+// acquire takes a token of sem (a buffered channel used as a lock or semaphore), reporting queued first when it
+// has to wait; it gives up when ctx ends.
+func acquire(ctx context.Context, sem chan struct{}, r Request, queued *bool) (release func(), err error) {
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	default:
+	}
+	if !*queued {
+		*queued = true
+		r.progress(PhaseQueued)
+	}
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (m *Manager) slotSem() chan struct{} {
+	m.once.Do(func() {
+		n := m.MaxPreparing
+		if n <= 0 {
+			n = DefaultMaxPreparing
+		}
+		m.slots = make(chan struct{}, n)
+	})
+	return m.slots
+}
+
+// mirrorSem returns the mirror's lock in locks (created on first use).
+func (m *Manager) mirrorSem(locks *map[string]chan struct{}, mirror string) chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if *locks == nil {
+		*locks = map[string]chan struct{}{}
+	}
+	sem, ok := (*locks)[mirror]
+	if !ok {
+		sem = make(chan struct{}, 1)
+		(*locks)[mirror] = sem
+	}
+	return sem
+}
+
+// removeWorktree removes a worktree under the mirror's worktree lock (worktree bookkeeping lives in the mirror);
+// the lock is only held for worktree add/remove, never across a fetch.
+func (m *Manager) removeWorktree(mirror, dir string) error {
+	queued := true // nothing to report
+	release, _ := acquire(context.Background(), m.mirrorSem(&m.worktrees, mirror), Request{}, &queued)
+	defer release()
+	return m.Git.RemoveWorktree(context.Background(), mirror, dir)
 }
 
 func key(step string, fence int64) string { return fmt.Sprintf("%s/%d", step, fence) }
@@ -185,14 +267,19 @@ func (m *Manager) Prepare(ctx context.Context, r Request) (Prepared, error) {
 	return p, nil
 }
 
+// prepare runs within a preparation slot; the fetch under the mirror's fetch lock, worktree add under its worktree
+// lock.
+// Cancelling ctx stops a waiting preparation at once and a running git command (its process is killed).
 func (m *Manager) prepare(ctx context.Context, r Request, branch, mirror, dir string) (Prepared, error) {
-	sha, err := m.Git.FetchBase(ctx, mirror, r.Repository, r.Base, r.Token)
+	queued := false
+	releaseSlot, err := acquire(ctx, m.slotSem(), r, &queued)
 	if err != nil {
-		return Prepared{}, fmt.Errorf("fetching %s of %s: %w", r.Base, r.Repository, err)
+		return Prepared{}, err
 	}
-	fork, admin, err := m.Git.AddWorktree(ctx, mirror, dir, branch, sha)
+	defer releaseSlot()
+	fork, admin, err := m.checkout(ctx, r, branch, mirror, dir, &queued)
 	if err != nil {
-		return Prepared{}, fmt.Errorf("creating the worktree: %w", err)
+		return Prepared{}, err
 	}
 	files, truncated, err := m.Scanner.Scan(dir)
 	if err == nil {
@@ -200,12 +287,36 @@ func (m *Manager) prepare(ctx context.Context, r Request, branch, mirror, dir st
 			BaseSHA: fork, Mirror: mirror, Dir: dir, Admin: admin, Instructions: files})
 	}
 	if err != nil {
-		_ = m.Git.RemoveWorktree(context.WithoutCancel(ctx), mirror, dir)
+		_ = m.removeWorktree(mirror, dir)
 		return Prepared{}, fmt.Errorf("recording the workspace: %w", err)
 	}
 	fitted, cut := domain.Fit(files, func(i domain.Instruction) int { return len(i.Path) + entryOverhead }, instructionBudget)
 	return Prepared{Dir: dir, Repository: r.Repository, Branch: branch, Base: r.Base, BaseSHA: fork,
 		Instructions: fitted, InstructionsTruncated: truncated || cut}, nil
+}
+
+// checkout fetches the base and creates the worktree, each under its mirror lock.
+func (m *Manager) checkout(ctx context.Context, r Request, branch, mirror, dir string, queued *bool) (fork, admin string, err error) {
+	release, err := acquire(ctx, m.mirrorSem(&m.fetches, mirror), r, queued)
+	if err != nil {
+		return "", "", err
+	}
+	r.progress(PhaseFetching)
+	sha, err := m.Git.FetchBase(ctx, mirror, r.Repository, r.Base, r.Token)
+	release()
+	if err != nil {
+		return "", "", fmt.Errorf("fetching %s of %s: %w", r.Base, r.Repository, err)
+	}
+	if release, err = acquire(ctx, m.mirrorSem(&m.worktrees, mirror), r, queued); err != nil {
+		return "", "", err
+	}
+	r.progress(PhaseCheckout)
+	fork, admin, err = m.Git.AddWorktree(ctx, mirror, dir, branch, sha)
+	release()
+	if err != nil {
+		return "", "", fmt.Errorf("creating the worktree: %w", err)
+	}
+	return fork, admin, nil
 }
 
 // Changes reports what a running attempt changed so far (KIN-51): the worktree against the base, untracked files
@@ -279,7 +390,7 @@ func (m *Manager) Finish(ctx context.Context, step string, fence int64) (*Result
 	if err != nil {
 		return nil, fmt.Errorf("listing changed files: %w", err)
 	}
-	if err := m.Git.RemoveWorktree(ctx, meta.Mirror, meta.Dir); err != nil {
+	if err := m.removeWorktree(meta.Mirror, meta.Dir); err != nil {
 		return nil, fmt.Errorf("removing the worktree: %w", err)
 	}
 	if err := m.Store.DeleteMeta(step, fence); err != nil {

@@ -147,6 +147,13 @@ func (r runnerExecutions) StartAttempt(ctx context.Context, runnerID, step strin
 	return attemptError(r.wf.StartStepAt(ctx, step, runnerID, fence, at, agent))
 }
 
+// RenewAttempt extends the claim of a step whose workspace the runner is preparing (KIN-71, workspace.preparing):
+// a lease already run out is stale (the attempt is cancelled), as for a late start.
+func (r runnerExecutions) RenewAttempt(ctx context.Context, runnerID, step string, fence int64) error {
+	_, err := r.wf.RenewLease(ctx, step, runnerID, fence)
+	return attemptError(err)
+}
+
 func (r runnerExecutions) CompleteAttempt(ctx context.Context, runnerID, step string, fence int64, at time.Time) error {
 	if planning(step) {
 		return attemptError(r.wf.CompletePlanningAttempt(ctx, step, runnerID, fence))
@@ -162,6 +169,7 @@ func (r runnerExecutions) FailAttempt(ctx context.Context, runnerID, step string
 }
 
 var _ runnersapp.NetworkHolder = runnerExecutions{}
+var _ runnersapp.AttemptRenewer = runnerExecutions{}
 
 // HoldAttemptForNetwork parks the step WAITING(network): the runner refused to run it without a verified strict
 // egress sandbox (KIN-31).

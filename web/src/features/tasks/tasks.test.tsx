@@ -204,8 +204,9 @@ describe("task detail", () => {
       http.get("/api/tasks/t1", () => json(cli)),
       http.get("/api/approvals", () => json([])),
       http.get("/api/tasks/t1/steps/s1/attempts/1/events", () =>
-        json({ events: [{ seq: 1, kind: "execution.agent", at: "2026-11-24T10:00:02Z", reason: "tool_use · Edit · <b>x</b>" }],
-          next: 1, more: false })),
+        json({ events: [{ seq: 1, kind: "workspace.preparing", at: "2026-11-24T10:00:01Z", reason: "fetching" },
+          { seq: 2, kind: "execution.agent", at: "2026-11-24T10:00:02Z", reason: "tool_use · Edit · <b>x</b>" }],
+          next: 2, more: false })),
     );
     const { container } = await renderApp("/tasks/t1");
     const user = userEvent.setup();
@@ -218,6 +219,7 @@ describe("task detail", () => {
     await user.click(screen.getByText("Output and events of attempt 1"));
     const log = await screen.findByLabelText("Log of attempt 1");
     await waitFor(() => expect(log).toHaveTextContent("Agent: tool_use · Edit · <b>x</b>"));
+    expect(log).toHaveTextContent("Preparing the workspace: fetching the base branch"); // KIN-71
     expect(log.querySelector("b")).toBeNull();
     await expectAccessible(container);
   });

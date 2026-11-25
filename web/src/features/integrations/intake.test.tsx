@@ -33,7 +33,7 @@ function settings(over: Partial<IntakeSettings> = {}): IntakeSettings {
 function view(over: Partial<ProjectYouTrack> = {}): ProjectYouTrack {
   return {
     connected: true,
-    binding: { shortName: "KIN", triggerTag: "kindevai" },
+    binding: { shortName: "KIN", triggerTag: "kindevai", autoPlan: false },
     status: "ok",
     lastPolledAt: "2026-11-24T10:00:00Z",
     recent: [],
@@ -41,10 +41,10 @@ function view(over: Partial<ProjectYouTrack> = {}): ProjectYouTrack {
   };
 }
 
-function projectRoutes(me: Me, state: { v: ProjectYouTrack }) {
+function projectRoutes(me: Me, state: { v: ProjectYouTrack }, myRole?: Project["myRole"]) {
   server.use(
     http.get("/api/auth/me", () => json(me)),
-    http.get("/api/projects/p1", () => json({ ...alpha, myRole: me.role === "owner" ? "owner" : "member" })),
+    http.get("/api/projects/p1", () => json({ ...alpha, myRole: myRole ?? (me.role === "owner" ? "owner" : "member") })),
     http.get("/api/projects/p1/members", () => json([])),
     http.get("/api/projects/p1/integrations", () => json({ projectId: "p1", youtrackProject: "KIN", repositories: [] })),
     http.get("/api/projects/p1/youtrack", () => json(state.v)),
@@ -201,8 +201,8 @@ describe("project YouTrack panel", () => {
         const b = (await request.json()) as { triggerTag: string };
         tags.push(b);
         if (b.triggerTag.includes("}")) return invalid("tag_format", "triggerTag");
-        state.v = view({ binding: { shortName: "KIN", triggerTag: b.triggerTag } });
-        return json({ shortName: "KIN", triggerTag: b.triggerTag });
+        state.v = view({ binding: { shortName: "KIN", triggerTag: b.triggerTag, autoPlan: false } });
+        return json({ shortName: "KIN", triggerTag: b.triggerTag, autoPlan: false });
       }),
     );
     await renderApp("/projects/p1");
@@ -217,5 +217,34 @@ describe("project YouTrack panel", () => {
     await user.click(screen.getByRole("button", { name: "Save tag" }));
     await expectStatus("Trigger tag saved.");
     expect(await screen.findByText("Issues of YouTrack project KIN tagged “ai run” become tasks.")).toBeInTheDocument();
+  });
+
+  it("lets the project admin turn on automatic planning; members only see it (KIN-85)", async () => {
+    const state = { v: view() };
+    const puts: unknown[] = [];
+    projectRoutes(member, state, "project_admin");
+    server.use(
+      http.put("/api/projects/p1/integrations/youtrack/autoplan", async ({ request }) => {
+        const b = (await request.json()) as { autoPlan: boolean };
+        puts.push(b);
+        state.v = view({ binding: { shortName: "KIN", triggerTag: "kindevai", autoPlan: b.autoPlan } });
+        return json(state.v.binding);
+      }),
+    );
+    const first = await renderApp("/projects/p1");
+    const user = userEvent.setup();
+    const box = await screen.findByRole("checkbox", { name: "Plan new tasks from YouTrack with AI automatically" });
+    expect(box).not.toBeChecked();
+    await expectAccessible(first.container);
+    await user.click(box);
+    await expectStatus("New tasks from YouTrack are now planned by AI automatically.");
+    expect(await screen.findByRole("checkbox", { name: "Plan new tasks from YouTrack with AI automatically" })).toBeChecked();
+    expect(puts).toEqual([{ autoPlan: true }]);
+    first.unmount();
+
+    projectRoutes(member, state);
+    await renderApp("/projects/p1", "ru");
+    expect(await screen.findByText("Новые задачи из YouTrack планируются AI автоматически.")).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
   });
 });

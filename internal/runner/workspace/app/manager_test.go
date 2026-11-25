@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/runner/workspace/domain"
 )
@@ -19,12 +20,26 @@ type fakeGit struct {
 	fetchErr error
 	changes  []domain.Change
 	removed  []string
+	// gate, when set, holds every fetch until it is closed (or the fetch's context ends); started gets the
+	// repository of each fetch as it begins.
+	gate    chan struct{}
+	started chan string
 }
 
 func (g *fakeGit) log(s string) { g.mu.Lock(); g.calls = append(g.calls, s); g.mu.Unlock() }
 
-func (g *fakeGit) FetchBase(_ context.Context, mirror, repository, base string, tok Token) (string, error) {
+func (g *fakeGit) FetchBase(ctx context.Context, mirror, repository, base string, tok Token) (string, error) {
 	g.log("fetch " + repository + " " + base)
+	if g.started != nil {
+		g.started <- repository
+	}
+	if g.gate != nil {
+		select {
+		case <-g.gate:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
 	g.mu.Lock()
 	g.tokens = append(g.tokens, tok.Reveal())
 	g.mu.Unlock()
@@ -291,5 +306,142 @@ func TestChangesReportTheRunningAttempt(t *testing.T) {
 	}
 	if res, err := m.Changes(t.Context(), "st1", 2); res != nil || err != nil {
 		t.Fatalf("other attempt: %v %v", res, err)
+	}
+}
+
+// phases records a preparation's progress reports.
+type phases struct {
+	mu sync.Mutex
+	v  []string
+}
+
+func (p *phases) report(phase string) { p.mu.Lock(); p.v = append(p.v, phase); p.mu.Unlock() }
+func (p *phases) get() []string       { p.mu.Lock(); defer p.mu.Unlock(); return slices.Clone(p.v) }
+
+func prepareAsync(m *Manager, ctx context.Context, r Request) chan error {
+	done := make(chan error, 1)
+	go func() { _, err := m.Prepare(ctx, r); done <- err }()
+	return done
+}
+
+func noFetch(t *testing.T, g *fakeGit) {
+	t.Helper()
+	select {
+	case repo := <-g.started:
+		t.Fatalf("fetch of %s started", repo)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// KIN-71: at most MaxPreparing workspaces are prepared at once; the next one waits (reported as queued) and starts
+// when a slot is free.
+func TestPreparationsAreBounded(t *testing.T) {
+	t.Parallel()
+	m, g, _, _ := newManager()
+	m.MaxPreparing = 1
+	g.gate, g.started = make(chan struct{}), make(chan string, 4)
+	first := prepareAsync(m, t.Context(), req())
+	<-g.started
+	var p phases
+	r := req()
+	r.Step, r.Repository, r.Progress = "st2", "acme/web", p.report
+	second := prepareAsync(m, t.Context(), r)
+	noFetch(t, g)
+	if got := p.get(); !slices.Equal(got, []string{PhaseQueued}) {
+		t.Fatalf("phases %v", got)
+	}
+	close(g.gate)
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-second; err != nil {
+		t.Fatal(err)
+	}
+	if got := p.get(); !slices.Equal(got, []string{PhaseQueued, PhaseFetching, PhaseCheckout}) {
+		t.Fatalf("phases %v", got)
+	}
+}
+
+// KIN-71: two preparations of one repository never run git on its mirror at the same time.
+func TestFetchesOfOneRepositoryAreSerialized(t *testing.T) {
+	t.Parallel()
+	m, g, _, _ := newManager()
+	g.gate, g.started = make(chan struct{}), make(chan string, 4)
+	first := prepareAsync(m, t.Context(), req())
+	<-g.started
+	r := req()
+	r.Step = "st2"
+	second := prepareAsync(m, t.Context(), r)
+	noFetch(t, g)
+	close(g.gate)
+	for _, d := range []chan error{first, second} {
+		if err := <-d; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := len(g.started); n != 1 {
+		t.Fatalf("%d more fetches", n)
+	}
+}
+
+// KIN-71: a preparation cancelled while it waits (or fetches) ends at once and releases its workspace.
+func TestCancelledPreparationReleasesTheWorkspace(t *testing.T) {
+	t.Parallel()
+	m, g, st, _ := newManager()
+	m.MaxPreparing = 1
+	g.gate, g.started = make(chan struct{}), make(chan string, 4)
+	fetching, cancelFetch := context.WithCancel(t.Context())
+	first := prepareAsync(m, fetching, req())
+	<-g.started
+	waiting, cancelWait := context.WithCancel(t.Context())
+	r := req()
+	r.Step, r.Repository = "st2", "acme/web"
+	second := prepareAsync(m, waiting, r)
+	noFetch(t, g)
+	cancelWait()
+	if err := <-second; !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiting: %v", err)
+	}
+	cancelFetch()
+	if err := <-first; !errors.Is(err, context.Canceled) {
+		t.Fatalf("fetching: %v", err)
+	}
+	st.mu.Lock()
+	held := len(st.locks)
+	st.mu.Unlock()
+	if held != 0 {
+		t.Fatalf("%d workspace locks held", held)
+	}
+	close(g.gate)
+	if _, err := m.Prepare(t.Context(), req()); err != nil { // slot and repository lock are free again
+		t.Fatal(err)
+	}
+}
+
+// KIN-71: an attempt's end (its worktree is removed) never waits for another attempt's fetch of the repository.
+func TestFinishDoesNotWaitForAFetchOfTheRepository(t *testing.T) {
+	t.Parallel()
+	m, g, _, _ := newManager()
+	if _, err := m.Prepare(t.Context(), req()); err != nil {
+		t.Fatal(err)
+	}
+	g.gate, g.started = make(chan struct{}), make(chan string, 4)
+	r := req()
+	r.Step = "st2"
+	fetching := prepareAsync(m, t.Context(), r)
+	<-g.started
+	finished := make(chan error, 1)
+	go func() { _, err := m.Finish(t.Context(), "st1", 1); finished <- err }()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Finish waited for another attempt's fetch")
+	}
+	close(g.gate)
+	if err := <-fetching; err != nil {
+		t.Fatal(err)
 	}
 }

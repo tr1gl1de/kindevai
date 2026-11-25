@@ -988,3 +988,40 @@ func TestAgentEventsAreCheckedAndRedacted(t *testing.T) {
 		t.Fatalf("redacted %s", red)
 	}
 }
+
+// renewingWorkflow also extends a claim's lease (the real workflow does).
+type renewingWorkflow struct{ *fakeWorkflow }
+
+func (w renewingWorkflow) RenewAttempt(_ context.Context, _, step string, fence int64) error {
+	return w.op("renew", step, fence, "claimed", "")
+}
+
+// KIN-71: workspace.preparing (the runner prepares the attempt's worktree in the background) extends the claimed
+// step's lease, so a long first clone does not lose the claim; a stale one is rejected and its attempt cancelled.
+func TestWorkspacePreparingRenewsTheClaim(t *testing.T) {
+	t.Parallel()
+	e := newChannelEnv()
+	e.ch.Executions = renewingWorkflow{e.wf}
+	e.wf.fence["s1"], e.wf.state["s1"] = 1, "claimed"
+	e.wf.fence["s2"], e.wf.state["s2"] = 3, "claimed" // a newer claim exists
+	sess, _ := newSession("r1")
+	body, _ := json.Marshal(protocol.WorkspacePreparing{Phase: protocol.PreparingFetching, ElapsedSec: 20})
+	evs := []protocol.Event{
+		{Epoch: "sp", Seq: 1, Step: "s1", Fence: 1, AttemptSeq: 2, Kind: protocol.EventWorkspacePreparing, At: 1, Body: body},
+		{Epoch: "sp", Seq: 2, Base: 1, Step: "s2", Fence: 2, AttemptSeq: 2, Kind: protocol.EventWorkspacePreparing, At: 1, Body: body},
+	}
+	for _, ev := range evs {
+		if err := handle(t, e.ch, sess, protocol.TypeEvent, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if h := e.wf.history(); !slices.Equal(h, []string{"renew"}) {
+		t.Fatalf("calls %v", h)
+	}
+	if rec := e.repo.events[evKey("s1", 1, 2)]; rec.Outcome != domain.OutcomeApplied {
+		t.Fatalf("record %+v", rec)
+	}
+	if rec := e.repo.events[evKey("s2", 2, 2)]; rec.Outcome != domain.OutcomeRejected || len(e.commands("r1")) != 1 {
+		t.Fatalf("record %+v, commands %+v", rec, e.commands("r1"))
+	}
+}

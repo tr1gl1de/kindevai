@@ -55,7 +55,7 @@ func sqlFor(t table) queries {
 		listDead: r.Replace(`SELECT id, {e}, topic, {k}, attempts, coalesce(last_error, ''), created_at, updated_at
 			FROM {t} WHERE status = 'dead' ORDER BY updated_at DESC, id DESC LIMIT ?`),
 		retry: r.Replace(`UPDATE {t} SET status = 'pending', attempts = 0, next_attempt_at = ?, updated_at = ?
-			WHERE id = ? AND status = 'dead'`),
+			WHERE id = ? AND status = 'dead' RETURNING id, {e}, topic, {k}, payload, attempts`),
 		purge: r.Replace(`DELETE FROM {t} WHERE (status = 'done' AND updated_at <= ?) OR (status = 'dead' AND updated_at <= ?)`),
 		stats: r.Replace(`SELECT {e}, sum(status = 'pending'), sum(status = 'dead') FROM {t} GROUP BY {e}`),
 	}
@@ -221,27 +221,42 @@ func candidates(ctx context.Context, conn db.Executor, query string, args ...any
 }
 
 // finish records the outcome of an attempt: done, a retry after the backoff, or dead. It runs even if the
-// dispatcher is stopping, so a completed delivery is not repeated after a graceful shutdown.
-func (q *queue) finish(ctx context.Context, r record, cause error) (dead bool, err error) {
+// dispatcher is stopping, so a completed delivery is not repeated after a graceful shutdown. onDead (optional) runs
+// in the transaction that marks the message dead; its error rolls the mark back and leaves the message leased.
+func (q *queue) finish(ctx context.Context, r record, cause error, onDead func(ctx context.Context) error) (dead bool, err error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	now := q.cfg.Now()
-	conn := db.Conn(ctx, q.d)
-	var res sql.Result
-	switch {
-	case cause == nil:
-		res, err = conn.ExecContext(ctx, q.sql.done, ms(now), r.id)
-	case isPermanent(cause) || r.attempts >= q.cfg.MaxAttempts:
-		dead = true
-		res, err = conn.ExecContext(ctx, q.sql.dead, errorText(cause), ms(now), r.id)
-	default:
-		res, err = conn.ExecContext(ctx, q.sql.reschedule, ms(now.Add(q.cfg.Backoff(r.attempts))), errorText(cause), ms(now), r.id)
-	}
-	if err == nil {
-		var n int64
-		if n, err = res.RowsAffected(); err == nil && n == 0 {
-			err = errStale
+	dead = cause != nil && (isPermanent(cause) || r.attempts >= q.cfg.MaxAttempts)
+	record := func(ctx context.Context) error {
+		conn := db.Conn(ctx, q.d)
+		var res sql.Result
+		var err error
+		switch {
+		case cause == nil:
+			res, err = conn.ExecContext(ctx, q.sql.done, ms(now), r.id)
+		case dead:
+			res, err = conn.ExecContext(ctx, q.sql.dead, errorText(cause), ms(now), r.id)
+		default:
+			res, err = conn.ExecContext(ctx, q.sql.reschedule, ms(now.Add(q.cfg.Backoff(r.attempts))), errorText(cause), ms(now), r.id)
 		}
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return err
+		} else if n == 0 {
+			return errStale
+		}
+		if dead && onDead != nil {
+			return onDead(ctx)
+		}
+		return nil
+	}
+	if dead && onDead != nil {
+		err = db.Transactor{DB: q.d}.InTx(ctx, record)
+	} else {
+		err = record(ctx)
 	}
 	if err != nil {
 		return dead, fmt.Errorf("recording attempt of message %d: %w", r.id, err)
@@ -275,16 +290,26 @@ func (q *queue) listDead(ctx context.Context, limit int) ([]DeadMessage, error) 
 	return out, nil
 }
 
-func (q *queue) retry(ctx context.Context, id int64) error {
+// retry puts a dead message back; onRetry (optional) runs in the same transaction and its error keeps it dead.
+func (q *queue) retry(ctx context.Context, id int64, onRetry func(ctx context.Context, r record) error) error {
 	now := ms(q.cfg.Now())
-	res, err := db.Conn(ctx, q.d).ExecContext(ctx, q.sql.retry, now, now, id)
+	err := db.Transactor{DB: q.d}.InTx(ctx, func(ctx context.Context) error {
+		var r record
+		err := db.Conn(ctx, q.d).QueryRowContext(ctx, q.sql.retry, now, now, id).
+			Scan(&r.id, &r.endpoint, &r.topic, &r.key, &r.payload, &r.attempts)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil || onRetry == nil {
+			return err
+		}
+		return onRetry(ctx, r)
+	})
+	if errors.Is(err, ErrNotFound) {
+		return ErrNotFound
+	}
 	if err != nil {
 		return fmt.Errorf("retrying message %d: %w", id, err)
-	}
-	if n, err := res.RowsAffected(); err != nil {
-		return fmt.Errorf("retrying message %d: %w", id, err)
-	} else if n == 0 {
-		return ErrNotFound
 	}
 	q.notify()
 	return nil

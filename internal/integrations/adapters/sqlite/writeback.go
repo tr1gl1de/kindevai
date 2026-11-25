@@ -62,6 +62,29 @@ func (r *Repository) MarkIssueWrite(ctx context.Context, key string, s domain.Wr
 	return affected(res, err, "saving youtrack write")
 }
 
+// MoveIssueWrite changes a write's status only while it is from (code "" keeps its error) and reports whether it
+// did; domain.ErrNotFound for an unknown key (KIN-108).
+func (r *Repository) MoveIssueWrite(ctx context.Context, key string, from, to domain.WriteStatus, code string, attempts int,
+	at time.Time) (bool, error) {
+	res, err := r.conn(ctx).ExecContext(ctx, `UPDATE youtrack_writes SET status = ?, error = coalesce(?, error),
+		attempts = max(attempts, ?), updated_at = ? WHERE key = ? AND status = ?`,
+		string(to), nullStr(code), attempts, ts(at), key, string(from))
+	if err != nil {
+		return false, fmt.Errorf("saving youtrack write: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("saving youtrack write: %w", err)
+	}
+	if n > 0 {
+		return true, nil
+	}
+	if _, err := r.IssueWrite(ctx, key); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 // IssueWrite returns one write; domain.ErrNotFound when none.
 func (r *Repository) IssueWrite(ctx context.Context, key string) (domain.IssueWrite, error) {
 	var w domain.IssueWrite

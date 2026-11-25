@@ -59,6 +59,9 @@ type WriteStore interface {
 	StateMap(ctx context.Context, projectID string) (domain.StateMap, error) // domain.ErrNotFound when unbound
 	SaveIssueWrite(ctx context.Context, w domain.IssueWrite) error
 	MarkIssueWrite(ctx context.Context, key string, s domain.WriteStatus, code string, attempts int, at time.Time) error
+	// MoveIssueWrite changes a write's status only while it is from (code "" keeps its error) and reports whether it
+	// did; domain.ErrNotFound for an unknown key (KIN-108).
+	MoveIssueWrite(ctx context.Context, key string, from, to domain.WriteStatus, code string, attempts int, at time.Time) (bool, error)
 	TaskPublication(ctx context.Context, taskID string) (domain.Publication, error)
 	// FollowsFailure reports whether the write key is the first of its task published after the task's latest
 	// failed write (in enqueue order): the publication that closes the task's write-back alert (KIN-107).
@@ -204,6 +207,39 @@ func (s *IssueSync) enqueue(ctx context.Context, key string, p writePayload, rej
 		return fmt.Errorf("enqueueing %s: %w", TopicYouTrackWrite, err)
 	}
 	return nil
+}
+
+// DeadCode is the error code of a write whose outbox message went dead outside HandleWrite (KIN-108).
+const DeadCode = "dead"
+
+// HandleDead is the outbox dead-letter hook of TopicYouTrackWrite (KIN-108): it runs in the transaction that marks
+// the message dead, whatever killed it (a handler panic, no handler, a crash on the last attempt). A write still
+// pending fails with DeadCode and raises the write-back alert; a write the handler already failed or published keeps
+// its outcome, so the hook is idempotent and never alerts twice.
+func (s *IssueSync) HandleDead(ctx context.Context, d messaging.Delivery, _ error) error {
+	var p writePayload
+	if err := json.Unmarshal(d.Payload, &p); err != nil {
+		p = writePayload{} // undecodable: fail the write without an alert (its project is unknown)
+	}
+	moved, err := s.Store.MoveIssueWrite(ctx, d.Key, domain.WritePending, domain.WriteFailed, DeadCode, d.Attempt, s.now())
+	if errors.Is(err, domain.ErrNotFound) || (err == nil && !moved) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return s.alertFailed(ctx, d.Key, p, DeadCode)
+}
+
+// HandleRetried is the outbox retry hook of TopicYouTrackWrite (KIN-108): a dead message put back into the queue (the
+// outbox retry API, RetryUnhandled) makes its failed write pending again ("awaiting publication") with its last
+// error. The write-back alert stays open until a write of the task is published.
+func (s *IssueSync) HandleRetried(ctx context.Context, d messaging.Delivery) error {
+	_, err := s.Store.MoveIssueWrite(ctx, d.Key, domain.WriteFailed, domain.WritePending, "", 0, s.now())
+	if errors.Is(err, domain.ErrNotFound) {
+		return nil
+	}
+	return err
 }
 
 // errConflict: the article kept changing between our read and our revision check.

@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 import type { DocsDecision, Publication } from "../../api/types";
 
-const knownErrors = ["conflict", "unauthorized", "not_configured", "not_found"] as const;
+const knownErrors = ["conflict", "unauthorized", "not_configured", "not_found", "dead"] as const;
 type KnownError = (typeof knownErrors)[number];
 const isKnown = (code: string): code is KnownError => (knownErrors as readonly string[]).includes(code);
 

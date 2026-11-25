@@ -572,6 +572,7 @@ export const ru: Messages = {
     publicationError_unauthorized: "YouTrack отклонил токен интеграции",
     publicationError_not_configured: "YouTrack не подключён",
     publicationError_not_found: "задача или статья не найдена",
+    publicationError_dead: "доставка прервана внутренней ошибкой",
     publicationErrorOther: "YouTrack недоступен: {{code}}",
     docsTitle: "База знаний",
     docs_updated: "Обновлённые разделы:",

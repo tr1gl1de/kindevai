@@ -82,4 +82,34 @@ describe("stylesheets", () => {
       }
     }
   });
+
+  // KIN-109: before KIN-68 these accents sat in sheets bundled ahead of the base, so the base .badge/.card border
+  // shorthand always won. Feature sheets now follow the base, so the accents render; keep them declared.
+  it.each([
+    ["features/tasks/tasks.css", ".time-incomplete", "border-color: var(--warn-border)"],
+    ["features/tasks/tasks.css", ".ws-note", "border-color: var(--warn-border)"],
+    ["features/tasks/tasks.css", ".tests-not_configured", "border-color: var(--warn-border)"],
+    ["features/tasks/tasks.css", ".ws-status-D", "border-color: var(--danger)"],
+    ["features/tasks/tasks.css", ".tests-failed", "border-color: var(--danger)"],
+    ["features/tasks/tasks.css", ".tests-missing", "border-color: var(--danger)"],
+    ["features/tasks/tasks.css", ".verdict-changes_requested", "border-color: var(--danger)"],
+    ["features/planDiscussion/planDiscussion.css", ".discussion-status.status-FAILED", "border-color: var(--danger)"],
+    ["features/planDiscussion/planDiscussion.css", ".discussion-status.status-PENDING", "border-color: var(--warn-border)"],
+    ["features/planDiscussion/planDiscussion.css", ".discussion-status.status-DELIVERED", "border-color: var(--warn-border)"],
+    ["features/planDiscussion/planDiscussion.css", ".discussion-revision-current", "border: 2px solid var(--accent)"],
+    ["features/planDiscussion/planDiscussion.css", ".discussion-status", "display: inline-flex"],
+  ])("%s gives %s the accent %s", (sheet, selector, declaration) => {
+    expect(declarations(readFileSync(join(src, sheet), "utf8"), selector)).toContain(declaration);
+  });
 });
+
+// The declarations of the top-level rules whose selector list contains exactly `selector`.
+function declarations(css: string, selector: string): string[] {
+  const out: string[] = [];
+  for (const m of css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (m[1]!.split(",").some((s) => s.trim() === selector)) {
+      out.push(...m[2]!.split(";").map((d) => d.trim().replace(/\s+/g, " ")).filter(Boolean));
+    }
+  }
+  return out;
+}

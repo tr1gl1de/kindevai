@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 interface Props {
@@ -7,6 +7,12 @@ interface Props {
   confirmLabel: string;
   cancelLabel: string;
   busy?: boolean;
+  /** Extra content under the text, e.g. a preview of what will be created. */
+  children?: ReactNode;
+  /** Disables the confirm button (e.g. nothing to confirm yet). */
+  confirmDisabled?: boolean;
+  /** Style of the confirm button: "danger" (default) for destructive actions, "primary" otherwise. */
+  tone?: "danger" | "primary";
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -15,7 +21,18 @@ interface Props {
  * Modal confirmation for destructive actions. Focus starts on Cancel (safe default), Tab stays inside, Escape
  * cancels, and the rest of the page is inert while it is open. Focus returns to the opener if it still exists.
  */
-export function ConfirmDialog({ title, text, confirmLabel, cancelLabel, busy, onConfirm, onCancel }: Props) {
+export function ConfirmDialog({
+  title,
+  text,
+  confirmLabel,
+  cancelLabel,
+  busy,
+  children,
+  confirmDisabled,
+  tone = "danger",
+  onConfirm,
+  onCancel,
+}: Props) {
   const id = useId();
   const ref = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -28,7 +45,9 @@ export function ConfirmDialog({ title, text, confirmLabel, cancelLabel, busy, on
     cancelRef.current?.focus();
     // Keeps Tab / Shift+Tab cycling between the dialog's buttons.
     const trap = (e: KeyboardEvent) => {
-      const items = ref.current ? [...ref.current.querySelectorAll<HTMLElement>("button:not([disabled])")] : [];
+      const items = ref.current
+        ? [...ref.current.querySelectorAll<HTMLElement>("button:not([disabled]), select:not([disabled])")]
+        : [];
       const first = items[0];
       const last = items[items.length - 1];
       if (!first || !last) return;
@@ -60,15 +79,16 @@ export function ConfirmDialog({ title, text, confirmLabel, cancelLabel, busy, on
         aria-modal="true"
         aria-labelledby={`${id}-title`}
         aria-describedby={`${id}-text`}
-        className="dialog"
+        className={children ? "dialog dialog-wide" : "dialog"}
       >
         <h2 id={`${id}-title`}>{title}</h2>
         <p id={`${id}-text`}>{text}</p>
+        {children}
         <div className="dialog-actions">
           <button ref={cancelRef} type="button" className="button" onClick={onCancel}>
             {cancelLabel}
           </button>
-          <button type="button" className="button danger" disabled={busy} onClick={onConfirm}>
+          <button type="button" className={`button ${tone}`} disabled={busy || confirmDisabled} onClick={onConfirm}>
             {confirmLabel}
           </button>
         </div>

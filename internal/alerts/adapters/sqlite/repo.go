@@ -258,3 +258,99 @@ func (r *Repository) DeleteClosed(ctx context.Context, before time.Time, limit i
 	}
 	return res.RowsAffected()
 }
+
+const analysisColumns = `alert_id, project_id, youtrack_project, coalesce(requested_by, ''), requested_at,
+	coalesce(issue_id, ''), coalesce(issue_url, ''), created_at, attempt, coalesce(failure, ''), failed_at`
+
+func scanAnalysis(row rowScanner) (domain.AnalysisTask, error) {
+	var t domain.AnalysisTask
+	var requested string
+	var created, failed sql.NullString
+	if err := row.Scan(&t.AlertID, &t.ProjectID, &t.YouTrackProject, &t.RequestedBy, &requested, &t.IssueID,
+		&t.IssueURL, &created, &t.Attempt, &t.Failure, &failed); err != nil {
+		return domain.AnalysisTask{}, err
+	}
+	var err error
+	if t.RequestedAt, err = parseTS(requested); err != nil {
+		return domain.AnalysisTask{}, err
+	}
+	if t.CreatedAt, err = parseNullTS(created); err != nil {
+		return domain.AnalysisTask{}, err
+	}
+	if t.FailedAt, err = parseNullTS(failed); err != nil {
+		return domain.AnalysisTask{}, err
+	}
+	return t, nil
+}
+
+// Analysis returns an alert's analysis task (KIN-61).
+func (r *Repository) Analysis(ctx context.Context, alertID string) (domain.AnalysisTask, error) {
+	t, err := scanAnalysis(r.conn(ctx).QueryRowContext(ctx, `SELECT `+analysisColumns+` FROM alert_analysis_tasks
+		WHERE alert_id = ?`, alertID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.AnalysisTask{}, domain.ErrNotFound
+	}
+	if err != nil {
+		return domain.AnalysisTask{}, fmt.Errorf("reading analysis task: %w", err)
+	}
+	return t, nil
+}
+
+// Analyses returns the analysis tasks of the given alerts (at most app.MaxList ids), by alert id.
+func (r *Repository) Analyses(ctx context.Context, alertIDs []string) (map[string]domain.AnalysisTask, error) {
+	out := map[string]domain.AnalysisTask{}
+	if len(alertIDs) == 0 {
+		return out, nil
+	}
+	args := make([]any, 0, len(alertIDs))
+	for _, id := range alertIDs {
+		args = append(args, id)
+	}
+	rows, err := r.conn(ctx).QueryContext(ctx, `SELECT `+analysisColumns+` FROM alert_analysis_tasks WHERE alert_id IN (`+
+		strings.TrimSuffix(strings.Repeat("?,", len(alertIDs)), ",")+`)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("listing analysis tasks: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		t, err := scanAnalysis(rows)
+		if err != nil {
+			return nil, fmt.Errorf("reading analysis task: %w", err)
+		}
+		out[t.AlertID] = t
+	}
+	return out, rows.Err()
+}
+
+// CreateAnalysis inserts an alert's analysis task; a second one for the same alert fails.
+func (r *Repository) CreateAnalysis(ctx context.Context, t domain.AnalysisTask) error {
+	_, err := r.conn(ctx).ExecContext(ctx, `INSERT INTO alert_analysis_tasks (alert_id, project_id, youtrack_project,
+		requested_by, requested_at, issue_id, issue_url, created_at, attempt, failure, failed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.AlertID, t.ProjectID, t.YouTrackProject, nullStr(t.RequestedBy), ts(t.RequestedAt), nullStr(t.IssueID),
+		nullStr(t.IssueURL), nullTS(t.CreatedAt), attempt(t), nullStr(t.Failure), nullTS(t.FailedAt))
+	if err != nil {
+		return fmt.Errorf("inserting analysis task: %w", err)
+	}
+	return nil
+}
+
+func attempt(t domain.AnalysisTask) int { return max(t.Attempt, 1) }
+
+// SaveAnalysis stores an analysis task's changes: its issue, failure or new attempt.
+func (r *Repository) SaveAnalysis(ctx context.Context, t domain.AnalysisTask) error {
+	res, err := r.conn(ctx).ExecContext(ctx, `UPDATE alert_analysis_tasks SET project_id = ?, youtrack_project = ?,
+		requested_by = ?, requested_at = ?, issue_id = ?, issue_url = ?, created_at = ?, attempt = ?, failure = ?,
+		failed_at = ? WHERE alert_id = ?`, t.ProjectID, t.YouTrackProject, nullStr(t.RequestedBy), ts(t.RequestedAt),
+		nullStr(t.IssueID), nullStr(t.IssueURL), nullTS(t.CreatedAt), attempt(t), nullStr(t.Failure), nullTS(t.FailedAt),
+		t.AlertID)
+	if err != nil {
+		return fmt.Errorf("updating analysis task: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
+}

@@ -40,7 +40,8 @@ func (f *fakePulls) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		out := []map[string]any{}
 		head := strings.TrimPrefix(q.Get("head"), "acme:")
-		if n, ok := f.open[head]; ok && !f.hidden && q.Get("state") == "open" && strings.HasPrefix(q.Get("head"), "acme:") {
+		if n, ok := f.open[head]; ok && !f.hidden && q.Get("state") == "open" && strings.HasPrefix(q.Get("head"), "acme:") &&
+			(q.Get("base") == "" || q.Get("base") == f.bases[n]) {
 			out = append(out, pr(n, head))
 		}
 		_ = json.NewEncoder(w).Encode(out)
@@ -87,6 +88,12 @@ func TestOpenPullRequestCreatesOrReusesTheBranchsPullRequest(t *testing.T) {
 	again, err := c.OpenPullRequest(t.Context(), tok, "acme", "api", in)
 	if err != nil || again.Number != 1 || !again.Reused || len(f.creates) != 1 {
 		t.Fatalf("again %+v %v (%d creates)", again, err, len(f.creates))
+	}
+	// An open pull request of the branch into another base is not ours: the create is refused (422) and nothing is
+	// adopted.
+	if _, err := c.OpenPullRequest(t.Context(), tok, "acme", "api", domain.PullRequestInput{Base: "release", Head: "feature/t1--s1",
+		Title: "t"}); err == nil {
+		t.Fatal("adopted a pull request into another base")
 	}
 	f.hidden = true // the list misses it, the create answers 422: the pull request is found after all
 	raced, err := c.OpenPullRequest(t.Context(), tok, "acme", "api", in)

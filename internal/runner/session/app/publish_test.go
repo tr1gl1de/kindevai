@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/domain"
@@ -15,9 +16,17 @@ type fakePusher struct {
 	*fakeWorkspaces
 	pushes []PushRequest
 	err    error
+	hold   chan struct{} // when set, a push waits until it is closed or its context ends
 }
 
-func (p *fakePusher) Push(_ context.Context, r PushRequest) (protocol.WorkspacePushed, error) {
+func (p *fakePusher) Push(ctx context.Context, r PushRequest) (protocol.WorkspacePushed, error) {
+	if p.hold != nil {
+		select {
+		case <-p.hold:
+		case <-ctx.Done():
+			return protocol.WorkspacePushed{}, ctx.Err()
+		}
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.pushes = append(p.pushes, r)
@@ -46,7 +55,8 @@ func TestPublishPushesTheReviewedHeadWithoutAProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "completed", func() bool { return slices.Contains(ev.kinds(), protocol.EventCompleted) })
-	want := []string{protocol.EventAccepted, protocol.EventStarted, protocol.EventWorkspacePushed, protocol.EventCompleted}
+	want := []string{protocol.EventAccepted, protocol.EventStarted, protocol.EventWorkspacePreparing, protocol.EventWorkspacePushed,
+		protocol.EventCompleted}
 	if k := ev.kinds(); !slices.Equal(k, want) {
 		t.Fatalf("events %v", k)
 	}
@@ -94,4 +104,56 @@ func TestPublishWithoutAPusherFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "failed", func() bool { return slices.Contains(ev.kinds(), protocol.EventFailed) })
+}
+
+// A slow push keeps the claim alive (workspace.preparing, which renews the lease) and a cancel stops it: the attempt
+// fails as cancelled and nothing is reported as pushed.
+func TestASlowPushKeepsTheClaimAliveAndCanBeCancelled(t *testing.T) {
+	t.Parallel()
+	x, _, j, ev := newExecutor(domain.Policy{})
+	ws := &fakePusher{fakeWorkspaces: &fakeWorkspaces{}, hold: make(chan struct{})}
+	x.Workspaces, x.PrepareKeepalive = ws, 5*time.Millisecond
+	if err := x.Assign(t.Context(), publishAssignment()); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "keepalives", func() bool {
+		n := 0
+		for _, k := range ev.kinds() {
+			if k == protocol.EventWorkspacePreparing {
+				n++
+			}
+		}
+		return n >= 3
+	})
+	x.Cancel("S1", 1, "cancelled")
+	waitFor(t, "failed", func() bool { return slices.Contains(ev.kinds(), protocol.EventFailed) })
+	if e := ev.last(); !strings.Contains(e.body, "cancelled") || slices.Contains(ev.kinds(), protocol.EventWorkspacePushed) {
+		t.Fatalf("%v %+v", ev.kinds(), e)
+	}
+	waitFor(t, "finished", func() bool { done, _ := j.Finished("S1", 1); return done })
+}
+
+// A runner restart during a push fails the attempt from its journal record (the Control Plane assigns it again).
+func TestARestartDuringAPushFailsTheAttempt(t *testing.T) {
+	t.Parallel()
+	x, _, j, ev := newExecutor(domain.Policy{})
+	ws := &fakePusher{fakeWorkspaces: &fakeWorkspaces{}, hold: make(chan struct{})}
+	x.Workspaces = ws
+	if err := x.Assign(t.Context(), publishAssignment()); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "started", func() bool { return slices.Contains(ev.kinds(), protocol.EventStarted) })
+	x.Close()
+	if slices.Contains(ev.kinds(), protocol.EventFailed) {
+		t.Fatal("the stopping runner reported the push")
+	}
+	next, _, _, ev2 := newExecutor(domain.Policy{})
+	next.Journal = j
+	next.Workspaces = &fakePusher{fakeWorkspaces: &fakeWorkspaces{}}
+	if err := next.Recover(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if e := ev2.last(); e.kind != protocol.EventFailed || !strings.Contains(e.body, "interrupted") {
+		t.Fatalf("%v %+v", ev2.kinds(), e)
+	}
 }

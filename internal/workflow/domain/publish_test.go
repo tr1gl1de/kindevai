@@ -108,3 +108,18 @@ func TestApprovedStepWithoutChangesSucceedsWithoutPublishing(t *testing.T) {
 		t.Fatalf("step %s execution %s", s.State, e.State)
 	}
 }
+
+// Only a publish attempt reports a push: a push report of an implementation or review attempt is refused and
+// leaves its head alone.
+func TestOnlyAPublishAttemptRecordsAPush(t *testing.T) {
+	t.Parallel()
+	e, id := reviewExecution(t)
+	f := runPhase(t, &e, id, "r1", implClaim)
+	passTests(t, &e, id, "r1", f, 0)
+	if err := e.RecordPush(id, "r1", f, Push{Repository: "api", Branch: "feature/t1--s1", HeadSHA: "evil"}); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("%v", err)
+	}
+	if a := e.Step(id).Attempts[0]; a.HeadSHA != "head1" || a.PushedBranch != "" {
+		t.Fatalf("attempt %+v", a)
+	}
+}

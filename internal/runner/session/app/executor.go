@@ -682,7 +682,8 @@ func (x *Executor) prepareAndLaunch(ctx context.Context, r *run, a domain.Assign
 }
 
 // publish pushes the step's reviewed head (KIN-36) in the background: no process runs. The attempt reports
-// started, then workspace.pushed and completed, or failed with the (redacted) reason. A cancel stops git.
+// started, workspace.preparing while the push lasts, then workspace.pushed and completed, or failed with the
+// (redacted) reason. A cancel stops git.
 func (x *Executor) publish(ctx context.Context, r *run, a domain.Assignment) {
 	defer r.stopPrep()
 	if err := r.stream.Emit(protocol.EventStarted, protocol.Started{Agent: a.Adapter}); err != nil {
@@ -691,8 +692,12 @@ func (x *Executor) publish(ctx context.Context, r *run, a domain.Assignment) {
 	var pushed protocol.WorkspacePushed
 	err := errors.New("this runner cannot push work branches")
 	if p, ok := x.Workspaces.(Pusher); ok {
+		// The push can outlast the claim's lease (a first push of a large repository): it is reported like a
+		// workspace preparation, which renews the lease (KIN-71).
+		progress := x.startProgress(r)
 		pushed, err = p.Push(ctx, PushRequest{Step: a.Step, Task: a.Task, Repository: a.Repository, Head: a.DiffHead,
 			Token: a.Token})
+		progress.end()
 	}
 	x.mu.Lock()
 	r.stopPrep = nil

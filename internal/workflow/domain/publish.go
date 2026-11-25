@@ -48,7 +48,8 @@ type Push struct {
 }
 
 // RecordPush stores a publish attempt's push report. A report naming main/master is ErrProtectedBranch and is not
-// stored (the caller audits it and fails the attempt). It reports false for an attempt the runner does not hold.
+// stored (the caller audits it and fails the attempt). An attempt the runner does not hold is ErrStaleFence, one
+// that is no publish attempt ErrInvalidTransition.
 func (e *Execution) RecordPush(stepID, runnerID string, fence int64, p Push) error {
 	if IsProtectedBranch(p.Branch) {
 		return fmt.Errorf("push to %q: %w", cutUTF8(p.Branch, 200), ErrProtectedBranch)
@@ -56,6 +57,9 @@ func (e *Execution) RecordPush(stepID, runnerID string, fence int64, p Push) err
 	a := e.attemptFor(stepID, runnerID, fence)
 	if a == nil {
 		return fmt.Errorf("attempt %d of step %s on runner %s: %w", fence, stepID, runnerID, ErrStaleFence)
+	}
+	if a.Role != StepRolePublisher { // only a publish attempt pushes; another's head is its own report
+		return fmt.Errorf("attempt %d of step %s is no publish attempt: %w", fence, stepID, ErrInvalidTransition)
 	}
 	a.PushedBranch, a.HeadSHA = cutUTF8(p.Branch, 200), cutUTF8(p.HeadSHA, 64)
 	return nil

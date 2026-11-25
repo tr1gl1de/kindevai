@@ -27,7 +27,7 @@ func (c *Client) OpenPullRequest(ctx context.Context, tok domain.Secret, owner, 
 	if err := domain.GuardBranch(in.Base); err != nil {
 		return domain.PullRequestRef{}, err
 	}
-	if pr, ok, err := c.openPullRequest(ctx, tok, owner, name, in.Head); err != nil || ok {
+	if pr, ok, err := c.openPullRequest(ctx, tok, owner, name, in.Head, in.Base); err != nil || ok {
 		return pr, err
 	}
 	var created pullJSON
@@ -40,23 +40,27 @@ func (c *Client) OpenPullRequest(ctx context.Context, tok domain.Secret, owner, 
 		}
 		return created.ref(false), nil
 	}
-	// 422: one exists already (a concurrent create), or GitHub refused the pull request (no commits, bad head).
-	if pr, ok, err := c.openPullRequest(ctx, tok, owner, name, in.Head); err != nil || ok {
+	// 422: one exists already (a concurrent create, or one into another base), or GitHub refused the pull request
+	// (no commits, bad head).
+	if pr, ok, err := c.openPullRequest(ctx, tok, owner, name, in.Head, in.Base); err != nil || ok {
 		return pr, err
 	}
 	return domain.PullRequestRef{}, &failure{"unprocessable", "GitHub refused the pull request (HTTP 422)"}
 }
 
-// openPullRequest finds the open pull request whose head is branch of the repository itself.
-func (c *Client) openPullRequest(ctx context.Context, tok domain.Secret, owner, name, branch string) (domain.PullRequestRef, bool, error) {
-	q := url.Values{"state": {"open"}, "head": {owner + ":" + branch}, "per_page": {"5"}}
+// openPullRequest finds the open pull request whose head is branch of the repository itself and whose base is base
+// (one someone opened into another base is never adopted).
+func (c *Client) openPullRequest(ctx context.Context, tok domain.Secret, owner, name, branch, base string) (domain.PullRequestRef, bool, error) {
+	q := url.Values{"state": {"open"}, "head": {owner + ":" + branch}, "base": {base}, "per_page": {"5"}}
 	var list []pullJSON
 	if _, err := c.call(ctx, http.MethodGet, repoPath(owner, name)+"/pulls?"+q.Encode(), tok.Reveal(), nil, &list,
 		http.StatusOK); err != nil {
 		return domain.PullRequestRef{}, false, err
 	}
-	if len(list) == 0 {
-		return domain.PullRequestRef{}, false, nil
+	for _, p := range list {
+		if p.Base.Ref == base {
+			return p.ref(true), true, nil
+		}
 	}
-	return list[0].ref(true), true, nil
+	return domain.PullRequestRef{}, false, nil
 }

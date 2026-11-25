@@ -196,7 +196,7 @@ func interpreter(p string) string {
 // program inside the system directories or a visible directory (the worktree, the state directory) needs nothing. An installation inside the runner's data directory, or one
 // whose unit would hold a hidden directory (the data directory, a whole HOME), is refused (the sandbox then does
 // not verify).
-func expose(program, path, dataDir string, hidden, visible []string) ([]exposure, error) {
+func expose(program, path string, dataDirs, hidden, visible []string) ([]exposure, error) {
 	var out []exposure
 	for depth := 0; program != "" && depth < 2; depth++ {
 		p, err := lookPath(program, path)
@@ -209,8 +209,8 @@ func expose(program, path, dataDir string, hidden, visible []string) ([]exposure
 		}
 		if !withinAny(target, systemDirs) && !withinAny(target, visible) {
 			unit := packageRoot(target)
-			bad := dataDir != "" && within(unit, dataDir)
-			for _, h := range append([]string{dataDir}, hidden...) {
+			bad := withinAny(unit, dataDirs)
+			for _, h := range append(append([]string{}, dataDirs...), hidden...) {
 				bad = bad || h != "" && within(h, unit)
 			}
 			if bad {

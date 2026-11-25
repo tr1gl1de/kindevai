@@ -92,7 +92,7 @@ func TestExpose(t *testing.T) {
 		if err != nil {
 			t.Skip("no /bin/sh")
 		}
-		got, err := expose(sh, "", "", nil, nil)
+		got, err := expose(sh, "", nil, nil, nil)
 		if err != nil || len(got) != 0 {
 			t.Fatalf("expose = %v, %v", got, err)
 		}
@@ -109,7 +109,7 @@ func TestExpose(t *testing.T) {
 		if err := os.Symlink(bin, link); err != nil {
 			t.Fatal(err)
 		}
-		got, err := expose(link, "", filepath.Join(home, ".local", "share", "kindevai-runner"), []string{home}, nil)
+		got, err := expose(link, "", []string{filepath.Join(home, ".local", "share", "kindevai-runner")}, []string{home}, nil)
 		if err != nil || len(got) != 1 || got[0] != (exposure{link: link, target: bin, unit: bin}) {
 			t.Fatalf("expose = %+v, %v", got, err)
 		}
@@ -127,7 +127,7 @@ func TestExpose(t *testing.T) {
 		if err := os.Symlink("../lib/node_modules/@openai/codex/bin/codex.js", codex); err != nil {
 			t.Fatal(err)
 		}
-		got, err := expose(codex, "/usr/bin:"+filepath.Dir(codex), "", []string{home}, nil)
+		got, err := expose(codex, "/usr/bin:"+filepath.Dir(codex), nil, []string{home}, nil)
 		want := []exposure{{link: codex, target: script, unit: pkg}, {target: node, unit: node}}
 		if err != nil || !slices.Equal(got, want) {
 			t.Fatalf("expose = %+v, %v; want %+v", got, err, want)
@@ -138,10 +138,10 @@ func TestExpose(t *testing.T) {
 		dir, _ := filepath.EvalSymlinks(t.TempDir())
 		pkg := filepath.Join(dir, "node_modules", "cli")
 		write(t, filepath.Join(pkg, "cli"), "\x7fELF", 0o700)
-		if _, err := expose(filepath.Join(pkg, "cli"), "", filepath.Join(pkg, "data"), nil, nil); err == nil {
+		if _, err := expose(filepath.Join(pkg, "cli"), "", []string{filepath.Join(pkg, "data")}, nil, nil); err == nil {
 			t.Fatal("an installation around the data directory was exposed")
 		}
-		if _, err := expose(filepath.Join(pkg, "cli"), "", dir, nil, nil); err == nil {
+		if _, err := expose(filepath.Join(pkg, "cli"), "", []string{"/nonexistent", dir}, nil, nil); err == nil {
 			t.Fatal("a program inside the data directory was exposed")
 		}
 	})

@@ -186,12 +186,12 @@ func buildView(s Spec) (*view, error) {
 	var exps []exposure
 	if len(s.Argv) > 0 {
 		var err error
-		hidden := append(append([]string{home}, homes...), datas...)
+		hidden := append([]string{home}, homes...)
 		visible := append([]string{}, units...)
 		for _, k := range s.Keep {
 			visible = append(visible, both(k)...)
 		}
-		if exps, err = expose(s.Argv[0], envValue(s.Env, "PATH"), s.DataDir, hidden, visible); err != nil {
+		if exps, err = expose(s.Argv[0], envValue(s.Env, "PATH"), datas, hidden, visible); err != nil {
 			return nil, err
 		}
 	}
@@ -262,7 +262,7 @@ func assemble(home string, srcs []source, files []homeFile, exps []exposure, roD
 			return err
 		}
 	}
-	if err := unix.Mount("tmpfs", r+"/tmp", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=1777,size=512m"); err != nil {
+	if err := unix.Mount("tmpfs", r+"/tmp", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=1777,size=256m"); err != nil {
 		return fmt.Errorf("the sandbox's /tmp: %w", err)
 	}
 	if err := os.Symlink("../tmp", r+"/var/tmp"); err != nil {
@@ -413,7 +413,7 @@ func privateHome(r, home string, files []homeFile) error {
 	if err := mkdirIn(r, home); err != nil {
 		return err
 	}
-	if err := unix.Mount("tmpfs", r+home, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0700,size=1g"); err != nil {
+	if err := unix.Mount("tmpfs", r+home, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0700,size=256m"); err != nil {
 		return fmt.Errorf("the agent's HOME: %w", err)
 	}
 	for _, f := range files {
@@ -500,6 +500,14 @@ func (v *view) leaks() []domain.Leak {
 	out := []domain.Leak{absent(domain.LeakFSHome, v.home), absent(domain.LeakFSData, v.data)}
 	write := domain.Leak{Test: domain.LeakFSWrite, Blocked: true}
 	for _, d := range v.readonly {
+		if fi, err := os.Stat(d); err == nil && fi.Mode().IsRegular() { // a file unit: opening it for writing must fail
+			if f, err := os.OpenFile(d, os.O_WRONLY, 0); err == nil { //nolint:gosec // G304: the probe
+				_ = f.Close()
+				write = domain.Leak{Test: domain.LeakFSWrite, Target: d}
+				break
+			}
+			continue
+		}
 		p := filepath.Join(d, ".kindev-write-probe")
 		f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // G304: the probe
 		if err == nil {

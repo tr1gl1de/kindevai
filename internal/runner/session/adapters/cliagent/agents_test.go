@@ -252,3 +252,22 @@ func TestFollowReportsTheTimeoutAgentExecRecorded(t *testing.T) {
 		t.Fatal("unknown agent followed")
 	}
 }
+
+func TestCappedOutputStopsAtTheLimitAndMarksTheCut(t *testing.T) {
+	t.Parallel()
+	f, err := os.Create(filepath.Join(t.TempDir(), "out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	c := &capped{f: f, left: 10, name: "stdout"}
+	for _, w := range []string{"0123456", "789abc", "def"} {
+		if n, err := c.Write([]byte(w)); err != nil || n != len(w) {
+			t.Fatalf("write %q = %d %v", w, n, err)
+		}
+	}
+	b, _ := os.ReadFile(f.Name())
+	if !strings.HasPrefix(string(b), "0123456789\n[agent-exec: stdout cut at") || strings.Count(string(b), "cut at") != 1 {
+		t.Fatalf("file %q", b)
+	}
+}

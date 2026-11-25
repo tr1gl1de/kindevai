@@ -354,10 +354,6 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 		return x.launchFailed(r, a, err)
 	}
 	r.proc, r.sandbox = proc, sandbox
-	if agent != nil {
-		r.agent = a.Adapter
-		r.follower = x.follow(r, dir, domain.OutputOffsets{}, stdout, stderr)
-	}
 	if proc.StartTime() == "" {
 		x.logger().Warn("process start time unknown: after a restart a reused pid cannot be told apart", "step", a.Step,
 			"pid", proc.PID())
@@ -368,6 +364,13 @@ func (x *Executor) Assign(ctx context.Context, a domain.Assignment) error {
 	x.runs[k] = r
 	if err := r.stream.Emit(protocol.EventStarted, protocol.Started{Agent: a.Adapter}); err != nil {
 		x.logger().Error("emitting started", "step", a.Step, "err", err)
+	}
+	if agent != nil { // after execution.started: the CLI's events follow it
+		r.agent = a.Adapter
+		if r.follower = x.follow(r, dir, domain.OutputOffsets{}, stdout, stderr); r.follower == nil {
+			// Without its output the run's result is unknown: stop it (reported as cancelled, never as a success).
+			x.terminate(r, "the runner cannot read the CLI's output")
+		}
 	}
 	x.watch(r)
 	return nil
@@ -389,8 +392,7 @@ func (x *Executor) prepareAgent(a domain.Assignment, dir, workdir string, sandbo
 }
 
 // follow starts following the CLI's output files: events and raw output beyond from go to the attempt's stream,
-// the offsets reached are recorded for a restart. A follower that cannot start is logged: the attempt still runs
-// and its end is reported from the exit status.
+// the offsets reached are recorded for a restart. A follower that cannot start is logged and nil.
 func (x *Executor) follow(r *run, dir string, from domain.OutputOffsets, stdout, stderr io.Writer) AgentFollower {
 	k := r.key()
 	f, err := x.Agents.Follow(r.agent, dir, AgentFollow{From: from, Stdout: stdout, Stderr: stderr,
@@ -416,11 +418,11 @@ func (x *Executor) emitAgent(r *run, e domain.AgentEvent) {
 	if x.closed.Load() {
 		return
 	}
-	pe := protocol.AgentEvent{Kind: string(e.Kind), Session: e.Session, Model: e.Model, Version: e.Version,
-		Text: domain.Truncate(r.mask(e.Text), protocol.MaxAgentText), Tool: e.Tool,
+	pe := protocol.AgentEvent{Kind: string(e.Kind), Session: r.ident(e.Session, 128), Model: r.ident(e.Model, 128),
+		Version: r.ident(e.Version, 64), Text: domain.Truncate(r.mask(e.Text), protocol.MaxAgentText), Tool: r.ident(e.Tool, 128),
 		Input: domain.Truncate(r.mask(e.Input), protocol.MaxAgentInput), Usage: usage(e.Usage)}
 	if f := e.Failure; f != nil {
-		pe.Code, pe.Cause, pe.Message = string(f.Code), f.Cause, domain.Truncate(r.mask(f.Message), domain.MaxErrorMessage)
+		pe.Code, pe.Cause, pe.Message = string(f.Code), r.ident(f.Cause, 32), domain.Truncate(r.mask(f.Message), domain.MaxErrorMessage)
 		if !f.ResetsAt.IsZero() {
 			pe.ResetsAt = f.ResetsAt.UnixMilli()
 		}
@@ -442,7 +444,8 @@ func usage(u *domain.Usage) *protocol.AgentUsage {
 // agentEnd is the terminal event of a CLI run: its result with the agent report, the failure typed (cli_limit
 // carries its cause and reset time).
 func (r *run) agentEnd(res domain.AgentResult) (string, any) {
-	rep := &protocol.AgentReport{Session: res.Session, Model: res.Model, Version: res.Version, Usage: usage(&res.Usage)}
+	rep := &protocol.AgentReport{Session: r.ident(res.Session, 128), Model: r.ident(res.Model, 128),
+		Version: r.ident(res.Version, 64), Usage: usage(&res.Usage)}
 	if res.Failure == nil {
 		return protocol.EventCompleted, protocol.Completed{Agent: rep}
 	}
@@ -451,7 +454,8 @@ func (r *run) agentEnd(res domain.AgentResult) (string, any) {
 	if f.Code == domain.FailureCancelled {
 		reason = "cancelled: " + f.Message // as for any attempt (domain.Outcome)
 	}
-	body := protocol.Failure{Reason: r.mask(reason), Code: string(f.Code), Cause: f.Cause, Agent: rep}
+	body := protocol.Failure{Reason: domain.Truncate(r.mask(reason), protocol.MaxReasonLen), Code: string(f.Code),
+		Cause: r.ident(f.Cause, 32), Agent: rep}
 	if !f.ResetsAt.IsZero() {
 		body.ResetsAt = f.ResetsAt.UnixMilli()
 	}
@@ -634,6 +638,10 @@ func (x *Executor) reserver(r *run) func(int64) error {
 		return r.save(x.Journal, func(rec *domain.Record) { rec.Reserved = upTo })
 	}
 }
+
+// ident bounds and masks a short field the CLI reported (session id, model, version, tool name): CLI output is
+// untrusted and an event must stay below protocol.MaxBodyBytes.
+func (r *run) ident(s string, n int) string { return domain.Truncate(r.mask(s), n) }
 
 // mask redacts a failure reason that may quote a git error (KIN-77).
 func (r *run) mask(reason string) string { return redact.Lines(reason, r.known...) }

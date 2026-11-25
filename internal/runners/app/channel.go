@@ -574,7 +574,9 @@ func (c *Channel) agentReport(ctx context.Context, runnerID string, e protocol.E
 	if !ok || r == nil {
 		return nil
 	}
-	return ar.RecordAgentReport(ctx, runnerID, e.Step, e.Fence, *r)
+	rep := *r // the runner's (untrusted) text: masked like any reported text before it is stored
+	rep.Session, rep.Model, rep.Version = redact.Text(rep.Session), redact.Text(rep.Model), redact.Text(rep.Version)
+	return ar.RecordAgentReport(ctx, runnerID, e.Step, e.Fence, rep)
 }
 
 // redactBody masks secrets in what an event may carry from the attempt's process (KIN-77): the output data (line
@@ -612,12 +614,14 @@ func redactBody(kind string, body json.RawMessage) json.RawMessage {
 		if body == nil || json.Unmarshal(body, &a) != nil {
 			return nil
 		}
-		t, in, m := redact.Lines(a.Text), redact.Text(a.Input), redact.Text(a.Message)
-		if t == a.Text && in == a.Input && m == a.Message {
+		red := a
+		red.Text, red.Input, red.Message = redact.Lines(a.Text), redact.Text(a.Input), redact.Text(a.Message)
+		red.Session, red.Model, red.Version = redact.Text(a.Session), redact.Text(a.Model), redact.Text(a.Version)
+		red.Tool, red.Cause = redact.Text(a.Tool), redact.Text(a.Cause)
+		if red == a {
 			return body
 		}
-		a.Text, a.Input, a.Message = t, in, m
-		v = a
+		v = red
 	default:
 		return body
 	}

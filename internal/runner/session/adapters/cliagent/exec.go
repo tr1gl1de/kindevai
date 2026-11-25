@@ -54,6 +54,11 @@ func ExecMain(args []string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "agent-exec: --state, --prompt, --timeout and an absolute CLI path are required")
 		return 2
 	}
+	// The CLI runs in this process's group (the attempt's): a cancel's SIGTERM reaches it, and this process ignores
+	// it (until it recorded the end) to record the CLI's end. SIGKILL after the grace period ends them both (the end
+	// is then unknown). A handler, not SIG_IGN: the CLI must not inherit an ignored SIGTERM.
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	end, err := execCLI(*state, *prompt, *timeout, *grace, argv)
 	if err != nil {
 		fmt.Fprintln(stderr, "agent-exec:", err)
@@ -85,13 +90,11 @@ func execCLI(state, prompt string, timeout, grace time.Duration, argv []string) 
 		return ExecEnd{}, err
 	}
 	defer errf.Close()
-	// The CLI runs in this process's group (the attempt's): a cancel's SIGTERM reaches it, and this process ignores
-	// it to record the CLI's end. SIGKILL after the grace period ends them both (the end is then unknown).
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-	defer signal.Stop(sigs)
 	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec,noctx // the adapter's binary and validated arguments
-	cmd.Env, cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Environ(), in, out, errf
+	cmd.Env, cmd.Stdin = os.Environ(), in
+	cmd.Stdout = &capped{f: out, left: MaxOutputFile, name: "stdout"}
+	cmd.Stderr = &capped{f: errf, left: MaxOutputFile, name: "stderr"}
+	cmd.WaitDelay = grace // a process the CLI left holding its output does not keep the run open
 	if err := cmd.Start(); err != nil {
 		return ExecEnd{}, fmt.Errorf("starting the CLI: %w", err)
 	}
@@ -131,6 +134,33 @@ func killGroup() {
 	if syscall.Getpgrp() == os.Getpid() && os.Getpid() > 1 {
 		_ = syscall.Kill(-os.Getpid(), syscall.SIGKILL)
 	}
+}
+
+// MaxOutputFile bounds each of the CLI's output files: beyond it the output is discarded (the CLI is not blocked)
+// and a marker line notes the cut, so a looping CLI cannot fill the runner's disk.
+const MaxOutputFile = 256 << 20
+
+type capped struct {
+	f    *os.File
+	left int64
+	name string
+	cut  bool
+}
+
+func (c *capped) Write(p []byte) (int, error) {
+	n := len(p)
+	if c.left > 0 {
+		w := p[:min(int64(len(p)), c.left)]
+		if _, err := c.f.Write(w); err != nil {
+			return 0, err
+		}
+		c.left -= int64(len(w))
+	}
+	if c.left <= 0 && !c.cut && n > 0 {
+		c.cut = true
+		_, _ = fmt.Fprintf(c.f, "\n[agent-exec: %s cut at %d bytes]\n", c.name, int64(MaxOutputFile))
+	}
+	return n, nil
 }
 
 func openOutput(name string) (*os.File, error) {

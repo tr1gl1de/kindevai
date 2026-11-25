@@ -15,15 +15,16 @@ import (
 
 // fakeAgents prepares fake CLI commands and replays scripted output for the follower.
 type fakeAgents struct {
-	mu       sync.Mutex
-	prepared []domain.AgentRequest
-	prompts  []string
-	perms    []domain.Permissions
-	follows  []AgentFollow
-	events   []domain.AgentEvent // what the CLI's output parses into
-	stdout   string
-	result   domain.AgentResult
-	err      error // Prepare fails
+	mu        sync.Mutex
+	prepared  []domain.AgentRequest
+	prompts   []string
+	perms     []domain.Permissions
+	follows   []AgentFollow
+	events    []domain.AgentEvent // what the CLI's output parses into
+	stdout    string
+	result    domain.AgentResult
+	err       error // Prepare fails
+	followErr error // Follow fails
 }
 
 func (f *fakeAgents) Prepare(dir string, req domain.AgentRequest, prompt string, p domain.Permissions) (AgentCommand, error) {
@@ -47,6 +48,9 @@ type fakeFollower struct {
 }
 
 func (f *fakeAgents) Follow(_, _ string, h AgentFollow) (AgentFollower, error) {
+	if f.followErr != nil {
+		return nil, f.followErr
+	}
 	f.mu.Lock()
 	f.follows = append(f.follows, h)
 	f.mu.Unlock()
@@ -318,4 +322,39 @@ func TestCLIOutputOffsetsAreNotRecordedAfterClose(t *testing.T) {
 		t.Fatalf("records %+v", recs)
 	}
 	l.proc(0).end(domain.Exit{})
+}
+
+// A CLI attempt whose output cannot be read is stopped and fails: its result would be unknown.
+func TestCLIAttemptWithoutItsOutputIsStopped(t *testing.T) {
+	t.Parallel()
+	x, l, _, ev, ag := newCLIExecutor()
+	l.termExit = true
+	ag.followErr = errors.New("unknown dialect")
+	if err := x.Assign(t.Context(), cliAssignment(domain.AgentClaude)); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "failed", func() bool { return len(ev.ofKind(protocol.EventFailed)) == 1 })
+	if f := ev.ofKind(protocol.EventFailed)[0]; !strings.Contains(f.body, "cannot read the CLI's output") {
+		t.Fatalf("failure %s", f.body)
+	}
+}
+
+// Fields the CLI reported are bounded (and masked): a huge session id cannot make the terminal event too large.
+func TestCLIReportFieldsAreBounded(t *testing.T) {
+	t.Parallel()
+	x, l, _, ev, ag := newCLIExecutor()
+	huge := strings.Repeat("s", 200<<10)
+	ag.events = []domain.AgentEvent{{Kind: domain.EventSession, Session: huge, Model: huge, Version: huge}}
+	ag.result.Session, ag.result.Model, ag.result.Version = huge, huge, huge
+	ag.result.Failure = &domain.AgentFailure{Code: domain.FailureCLILimit, Cause: huge, Message: huge}
+	if err := x.Assign(t.Context(), cliAssignment(domain.AgentClaude)); err != nil {
+		t.Fatal(err)
+	}
+	l.proc(0).end(domain.Exit{Code: 1})
+	waitFor(t, "failed", func() bool { return len(ev.ofKind(protocol.EventFailed)) == 1 })
+	for _, e := range append(ev.ofKind(protocol.EventAgent), ev.ofKind(protocol.EventFailed)...) {
+		if len(e.body) > 4<<10 {
+			t.Fatalf("%s body of %d bytes", e.kind, len(e.body))
+		}
+	}
 }

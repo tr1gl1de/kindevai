@@ -6,7 +6,7 @@
   border-left-width: 4px;
   border-radius: var(--radius);
   background: var(--warn-bg);
-  color: #16181d; /* fixed dark text: --warn-bg is light in every theme */
+  color: var(--text);
 }
 .maintenance-banner h2 {
   margin: 0 0 4px;
@@ -14,10 +14,4 @@
 }
 .maintenance-banner p {
   margin: 4px 0;
-}
-.maintenance-banner .muted {
-  color: #4a505c;
-}
-.maintenance-banner a {
-  color: #1a56c4;
 }

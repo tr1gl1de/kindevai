@@ -38,6 +38,21 @@ describe("Telegram launch data", () => {
     expect(el.style.getPropertyValue("--tg-theme-evil")).toBe("");
     applyThemeParams("not json", el);
   });
+
+  // KIN-111: tokens Telegram does not set (warn, danger, borders) follow Telegram's light or dark background,
+  // not the OS scheme, so they keep their contrast against Telegram's text colour.
+  it("switches the theme to match Telegram's background", () => {
+    const el = document.createElement("div");
+    applyThemeParams(JSON.stringify({ bg_color: "#17212b", text_color: "#f5f5f5" }), el);
+    expect(el.dataset.theme).toBe("dark");
+    applyThemeParams(JSON.stringify({ bg_color: "#fff" }), el);
+    expect(el.dataset.theme).toBe("light");
+    applyThemeParams(JSON.stringify({ text_color: "#000" }), el);
+    expect(el.dataset.theme).toBe("light");
+    const plain = document.createElement("div");
+    applyThemeParams(JSON.stringify({ text_color: "#000" }), plain);
+    expect(plain.dataset.theme).toBeUndefined();
+  });
 });
 
 describe("Mini App sign-in", () => {

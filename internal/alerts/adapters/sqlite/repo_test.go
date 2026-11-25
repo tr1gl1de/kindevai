@@ -190,3 +190,31 @@ func TestDeleteClosedBefore(t *testing.T) {
 		t.Fatalf("a0 not purged: %v", err)
 	}
 }
+
+// KIN-99: one resolve tombstone per dedup key that keeps the latest time, nanoseconds included.
+func TestResolvedKeepsTheLatestTimePerKey(t *testing.T) {
+	t.Parallel()
+	r := sqlite.New(testDB(t))
+	ctx := t.Context()
+	t0 := time.Date(2026, 11, 25, 12, 0, 0, 500, time.UTC)
+	if _, ok, err := r.Resolved(ctx, "cli/r1/claude"); ok || err != nil {
+		t.Fatalf("unset key resolved: %v, %v", ok, err)
+	}
+	for _, at := range []time.Time{t0, t0.Add(-time.Hour), t0.Add(-1)} {
+		if err := r.SetResolved(ctx, "cli/r1/claude", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.SetResolved(ctx, "cli/r2/claude", t0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if at, ok, err := r.Resolved(ctx, "cli/r1/claude"); !ok || err != nil || !at.Equal(t0) {
+		t.Fatalf("resolved = %v, %v, %v; want %v", at, ok, err, t0)
+	}
+	if err := r.SetResolved(ctx, "cli/r1/claude", t0.Add(1)); err != nil {
+		t.Fatal(err)
+	}
+	if at, _, _ := r.Resolved(ctx, "cli/r1/claude"); !at.Equal(t0.Add(1)) {
+		t.Fatalf("resolved = %v, want %v", at, t0.Add(1))
+	}
+}

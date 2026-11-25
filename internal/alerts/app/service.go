@@ -51,6 +51,10 @@ type Repository interface {
 	Active(ctx context.Context, dedupKey string) (domain.Alert, error) // domain.ErrNotFound
 	// Applied reports whether event was the last one applied to an alert with dedupKey (active or closed).
 	Applied(ctx context.Context, dedupKey, event string) (bool, error)
+	// Resolved is the latest observation time of an "anomaly ended" event for dedupKey; SetResolved records one,
+	// keeping the latest (KIN-99).
+	Resolved(ctx context.Context, dedupKey string) (time.Time, bool, error)
+	SetResolved(ctx context.Context, dedupKey string, at time.Time) error
 	Create(ctx context.Context, a domain.Alert) error
 	Save(ctx context.Context, a domain.Alert) error
 	Get(ctx context.Context, id string) (domain.Alert, error)                   // domain.ErrNotFound
@@ -140,6 +144,10 @@ func (s *Service) Raise(ctx context.Context, event string, o domain.Occurrence) 
 			if done, err := s.Repo.Applied(ctx, o.DedupKey, event); err != nil || done {
 				return err
 			}
+			// An occurrence observed no later than the anomaly was seen ended, delivered late, is over (KIN-99).
+			if ended, err := s.endedBy(ctx, o); err != nil || ended {
+				return err
+			}
 			if a, err = domain.NewAlert(s.NewID(), o, now); err != nil {
 				return err
 			}
@@ -152,6 +160,10 @@ func (s *Service) Raise(ctx context.Context, event string, o domain.Occurrence) 
 			return fmt.Errorf("loading alert: %w", err)
 		case a.LastEvent == event:
 			return nil // redelivery of the event already applied
+		}
+		// An untimed occurrence opened the alert after the anomaly ended: an ended one is not grouped into it.
+		if ended, err := s.endedBy(ctx, o); err != nil || ended {
+			return err
 		}
 		escalated, err := a.Recur(o, now)
 		if err != nil {
@@ -174,18 +186,25 @@ func (s *Service) ResolveKey(ctx context.Context, dedupKey string) error {
 }
 
 // ResolveKeyObservedAt is ResolveKey for an "anomaly ended" event the monitor observed at at: an alert observed
-// after that (a later occurrence whose event was delivered first) stays active (KIN-88). A zero at resolves as
-// ResolveKey.
+// after that (a later occurrence whose event was delivered first) stays active (KIN-88). Otherwise at is kept for
+// the dedup key, with or without an active alert, so an occurrence observed no later than at and delivered after
+// this event opens no alert (KIN-99). A zero at resolves as ResolveKey.
 func (s *Service) ResolveKeyObservedAt(ctx context.Context, dedupKey string, at time.Time) error {
 	return s.Tx.InTx(ctx, func(ctx context.Context) error {
 		a, err := s.Repo.Active(ctx, dedupKey)
-		if errors.Is(err, domain.ErrNotFound) {
-			return nil
-		}
-		if err != nil {
+		found := err == nil
+		if err != nil && !errors.Is(err, domain.ErrNotFound) {
 			return fmt.Errorf("loading alert: %w", err)
 		}
-		if a.ObservedAfter(at) {
+		if found && a.ObservedAfter(at) {
+			return nil
+		}
+		if !at.IsZero() { // KIN-99: an occurrence observed until at and delivered later opens no alert
+			if err := s.Repo.SetResolved(ctx, dedupKey, at); err != nil {
+				return err
+			}
+		}
+		if !found {
 			return nil
 		}
 		if err := a.Resolve("", s.Now()); err != nil {
@@ -193,6 +212,16 @@ func (s *Service) ResolveKeyObservedAt(ctx context.Context, dedupKey string, at 
 		}
 		return s.Repo.Save(ctx, a)
 	})
+}
+
+// endedBy reports whether a timed occurrence was observed no later than the last "anomaly ended" event of its dedup
+// key (KIN-99). An untimed one never is.
+func (s *Service) endedBy(ctx context.Context, o domain.Occurrence) (bool, error) {
+	if o.ObservedAt.IsZero() {
+		return false, nil
+	}
+	at, found, err := s.Repo.Resolved(ctx, o.DedupKey)
+	return found && !o.ObservedAt.After(at), err
 }
 
 // View is an alert as a user sees it.

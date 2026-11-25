@@ -19,6 +19,9 @@ paths:
 - Layers: unit tests next to code (fast, default `make test`); integration tests behind `//go:build integration`
   (`make test-integration`); fixtures in `testdata/`. Golden files updated only with `-update` flag.
 - Frontend: Vitest + Testing Library, tests query by role/label, network mocked (MSW); no fixed ports.
+- Frontend timing (KIN-82): enter text with `fill()` from `web/src/test/render.tsx` (one paste) and keep `user.type`
+  for keystroke behaviour (special keys, per-key reactions). The per-test (30 s) and findBy/waitFor (5 s) limits are
+  set once in `web/vite.config.ts` / `web/src/test/setup.ts` for a loaded machine — no per-test timeouts or sleeps.
 - Leave nothing behind: every resource a test creates is released via `t.Cleanup` (servers, DBs, goroutines,
   child processes, containers). Child processes are killed with their process group; goroutines stop on
   `t.Context()` cancel. A test that leaves files outside `t.TempDir()` or a running process is a failing test.

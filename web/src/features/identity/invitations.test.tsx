@@ -4,7 +4,7 @@ import { http } from "msw";
 import { describe, expect, it } from "vitest";
 import type { Invitation, Project } from "../../api/types";
 import { apiError, json, owner, server } from "../../test/msw";
-import { expectAccessible, expectStatus, renderApp } from "../../test/render";
+import { expectAccessible, expectStatus, fill, renderApp } from "../../test/render";
 
 const alpha: Project = { id: "p1", slug: "alpha", name: "Alpha", createdAt: "2026-11-24T10:00:00Z", myRole: "owner" };
 const TOKEN = "tok_abcdefghijklmnopqrstuvwxyz0123456789ABCDEF";
@@ -89,18 +89,18 @@ describe("accept invitation page", () => {
     expect(await screen.findByText(/You are invited to Alpha as Member/)).toBeInTheDocument();
     await expectAccessible(container);
 
-    await user.type(screen.getByLabelText("Login"), "taken");
-    await user.type(screen.getByLabelText("Password"), "dave's long password");
-    await user.type(screen.getByLabelText("Repeat password"), "dave's long passwor");
+    await fill(user, screen.getByLabelText("Login"), "taken");
+    await fill(user, screen.getByLabelText("Password"), "dave's long password");
+    await fill(user, screen.getByLabelText("Repeat password"), "dave's long passwor");
     await user.click(screen.getByRole("button", { name: "Create account" }));
     expect(screen.getByLabelText("Repeat password")).toHaveAccessibleDescription(/do not match/i);
-    await user.type(screen.getByLabelText("Repeat password"), "d");
+    await user.type(screen.getByLabelText("Repeat password"), "d"); // completes the mismatched value in place
     await user.click(screen.getByRole("button", { name: "Create account" }));
     expect(await screen.findByLabelText("Login")).toHaveAccessibleDescription(/already taken/i);
     expect(screen.getByLabelText("Password")).toHaveValue("dave's long password"); // nothing typed is lost
 
     await user.clear(screen.getByLabelText("Login"));
-    await user.type(screen.getByLabelText("Login"), "dave");
+    await fill(user, screen.getByLabelText("Login"), "dave");
     await user.click(screen.getByRole("button", { name: "Create account" }));
     expect(await screen.findByRole("heading", { name: "Account created" })).toHaveFocus();
     expect(accepted).toEqual({ token: TOKEN, login: "dave", password: "dave's long password" });

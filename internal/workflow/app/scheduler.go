@@ -18,6 +18,25 @@ type RunnerPool interface {
 	Candidates(ctx context.Context, projectID string) ([]Candidate, error)
 }
 
+// AgentRouter is the routing context (KIN-33) as the scheduler needs it.
+type AgentRouter interface {
+	// Route returns the permitted CLI chain for a step of role in the project (System → Project → Role binding),
+	// author being the CLI that did the work under review ("" when unknown), with the runners' CLI cool-downs.
+	Route(ctx context.Context, projectID, role, author string) (AgentRoute, error)
+}
+
+// AgentRoute is routing's answer for one step.
+type AgentRoute struct {
+	Chain []domain.AgentChoice // permitted choices in order; empty: nothing permitted
+	// Blocked explains an empty Chain (shown as the task's BLOCKED(agent) detail).
+	Blocked string
+	// Cooling reports a runner's CLI cooling down after a usage limit (cli_limit) until the returned time; nil: none.
+	Cooling func(runnerID, agent string) (time.Time, bool)
+}
+
+// AgentMock is the agent of mock plans (the mock adapter, no AI): they are never routed.
+const AgentMock = "mock"
+
 // Assignment is one attempt the scheduler hands to a runner (the runner checks it again itself).
 type Assignment struct {
 	StepID      string
@@ -28,6 +47,11 @@ type Assignment struct {
 	ProjectID   string
 	Repository  string
 	Scope       []string
+	// Agent is the AI CLI routing chose (AgentMock for mock plans, "" without routing), Model its model ("" = the
+	// CLI's default) and Role the step's platform role (KIN-33).
+	Agent string
+	Model string
+	Role  string
 }
 
 // Dispatcher queues runner commands in the use case's transaction (the runner's ordered command log, KIN-22), so a
@@ -47,13 +71,22 @@ const (
 	// CancelReasonScopeExceeded: the attempt changed files beyond the approved scope; the step waits for a new
 	// approval (KIN-51).
 	CancelReasonScopeExceeded = "scope_exceeded"
+	// CancelReasonAgentStopped: the Owner's emergency stop of the attempt's AI CLI (KIN-33).
+	CancelReasonAgentStopped = "agent_stopped"
 )
 
 // Wait details shown with a task BLOCKED for a runner.
 const (
 	DetailNoRunner   = "waiting for a runner: no approved, online runner of this project has the step's capabilities and disk space"
 	DetailRunnerLost = "waiting for the runner to reconnect: the outcome of a running attempt is unknown until it reconciles"
+	DetailNoAgent    = "waiting for an AI CLI: none is enabled for the step's role in this project"
+	DetailCLILimit   = "waiting for a CLI usage limit to reset"
 )
+
+// routedWait: the wait reasons the scheduler itself sets and lifts by routing the step again.
+func routedWait(r domain.WaitReason) bool {
+	return r == domain.WaitRunner || r == domain.WaitAgent || r == domain.WaitCLILimit
+}
 
 // Schedule is one scheduler pass (KIN-23): leases that ran out are handled, READY tasks start their execution, and
 // every running execution's schedulable steps are claimed for a candidate runner with an execution.assign command
@@ -96,11 +129,11 @@ func (s *Service) Schedule(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// schedulable: READY, WAITING for a runner without an unknown attempt, or WAITING for the network once its retry
-// is due (KIN-31).
+// schedulable: READY, WAITING for a runner, an AI CLI or a CLI limit without an unknown attempt (KIN-33), or
+// WAITING for the network once its retry is due (KIN-31).
 func schedulable(st *domain.Step, now time.Time) bool {
 	return st.State == domain.StepReady ||
-		st.State == domain.StepWaiting && st.WaitReason == domain.WaitRunner && !st.AttemptUnknown() ||
+		st.State == domain.StepWaiting && routedWait(st.WaitReason) && !st.AttemptUnknown() ||
 		st.NetworkRetryDue(now)
 }
 
@@ -114,7 +147,7 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		blockedForRunner := t.State == domain.TaskBlocked && t.BlockReason == domain.WaitRunner &&
+		blockedForRunner := t.State == domain.TaskBlocked && routedWait(t.BlockReason) &&
 			t.BlockedFrom == domain.TaskRunning
 		if t.State != domain.TaskRunning && !blockedForRunner {
 			return nil // blocked for something else, or finishing: not the scheduler's business
@@ -129,7 +162,7 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 		}
 		if !slices.ContainsFunc(e.Steps, func(st domain.Step) bool { return schedulable(&st, s.now()) }) &&
 			!blockedForRunner && t.State == domain.TaskRunning {
-			return s.blockIfStuck(ctx, &e, &t) // nothing to assign: only the task's block state may change
+			return s.blockIfStuck(ctx, &e, &t, nil) // nothing to assign: only the task's block state may change
 		}
 		cands, err := s.Runners.Candidates(ctx, t.ProjectID)
 		if err != nil {
@@ -144,16 +177,24 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 		}
 		now := s.now()
 		before := e.Clone()
+		routed := s.Agents != nil && rev.CreatedBy() != MockPlanner
+		why := map[string]domain.Reason{}
+		routes := map[[2]string]AgentRoute{} // role, author → route, read once per pass
 		for i := range e.Steps {
 			st := &e.Steps[i]
 			if !schedulable(st, now) {
 				continue
 			}
 			ps := caps[st.Key]
-			c, ok := domain.PickRunner(cands, ps.Capabilities, held)
+			c, choice, reason, ok, err := s.route(ctx, routed, routes, &e, t.ProjectID, ps, cands, held)
+			if err != nil {
+				return err
+			}
 			if !ok {
-				if st.State == domain.StepReady {
-					if err := e.WaitStep(st.ID, domain.WaitRunner, now); err != nil {
+				why[st.ID] = reason
+				if st.State == domain.StepReady || st.State == domain.StepWaiting && routedWait(st.WaitReason) &&
+					st.WaitReason != reason.Code {
+					if err := e.WaitStep(st.ID, reason.Code, now); err != nil {
 						return err
 					}
 				}
@@ -169,7 +210,7 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 					return err
 				}
 			}
-			l, err := e.Claim(st.ID, c.ID, now, s.leaseTTL())
+			l, err := e.ClaimWith(st.ID, c.ID, choice, now, s.leaseTTL())
 			if errors.Is(err, domain.ErrParallelismLimit) {
 				break
 			}
@@ -177,7 +218,8 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 				return err
 			}
 			if err := s.Dispatcher.Assign(ctx, c.ID, Assignment{StepID: st.ID, StepKey: st.Key, Fence: l.Fence,
-				ExecutionID: e.ID, TaskID: t.ID, ProjectID: t.ProjectID, Repository: ps.Repository, Scope: ps.Scope}); err != nil {
+				ExecutionID: e.ID, TaskID: t.ID, ProjectID: t.ProjectID, Repository: ps.Repository, Scope: ps.Scope,
+				Agent: choice.Agent, Model: choice.Model, Role: ps.StepRole()}); err != nil {
 				return fmt.Errorf("queueing the assignment: %w", err)
 			}
 			held[c.ID]++
@@ -187,8 +229,65 @@ func (s *Service) scheduleExecution(ctx context.Context, id string) error {
 				return err
 			}
 		}
-		return s.blockIfStuck(ctx, &e, &t)
+		return s.blockIfStuck(ctx, &e, &t, why)
 	})
+}
+
+// route picks the runner and AI CLI for a step (KIN-33). Unrouted (mock plans, or no router configured) it is a
+// plain runner pick; routed, the permitted chain of the step's role decides, and the reason says why nothing fits.
+func (s *Service) route(ctx context.Context, routed bool, routes map[[2]string]AgentRoute, e *domain.Execution,
+	projectID string, ps domain.PlanStep, cands []Candidate, held map[string]int) (Candidate, domain.AgentChoice, domain.Reason, bool, error) {
+	if !routed {
+		c, ok := domain.PickRunner(cands, ps.Capabilities, held)
+		var choice domain.AgentChoice
+		if s.Agents != nil {
+			choice.Agent = AgentMock
+		}
+		return c, choice, domain.Reason{Code: domain.WaitRunner, Detail: DetailNoRunner}, ok, nil
+	}
+	key := [2]string{ps.StepRole(), author(e, ps)}
+	r, cached := routes[key]
+	if !cached {
+		var err error
+		if r, err = s.Agents.Route(ctx, projectID, key[0], key[1]); err != nil {
+			return Candidate{}, domain.AgentChoice{}, domain.Reason{}, false, fmt.Errorf("routing step %s: %w", ps.Key, err)
+		}
+		routes[key] = r
+	}
+	if len(r.Chain) == 0 {
+		detail := r.Blocked
+		if detail == "" {
+			detail = DetailNoAgent
+		}
+		return Candidate{}, domain.AgentChoice{}, domain.Reason{Code: domain.WaitAgent, Detail: detail}, false, nil
+	}
+	c, choice, reason, ok := domain.PickRoute(cands, ps.Capabilities, held, r.Chain, r.Cooling)
+	return c, choice, reason, ok, nil
+}
+
+// author is the AI CLI that did the work a step reviews: the CLI the Control Plane assigned to the latest claim of
+// a succeeded dependency (never what a runner reports), the most recently finished one first; "" when none is
+// known (mock, no dependency).
+func author(e *domain.Execution, ps domain.PlanStep) string {
+	if ps.StepRole() != domain.StepRoleReviewer {
+		return ""
+	}
+	var best string
+	var at time.Time
+	for _, key := range ps.DependsOn {
+		d := e.StepByKey(key)
+		if d == nil || d.State != domain.StepSucceeded || d.Agent == "" || d.Agent == AgentMock || len(d.Attempts) == 0 {
+			continue
+		}
+		last := d.Attempts[len(d.Attempts)-1]
+		if f := last.FinishedAt; best == "" || f != nil && f.After(at) {
+			best = d.Agent
+			if f != nil {
+				at = *f
+			}
+		}
+	}
+	return best
 }
 
 func executionEqual(a, b domain.Execution) bool {
@@ -197,25 +296,32 @@ func executionEqual(a, b domain.Execution) bool {
 	}
 	for i := range a.Steps {
 		x, y := a.Steps[i], b.Steps[i]
-		if x.State != y.State || x.Fence != y.Fence || x.WaitReason != y.WaitReason || x.RunnerID != y.RunnerID {
+		if x.State != y.State || x.Fence != y.Fence || x.WaitReason != y.WaitReason || x.RunnerID != y.RunnerID ||
+			x.Agent != y.Agent || x.Model != y.Model {
 			return false
 		}
 	}
 	return true
 }
 
-// blockIfStuck saves the task BLOCKED(runner) while a step waits for a runner and none is claimed or running, and
-// resumes it otherwise. t is saved only when it changed (or was resumed above).
-func (s *Service) blockIfStuck(ctx context.Context, e *domain.Execution, t *domain.Task) error {
+// blockIfStuck saves the task BLOCKED while a step waits for a runner, an AI CLI or a CLI limit and none is claimed
+// or running, and resumes it otherwise. The reason is the first waiting step's (why: this pass's routing reasons
+// by step id; nil keeps the task's current reason); a blocked task whose reason changed is re-blocked with the new
+// one. t is saved only when it changed (or was resumed above).
+func (s *Service) blockIfStuck(ctx context.Context, e *domain.Execution, t *domain.Task, why map[string]domain.Reason) error {
 	waiting, lost, active := false, false, false
+	var reason *domain.Reason
 	for i := range e.Steps {
 		st := &e.Steps[i]
 		switch {
 		case st.State == domain.StepClaimed || st.State == domain.StepRunning:
 			active = true
-		case st.State == domain.StepWaiting && st.WaitReason == domain.WaitRunner:
+		case st.State == domain.StepWaiting && routedWait(st.WaitReason):
 			waiting = true
 			lost = lost || st.AttemptUnknown()
+			if r, ok := why[st.ID]; ok && reason == nil {
+				reason = &r
+			}
 		}
 	}
 	now := s.now()
@@ -224,16 +330,27 @@ func (s *Service) blockIfStuck(ctx context.Context, e *domain.Execution, t *doma
 		return err
 	}
 	stuck := waiting && !active
+	want := domain.Reason{Code: domain.WaitRunner, Detail: DetailNoRunner}
+	switch {
+	case lost:
+		want.Detail = DetailRunnerLost
+	case reason != nil:
+		want = *reason
+	}
+	ours := t.State == domain.TaskBlocked && routedWait(t.BlockReason) && t.BlockedFrom == domain.TaskRunning
 	switch {
 	case stuck && t.State == domain.TaskRunning:
-		detail := DetailNoRunner
-		if lost {
-			detail = DetailRunnerLost
-		}
-		if err := t.Transition(domain.TaskBlocked, domain.Reason{Code: domain.WaitRunner, Detail: detail}, now); err != nil {
+		if err := t.Transition(domain.TaskBlocked, want, now); err != nil {
 			return err
 		}
-	case !stuck && t.State == domain.TaskBlocked && t.BlockReason == domain.WaitRunner:
+	case stuck && ours && (lost || reason != nil) && t.Reason != want:
+		if err := t.Resume(now); err != nil {
+			return err
+		}
+		if err := t.Transition(domain.TaskBlocked, want, now); err != nil {
+			return err
+		}
+	case !stuck && ours:
 		if err := t.Resume(now); err != nil {
 			return err
 		}
@@ -430,4 +547,40 @@ func (s *Service) cancelReleased(ctx context.Context, before, after *domain.Exec
 		}
 	}
 	return nil
+}
+
+// StopAgent is the Owner's emergency stop of an AI CLI (KIN-33): every attempt running (or claimed) with it is taken
+// away at once — claimed steps return to READY, running or unknown attempts are cancelled without using the retry
+// budget and their steps WAIT for an agent — and each runner gets an execution.cancel (agent_stopped) in the same
+// transaction. The steps are routed again by the next pass. It joins the caller's transaction (the routing context
+// disables the CLI globally in the same one) and returns the number of attempts stopped.
+func (s *Service) StopAgent(ctx context.Context, agent string) (int, error) {
+	n := 0
+	err := s.Tx.InTx(ctx, func(ctx context.Context) error {
+		ids, err := s.Repo.RunningExecutions(ctx)
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			var released []domain.AgentReleased
+			err := s.updateExecutionByID(ctx, id, func(_ context.Context, e *domain.Execution, now time.Time) error {
+				released = e.ReleaseAgent(agent, "AI CLI "+agent+" stopped by the Owner (emergency stop)", now)
+				return nil
+			})
+			if err != nil {
+				return fmt.Errorf("stopping %s in execution %s: %w", agent, id, err)
+			}
+			n += len(released)
+			if s.Dispatcher == nil {
+				continue
+			}
+			for _, r := range released {
+				if err := s.Dispatcher.Cancel(ctx, r.RunnerID, r.StepID, r.Fence, CancelReasonAgentStopped); err != nil {
+					return fmt.Errorf("queueing the cancel of step %s: %w", r.StepID, err)
+				}
+			}
+		}
+		return nil
+	})
+	return n, err
 }

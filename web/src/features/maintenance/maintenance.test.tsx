@@ -4,7 +4,7 @@ import { http } from "msw";
 import { describe, expect, it } from "vitest";
 import type { Me, MaintenanceStatus } from "../../api/types";
 import { apiError, json, owner, server } from "../../test/msw";
-import { expectAccessible, expectStatus, renderApp } from "../../test/render";
+import { expectAccessible, expectStatus, fill, renderApp } from "../../test/render";
 
 const alice: Me = { id: "u2", login: "alice", role: "user", mustChangePassword: false };
 const on: MaintenanceStatus = { enabled: true, reason: "Moving servers", since: "2026-11-25T12:00:00Z", by: "owner", activeAttempts: 2 };
@@ -49,7 +49,7 @@ describe("maintenance mode", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Режим обслуживания" })).toBeInTheDocument();
     await expectAccessible(container);
     const user = userEvent.setup();
-    await user.type(await screen.findByLabelText("Причина (видна всем)"), "Переезд");
+    await fill(user, await screen.findByLabelText("Причина (видна всем)"), "Переезд");
     await user.click(screen.getByRole("button", { name: "Включить режим обслуживания" }));
     await expectStatus("Режим обслуживания включён.");
     expect(await screen.findByRole("region", { name: "Режим обслуживания" })).toHaveTextContent("Причина: Переезд");

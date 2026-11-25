@@ -110,8 +110,14 @@ type Assign struct {
 	Project    string   `json:"project"`
 	Repository string   `json:"repository"` // "owner/name"
 	Scope      []string `json:"scope"`      // repository-relative paths the step may change
-	Adapter    string   `json:"adapter"`    // AdapterMock until the CLI adapters (KIN-32)
-	Scenario   string   `json:"scenario,omitempty"`
+	// Adapter is the agent to run: AdapterMock, or the AI CLI routing chose (KIN-33: "claude", "codex"; run by the
+	// CLI adapters, KIN-79).
+	Adapter  string `json:"adapter"`
+	Scenario string `json:"scenario,omitempty"`
+	// Model is the CLI's model routing chose from the role binding ("" = the CLI's default); Role the step's
+	// platform role (planner, implementer, reviewer), informational (KIN-33).
+	Model string `json:"model,omitempty"`
+	Role  string `json:"role,omitempty"`
 	// Base is the branch the attempt's worktree starts from (the repository's integration branch, KIN-26/KIN-29).
 	// Empty: the attempt runs in an empty directory (no registered repository).
 	Base string `json:"base,omitempty"`

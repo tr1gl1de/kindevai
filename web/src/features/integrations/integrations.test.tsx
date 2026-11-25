@@ -4,7 +4,7 @@ import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 import type { GitHubApp, Integrations, Me, Project, ProjectIntegrations, YouTrackConnection } from "../../api/types";
 import { json, owner, server } from "../../test/msw";
-import { expectAccessible, expectStatus, renderApp } from "../../test/render";
+import { expectAccessible, expectStatus, fill, renderApp } from "../../test/render";
 
 const TOKEN = "perm:cm9vdA==.NDQtMQ==.s3cr3tT0kenValue";
 const alpha: Project = { id: "p1", slug: "alpha", name: "Alpha", createdAt: "2026-11-24T10:00:00Z", myRole: "owner" };
@@ -56,10 +56,10 @@ describe("integrations page (owner)", () => {
     expect(screen.getByLabelText("Base URL")).toHaveFocus();
     expect(screen.getByLabelText("Permanent token")).toHaveAttribute("aria-invalid", "true");
 
-    await user.type(screen.getByLabelText("Base URL"), "https://acme.youtrack.cloud");
+    await fill(user, screen.getByLabelText("Base URL"), "https://acme.youtrack.cloud");
     const tokenInput = screen.getByLabelText("Permanent token");
     expect(tokenInput).toHaveAttribute("type", "password");
-    await user.type(tokenInput, TOKEN);
+    await fill(user, tokenInput, TOKEN);
     await user.click(screen.getByRole("button", { name: "Save connection" }));
     await expectStatus("YouTrack connection saved.");
     expect(bodies).toEqual([{ baseUrl: "https://acme.youtrack.cloud", token: TOKEN }]);
@@ -70,9 +70,9 @@ describe("integrations page (owner)", () => {
 
     await user.click(screen.getByRole("button", { name: "Test connection" }));
     expect(await screen.findByText("Testing…")).toBeInTheDocument();
-    expect(await screen.findByText("Connected as robot.", undefined, { timeout: 4000 })).toBeInTheDocument();
+    expect(await screen.findByText("Connected as robot.")).toBeInTheDocument();
     await expectAccessible(container);
-  }, 15_000); // real polling plus two axe runs: the default 5s is too tight on a loaded machine
+  });
 
   it("shows server validation next to the field and keeps the token out of the next save", async () => {
     const bodies: unknown[] = [];
@@ -92,7 +92,7 @@ describe("integrations page (owner)", () => {
     const url = await screen.findByLabelText("Base URL");
     expect(url).toHaveValue("https://acme.youtrack.cloud");
     await user.clear(url);
-    await user.type(url, "ftp://acme");
+    await fill(user, url, "ftp://acme");
     await user.click(screen.getByRole("button", { name: "Save connection" }));
     expect(await screen.findByText("Use an http:// or https:// address.")).toBeInTheDocument();
     expect(url).toHaveFocus();
@@ -187,21 +187,21 @@ describe("project integrations (owner)", () => {
     expect(await within(section).findByText("No repositories yet.")).toBeInTheDocument();
     await expectAccessible(container);
 
-    await user.type(within(section).getByLabelText("YouTrack project"), "kin");
+    await fill(user, within(section).getByLabelText("YouTrack project"), "kin");
     await user.click(within(section).getByRole("button", { name: "Save YouTrack project" }));
     await expectStatus("Alpha is linked to YouTrack project KIN.");
 
     const add = within(section).getByRole("form", { name: "Add repository" });
-    await user.type(within(add).getByLabelText("Owner"), "acme");
-    await user.type(within(add).getByLabelText("Repository"), "web");
+    await fill(user, within(add).getByLabelText("Owner"), "acme");
+    await fill(user, within(add).getByLabelText("Repository"), "web");
     const branch = within(add).getByLabelText("Integration branch");
     expect(branch).toHaveValue("dev");
     await user.clear(branch);
-    await user.type(branch, "main");
+    await fill(user, branch, "main");
     await user.click(within(add).getByRole("button", { name: "Add repository" }));
     expect(await within(add).findByText("main and master are protected; choose another branch.")).toBeInTheDocument();
     await user.clear(branch);
-    await user.type(branch, "dev");
+    await fill(user, branch, "dev");
     await user.click(within(add).getByRole("button", { name: "Add repository" }));
     await expectStatus("acme/web added.");
     const row = (await within(section).findByRole("cell", { name: "acme/web" })).closest("tr")!;
@@ -210,7 +210,7 @@ describe("project integrations (owner)", () => {
     await user.click(within(row).getByRole("button", { name: "Change branch of acme/web" }));
     const edit = within(row).getByLabelText("Integration branch");
     await user.clear(edit);
-    await user.type(edit, "next");
+    await fill(user, edit, "next");
     await user.click(within(row).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(within(section).getByRole("cell", { name: "next" })).toBeInTheDocument());
 
@@ -277,17 +277,17 @@ describe("GitHub App (owner)", () => {
     expect(within(section).getByLabelText("App ID")).toHaveFocus();
     expect(within(section).getByLabelText("Private key")).toHaveAttribute("aria-invalid", "true");
 
-    await user.type(within(section).getByLabelText("App ID"), "x");
-    await user.type(within(section).getByLabelText("Private key"), PEM);
+    await fill(user, within(section).getByLabelText("App ID"), "x");
+    await fill(user, within(section).getByLabelText("Private key"), PEM);
     const secret = within(section).getByLabelText("Webhook secret");
     expect(secret).toHaveAttribute("type", "password");
-    await user.type(secret, HOOK);
+    await fill(user, secret, HOOK);
     await user.click(within(section).getByRole("button", { name: "Save GitHub App" }));
     expect(await within(section).findByText("Enter the numeric App ID from the App's settings page.")).toBeInTheDocument();
     expect(within(section).getByLabelText("Private key")).toHaveValue(PEM); // never clear what the user typed
 
     await user.clear(within(section).getByLabelText("App ID"));
-    await user.type(within(section).getByLabelText("App ID"), "42");
+    await fill(user, within(section).getByLabelText("App ID"), "42");
     await user.click(within(section).getByRole("button", { name: "Save GitHub App" }));
     await expectStatus("GitHub App saved. Registered repositories are being read from GitHub.");
     expect(bodies.at(-1)).toEqual({ appId: "42", privateKey: PEM, webhookSecret: HOOK });
@@ -298,7 +298,7 @@ describe("GitHub App (owner)", () => {
     expect(within(section).getByText("No webhook received yet.")).toBeInTheDocument();
 
     await user.click(within(section).getByRole("button", { name: "Test App" }));
-    expect(await within(section).findByText("Authenticated as kindev-bot.", undefined, { timeout: 4000 })).toBeInTheDocument();
+    expect(await within(section).findByText("Authenticated as kindev-bot.")).toBeInTheDocument();
     await expectAccessible(container);
   });
 

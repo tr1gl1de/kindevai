@@ -104,6 +104,10 @@ type Step struct {
 	RunnerID       string     // holder of the current claim (CLAIMED, RUNNING, or WAITING on an unknown attempt)
 	LeaseExpiresAt *time.Time // set while CLAIMED or RUNNING
 	Attempts       []Attempt
+	// Agent and Model are the AI CLI and model of the latest claim (KIN-33): "mock" for mock plans, "" before the
+	// first claim. They stay after the attempt ends, so a review step can tell which CLI authored the work.
+	Agent string
+	Model string
 }
 
 // WaitingForNetwork is what the UI shows as WAITING_FOR_NETWORK.
@@ -264,8 +268,13 @@ func (e *Execution) active() int {
 	return n
 }
 
-// Claim gives runnerID the READY step under a new fencing token and a lease of ttl.
+// Claim gives runnerID the READY step under a new fencing token and a lease of ttl (no AI CLI recorded).
 func (e *Execution) Claim(stepID, runnerID string, now time.Time, ttl time.Duration) (Lease, error) {
+	return e.ClaimWith(stepID, runnerID, AgentChoice{}, now, ttl)
+}
+
+// ClaimWith is Claim for the AI CLI and model routing chose (KIN-33); they are recorded on the step and its attempt.
+func (e *Execution) ClaimWith(stepID, runnerID string, agent AgentChoice, now time.Time, ttl time.Duration) (Lease, error) {
 	if runnerID == "" {
 		return Lease{}, invalid("runnerId", "runner_required")
 	}
@@ -283,6 +292,7 @@ func (e *Execution) Claim(stepID, runnerID string, now time.Time, ttl time.Durat
 	s.move(StepClaimed)
 	s.Fence++
 	s.RunnerID, s.LeaseExpiresAt = runnerID, &exp
+	s.Agent, s.Model = agent.Agent, agent.Model
 	return Lease{StepID: s.ID, RunnerID: runnerID, Fence: s.Fence, ExpiresAt: exp}, nil
 }
 
@@ -323,7 +333,7 @@ func (e *Execution) Start(stepID, runnerID string, fence int64, now time.Time, t
 	s.move(StepRunning)
 	s.LeaseExpiresAt = &exp
 	s.Attempts = append(s.Attempts, Attempt{Number: len(s.Attempts) + 1, RunnerID: runnerID, Fence: fence,
-		State: AttemptRunning, StartedAt: now})
+		State: AttemptRunning, StartedAt: now, Agent: s.Agent})
 	return nil
 }
 
@@ -381,13 +391,13 @@ func (e *Execution) Fail(stepID, runnerID string, fence int64, msg string, now t
 	if !reportable(s) && s.State != StepClaimed {
 		return invalidStep(s, "fail")
 	}
-	msg = truncate(strings.TrimSpace(msg), MaxReasonLen)
+	msg = reasonText(msg)
 	if msg == "" {
 		msg = "failed"
 	}
 	if s.State == StepClaimed { // the launch itself failed: it still counts as an attempt
 		s.Attempts = append(s.Attempts, Attempt{Number: len(s.Attempts) + 1, RunnerID: runnerID, Fence: fence,
-			State: AttemptRunning, StartedAt: now})
+			State: AttemptRunning, StartedAt: now, Agent: s.Agent})
 	}
 	e.failAttempt(s, msg, now, maxAttempts)
 	return nil
@@ -438,9 +448,11 @@ func (e *Execution) Reconcile(stepID string, p ProcessState, now time.Time, ttl 
 	return nil
 }
 
-func truncate(s string, n int) string {
-	if r := []rune(s); len(r) > n {
-		return string(r[:n])
+// reasonText trims a reason and bounds it to MaxReasonLen runes.
+func reasonText(s string) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > MaxReasonLen {
+		return string(r[:MaxReasonLen])
 	}
 	return s
 }
@@ -490,7 +502,7 @@ func (e *Execution) ReleaseRunner(runnerID, msg string, now time.Time, maxAttemp
 	if e.State != ExecutionRunning || runnerID == "" {
 		return nil
 	}
-	msg = truncate(strings.TrimSpace(msg), MaxReasonLen)
+	msg = reasonText(msg)
 	var out []Released
 	for i := range e.Steps {
 		s := &e.Steps[i]
@@ -505,6 +517,41 @@ func (e *Execution) ReleaseRunner(runnerID, msg string, now time.Time, maxAttemp
 		}
 		// A step that uses up its budget fails the execution, which cancels the remaining steps (no longer held).
 		e.failAttempt(s, msg, now, maxAttempts)
+	}
+	return out
+}
+
+// AgentReleased is an attempt ReleaseAgent took away: its runner must stop the process with this token.
+type AgentReleased struct {
+	StepID   string
+	RunnerID string
+	Fence    int64
+}
+
+// ReleaseAgent takes every step held with agent away at once (KIN-33: the Owner's emergency stop of a CLI). A
+// CLAIMED step returns to READY; a RUNNING step or an UNKNOWN attempt is cancelled with msg — not the step's fault,
+// so it does not use the retry budget — and the step WAITs with reason agent, which the scheduler routes again
+// (another CLI of its chain, or it keeps waiting). The tokens are released, so later reports of these attempts are stale.
+func (e *Execution) ReleaseAgent(agent, msg string, now time.Time) []AgentReleased {
+	if e.State != ExecutionRunning || agent == "" {
+		return nil
+	}
+	msg = reasonText(msg)
+	var out []AgentReleased
+	for i := range e.Steps {
+		s := &e.Steps[i]
+		if s.Agent != agent || !s.Holding() {
+			continue
+		}
+		out = append(out, AgentReleased{StepID: s.ID, RunnerID: s.RunnerID, Fence: s.Fence})
+		s.RunnerID = ""
+		if s.State == StepClaimed {
+			s.move(StepReady)
+			continue
+		}
+		s.finishAttempt(AttemptCancelled, msg, now)
+		s.move(StepWaiting)
+		s.WaitReason = WaitAgent
 	}
 	return out
 }
@@ -544,10 +591,10 @@ func (e *Execution) hold(stepID, runnerID string, fence int64, msg string, reaso
 	if !reportable(s) && s.State != StepClaimed {
 		return invalidStep(s, "hold")
 	}
-	msg = truncate(strings.TrimSpace(msg), MaxReasonLen)
+	msg = reasonText(msg)
 	if s.State == StepClaimed {
 		s.Attempts = append(s.Attempts, Attempt{Number: len(s.Attempts) + 1, RunnerID: runnerID, Fence: fence,
-			State: AttemptRunning, StartedAt: now})
+			State: AttemptRunning, StartedAt: now, Agent: s.Agent})
 	}
 	s.finishAttempt(AttemptCancelled, msg, now)
 	s.move(StepWaiting)
@@ -566,7 +613,8 @@ func (s *Step) countedAttempts() int {
 	return n
 }
 
-// WaitStep parks a READY step that cannot be scheduled (no runner, network, CLI limit, approval).
+// WaitStep parks a READY step that cannot be scheduled (no runner, network, CLI limit, approval, agent), or changes
+// the reason of a WAITING one.
 func (e *Execution) WaitStep(stepID string, reason WaitReason, _ time.Time) error {
 	if !reason.Valid() {
 		return invalid("reason", "wait_reason")
@@ -575,7 +623,8 @@ func (e *Execution) WaitStep(stepID string, reason WaitReason, _ time.Time) erro
 	if err != nil {
 		return err
 	}
-	if s.State != StepReady {
+	// A step waiting without an unknown attempt may change what it waits for (the scheduler's routing, KIN-33).
+	if s.State != StepReady && (s.State != StepWaiting || s.unknownAttempt()) {
 		return invalidStep(s, "wait")
 	}
 	s.move(StepWaiting)

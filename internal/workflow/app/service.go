@@ -97,6 +97,7 @@ type Service struct {
 	Events      Events       // optional
 	Notifier    TaskNotifier // optional: "task finished" notifications (KIN-62)
 	Runners     RunnerPool   // required for Schedule
+	Agents      AgentRouter  // AI CLI routing (KIN-33); nil: steps are not routed (every attempt runs the mock agent)
 	Dispatcher  Dispatcher   // runner commands; required for Schedule, optional otherwise
 	Access      Access       // project visibility for the task API (KIN-23)
 	Outbox      Outbox       // alert hooks (KIN-60); nil: none

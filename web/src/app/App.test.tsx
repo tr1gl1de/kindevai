@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { http } from "msw";
 import { describe, expect, it } from "vitest";
 import { apiError, json, owner, server } from "../test/msw";
-import { expectAccessible, expectStatus, renderApp } from "../test/render";
+import { expectAccessible, expectStatus, fill, renderApp } from "../test/render";
 
 function signedIn() {
   server.use(http.get("/api/auth/me", () => json(owner)));
@@ -30,11 +30,11 @@ describe("first-run setup", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Set up AI Platform" })).toBeInTheDocument();
     await expectAccessible(container);
 
-    await user.type(screen.getByLabelText("Setup token"), "tok");
-    await user.type(screen.getByLabelText("Owner login"), "owner");
-    await user.type(screen.getByLabelText("Password"), "short");
-    await user.type(screen.getByLabelText("Repeat password"), "different");
-    await user.type(screen.getByLabelText("Platform name"), "Acme AI");
+    await fill(user, screen.getByLabelText("Setup token"), "tok");
+    await fill(user, screen.getByLabelText("Owner login"), "owner");
+    await fill(user, screen.getByLabelText("Password"), "short");
+    await fill(user, screen.getByLabelText("Repeat password"), "different");
+    await fill(user, screen.getByLabelText("Platform name"), "Acme AI");
     await user.click(screen.getByRole("button", { name: "Create owner and finish setup" }));
     const pw = screen.getByLabelText("Password");
     expect(pw).toHaveAttribute("aria-invalid", "true");
@@ -43,9 +43,9 @@ describe("first-run setup", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(/fix 2 fields/i);
 
     await user.clear(pw);
-    await user.type(pw, "correct horse battery");
+    await fill(user, pw, "correct horse battery");
     await user.clear(screen.getByLabelText("Repeat password"));
-    await user.type(screen.getByLabelText("Repeat password"), "correct horse battery");
+    await fill(user, screen.getByLabelText("Repeat password"), "correct horse battery");
     await user.click(screen.getByRole("button", { name: "Create owner and finish setup" }));
 
     expect(await screen.findByRole("heading", { level: 1, name: "Projects" })).toBeInTheDocument();
@@ -59,11 +59,11 @@ describe("first-run setup", () => {
     );
     await renderApp("/");
     const user = userEvent.setup();
-    await user.type(await screen.findByLabelText("Setup token"), "bad");
-    await user.type(screen.getByLabelText("Owner login"), "owner");
-    await user.type(screen.getByLabelText("Password"), "correct horse battery");
-    await user.type(screen.getByLabelText("Repeat password"), "correct horse battery");
-    await user.type(screen.getByLabelText("Platform name"), "Acme");
+    await fill(user, await screen.findByLabelText("Setup token"), "bad");
+    await fill(user, screen.getByLabelText("Owner login"), "owner");
+    await fill(user, screen.getByLabelText("Password"), "correct horse battery");
+    await fill(user, screen.getByLabelText("Repeat password"), "correct horse battery");
+    await fill(user, screen.getByLabelText("Platform name"), "Acme");
     await user.click(screen.getByRole("button", { name: "Create owner and finish setup" }));
     const token = await screen.findByLabelText("Setup token");
     await waitFor(() => expect(token).toHaveAccessibleDescription(/setup token is invalid or expired/i));
@@ -90,13 +90,13 @@ describe("sign in", () => {
     const user = userEvent.setup();
     expect(await screen.findByRole("heading", { level: 1, name: "Sign in" })).toBeInTheDocument();
     await expectAccessible(container);
-    await user.type(screen.getByLabelText("Login"), "owner");
-    await user.type(screen.getByLabelText("Password"), "nope");
+    await fill(user, screen.getByLabelText("Login"), "owner");
+    await fill(user, screen.getByLabelText("Password"), "nope");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Wrong login or password.");
     expect(screen.getByLabelText("Login")).toHaveValue("owner");
     await user.clear(screen.getByLabelText("Password"));
-    await user.type(screen.getByLabelText("Password"), "correct horse battery");
+    await fill(user, screen.getByLabelText("Password"), "correct horse battery");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
     expect(await screen.findByRole("heading", { level: 1, name: "Projects" })).toBeInTheDocument();
   });
@@ -105,8 +105,8 @@ describe("sign in", () => {
     server.use(http.post("/api/auth/login", () => apiError(429, "rate_limited")));
     await renderApp("/");
     const user = userEvent.setup();
-    await user.type(await screen.findByLabelText("Login"), "owner");
-    await user.type(screen.getByLabelText("Password"), "whatever-123");
+    await fill(user, await screen.findByLabelText("Login"), "owner");
+    await fill(user, screen.getByLabelText("Password"), "whatever-123");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(/too many attempts/i);
   });
@@ -188,8 +188,8 @@ describe("session handling", () => {
     const user = userEvent.setup();
     expect(await screen.findByRole("link", { name: "Secret Web" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Sign out" }));
-    await user.type(await screen.findByLabelText("Login"), "bob");
-    await user.type(screen.getByLabelText("Password"), "bob-password-1");
+    await fill(user, await screen.findByLabelText("Login"), "bob");
+    await fill(user, screen.getByLabelText("Password"), "bob-password-1");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
     expect(await screen.findByRole("heading", { level: 1, name: "Projects" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Secret Web" })).not.toBeInTheDocument();
@@ -208,11 +208,11 @@ describe("session handling", () => {
     );
     await renderApp("/");
     const user = userEvent.setup();
-    await user.type(await screen.findByLabelText("Setup token"), "tok");
-    await user.type(screen.getByLabelText("Owner login"), "owner");
-    await user.type(screen.getByLabelText("Password"), "correct horse battery");
-    await user.type(screen.getByLabelText("Repeat password"), "correct horse battery");
-    await user.type(screen.getByLabelText("Platform name"), "Acme");
+    await fill(user, await screen.findByLabelText("Setup token"), "tok");
+    await fill(user, screen.getByLabelText("Owner login"), "owner");
+    await fill(user, screen.getByLabelText("Password"), "correct horse battery");
+    await fill(user, screen.getByLabelText("Repeat password"), "correct horse battery");
+    await fill(user, screen.getByLabelText("Platform name"), "Acme");
     await user.click(screen.getByRole("button", { name: "Create owner and finish setup" }));
     expect(await screen.findByRole("heading", { level: 1, name: "Sign in" })).toBeInTheDocument();
     await expectStatus(/owner account was created/i);

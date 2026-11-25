@@ -13,6 +13,7 @@ import { useMembers, useProject, useRemoveMember, useSetMember } from "./api";
 import { ProjectIntegrationsPanel } from "../integrations/ProjectIntegrationsPanel";
 import { ProjectYouTrackPanel } from "../integrations/ProjectYouTrackPanel";
 import { RiskPolicyPanel } from "../approvals/RiskPolicyPanel";
+import { ProjectAgentsPanel } from "../agents/ProjectAgentsPanel";
 import { NotFoundPage } from "./NotFoundPage";
 import { RoleLabel } from "./RoleLabel";
 
@@ -44,6 +45,7 @@ export function ProjectPage({ me }: { me: Me }) {
       {(me.role === "owner" || p.myRole === "project_admin") && (
         <RiskPolicyPanel projectId={p.id} canEdit={me.role === "owner"} />
       )}
+      {(me.role === "owner" || p.myRole === "project_admin") && <ProjectAgentsPanel projectId={p.id} />}
     </>
   );
 }

@@ -439,7 +439,8 @@ func printable(s string) string {
 }
 
 // Wait blocks until every upgrading or upgraded connection handler has returned or ctx ends. Call it after the hub's
-// Shutdown, so the going-away close frames reach the runners before the process exits.
+// Shutdown, so the going-away close frames reach the runners before the process exits. It counts every connection
+// only once http.Server.Shutdown has returned nil: a Shutdown that timed out may leave handlers still to start.
 func (h *Handler) Wait(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() { h.live.Wait(); close(done) }()

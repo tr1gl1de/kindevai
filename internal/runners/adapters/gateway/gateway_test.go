@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -584,16 +585,21 @@ func TestWaitCountsAConnectionHijackedDuringShutdown(t *testing.T) {
 			next.ServeHTTP(&stallingHijack{ResponseWriter: w, hijacked: hijacked, release: release}, r)
 		})
 	}})
+	var once sync.Once
+	unstall := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unstall)
+	dialed := make(chan error, 1)
 	go func() {
 		c, _, err := websocket.Dial(t.Context(), e.url, &websocket.DialOptions{Subprotocols: []string{protocol.Subprotocol}})
 		if err == nil {
 			_ = c.CloseNow()
 		}
+		dialed <- err
 	}()
 	select {
 	case <-hijacked:
-	case <-t.Context().Done():
-		t.Fatal(t.Context().Err())
+	case err := <-dialed:
+		t.Fatalf("dial ended before the upgrade: %v", err)
 	}
 	if err := e.srv.Config.Shutdown(t.Context()); err != nil {
 		t.Fatal(err)
@@ -601,7 +607,7 @@ func TestWaitCountsAConnectionHijackedDuringShutdown(t *testing.T) {
 	if n := e.h.Live(); n != 1 {
 		t.Fatalf("live = %d after Shutdown with a hijacked connection, want 1", n)
 	}
-	close(release)
+	unstall()
 	if err := e.h.Wait(t.Context()); err != nil || e.h.Live() != 0 {
 		t.Fatalf("Wait = %v, live %d", err, e.h.Live())
 	}

@@ -19,6 +19,7 @@ import { TasksPage } from "../features/tasks/TasksPage";
 import { AlertsPage } from "../features/alerts/AlertsPage";
 import { RunnersPage } from "../features/runners/RunnersPage";
 import { NetworkPage } from "../features/network/NetworkPage";
+import { AgentsPage } from "../features/agents/AgentsPage";
 import { StoragePage } from "../features/runners/StoragePage";
 import { IntegrationsPage } from "../features/integrations/IntegrationsPage";
 import { MaintenancePage } from "../features/maintenance/MaintenancePage";
@@ -102,6 +103,7 @@ function Gate() {
           {me.data.role === "owner" && <Route path="/infrastructure/storage" element={<StoragePage />} />}
           {me.data.role === "owner" && <Route path="/integrations" element={<IntegrationsPage />} />}
           {me.data.role === "owner" && <Route path="/network" element={<NetworkPage />} />}
+          {me.data.role === "owner" && <Route path="/agents" element={<AgentsPage />} />}
           {me.data.role === "owner" && <Route path="/audit" element={<AuditPage />} />}
           {me.data.role === "owner" && <Route path="/settings/telegram" element={<TelegramSettingsPage />} />}
           {me.data.role === "owner" && <Route path="/settings/maintenance" element={<MaintenancePage />} />}

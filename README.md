@@ -165,6 +165,12 @@ ai-runner fingerprint                                    # compare with the runn
   completed/failed event, on the runner's clock, recorded once per attempt); it is shown per attempt, step, task and
   for the list's filter, apart from the task's calendar duration. A period without an end (a lost process) or a usable
   time is shown as "accounting incomplete", never as a complete record.
+- Agents (`/agents` for the Owner, the "AI agents" panel of a project for the Owner and its admins, KIN-33): enable or
+  disable each AI CLI (Claude Code, Codex) globally and per project — a project cannot enable a CLI the Owner disabled —
+  and bind the planner, implementer and reviewer roles to a CLI and model with an ordered fallback (the reviewer
+  prefers a CLI other than the author's). The scheduler runs a step on the first permitted CLI that an eligible runner
+  has installed and is not cooling down on after a usage limit; otherwise the task is `BLOCKED` with the reason
+  (`agent`, `cli_limit` or `runner`). Disabling lets running sessions finish; **Emergency stop** cancels them too.
 - Workspaces (runner): when the step's repository is registered for the project, the attempt runs in its own git
   worktree under `workspaces/` on the branch `feature/<task>--<step>` (never main/master), started from the
   repository's integration branch fetched into a bare cache under `repos/`; the base commit is recorded. The Control

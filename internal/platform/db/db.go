@@ -4,6 +4,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"embed"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver: static binary, no CGO toolchain on the VPS or in Docker
@@ -190,14 +192,55 @@ func Migrate(ctx context.Context, d *sql.DB, migrations fs.FS) (int, error) {
 	return applied, nil
 }
 
-func apply(ctx context.Context, d *sql.DB, m migration, body string) error {
-	tx, err := d.BeginTx(ctx, nil)
+// ForeignKeysOff, as the first line of a migration, runs it with foreign key enforcement off (SQLite's 12-step
+// ALTER TABLE procedure: rebuilding a parent table must not cascade deletes into its children). The migration is
+// still one transaction; PRAGMA foreign_key_check must find no violation before it commits, and enforcement is
+// switched back on afterwards.
+const ForeignKeysOff = "-- migrate: foreign-keys-off\n"
+
+// foreignKeyCheck fails when PRAGMA foreign_key_check finds a violation.
+func foreignKeyCheck(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return errors.New("foreign key violations after the migration")
+	}
+	return rows.Err()
+}
+
+func apply(ctx context.Context, d *sql.DB, m migration, body string) (err error) {
+	conn, err := d.Conn(ctx) // one connection: the pragma is per connection and must not change mid-transaction
+	if err != nil {
+		return fmt.Errorf("migration %s: %w", m.name, err)
+	}
+	defer conn.Close()
+	fkOff := strings.HasPrefix(body, ForeignKeysOff)
+	if fkOff {
+		if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+			return fmt.Errorf("migration %s: %w", m.name, err)
+		}
+		defer func() {
+			if _, ferr := conn.ExecContext(context.WithoutCancel(ctx), "PRAGMA foreign_keys = ON"); ferr != nil {
+				err = errors.Join(err, fmt.Errorf("migration %s: enabling foreign keys again: %w", m.name, ferr))
+				_ = conn.Raw(func(any) error { return driver.ErrBadConn }) // never reuse a connection without them
+			}
+		}()
+	}
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("migration %s: %w", m.name, err)
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 	if _, err := tx.ExecContext(ctx, body); err != nil {
 		return fmt.Errorf("migration %s: %w", m.name, err)
+	}
+	if fkOff {
+		if err := foreignKeyCheck(ctx, tx); err != nil {
+			return fmt.Errorf("migration %s: %w", m.name, err)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
 		m.version, m.name, time.Now().UTC().Format(time.RFC3339)); err != nil {

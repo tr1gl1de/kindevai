@@ -70,8 +70,25 @@ type PlanStep struct {
 	DependsOn    []string `json:"dependsOn"`    // keys of steps that must succeed first (a set)
 	Key          string   `json:"key"`
 	Repository   string   `json:"repository"` // a repository of the task's project
-	Scope        []string `json:"scope"`      // repository-relative paths the step may change (a set)
-	Title        string   `json:"title"`
+	// Role is the platform role that runs the step (KIN-33): "" (implementer) or "reviewer". Omitted when empty,
+	// so plans without roles keep their canonical JSON and hash.
+	Role  string   `json:"role,omitempty"`
+	Scope []string `json:"scope"` // repository-relative paths the step may change (a set)
+	Title string   `json:"title"`
+}
+
+// Step roles (KIN-33): the platform role whose CLI binding runs a step.
+const (
+	StepRoleImplementer = "implementer"
+	StepRoleReviewer    = "reviewer"
+)
+
+// StepRole is the step's role, implementer when the plan names none.
+func (s PlanStep) StepRole() string {
+	if s.Role == "" {
+		return StepRoleImplementer
+	}
+	return s.Role
 }
 
 func normSet(xs []string) []string {
@@ -94,7 +111,8 @@ func (p Plan) Normalize() Plan {
 	for _, s := range p.Steps {
 		n.Steps = append(n.Steps, PlanStep{
 			Capabilities: normSet(s.Capabilities), DependsOn: normSet(s.DependsOn), Key: strings.TrimSpace(s.Key),
-			Repository: strings.TrimSpace(s.Repository), Scope: normSet(s.Scope), Title: strings.TrimSpace(s.Title),
+			Repository: strings.TrimSpace(s.Repository), Role: strings.TrimSpace(s.Role), Scope: normSet(s.Scope),
+			Title: strings.TrimSpace(s.Title),
 		})
 	}
 	return n
@@ -182,6 +200,8 @@ func ValidatePlan(p Plan, projectRepos []string) error {
 			return invalid(f("repository"), "repository_not_in_project")
 		case len(s.Capabilities) > maxListItems || slices.ContainsFunc(s.Capabilities, func(c string) bool { return !capabilityRe.MatchString(c) }):
 			return invalid(f("capabilities"), "capability_format")
+		case s.Role != "" && s.Role != StepRoleImplementer && s.Role != StepRoleReviewer:
+			return invalid(f("role"), "role_unknown")
 		case len(s.Scope) > maxListItems || slices.ContainsFunc(s.Scope, func(c string) bool { return !validScopePath(c) }):
 			return invalid(f("scope"), "scope_path")
 		}

@@ -63,10 +63,17 @@ func (d *Dir) Path() string { return d.path }
 // Join returns a path inside the data directory.
 func (d *Dir) Join(elem ...string) string { return filepath.Join(append([]string{d.path}, elem...)...) }
 
-// Close releases the lock.
+// Close releases the lock. The flock belongs to the open file description, which a child forked by any goroutine
+// of this process shares until its exec closes the inherited copy; merely closing our descriptor would leave the
+// lock held for that moment, so the next Open of the directory (import starting the imported installation, serve
+// after stop) could fail with ErrLocked. Unlocking explicitly releases it for every copy at once.
 func (d *Dir) Close() error {
-	if err := d.lock.Close(); err != nil { // closing the descriptor drops the flock
+	unlockErr := syscall.Flock(int(d.lock.Fd()), syscall.LOCK_UN)
+	if err := d.lock.Close(); err != nil {
 		return fmt.Errorf("releasing data dir lock: %w", err)
+	}
+	if unlockErr != nil {
+		return fmt.Errorf("releasing data dir lock: %w", unlockErr)
 	}
 	return nil
 }

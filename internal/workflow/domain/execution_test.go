@@ -20,7 +20,7 @@ var stepTable = map[StepState][]StepState{
 	StepRunning:   {StepReady, StepSucceeded, StepWaiting, StepFailed, StepCancelled},
 	StepWaiting:   {StepReady, StepRunning, StepSucceeded, StepFailed, StepCancelled},
 	StepFailed:    {StepReady},
-	StepSucceeded: nil,
+	StepSucceeded: {StepReady}, // a CI fix round (KIN-37)
 	StepCancelled: nil,
 }
 

@@ -164,6 +164,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	attachScopeCheck(channel, apv.Approvals, apv.Workflow)             // KIN-51 changed files vs the approved scope
 	wirePlanner(apv.Workflow, inst, msg, integ)                        // KIN-34 planner runs and their context package
 	wirePublishing(apv.Workflow, inst, msg, integ.GitHub)              // KIN-36 push, change set, pull request into dev
+	wireCI(apv.Workflow, apv.Approvals, msg, integ.GitHub)             // KIN-37 CI fix loop, policy-gated merge into dev
 	intake.planWith(apv.Workflow)                                      // KIN-85 intake tasks auto-planned (per project)
 	attachNetwork(gateway, netSvc, logger)
 	wireStrictEgress(apv.Workflow, netSvc.StrictFor) // KIN-31 strict steps only on verified runners
@@ -182,6 +183,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	defer startRetention(ctx, inst, apv.Workflow, retention, logger)() // KIN-52
 	defer startAlertMonitors(ctx, inst, msg, logger)()                 // KIN-60
 	defer startScheduler(ctx, apv.Workflow, DefaultSchedulerInterval, logger)()
+	defer startCIReconciler(ctx, apv.Workflow, ciReconcileEvery, logger)() // KIN-37
 
 	assets, built := web.Assets()
 	if !built {

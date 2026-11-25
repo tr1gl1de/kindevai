@@ -21,8 +21,16 @@ const (
 )
 
 // CIAlerts is a GitHubEventHandler: a completed check suite on the integration branch or a PR becomes an
-// alerts.ci_failed / alerts.ci_passed event, enqueued in the inbox transaction.
+// alerts.ci_failed / alerts.ci_passed event, enqueued in the inbox transaction. A suite on a branch the platform
+// published goes to PlatformCI instead (KIN-37) and raises no alert.
 func (s *GitHubService) CIAlerts(ctx context.Context, r domain.Repository, e domain.GitHubEvent) error {
+	if s.PlatformCI != nil && e.Event == domain.EventCheckSuite && e.Action == "completed" && e.Branch != "" {
+		// KIN-37: CI of a branch the platform published belongs to its execution (CI fix loop, merge gate).
+		owned, err := s.PlatformCI(ctx, r.FullName(), e.Branch, e.HeadSHA, e.Delivery)
+		if err != nil || owned {
+			return err
+		}
+	}
 	topic := ""
 	switch domain.CIOutcomeOf(r, e) {
 	case domain.CIFailed:

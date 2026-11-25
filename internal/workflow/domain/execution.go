@@ -28,14 +28,15 @@ var AllStepStates = []StepState{StepPending, StepReady, StepClaimed, StepRunning
 // stepTransitions is the Step FSM. CLAIMED -> READY: the lease ran out before the runner started. WAITING ->
 // RUNNING/SUCCEEDED/FAILED: reconciliation found the process alive or its result. FAILED -> READY: retry within
 // the attempt budget. RUNNING/WAITING -> READY: a phase of the review loop ended and the next one (review, fix round)
-// is due (KIN-35).
+// is due (KIN-35). SUCCEEDED -> READY: CI failed on the step's published branch and a CI fix round starts (KIN-37).
 var stepTransitions = map[StepState][]StepState{
-	StepPending: {StepReady, StepCancelled},
-	StepReady:   {StepClaimed, StepWaiting, StepCancelled},
-	StepClaimed: {StepReady, StepRunning, StepWaiting, StepFailed, StepCancelled},
-	StepRunning: {StepReady, StepSucceeded, StepWaiting, StepFailed, StepCancelled},
-	StepWaiting: {StepReady, StepRunning, StepSucceeded, StepFailed, StepCancelled},
-	StepFailed:  {StepReady},
+	StepPending:   {StepReady, StepCancelled},
+	StepReady:     {StepClaimed, StepWaiting, StepCancelled},
+	StepClaimed:   {StepReady, StepRunning, StepWaiting, StepFailed, StepCancelled},
+	StepRunning:   {StepReady, StepSucceeded, StepWaiting, StepFailed, StepCancelled},
+	StepWaiting:   {StepReady, StepRunning, StepSucceeded, StepFailed, StepCancelled},
+	StepFailed:    {StepReady},
+	StepSucceeded: {StepReady},
 }
 
 // StepTransitionAllowed reports whether the Step FSM has the edge from -> to.
@@ -186,6 +187,10 @@ type Step struct {
 	// AttemptBase is the number of attempts before the loop last started over (its runner was released): only later
 	// attempts count for the loop's budgets and evidence.
 	AttemptBase int
+	// CIRound counts the CI fix rounds of the step's published branch (KIN-37, ci.go); CIFeedback is why CI failed,
+	// told to the implementer of the current CI fix round.
+	CIRound    int
+	CIFeedback string
 }
 
 // WaitingForNetwork is what the UI shows as WAITING_FOR_NETWORK.
@@ -792,7 +797,7 @@ func (s *Step) countedAttempts() int {
 // WaitStep parks a READY step that cannot be scheduled (no runner, network, CLI limit, approval, agent), or changes
 // the reason of a WAITING one.
 func (e *Execution) WaitStep(stepID string, reason WaitReason, _ time.Time) error {
-	if !reason.Valid() {
+	if !reason.Valid() || reason == WaitCI { // ci blocks a task, never a step
 		return invalid("reason", "wait_reason")
 	}
 	s, err := e.step(stepID, "wait")

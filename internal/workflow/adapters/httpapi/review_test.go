@@ -67,7 +67,7 @@ func TestPullRequestsView(t *testing.T) {
 		{Repository: "acme/web", Branch: "feature/t1--s2", HeadSHA: "h2", State: domain.ArtifactFailed,
 			PRURL: "javascript:alert(1)", Error: "not installed", UpdatedAt: now},
 	}
-	b, err := json.Marshal(pullRequestViews(arts))
+	b, err := json.Marshal(pullRequestViews(arts, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,10 +80,31 @@ func TestPullRequestsView(t *testing.T) {
 	if strings.Contains(string(b), "javascript") {
 		t.Fatalf("unsafe link kept:\n%s", b)
 	}
-	if v := pullRequestViews(nil); v == nil || len(v) != 0 {
+	if v := pullRequestViews(nil, nil); v == nil || len(v) != 0 {
 		t.Fatal("no change set must be an empty list")
 	}
 	if v := reviewLoopView(domain.Step{Review: true, Phase: domain.PhasePublish}); v.Phase != "publish" {
 		t.Fatalf("phase %q", v.Phase)
+	}
+}
+
+// KIN-37: the change set shows CI on the current head (an older head's result is hidden), the step's CI fix rounds
+// and the merge with its reason.
+func TestPullRequestsViewShowsCIAndMerge(t *testing.T) {
+	t.Parallel()
+	e := &domain.Execution{ID: "e1", Steps: []domain.Step{{ID: "s1", CIRound: 2}}}
+	arts := []domain.GitArtifact{
+		{ExecutionID: "e1", StepID: "s1", Repository: "acme/app", Branch: "feature/t1--s1", HeadSHA: "h2", State: domain.ArtifactOpen,
+			CI: domain.CIFailed, CIHeadSHA: "h1", CIDetail: "old", Merge: domain.MergeWaiting, MergeError: "integrate_dev is not approved"},
+		{ExecutionID: "e1", StepID: "s9", Repository: "acme/web", Branch: "feature/t1--s9", HeadSHA: "h3", State: domain.ArtifactOpen,
+			CI: domain.CIPassed, CIHeadSHA: "h3", Merge: domain.MergeMerged, MergeSHA: "m1"},
+	}
+	v := pullRequestViews(arts, e)
+	if v[0].CI != "" || v[0].CIDetail != "" || v[0].CIRound != 2 || v[0].CIMaxRounds != domain.MaxCIFixRounds ||
+		v[0].Merge != "waiting" || v[0].MergeError == "" {
+		t.Fatalf("first %+v", v[0])
+	}
+	if v[1].CI != "passed" || v[1].Merge != "merged" || v[1].MergeSHA != "m1" || v[1].CIRound != 0 {
+		t.Fatalf("second %+v", v[1])
 	}
 }

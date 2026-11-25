@@ -264,7 +264,7 @@ func (r *Repository) loadExecution(ctx context.Context, q string, arg string) (d
 func (r *Repository) steps(ctx context.Context, c db.Executor, execID string) ([]domain.Step, error) {
 	rows, err := c.QueryContext(ctx, `SELECT id, step_key, title, repository, depends_on, state, wait_reason, reason,
 		fence, runner_id, lease_expires_at, agent, model, wait_until, review, phase, review_round, pinned_runner,
-		test_command, attempt_base, network_holds FROM workflow_steps WHERE execution_id = ? ORDER BY position`, execID)
+		test_command, attempt_base, network_holds, ci_round, ci_feedback FROM workflow_steps WHERE execution_id = ? ORDER BY position`, execID)
 	if err != nil {
 		return nil, fmt.Errorf("reading steps: %w", err)
 	}
@@ -277,7 +277,7 @@ func (r *Repository) steps(ctx context.Context, c db.Executor, execID string) ([
 		var wait, runner, lease, until sql.NullString
 		if err := rows.Scan(&s.ID, &s.Key, &s.Title, &s.Repository, &deps, &s.State, &wait, &s.Reason, &s.Fence,
 			&runner, &lease, &s.Agent, &s.Model, &until, &s.Review, &s.Phase, &s.Round, &s.PinnedRunner, &s.TestCommand, &s.AttemptBase,
-			&s.NetworkHolds); err != nil {
+			&s.NetworkHolds, &s.CIRound, &s.CIFeedback); err != nil {
 			return nil, fmt.Errorf("reading step: %w", err)
 		}
 		if err := json.Unmarshal([]byte(deps), &s.DependsOn); err != nil {
@@ -329,10 +329,11 @@ func (r *Repository) SaveExecution(ctx context.Context, e *domain.Execution) err
 	for _, s := range e.Steps {
 		res, err := c.ExecContext(ctx, `UPDATE workflow_steps SET state = ?, wait_reason = ?, reason = ?, fence = ?,
 			runner_id = ?, lease_expires_at = ?, agent = ?, model = ?, wait_until = ?, review = ?, phase = ?, review_round = ?,
-			pinned_runner = ?, test_command = ?, attempt_base = ?, network_holds = ? WHERE id = ? AND execution_id = ?`,
+			pinned_runner = ?, test_command = ?, attempt_base = ?, network_holds = ?, ci_round = ?, ci_feedback = ?
+			WHERE id = ? AND execution_id = ?`,
 			s.State, nullStr(s.WaitReason), s.Reason, s.Fence, nullStr(s.RunnerID), nullTS(s.LeaseExpiresAt), s.Agent,
 			s.Model, nullTS(s.WaitUntil), s.Review, s.Phase, s.Round, s.PinnedRunner, s.TestCommand, s.AttemptBase,
-			s.NetworkHolds, s.ID, e.ID)
+			s.NetworkHolds, s.CIRound, s.CIFeedback, s.ID, e.ID)
 		if err := oneRow(res, err, "saving step "+s.Key); err != nil {
 			return err
 		}
@@ -645,13 +646,17 @@ func attemptJSON(a domain.Attempt) (sql.NullString, string, error) {
 // SaveArtifact implements app.ChangeSets (KIN-36).
 func (r *Repository) SaveArtifact(ctx context.Context, a domain.GitArtifact) error {
 	_, err := db.Conn(ctx, r.db).ExecContext(ctx, `INSERT INTO change_set_artifacts(execution_id, repository, branch,
-		task_id, step_id, base_sha, head_sha, state, pr_number, pr_url, pr_base, error, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		task_id, step_id, base_sha, head_sha, state, pr_number, pr_url, pr_base, error, ci_state, ci_head_sha, ci_detail,
+		merge_state, merge_sha, merge_error, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(execution_id, repository, branch) DO UPDATE SET step_id = excluded.step_id,
 		base_sha = excluded.base_sha, head_sha = excluded.head_sha, state = excluded.state, pr_number = excluded.pr_number,
-		pr_url = excluded.pr_url, pr_base = excluded.pr_base, error = excluded.error, updated_at = excluded.updated_at`,
+		pr_url = excluded.pr_url, pr_base = excluded.pr_base, error = excluded.error, ci_state = excluded.ci_state,
+		ci_head_sha = excluded.ci_head_sha, ci_detail = excluded.ci_detail, merge_state = excluded.merge_state,
+		merge_sha = excluded.merge_sha, merge_error = excluded.merge_error, updated_at = excluded.updated_at`,
 		a.ExecutionID, a.Repository, a.Branch, a.TaskID, a.StepID, a.BaseSHA, a.HeadSHA, a.State, max(a.PRNumber, 0),
-		a.PRURL, a.PRBase, a.Error, ts(a.CreatedAt), ts(a.UpdatedAt))
+		a.PRURL, a.PRBase, a.Error, a.CI, a.CIHeadSHA, a.CIDetail, a.Merge, a.MergeSHA, a.MergeError, ts(a.CreatedAt),
+		ts(a.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("saving the change set artifact: %w", err)
 	}
@@ -659,13 +664,14 @@ func (r *Repository) SaveArtifact(ctx context.Context, a domain.GitArtifact) err
 }
 
 const artifactCols = `execution_id, repository, branch, task_id, step_id, base_sha, head_sha, state, pr_number, pr_url,
-	pr_base, error, created_at, updated_at`
+	pr_base, error, ci_state, ci_head_sha, ci_detail, merge_state, merge_sha, merge_error, created_at, updated_at`
 
 func scanArtifact(row scanner) (domain.GitArtifact, error) {
 	var a domain.GitArtifact
 	var created, updated string
 	if err := row.Scan(&a.ExecutionID, &a.Repository, &a.Branch, &a.TaskID, &a.StepID, &a.BaseSHA, &a.HeadSHA, &a.State,
-		&a.PRNumber, &a.PRURL, &a.PRBase, &a.Error, &created, &updated); err != nil {
+		&a.PRNumber, &a.PRURL, &a.PRBase, &a.Error, &a.CI, &a.CIHeadSHA, &a.CIDetail, &a.Merge, &a.MergeSHA, &a.MergeError,
+		&created, &updated); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return a, domain.ErrNotFound
 		}
@@ -687,8 +693,27 @@ func (r *Repository) Artifact(ctx context.Context, executionID, repository, bran
 
 // TaskArtifacts implements app.ChangeSets.
 func (r *Repository) TaskArtifacts(ctx context.Context, taskID string) ([]domain.GitArtifact, error) {
-	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, `SELECT `+artifactCols+` FROM change_set_artifacts
+	return r.artifacts(ctx, `SELECT `+artifactCols+` FROM change_set_artifacts
 		WHERE task_id = ? ORDER BY created_at, repository, branch`, taskID)
+}
+
+// BranchArtifacts implements app.ChangeSets (KIN-37).
+func (r *Repository) BranchArtifacts(ctx context.Context, repository, branch string) ([]domain.GitArtifact, error) {
+	return r.artifacts(ctx, `SELECT `+artifactCols+` FROM change_set_artifacts
+		WHERE repository = ? AND branch = ? ORDER BY created_at`, repository, branch)
+}
+
+// VerifyingArtifacts implements app.ChangeSets (KIN-37): the open, unmerged artifacts of VERIFYING tasks and of
+// tasks BLOCKED on CI.
+func (r *Repository) VerifyingArtifacts(ctx context.Context, limit int) ([]domain.GitArtifact, error) {
+	return r.artifacts(ctx, `SELECT `+artifactCols+` FROM change_set_artifacts
+		WHERE state = 'open' AND merge_state != 'merged' AND task_id IN (SELECT id FROM tasks
+		WHERE state = 'VERIFYING' OR (state = 'BLOCKED' AND block_reason = 'ci'))
+		ORDER BY updated_at, execution_id LIMIT ?`, limit)
+}
+
+func (r *Repository) artifacts(ctx context.Context, q string, args ...any) ([]domain.GitArtifact, error) {
+	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("reading the change set: %w", err)
 	}

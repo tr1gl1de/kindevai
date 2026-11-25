@@ -388,7 +388,8 @@ func executionEqual(a, b domain.Execution) bool {
 		x, y := a.Steps[i], b.Steps[i]
 		if x.State != y.State || x.Fence != y.Fence || x.WaitReason != y.WaitReason || x.RunnerID != y.RunnerID ||
 			x.Agent != y.Agent || x.Model != y.Model || x.Review != y.Review || x.Phase != y.Phase || x.Round != y.Round ||
-			x.PinnedRunner != y.PinnedRunner || x.TestCommand != y.TestCommand || x.AttemptBase != y.AttemptBase {
+			x.PinnedRunner != y.PinnedRunner || x.TestCommand != y.TestCommand || x.AttemptBase != y.AttemptBase ||
+			x.CIRound != y.CIRound || x.CIFeedback != y.CIFeedback {
 			return false
 		}
 	}

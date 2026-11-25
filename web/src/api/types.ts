@@ -741,7 +741,7 @@ export type TaskState =
   | "BLOCKED"
   | "FAILED"
   | "CANCELLED";
-export type WaitReason = "runner" | "network" | "approval" | "cli_limit" | "agent";
+export type WaitReason = "runner" | "network" | "approval" | "cli_limit" | "agent" | "ci";
 export type StepState = "PENDING" | "READY" | "CLAIMED" | "RUNNING" | "SUCCEEDED" | "WAITING" | "FAILED" | "CANCELLED";
 export type AttemptState = "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "UNKNOWN";
 /** How far agent time is known: no CLI ran, still running, recorded, or a period lacks an end or a usable time. */
@@ -977,6 +977,14 @@ export interface PullRequest {
   url?: string;
   base?: string;
   error?: string;
+  /** KIN-37: CI on the head, the step's CI fix rounds, and the merge into the base. */
+  ci?: "pending" | "passed" | "failed";
+  ciDetail?: string;
+  ciRound?: number;
+  ciMaxRounds?: number;
+  merge?: "waiting" | "merged" | "failed";
+  mergeSha?: string;
+  mergeError?: string;
   updatedAt: string;
 }
 

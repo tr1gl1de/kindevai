@@ -194,6 +194,16 @@ ai-runner fingerprint                                    # compare with the runn
   `approve | changes_requested` with findings. Changes requested start a fix round with the findings (at most 2), after
   which the step FAILS with the reason; a reviewer that changes the branch fails its attempt. The task page shows the
   phase, the handoff (base/head, changed files, test evidence) and the verdict. Pushing and the PR are KIN-36.
+- CI fix loop and merge into dev (KIN-37): the Control Plane follows CI on each pull request it opened (completed
+  check suites from the GitHub webhook plus a reconciliation every minute; the status combines all latest check runs
+  of the head — none yet or one running is pending). Such CI never raises an Alert Center alert. Red CI reopens the
+  execution: the step implements again on the runner that holds its branch, told which checks failed, is reviewed and
+  pushed again (fast-forward) — at most 3 CI fix rounds per step, then the task is BLOCKED (reason `ci`) with an
+  alert; a later green re-run resumes it. Green CI goes through the merge gate: integrate_dev granted by policy
+  (L0/L1) or approved by the Owner (L2/L3) — without it nothing is merged, the PR shows "merge waiting". The merge is a
+  merge commit with the expected head SHA (a moved head, a conflict or a protected base is never merged: the task is
+  BLOCKED with the reason); a multi-repository change set merges in order and stops at the first failure. When every
+  PR is merged the task is COMPLETED. `main`/`master` are never a merge target.
 - Plan discussion API (KIN-43; the chat UI is KIN-44): the Owner and project admins write about the current plan
   revision of a task awaiting approval or ready (`POST /api/tasks/{id}/discussion/messages`, 202; members and viewers
   read `GET /api/tasks/{id}/discussion`). Each message is one turn run by the planner role's CLI like a planner

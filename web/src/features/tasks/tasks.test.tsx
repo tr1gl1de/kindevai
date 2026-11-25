@@ -306,6 +306,52 @@ describe("task detail", () => {
     await expectAccessible(container);
   });
 
+  it("shows CI, the CI fix rounds and the merge of each pull request (KIN-37)", async () => {
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/tasks/t1", () => json(detail({ pullRequests: [
+        { repository: "acme/app", branch: "feature/t1--s1", headSha: "bbbbbbbbbbbb", state: "open", number: 7,
+          url: "https://github.com/acme/app/pull/7", base: "dev", ci: "failed", ciDetail: "failed checks: test (failure)",
+          ciRound: 2, ciMaxRounds: 3, updatedAt: "2026-11-24T10:06:00Z" },
+        { repository: "acme/web", branch: "feature/t1--s2", headSha: "cccccccccccc", state: "open", number: 8,
+          url: "https://github.com/acme/web/pull/8", base: "dev", ci: "passed", ciRound: 0, ciMaxRounds: 3, merge: "waiting",
+          mergeError: "integrate_dev is not approved", updatedAt: "2026-11-24T10:06:00Z" },
+        { repository: "acme/docs", branch: "feature/t1--s3", headSha: "dddddddddddd", state: "open", number: 9,
+          url: "https://github.com/acme/docs/pull/9", base: "dev", ci: "passed", ciRound: 0, ciMaxRounds: 3, merge: "merged",
+          mergeSha: "eeeeeeeeeeeeeeee", updatedAt: "2026-11-24T10:06:00Z" },
+      ] }))),
+      http.get("/api/approvals", () => json([])),
+    );
+    const { container } = await renderApp("/tasks/t1");
+    const prs = await screen.findByRole("region", { name: "Pull requests" });
+    expect(within(prs).getByText("CI failed")).toBeInTheDocument();
+    expect(within(prs).getByText(/CI fix round 2 of 3/)).toBeInTheDocument();
+    expect(within(prs).getByText("failed checks: test (failure)")).toBeInTheDocument();
+    expect(within(prs).getByText("Merge waiting")).toBeInTheDocument();
+    expect(within(prs).getByText("integrate_dev is not approved")).toBeInTheDocument();
+    expect(within(prs).getByText("Merged into dev as eeeeeeeeee")).toBeInTheDocument();
+    await expectAccessible(container);
+  });
+
+  it("shows CI and the merge in Russian", async () => {
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/tasks/t1", () => json(detail({ task: { ...detail().task, state: "BLOCKED", blockReason: "ci" },
+        pullRequests: [{ repository: "acme/app", branch: "feature/t1--s1", headSha: "bbbbbbbbbbbb", state: "open", number: 7,
+          url: "https://github.com/acme/app/pull/7", base: "dev", ci: "passed", ciRound: 1, ciMaxRounds: 3, merge: "failed",
+          mergeError: "head moved", updatedAt: "2026-11-24T10:06:00Z" }] }))),
+      http.get("/api/approvals", () => json([])),
+    );
+    await renderApp("/tasks/t1", "ru");
+    const prs = await screen.findByRole("region", { name: "Пул-реквесты" });
+    expect(within(prs).getByText("CI пройден")).toBeInTheDocument();
+    expect(within(prs).getByText("Мерж отклонён")).toBeInTheDocument();
+    expect(within(prs).getByText(/Раунд исправления CI 1 из 3/)).toBeInTheDocument();
+    expect(screen.getByText(/Ждёт Owner: CI или мерж в dev/)).toBeInTheDocument();
+  });
+
   it("names the pull requests in Russian", async () => {
     server.use(
       http.get("/api/auth/me", () => json(owner)),

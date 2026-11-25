@@ -312,22 +312,41 @@ type DetailView struct {
 // PullRequestView is one published branch of the task and its pull request into the integration branch: state
 // opening | open | failed; URL only as an https link.
 type PullRequestView struct {
-	Repository string    `json:"repository"`
-	Branch     string    `json:"branch"`
-	HeadSHA    string    `json:"headSha"`
-	State      string    `json:"state"`
-	Number     int       `json:"number,omitempty"`
-	URL        string    `json:"url,omitempty"`
-	Base       string    `json:"base,omitempty"`
-	Error      string    `json:"error,omitempty"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	Repository string `json:"repository"`
+	Branch     string `json:"branch"`
+	HeadSHA    string `json:"headSha"`
+	State      string `json:"state"`
+	Number     int    `json:"number,omitempty"`
+	URL        string `json:"url,omitempty"`
+	Base       string `json:"base,omitempty"`
+	Error      string `json:"error,omitempty"`
+	// KIN-37: CI on the head (pending | passed | failed, "" before a result) with the failed checks, the step's CI
+	// fix rounds of MaxCIFixRounds, and the merge into the base (waiting | merged | failed) with why.
+	CI          string    `json:"ci,omitempty"`
+	CIDetail    string    `json:"ciDetail,omitempty"`
+	CIRound     int       `json:"ciRound"`
+	CIMaxRounds int       `json:"ciMaxRounds"`
+	Merge       string    `json:"merge,omitempty"`
+	MergeSHA    string    `json:"mergeSha,omitempty"`
+	MergeError  string    `json:"mergeError,omitempty"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
-func pullRequestViews(arts []domain.GitArtifact) []PullRequestView {
+func pullRequestViews(arts []domain.GitArtifact, e *domain.Execution) []PullRequestView {
 	out := make([]PullRequestView, 0, len(arts))
 	for _, a := range arts {
 		v := PullRequestView{Repository: a.Repository, Branch: a.Branch, HeadSHA: a.HeadSHA, State: string(a.State),
-			Number: a.PRNumber, Base: a.PRBase, Error: a.Error, UpdatedAt: a.UpdatedAt}
+			Number: a.PRNumber, Base: a.PRBase, Error: a.Error, CI: string(a.CI), CIDetail: a.CIDetail,
+			CIMaxRounds: domain.MaxCIFixRounds, Merge: string(a.Merge), MergeSHA: a.MergeSHA, MergeError: a.MergeError,
+			UpdatedAt: a.UpdatedAt}
+		if a.CIHeadSHA != a.HeadSHA { // a result of an older head is no result of this one
+			v.CI, v.CIDetail = "", ""
+		}
+		if e != nil && e.ID == a.ExecutionID {
+			if s := e.Step(a.StepID); s != nil {
+				v.CIRound = s.CIRound
+			}
+		}
 		if strings.HasPrefix(a.PRURL, "https://") {
 			v.URL = a.PRURL
 		}
@@ -555,7 +574,7 @@ func (h *Handler) detail(w http.ResponseWriter, r *http.Request, p auth.Principa
 		return
 	}
 	v := DetailView{Task: taskView(d.Task), CanManage: d.CanManage, Time: timeView(d.Time),
-		PullRequests: pullRequestViews(d.ChangeSet)}
+		PullRequests: pullRequestViews(d.ChangeSet, d.Execution)}
 	if d.Revision != nil {
 		v.Revision = revisionView(*d.Revision)
 	}

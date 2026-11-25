@@ -1,9 +1,11 @@
 package app_test
 
 import (
+	"context"
 	"encoding/json"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/tr1gl1de/kindevai/internal/integrations/app"
@@ -78,5 +80,35 @@ func TestCIAlertsRerunsBranchKeyAndClosedPR(t *testing.T) {
 		app.TopicCIPassed + "/4"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("events = %v, want %v", got, want)
+	}
+}
+
+// KIN-37 (KIN-60 follow-up): CI of a pull request the platform opened goes to its execution (the PlatformCI hook),
+// not to the Alert Center; CI of other branches still raises alerts.
+func TestCIOfPlatformPullRequestsSkipsTheAlertCenter(t *testing.T) {
+	t.Parallel()
+	e := newGitHubEnv(t)
+	var seen []string
+	e.gh.PlatformCI = func(_ context.Context, repository, branch, head, delivery string) (bool, error) {
+		seen = append(seen, repository+" "+branch+" "+head+" "+delivery)
+		return strings.HasPrefix(branch, "feature/t1--"), nil
+	}
+	repo := domain.Repository{ID: "r1", ProjectID: "p1", Owner: "acme", Name: "api", IntegrationBranch: "dev"}
+	suite := func(branch string) domain.GitHubEvent {
+		return domain.GitHubEvent{Event: domain.EventCheckSuite, Action: "completed", Repository: "acme/api",
+			Branch: branch, PullRequest: 7, HeadSHA: "abc", Status: "completed", Conclusion: "failure", Delivery: "d-" + branch}
+	}
+	for _, ev := range []domain.GitHubEvent{suite("feature/t1--s1"), suite("feature/human")} {
+		if err := e.gh.CIAlerts(t.Context(), repo, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.out.mu.Lock()
+	defer e.out.mu.Unlock()
+	if len(e.out.msgs) != 1 || !strings.Contains(string(e.out.msgs[0].Payload), "feature/human") {
+		t.Fatalf("alerts %+v", e.out.msgs)
+	}
+	if len(seen) != 2 || seen[0] != "acme/api feature/t1--s1 abc d-feature/t1--s1" {
+		t.Fatalf("hook calls %q", seen)
 	}
 }

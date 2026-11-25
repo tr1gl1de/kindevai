@@ -44,6 +44,10 @@ type ChangeSets interface {
 	Artifact(ctx context.Context, executionID, repository, branch string) (domain.GitArtifact, error)
 	// TaskArtifacts lists the artifacts of all the task's executions, oldest first.
 	TaskArtifacts(ctx context.Context, taskID string) ([]domain.GitArtifact, error)
+	// BranchArtifacts lists the artifacts of a repository's branch (KIN-37: CI of a platform pull request).
+	BranchArtifacts(ctx context.Context, repository, branch string) ([]domain.GitArtifact, error)
+	// VerifyingArtifacts lists at most limit open, unmerged artifacts of VERIFYING tasks and of tasks BLOCKED on CI.
+	VerifyingArtifacts(ctx context.Context, limit int) ([]domain.GitArtifact, error)
 }
 
 // PullRequestRequest asks to open a pull request of Branch into the integration branch of the project's
@@ -121,6 +125,9 @@ func (s *Service) published(ctx context.Context, before, e *domain.Execution, no
 			return err
 		}
 		key := "pull-request/" + e.ID + "/" + p.Repository + "/" + p.Branch + "/" + p.HeadSHA
+		if st.CIRound > 0 { // KIN-37: a CI fix round may publish the same head again; its pull request is reused
+			key += "/ci" + strconv.Itoa(st.CIRound)
+		}
 		if err := s.Outbox.Enqueue(ctx, messaging.Message{Adapter: AdapterGitHub, Topic: TopicOpenPullRequest, Key: key,
 			Payload: b}); err != nil {
 			return fmt.Errorf("enqueueing %s: %w", TopicOpenPullRequest, err)

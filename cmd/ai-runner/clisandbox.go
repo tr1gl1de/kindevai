@@ -15,6 +15,9 @@ import (
 // cliSandbox confines one CLI run of the KIN-32 adapters (cliagent.Sandbox) in the strict egress sandbox of its
 // network profile (KIN-31): the CLI's command line becomes `ai-runner sandbox-run`, which exits with
 // nsbox.ExitUnverified, never starting the CLI, when the sandbox does not verify.
+//
+// Not on the daemon's path: execution.assign runs a CLI through wireAgents (the confiner's sandbox launches
+// `agent-exec`, KIN-79/KIN-101). This standalone KIN-32 run path is kept only until its removal (KIN-102).
 type cliSandbox struct {
 	supported func(context.Context) (bool, string) // egress.Sandboxes.Supported
 	boxes     *nsbox.Manager

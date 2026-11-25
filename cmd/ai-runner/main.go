@@ -29,6 +29,7 @@ import (
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/app"
 	"github.com/tr1gl1de/kindevai/internal/runner/connection/domain"
 	"github.com/tr1gl1de/kindevai/internal/runner/egress/adapters/nsbox"
+	egress "github.com/tr1gl1de/kindevai/internal/runner/egress/app"
 	"github.com/tr1gl1de/kindevai/internal/runner/platform/datadir"
 	"github.com/tr1gl1de/kindevai/internal/runner/platform/secfile"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/adapters/cliagent"
@@ -368,13 +369,10 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	if err != nil {
 		return err
 	}
-	agents := cliAgents(home, exec.LookPath, logger) // KIN-79 CLI agents (set before Recover)
-	x.Agents = agents
+	agents := cliAgents(home, exec.LookPath, logger) // KIN-79 CLI agents
 	logCLILogins(agents, logger, time.Now())
 	strict := strictEgress(d, exe, logger) // KIN-31: strict profiles run only in a verified sandbox
-	// KIN-86: a sandboxed CLI attempt gets its task's session store, so the next attempt can resume. Set before
-	// Recover: adopted strict attempts get their adapter back (KIN-81).
-	x.Egress = confiner{s: strict, sessions: sessionBinds(&cliagent.SessionStore{Root: filepath.Join(resolved(d.Path()), "cli-sessions")})}
+	wireAgents(x, d, agents, strict)       // before Recover: adopted attempts get their CLI and adapter back (KIN-81)
 	if err := x.Recover(ctx); err != nil {
 		return fmt.Errorf("recovering running attempts: %w", err)
 	}
@@ -392,6 +390,16 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	conn := &app.Connector{Dialer: controlplane.New(), Logger: logger, Handlers: []app.LinkHandler{ch, rep, networkLink{agent}},
 		Halt: x.StopAll} // KIN-63: disabled or revoked, the runner stops its attempts itself (fail-closed)
 	return conn.Run(ctx, en, id)
+}
+
+// wireAgents gives the executor its AI CLIs (KIN-79) and the strict egress sandboxes (KIN-31): the one path an
+// execution.assign takes to a CLI. A strict attempt runs only as the command of a verified sandbox (Confine fails
+// closed, the CLI never starts on the host), and the permission bypass is chosen only for a confined attempt
+// (Executor.prepareAgent). A sandboxed CLI attempt gets its task's session store, so the next attempt can resume
+// (KIN-86).
+func wireAgents(x *sessionapp.Executor, d *datadir.Dir, agents *cliagent.Agents, strict *egress.Sandboxes) {
+	x.Agents = agents
+	x.Egress = confiner{s: strict, sessions: sessionBinds(&cliagent.SessionStore{Root: filepath.Join(resolved(d.Path()), "cli-sessions")})}
 }
 
 // newExecutor wires the session context (KIN-23) onto the channel: commands start and cancel attempts (the mock

@@ -60,7 +60,24 @@ type fakeLauncher struct {
 	out      []string // what the process writes to stdout, write by write (default "hello\n")
 }
 
-func (l *fakeLauncher) Launch(_ context.Context, s LaunchSpec) (Process, error) {
+// Launch starts the fake process and, like the real launcher, returns only once its sandbox verified; an unverified
+// sandbox ends the process (SIGKILL) and fails the launch.
+func (l *fakeLauncher) Launch(ctx context.Context, s LaunchSpec) (Process, error) {
+	p, err := l.start(s)
+	if err != nil {
+		return nil, err
+	}
+	if s.Sandbox == nil {
+		return p, nil
+	}
+	if err := s.Sandbox.Await(ctx); err != nil {
+		_ = p.Signal(true)
+		return nil, fmt.Errorf("%w: %w", ErrNetwork, err)
+	}
+	return p, nil
+}
+
+func (l *fakeLauncher) start(s LaunchSpec) (*fakeProc, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.err != nil {

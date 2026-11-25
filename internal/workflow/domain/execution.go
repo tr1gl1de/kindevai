@@ -142,7 +142,10 @@ type Step struct {
 	WaitReason WaitReason // set only while WAITING
 	// WaitUntil is when a step WAITING for its CLI's limit is retried (KIN-79); nil otherwise.
 	WaitUntil *time.Time
-	Reason    string // why the step failed or was cancelled
+	// NetworkHolds counts the step's network holds in a row on the same runner (KIN-81): each doubles the retry
+	// delay and from NetworkAlertAfter on the Owner is alerted. An attempt that ends otherwise resets it.
+	NetworkHolds int
+	Reason       string // why the step failed or was cancelled
 	// Fence is the last fencing token issued for the step. It only grows, across attempts and runners.
 	Fence          int64
 	RunnerID       string     // holder of the current claim (CLAIMED, RUNNING, or WAITING on an unknown attempt)
@@ -190,6 +193,7 @@ func (s *Step) move(to StepState) {
 }
 
 func (s *Step) finishAttempt(state AttemptState, msg string, now time.Time) {
+	s.NetworkHolds = 0 // HoldForNetwork sets it again
 	if a := s.lastAttempt(); a != nil && (a.State == AttemptRunning || a.State == AttemptUnknown) {
 		a.State, a.Error, a.FinishedAt = state, msg, &now
 	}
@@ -611,21 +615,49 @@ func (e *Execution) HoldForApproval(stepID, runnerID string, fence int64, msg st
 // HoldForNetwork parks a CLAIMED or RUNNING step whose runner could not build or verify the strict egress sandbox
 // (KIN-31, fail-closed: the attempt never ran unconfined). Like a hold for approval the attempt is cancelled (no
 // retry budget used) and the claim released; the step WAITs with reason network until the scheduler retries it
-// (NetworkRetryDelay after the attempt ended).
+// (NetworkRetryDelayAfter its holds in a row, after the attempt ended; KIN-81).
 func (e *Execution) HoldForNetwork(stepID, runnerID string, fence int64, msg string, now time.Time) error {
-	return e.hold(stepID, runnerID, fence, msg, WaitNetwork, now)
+	s := e.Step(stepID)
+	if s == nil {
+		return e.hold(stepID, runnerID, fence, msg, WaitNetwork, now)
+	}
+	holds := s.NetworkHolds // the hold's finishAttempt resets it
+	if err := e.hold(stepID, runnerID, fence, msg, WaitNetwork, now); err != nil {
+		return err
+	}
+	if n := len(s.Attempts); n < 2 || s.Attempts[n-2].RunnerID != runnerID {
+		holds = 0 // the streak is per runner
+	}
+	s.NetworkHolds = holds + 1
+	return nil
 }
 
-// NetworkRetryDelay is how long a step held for the network waits before the scheduler assigns it again.
-const NetworkRetryDelay = 2 * time.Minute
+// NetworkRetryDelay is how long a step held for the network once waits before the scheduler assigns it again;
+// every further hold in a row doubles it (KIN-81), up to MaxNetworkRetryDelay. From NetworkAlertAfter holds in a
+// row on one runner the Owner is alerted (its strict egress keeps failing).
+const (
+	NetworkRetryDelay    = 2 * time.Minute
+	MaxNetworkRetryDelay = 30 * time.Minute
+	NetworkAlertAfter    = 3
+)
 
-// NetworkRetryDue reports a step WAITING for the network whose last attempt ended at least NetworkRetryDelay ago.
+// NetworkRetryDelayAfter is the retry delay after holds network holds in a row.
+func NetworkRetryDelayAfter(holds int) time.Duration {
+	d := NetworkRetryDelay
+	for i := 1; i < holds && d < MaxNetworkRetryDelay; i++ {
+		d *= 2
+	}
+	return min(d, MaxNetworkRetryDelay)
+}
+
+// NetworkRetryDue reports a step WAITING for the network whose last attempt ended at least its backed-off retry
+// delay ago.
 func (s *Step) NetworkRetryDue(now time.Time) bool {
 	if !s.WaitingForNetwork() {
 		return false
 	}
 	a := s.lastAttempt()
-	return a == nil || a.FinishedAt == nil || !now.Before(a.FinishedAt.Add(NetworkRetryDelay))
+	return a == nil || a.FinishedAt == nil || !now.Before(a.FinishedAt.Add(NetworkRetryDelayAfter(s.NetworkHolds)))
 }
 
 // HoldForCLILimit parks a CLAIMED or RUNNING step whose AI CLI hit its subscription/rate limit or is logged out

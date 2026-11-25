@@ -242,6 +242,16 @@ type Record struct {
 	// beyond these offsets.
 	Agent  string        `json:"agent,omitempty"`
 	Output OutputOffsets `json:"output,omitzero"`
+	// Sandbox is the strict egress sandbox the attempt runs in (KIN-81; nil: none): a restarted runner serves its
+	// proxy adapter again at Endpoint, with the profile of (Project, Role), or stops the attempt.
+	Sandbox *SandboxRef `json:"sandbox,omitempty"`
+}
+
+// SandboxRef names an attempt's strict egress sandbox in its journal record.
+type SandboxRef struct {
+	Endpoint string `json:"endpoint"` // the proxy adapter's socket, the sandbox's only way out
+	Role     string `json:"role"`     // the CLI role the network profile was chosen for
+	Profile  string `json:"profile"`  // the fingerprint of that profile: reattached only while it is unchanged
 }
 
 // OutputOffsets are byte offsets in an AI CLI's stdout and stderr files.

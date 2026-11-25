@@ -371,6 +371,10 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	agents := cliAgents(home, exec.LookPath, logger) // KIN-79 CLI agents (set before Recover)
 	x.Agents = agents
 	logCLILogins(agents, logger, time.Now())
+	strict := strictEgress(d, exe, logger) // KIN-31: strict profiles run only in a verified sandbox
+	// KIN-86: a sandboxed CLI attempt gets its task's session store, so the next attempt can resume. Set before
+	// Recover: adopted strict attempts get their adapter back (KIN-81).
+	x.Egress = confiner{s: strict, sessions: sessionBinds(&cliagent.SessionStore{Root: filepath.Join(resolved(d.Path()), "cli-sessions")})}
 	if err := x.Recover(ctx); err != nil {
 		return fmt.Errorf("recovering running attempts: %w", err)
 	}
@@ -379,9 +383,6 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	// KIN-77, KIN-86: proxy passwords and the CLIs' stored tokens are masked in attempt output.
 	x.KnownSecrets = func() []string { return append(agent.Secrets(), agents.Secrets()...) }
 	ch.Commands = withNetwork(agent, ch.Commands)
-	strict := strictEgress(d, exe, logger) // KIN-31: strict profiles run only in a verified sandbox
-	// KIN-86: a sandboxed CLI attempt gets its task's session store, so the next attempt can resume.
-	x.Egress = confiner{s: strict, sessions: sessionBinds(&cliagent.SessionStore{Root: filepath.Join(resolved(d.Path()), "cli-sessions")})}
 	pr := probe.New(d.Path())
 	pr.StrictEgress = func(ctx context.Context) bool { ok, _ := strict.Supported(ctx); return ok }
 	rep := &app.Reporter{Probe: pr} // KIN-20 heartbeat, capabilities, storage

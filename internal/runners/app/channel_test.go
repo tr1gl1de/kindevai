@@ -204,8 +204,8 @@ func (w *fakeWorkflow) CompleteAttempt(_ context.Context, _, step string, fence 
 	w.mark("complete", at, "")
 	return w.op("complete", step, fence, "running", "done")
 }
-func (w *fakeWorkflow) FailAttempt(_ context.Context, _, step string, fence int64, _ string, at time.Time) error {
-	w.mark("fail", at, "")
+func (w *fakeWorkflow) FailAttempt(_ context.Context, _, step string, fence int64, reason string, at time.Time) error {
+	w.mark("fail", at, reason)
 	return w.op("fail", step, fence, "running", "failed")
 }
 
@@ -612,6 +612,46 @@ func TestInvalidEventsAreProtocolErrors(t *testing.T) {
 		if err := e.ch.Handle(t.Context(), sess, env); !errors.Is(err, protocol.ErrChannelField) {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+// KIN-77: secrets in runner output are masked at ingest, before the event is stored (and before its size is
+// counted), so nothing secret is persisted whatever runner sent it; lines are kept. A failure reason is masked too.
+func TestOutputIsRedactedBeforeItIsStored(t *testing.T) {
+	t.Parallel()
+	e := newChannelEnv()
+	e.wf.fence["s1"], e.wf.state["s1"] = 1, "running"
+	sess, _ := newSession("r1")
+	data := "ok\nexport OPENAI_API_KEY=sk-Ab12Cd34Ef56Gh78\n  url https://u:hunter2pass@git.local/x\n\nend"
+	out, _ := json.Marshal(protocol.Output{Stream: "stderr", Offset: 7, Data: data})
+	fail, _ := json.Marshal(protocol.Failure{Reason: "git: Authorization: Bearer ghs_Ab1Cd2Ef3Gh4Ij5Kl6 refused"})
+	for i, ev := range []protocol.Event{
+		{Epoch: "sp", Seq: 1, Step: "s1", Fence: 1, AttemptSeq: 1, Kind: protocol.EventOutput, At: 1, Body: out},
+		{Epoch: "sp", Seq: 2, Base: 1, Step: "s1", Fence: 1, AttemptSeq: 2, Kind: protocol.EventFailed, At: 2, Body: fail},
+	} {
+		if err := handle(t, e.ch, sess, protocol.TypeEvent, ev); err != nil {
+			t.Fatalf("event %d: %v", i, err)
+		}
+	}
+	var o protocol.Output
+	rec := e.repo.events[evKey("s1", 1, 1)]
+	if err := json.Unmarshal(rec.Body, &o); err != nil {
+		t.Fatalf("stored body %q: %v", rec.Body, err)
+	}
+	want := "ok\nexport OPENAI_API_KEY=[redacted]\n  url [redacted]\n\nend"
+	if o.Data != want || o.Stream != "stderr" || o.Offset != 7 {
+		t.Fatalf("stored output %+v, want data %q", o, want)
+	}
+	if got := e.repo.output["s1/1"]; got != int64(len(rec.Body)) {
+		t.Errorf("counted %d output bytes, stored %d", got, len(rec.Body))
+	}
+	if f := string(e.repo.events[evKey("s1", 1, 2)].Body); strings.Contains(f, "ghs_") {
+		t.Errorf("stored failure %s", f)
+	}
+	e.wf.mu.Lock()
+	defer e.wf.mu.Unlock()
+	if m := strings.Join(e.wf.marks, ";"); strings.Contains(m, "ghs_") || !strings.Contains(m, "Bearer [redacted] refused") {
+		t.Errorf("workflow got %q", m)
 	}
 }
 

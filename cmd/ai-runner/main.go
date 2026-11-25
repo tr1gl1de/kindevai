@@ -333,6 +333,7 @@ func daemon(ctx context.Context, args []string, e *env) error {
 	}
 	agent := networkAgent(d, logger) // KIN-30 network profiles and Test Network
 	agent.Context = ctx
+	x.KnownSecrets = agent.Secrets // KIN-77: proxy passwords are masked in attempt output
 	ch.Commands = withNetwork(agent, ch.Commands)
 	rep := &app.Reporter{Probe: probe.New(d.Path())} // KIN-20 heartbeat, capabilities, storage
 	if *measureSpace {                               // KIN-55: only with the operator's explicit permission

@@ -117,7 +117,7 @@ func randomLooking(v string) bool {
 		return false
 	}
 	var lower, upper, digit bool
-	counts := map[rune]int{}
+	var counts [128]int // every accepted rune is ASCII; an array keeps this allocation-free (KIN-77: output)
 	for _, r := range v {
 		switch {
 		case r >= 'a' && r <= 'z':
@@ -138,6 +138,9 @@ func randomLooking(v string) bool {
 	var h float64
 	n := float64(len(v))
 	for _, c := range counts {
+		if c == 0 {
+			continue
+		}
 		p := float64(c) / n
 		h -= p * math.Log2(p)
 	}
@@ -207,16 +210,19 @@ func maskPairs(s string) string {
 	if strings.Contains(s, "PRIVATE KEY-----") {
 		s = pemRe.ReplaceAllString(s, Placeholder)
 	}
-	if !strings.ContainsAny(s, "=:") {
+	// The regexps only run on text that can hold their pairs: they dominate the cost on process output (KIN-77).
+	if strings.Contains(s, "=") {
+		s = paramRe.ReplaceAllStringFunc(s, func(m string) string {
+			k, _, _ := strings.Cut(m, "=")
+			if SecretKey(k) {
+				return k + "=" + Placeholder
+			}
+			return m
+		})
+	}
+	if !strings.Contains(s, ":") || strings.Count(s, `"`) < 4 {
 		return s
 	}
-	s = paramRe.ReplaceAllStringFunc(s, func(m string) string {
-		k, _, _ := strings.Cut(m, "=")
-		if SecretKey(k) {
-			return k + "=" + Placeholder
-		}
-		return m
-	})
 	return jsonPairRe.ReplaceAllStringFunc(s, func(m string) string {
 		sub := jsonPairRe.FindStringSubmatch(m)
 		if SecretKey(sub[1]) {

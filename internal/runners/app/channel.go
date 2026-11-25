@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
+	"github.com/tr1gl1de/kindevai/internal/platform/redact"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runners/domain"
 )
@@ -332,6 +333,9 @@ func (c *Channel) commandAck(ctx context.Context, s Session, a protocol.Ack) err
 func (c *Channel) event(ctx context.Context, s Session, e protocol.Event) error {
 	var ack int64 = -1
 	var sig storageSignal
+	// KIN-77: secrets are masked before the event is stored, counted or passed to the workflow — outside the
+	// transaction, so the single SQLite writer is not held while text is scanned.
+	e.Body = redactBody(e.Kind, e.Body)
 	err := c.Tx.InTx(ctx, func(ctx context.Context) error {
 		sig = storageSignal{}
 		st, _, err := c.Repo.Channel(ctx, s.RunnerID)
@@ -541,6 +545,46 @@ func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Ev
 		ch = protocol.WorkspaceChanges{Truncated: true}
 	}
 	return c.Scope.CheckChanges(ctx, runnerID, e.Step, e.Fence, ch)
+}
+
+// redactBody masks secrets in what an event may carry from the attempt's process (KIN-77): the output data (line
+// by line, the lines kept) and a failure reason. The runner masks first, with the secret values it holds and a
+// window across writes; this is the Control Plane's own best-effort pass for whatever runner sent the event. It is
+// stateless per chunk: the runner cuts chunks at line boundaries, so only a line longer than a chunk (or a PEM key
+// spread over chunks) is redacted in parts. An output body that does not decode is not kept (it could not be redacted or shown).
+func redactBody(kind string, body json.RawMessage) json.RawMessage {
+	var v any
+	switch kind {
+	case protocol.EventOutput:
+		var o protocol.Output
+		if body == nil || json.Unmarshal(body, &o) != nil {
+			return nil
+		}
+		red := redact.Lines(o.Data)
+		if red == o.Data {
+			return body
+		}
+		o.Data = red
+		v = o
+	case protocol.EventFailed:
+		var f protocol.Failure
+		if body == nil || json.Unmarshal(body, &f) != nil {
+			return nil // nothing that could not be redacted is kept; the attempt fails without a reason
+		}
+		red := redact.Text(f.Reason)
+		if red == f.Reason {
+			return body
+		}
+		f.Reason = red
+		v = f
+	default:
+		return body
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 func truncate(s string, n int) string {

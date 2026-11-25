@@ -141,3 +141,25 @@ func TestNetworkTestRunsInBackgroundAndReportsOnTheLink(t *testing.T) {
 		t.Fatalf("result %+v", r)
 	}
 }
+
+// KIN-77: the proxy passwords of the applied configuration are known secrets, masked in attempt output.
+func TestSecretsListsTheProxyPasswords(t *testing.T) {
+	t.Parallel()
+	a := &app.Agent{Store: &memStore{}}
+	if got := a.Secrets(); len(got) != 0 {
+		t.Fatalf("no configuration: secrets %v", got)
+	}
+	cu := protocol.ConfigUpdate{Revision: 1, Network: protocol.NetworkConfig{
+		Default: protocol.NetworkProfile{Proxy: &protocol.NetworkProxy{Host: "p", Port: 1, Password: "default-pass"}},
+		Scoped: []protocol.ScopedNetworkProfile{
+			{Project: "P1", Profile: protocol.NetworkProfile{Proxy: &protocol.NetworkProxy{Host: "q", Port: 2, Password: "scoped-pass"}}},
+			{Project: "P2", Profile: protocol.NetworkProfile{}},
+		}}}
+	body, _ := json.Marshal(cu)
+	if err := a.Command(t.Context(), protocol.Command{ID: "c1", Kind: protocol.CommandConfigUpdate, Body: body}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(a.Secrets(), ","); got != "default-pass,scoped-pass" {
+		t.Errorf("secrets %q", got)
+	}
+}

@@ -115,6 +115,8 @@ func (s *Step) attemptRole() string {
 		return ""
 	case s.Phase == PhaseReview:
 		return StepRoleReviewer
+	case s.Phase == PhasePublish:
+		return StepRolePublisher
 	}
 	return StepRoleImplementer
 }
@@ -234,6 +236,9 @@ func (s *Step) RetryFeedback() string {
 // succeeded, else the step went on (next phase, fix round, retry) or failed.
 func (e *Execution) finishPhase(s *Step, now time.Time, maxAttempts int) (done bool) {
 	a := s.lastAttempt()
+	if s.Phase == PhasePublish {
+		return e.finishPublish(s, now, maxAttempts)
+	}
 	if s.Phase == PhaseImplement {
 		switch {
 		case a.TestCommand != "" && a.Tests == nil:
@@ -260,6 +265,11 @@ func (e *Execution) finishPhase(s *Step, now time.Time, maxAttempts int) (done b
 	s.finishAttempt(AttemptSucceeded, "", now)
 	s.RunnerID = ""
 	if r.Verdict == VerdictApprove {
+		if base, head := s.ReviewedWork(); head != "" && head != base {
+			s.Phase = PhasePublish // KIN-36: the approved work is pushed on the runner holding its branch
+			s.move(StepReady)
+			return false
+		}
 		return true
 	}
 	if s.Round >= MaxFixRounds {

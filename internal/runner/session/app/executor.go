@@ -148,7 +148,7 @@ type run struct {
 	output    []*redact.Stream // stdout, stderr: flushed before the terminal event
 	known     []string         // secret values masked in the attempt's output and failure reasons (KIN-77)
 	cancelled string
-	sandbox   Sandbox // released once the process ended
+	sandbox   Sandbox       // released once the process ended
 	follower  AgentFollower // the AI CLI's output (KIN-79); nil for the mock agent
 	agent     string
 	done      chan struct{}

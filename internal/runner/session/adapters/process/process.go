@@ -24,10 +24,15 @@ import (
 // Launcher starts the mock agent as `Program Args... --scenario <s> --attempt <n> --state <dir>` in the attempt's
 // worktree (or its state dir). Env is the child's whole
 // environment: the runner's own variables (and any secret in them) are never inherited.
+//
+// An attempt with an AI CLI (LaunchSpec.Agent, KIN-79) runs as `Program AgentArgs... --state <dir> --prompt <file>
+// --timeout <d> -- <cli> <args>...` (`ai-runner agent-exec`) in the worktree, with the CLI's environment after Env.
 type Launcher struct {
 	Program string
 	Args    []string
 	Env     []string
+	// AgentArgs start the CLI wrapper (default "agent-exec").
+	AgentArgs []string
 	// Poll is how often an adopted process is checked (default 200ms).
 	Poll time.Duration
 }
@@ -46,9 +51,16 @@ func (l *Launcher) Launch(ctx context.Context, s app.LaunchSpec) (app.Process, e
 	if s.Workdir != "" {
 		dir = s.Workdir
 	}
-	env := l.Env
-	if env == nil {
-		env = []string{}
+	env := append([]string{}, l.Env...)
+	if ag := s.Agent; ag != nil {
+		wrap := l.AgentArgs
+		if wrap == nil {
+			wrap = []string{"agent-exec"}
+		}
+		args = append(append(append([]string{}, wrap...), "--state", s.Dir, "--prompt", ag.PromptFile,
+			"--timeout", ag.Timeout.String(), "--"), append([]string{ag.Path}, ag.Args...)...)
+		env = append(env, ag.Env...)
+		dir = ag.Dir
 	}
 	var cmd *exec.Cmd
 	if s.Sandbox != nil {

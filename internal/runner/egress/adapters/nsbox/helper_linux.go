@@ -97,6 +97,10 @@ func Main(args []string, stderr io.Writer) int {
 	// Mounts, the loopback and the nft child act on this thread's namespaces (all threads share them here, but
 	// keep the thread anyway: Pdeathsig of the agent follows the thread that started it).
 	runtime.LockOSThread()
+	// As the PID namespace's init this process gets only the signals it handles: catch the cancel signals from the
+	// start, so a cancel during setup is not lost (the agent is then never started).
+	sigs := make(chan os.Signal, 8)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	port, err := setup(ctx, s)
@@ -119,7 +123,7 @@ func Main(args []string, stderr io.Writer) int {
 	if code := report(verdict, v, stderr); code != 0 || len(s.Argv) == 0 {
 		return code
 	}
-	return runAgent(s, port, stderr)
+	return runAgent(s, port, sigs, stderr)
 }
 
 func report(f *os.File, v domain.Verdict, stderr io.Writer) int {
@@ -445,7 +449,7 @@ func proxyEnv(env []string, port int) []string {
 
 // runAgent starts the agent in a nested user namespace where it keeps the runner's uid but has no capability
 // over the sandbox's namespaces, then waits for it and exits like it.
-func runAgent(s Spec, port int, stderr io.Writer) int {
+func runAgent(s Spec, port int, sigs chan os.Signal, stderr io.Writer) int {
 	path := s.Argv[0]
 	if !filepath.IsAbs(path) {
 		p, err := exec.LookPath(path)
@@ -456,25 +460,29 @@ func runAgent(s Spec, port int, stderr io.Writer) int {
 		path = p
 	}
 	cmd := &exec.Cmd{Path: path, Args: s.Argv, Env: proxyEnv(s.Env, port), Dir: s.Dir,
-		Stdout: os.Stdout, Stderr: os.Stderr}
+		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr} // stdin: e.g. a CLI's prompt
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags:  syscall.CLONE_NEWUSER,
 		UidMappings: []syscall.SysProcIDMap{{ContainerID: s.UID, HostID: 0, Size: 1}},
 		GidMappings: []syscall.SysProcIDMap{{ContainerID: s.GID, HostID: 0, Size: 1}},
 		Pdeathsig:   syscall.SIGKILL, // the forwarder dies with this helper: so does the agent
 	}
-	// The process group receives cancel signals; the helper outlives the agent to report its status. Caught, not
-	// ignored: an ignored disposition would be inherited by the agent across exec.
-	sigs := make(chan os.Signal, 8)
-	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-	go func() {
-		for range sigs { //nolint:revive // drained: the agent gets the group's signal itself
-		}
-	}()
+	// The process group receives cancel signals; the helper outlives the agent to report its status. Caught (in
+	// Main), not ignored: an ignored disposition would be inherited by the agent across exec.
+	select {
+	case sig := <-sigs: // cancelled while the sandbox was being built: the agent never starts
+		return 128 + int(sig.(syscall.Signal))
+	default:
+	}
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintln(stderr, "strict egress sandbox: starting the agent:", err)
 		return ExitAgentStart
 	}
+	go func() {
+		for sig := range sigs { // the group's later signals reach the agent itself; one that raced its start is passed on
+			_ = cmd.Process.Signal(sig)
+		}
+	}()
 	err := cmd.Wait()
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {

@@ -123,24 +123,34 @@ func (s *Sandboxes) Supported(ctx context.Context) (bool, string) {
 	return s.ok, s.why
 }
 
-// Confine returns the sandbox for an attempt of project run by role, or nil when its profile is not strict. An
-// error means the attempt must not run (strict, but no verified sandbox): the step waits for the network.
-func (s *Sandboxes) Confine(ctx context.Context, project, role, dir, workdir string) (Box, error) {
+// StrictProfile returns the profile of a run of project by role and whether it is strict. An error means the run
+// must not start (strict but unsupported here, or no configuration to prove it is not strict: fail-closed).
+func (s *Sandboxes) StrictProfile(ctx context.Context, project, role string) (protocol.NetworkProfile, bool, error) {
 	cu, ok, err := s.Config()
 	if err != nil {
-		return nil, fmt.Errorf("reading the network configuration: %w", err)
+		return protocol.NetworkProfile{}, false, fmt.Errorf("reading the network configuration: %w", err)
 	}
 	if !ok {
 		// The Control Plane sends the configuration when the session opens, before any assignment: without it the
 		// runner cannot prove the profile is not strict (fail-closed).
-		return nil, errors.New("no network configuration received from the Control Plane yet")
+		return protocol.NetworkProfile{}, false, errors.New("no network configuration received from the Control Plane yet")
 	}
 	p := ProfileFor(cu.Network, project, role)
 	if p.Enforcement != domain.EnforcementStrict {
-		return nil, nil
+		return p, false, nil
 	}
 	if ok, why := s.Supported(ctx); !ok {
-		return nil, fmt.Errorf("%w: %s", ErrUnsupported, why)
+		return p, true, fmt.Errorf("%w: %s", ErrUnsupported, why)
+	}
+	return p, true, nil
+}
+
+// Confine returns the sandbox for an attempt of project run by role, or nil when its profile is not strict. An
+// error means the attempt must not run (strict, but no verified sandbox): the step waits for the network.
+func (s *Sandboxes) Confine(ctx context.Context, project, role, dir, workdir string) (Box, error) {
+	p, strict, err := s.StrictProfile(ctx, project, role)
+	if err != nil || !strict {
+		return nil, err
 	}
 	b, err := s.Boxes.Open(ctx, BoxRequest{Dir: dir, Workdir: workdir, Profile: p})
 	if err != nil {

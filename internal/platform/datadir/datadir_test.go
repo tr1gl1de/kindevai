@@ -1,9 +1,12 @@
 package datadir
 
 import (
+	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -96,5 +99,37 @@ func TestOpenTightensExistingDirMode(t *testing.T) {
 	st, _ := os.Stat(dir)
 	if st.Mode().Perm() != 0o700 {
 		t.Fatalf("mode = %v, want 0700", st.Mode().Perm())
+	}
+}
+
+// KIN-90: a child forked by any goroutine of this process shares the lock descriptor until it execs. Close must
+// not return while such a child still holds the flock, or the next Open of the same directory (import starting
+// the imported installation, serve after stop) fails with ErrLocked although the lock was "released".
+func TestReopenAfterCloseIsNotLockedByConcurrentForks(t *testing.T) {
+	t.Parallel()
+	bin, err := exec.LookPath("true")
+	if err != nil {
+		t.Skip("no true binary")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			for ctx.Err() == nil {
+				_ = exec.CommandContext(ctx, bin).Run()
+			}
+		})
+	}
+	defer wg.Wait()
+	defer cancel()
+	dir := t.TempDir()
+	for i := range 500 {
+		d, err := Open(dir)
+		if err != nil {
+			t.Fatalf("reopen %d after Close: %v", i, err)
+		}
+		if err := d.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

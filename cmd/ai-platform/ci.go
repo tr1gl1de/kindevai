@@ -69,6 +69,8 @@ func (c workflowCI) CIStatus(ctx context.Context, projectID, repository, sha str
 		return workflowapp.CIStatus{State: workflow.CIPassed}, nil
 	case integrations.CIStateFailed:
 		return workflowapp.CIStatus{State: workflow.CIFailed, Detail: detail}, nil
+	case integrations.CIStateNone:
+		return workflowapp.CIStatus{State: workflow.CIPending, NoChecks: true}, nil
 	}
 	return workflowapp.CIStatus{State: workflow.CIPending}, nil
 }

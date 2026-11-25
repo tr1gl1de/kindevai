@@ -180,3 +180,47 @@ func TestATaskCanBeBlockedOnCI(t *testing.T) {
 		t.Fatalf("blocked from %s", task.BlockedFrom)
 	}
 }
+
+// KIN-105: a head without any check run (a repository without CI) counts how long it has had none: the window
+// starts at the first such result of the head, any check run or a new head ends it, and the Owner's resume starts
+// a new one; past NoCIBlockAfter the task is blocked rather than merged.
+func TestAHeadWithoutCheckRunsCountsItsWindow(t *testing.T) {
+	t.Parallel()
+	a := openArtifact(t, "head2")
+	if a.NoChecksFor(t0) != 0 {
+		t.Fatal("window before any result")
+	}
+	if !a.RecordNoChecks("head2", t0) || a.CI != CIPending || !a.NoChecksSince.Equal(t0) {
+		t.Fatalf("first observation: %+v", a)
+	}
+	if a.RecordNoChecks("head2", t0.Add(10*time.Minute)) || a.NoChecksFor(t0.Add(NoCIBlockAfter)) != NoCIBlockAfter {
+		t.Fatalf("the window restarted: %+v", a)
+	}
+	if !a.RecordCI("head2", CIPending, "", t0.Add(11*time.Minute)) || !a.NoChecksSince.IsZero() {
+		t.Fatalf("a running check run kept the window: %+v", a)
+	}
+	a.RecordNoChecks("head2", t0.Add(12*time.Minute))
+	a.HeadSHA = "head3" // a fix round pushed a new head
+	if a.NoChecksFor(t0.Add(time.Hour)) != 0 {
+		t.Fatal("an older head's window counted")
+	}
+	if !a.RecordNoChecks("head3", t0.Add(20*time.Minute)) || !a.NoChecksSince.Equal(t0.Add(20*time.Minute)) {
+		t.Fatalf("the new head's window: %+v", a)
+	}
+	if !a.RestartNoChecksWindow() || a.NoChecksFor(t0.Add(time.Hour)) != 0 || a.RestartNoChecksWindow() {
+		t.Fatalf("restart: %+v", a)
+	}
+}
+
+// KIN-105: the Owner's retry clears a refused merge (the gate runs again); nothing else is cleared.
+func TestARefusedMergeCanBeRetried(t *testing.T) {
+	t.Parallel()
+	a := openArtifact(t, "head2")
+	if a.RetryMerge(t0) {
+		t.Fatal("retried a merge that was not refused")
+	}
+	a.MergeFailed("GitHub refused the merge", t0)
+	if !a.RetryMerge(t0) || a.Merge != "" || a.MergeError != "" {
+		t.Fatalf("after retry: %+v", a)
+	}
+}

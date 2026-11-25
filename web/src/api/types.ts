@@ -1002,6 +1002,10 @@ export interface PullRequest {
   ciDetail?: string;
   ciRound?: number;
   ciMaxRounds?: number;
+  /** The head has had no check run at all since then (a repository without CI, KIN-105). */
+  ciNoChecksSince?: string;
+  /** Minutes without any check run after which the task is blocked rather than merged. */
+  ciNoChecksBlockMinutes?: number;
   merge?: "waiting" | "merged" | "failed";
   mergeSha?: string;
   mergeError?: string;

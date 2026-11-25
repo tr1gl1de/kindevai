@@ -22,6 +22,8 @@ const (
 	CIStatePending = "pending"
 	CIStatePassed  = "passed"
 	CIStateFailed  = "failed"
+	// CIStateNone: the commit has no check run at all (a repository without CI, KIN-105); still not green.
+	CIStateNone = "none"
 )
 
 // CheckRun is one check run on a commit as GitHub reports it.
@@ -34,11 +36,14 @@ type CheckRun struct {
 const maxCIDetail = 2000
 
 // CombineChecks is the CI state of a commit from its latest check runs (total: how many GitHub has, maybe more than
-// were read): pending while there is none, one is not completed or some were not read (never green on a partial
+// were read): none when the commit has no check run at all; pending while none was read, one is not completed or some were not read (never green on a partial
 // list); passed when every one concluded success, neutral or skipped; failed otherwise, with the failed checks named
 // in detail ("name (conclusion)", bounded).
 func CombineChecks(runs []CheckRun, total int) (state, detail string) {
 	if len(runs) == 0 {
+		if total == 0 {
+			return CIStateNone, ""
+		}
 		return CIStatePending, ""
 	}
 	var failed []string

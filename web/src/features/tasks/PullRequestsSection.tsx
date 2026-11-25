@@ -31,7 +31,11 @@ export function PullRequestsSection({ prs }: { prs: PullRequest[] }) {
             {p.state === "failed" && <p>{t("tasks.prFailed", { error: p.error ?? "" })}</p>}
             {p.state === "open" && (
               <p>
-                <span className={`badge ci-${p.ci ?? "none"}`}>{t(`tasks.ci_${p.ci ?? "none"}`)}</span>
+                {noChecks(p) ? (
+                  <span className="badge ci-pending">{t("tasks.ci_noChecks")}</span>
+                ) : (
+                  <span className={`badge ci-${p.ci ?? "none"}`}>{t(`tasks.ci_${p.ci ?? "none"}`)}</span>
+                )}
                 {(p.ciRound ?? 0) > 0 && <> · {t("tasks.ciRound", { n: p.ciRound ?? 0, max: p.ciMaxRounds ?? 0 })}</>}
                 {p.merge && (
                   <>
@@ -41,6 +45,7 @@ export function PullRequestsSection({ prs }: { prs: PullRequest[] }) {
                 )}
               </p>
             )}
+            {noChecks(p) && <p className="muted">{t("tasks.ciNoChecks", { minutes: p.ciNoChecksBlockMinutes ?? 0 })}</p>}
             {p.ci === "failed" && p.ciDetail && <p className="muted">{p.ciDetail}</p>}
             {p.merge === "merged" && p.mergeSha && (
               <p className="muted">{t("tasks.mergedAs", { base: p.base ?? "", sha: p.mergeSha.slice(0, 10) })}</p>
@@ -52,3 +57,6 @@ export function PullRequestsSection({ prs }: { prs: PullRequest[] }) {
     </section>
   );
 }
+
+/** A head without any check run (a repository without CI, KIN-105). */
+const noChecks = (p: PullRequest) => p.state === "open" && p.ci === "pending" && !!p.ciNoChecksSince;

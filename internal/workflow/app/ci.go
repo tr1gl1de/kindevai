@@ -41,6 +41,9 @@ const (
 	KindMerged            = "workflow.merged"
 	KindMergeRefused      = "workflow.merge_refused"
 	KindMergeFailed       = "workflow.merge_failed"
+	KindCIMissing         = "workflow.ci_missing"    // KIN-105: no check run on the head within NoCIBlockAfter
+	KindCIResumed         = "workflow.ci_resumed"    // KIN-105: the Owner resumed a task blocked on CI
+	KindMergeRetried      = "workflow.merge_retried" // KIN-105: the Owner retried a refused merge
 )
 
 // ReconcileCIEvery is the period of the CI reconciliation; reconcileBatch bounds the artifacts checked per pass.
@@ -54,10 +57,11 @@ const (
 var ErrHeadMoved = errors.New("the pull request's head moved away from the checked commit")
 
 // CIStatus is the combined status of all checks on a commit; Detail names the failed ones (untrusted text from
-// GitHub, bounded by the adapter).
+// GitHub, bounded by the adapter). NoChecks: pending because the commit has no check run at all (KIN-105).
 type CIStatus struct {
-	State  domain.CIState
-	Detail string
+	State    domain.CIState
+	Detail   string
+	NoChecks bool
 }
 
 // MergeRequest asks to merge pull request Number of the project's Repository into Base with a merge commit, only
@@ -210,7 +214,12 @@ func (s *Service) HandleCICheck(ctx context.Context, d messaging.Delivery) error
 			return nil // a fix round pushed a new head meanwhile, or the task moved on
 		}
 		now := s.now()
-		changed := cur.RecordCI(a.HeadSHA, st.State, st.Detail, now)
+		var changed bool
+		if st.NoChecks && st.State == domain.CIPending {
+			changed = cur.RecordNoChecks(a.HeadSHA, now)
+		} else {
+			changed = cur.RecordCI(a.HeadSHA, st.State, st.Detail, now)
+		}
 		if st.State == domain.CIPassed && cur.Merge == domain.MergeFailed && t.State == domain.TaskVerifying {
 			cur.Merge, cur.MergeError, changed = "", "", true // the Owner resumed the task: try the merge again
 		}
@@ -240,6 +249,18 @@ func (s *Service) HandleCICheck(ctx context.Context, d messaging.Delivery) error
 				}
 			}
 			return s.enqueue(ctx, TopicMerge, hashKey("merge/", d.Key), mergePayload{cur.ExecutionID})
+		case domain.CIPending:
+			if t.State != domain.TaskVerifying || cur.NoChecksFor(now) < domain.NoCIBlockAfter {
+				return nil
+			}
+			// A repository without CI: nothing is merged without a green check, the Owner decides.
+			why := fmt.Sprintf("no CI check runs on %s (%s) for %s: the repository seems to have no CI, and nothing is "+
+				"merged without it; add CI and resume, or merge the pull request yourself", cur.Branch, cur.HeadSHA,
+				domain.NoCIBlockAfter)
+			if err := s.blockOnCI(ctx, &t, why); err != nil {
+				return err
+			}
+			return s.record(ctx, mergeEntry(t, cur, KindCIMissing, why))
 		}
 		return nil
 	})

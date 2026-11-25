@@ -282,6 +282,15 @@ func TestTaskTimeEventsAndRetryAPI(t *testing.T) {
 	if c := call(t, srv, "owner", "POST", "/api/tasks/"+id+"/retry", `{}`, nil); c != http.StatusConflict {
 		t.Fatalf("retry of a ready task %d", c)
 	}
+	// KIN-105: resume and retry merge act only on a task BLOCKED on CI, for the Owner or a project admin.
+	for _, action := range []string{"resume", "retry-merge"} {
+		if c := call(t, srv, "member", "POST", "/api/tasks/"+id+"/"+action, `{}`, nil); c != http.StatusForbidden {
+			t.Errorf("member %s %d", action, c)
+		}
+		if c := call(t, srv, "owner", "POST", "/api/tasks/"+id+"/"+action, `{}`, nil); c != http.StatusConflict {
+			t.Errorf("%s of a ready task %d", action, c)
+		}
+	}
 }
 
 // An attempt's workspace endpoint serves the latest workspace.prepared and workspace.changes reports as typed data

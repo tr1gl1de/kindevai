@@ -392,6 +392,9 @@ ai-runner cli-login status --cli-home <dir>                    # чем зало
 проектов. API: `GET /api/approvals?state=pending|decided|all`, `GET /api/approvals/{id}`,
 `POST /api/approvals/{id}/{approve|reject}` (`planRevision`, `planHash`, `comment` — обязателен при отказе),
 `GET/PUT /api/projects/{id}/risk-policy`.
+Любая ревизия плана задачи с изменениями относительно предыдущей (добавленные, удалённые и изменённые шаги; scope,
+риск, тесты, миграции) открывается на `/tasks/{id}/plan/revisions/{n}` всем, кто видит задачу
+(`GET /api/tasks/{id}/revisions/{n}?base=m` сравнивает с ревизией `m`).
 ### Журнал аудита
 
 Действия, важные для безопасности, пишутся в журнал аудита (только добавление) в той же транзакции, что и само

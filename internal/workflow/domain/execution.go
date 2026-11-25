@@ -92,6 +92,8 @@ type Attempt struct {
 	HeadSHA     string
 	Files       []string
 	FilesTotal  int
+	// PushedBranch is the branch a publish attempt reported it pushed HeadSHA to (KIN-36).
+	PushedBranch string
 }
 
 // AgentReport is an AI CLI run's report on one attempt (KIN-79, KB KIN-A-16).

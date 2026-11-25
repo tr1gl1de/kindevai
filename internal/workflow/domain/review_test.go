@@ -130,7 +130,7 @@ func TestImplementationWithPassingTestsGoesToAnIndependentReviewOnTheSameRunner(
 	if base, head := s.ReviewedWork(); base != "base1" || head != "head1" {
 		t.Fatalf("reviewed work = %s..%s", base, head)
 	}
-	// The reviewer is another CLI; it approves: the step succeeds and the execution finishes.
+	// The reviewer is another CLI; it approves: the work is published next (KIN-36) on the same runner.
 	rf := runPhase(t, &e, id, "r1", StepClaim{Agent: AgentChoice{Agent: "codex"}})
 	if s := e.Step(id); s.Attempts[1].Role != StepRoleReviewer || s.Author() != "claude" {
 		t.Fatalf("reviewer attempt role %q, author %q", s.Attempts[1].Role, s.Author())
@@ -140,8 +140,8 @@ func TestImplementationWithPassingTestsGoesToAnIndependentReviewOnTheSameRunner(
 	if err := e.Succeed(id, "r1", rf, t0); err != nil {
 		t.Fatal(err)
 	}
-	if s := e.Step(id); s.State != StepSucceeded || e.State != ExecutionSucceeded {
-		t.Fatalf("after approval: step %s execution %s", s.State, e.State)
+	if s := e.Step(id); s.State != StepReady || s.Phase != PhasePublish || e.State != ExecutionRunning {
+		t.Fatalf("after approval: step %s phase %q execution %s", s.State, s.Phase, e.State)
 	}
 }
 

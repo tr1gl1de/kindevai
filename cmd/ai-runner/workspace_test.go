@@ -77,6 +77,17 @@ func TestSessionWorkspacesOnARealRepository(t *testing.T) {
 		!strings.HasPrefix(ch.Branch, "feature/") {
 		t.Fatalf("%+v %v", ch, err)
 	}
+	// KIN-36: the reviewed head is published to the step's branch of the repository.
+	pushed, err := ws.Push(t.Context(), sessionapp.PushRequest{Step: "s1", Task: "KIN-9", Repository: "acme/api",
+		Head: ch.HeadSHA, Token: sessiondomain.NewSecret("")})
+	if err != nil || pushed.Branch != "feature/KIN-9--s1" || pushed.HeadSHA != ch.HeadSHA {
+		t.Fatalf("%+v %v", pushed, err)
+	}
+	out, err := exec.CommandContext(t.Context(), "git", "--git-dir="+filepath.Join(remotes, "acme", "api.git"), "rev-parse",
+		"refs/heads/feature/KIN-9--s1").Output()
+	if err != nil || strings.TrimSpace(string(out)) != ch.HeadSHA {
+		t.Fatalf("remote branch %q %v", out, err)
+	}
 }
 
 // recordedEvents keeps the attempts' events in memory (kind and body).

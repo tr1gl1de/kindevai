@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/adapters/cliagent"
 	sessiondomain "github.com/tr1gl1de/kindevai/internal/runner/session/domain"
@@ -30,7 +31,8 @@ func (reviewRouter) Route(_ context.Context, _, role, _ string) (workflowapp.Age
 
 // KIN-35 end to end on the Control Plane: the implementer is assigned with the registry's test command, the runner's
 // test evidence and final changes are taken through the channel's ports, the reviewer is assigned read-only with the
-// diff range (the registry's test command comes from the repository) and its verdict ends the step; the task goes on to VERIFYING.
+// diff range (the registry's test command comes from the repository); its approval publishes the reviewed head
+// (KIN-36: push report, change set, pull request through the outbox) and the task goes on to VERIFYING.
 func TestReviewLoopThroughTheRunnerChannel(t *testing.T) {
 	t.Parallel()
 	cp, runnerID := plannerCP(t, plannerRouter{})
@@ -93,6 +95,44 @@ func TestReviewLoopThroughTheRunnerChannel(t *testing.T) {
 		t.Fatalf("review assignment %+v", r)
 	}
 	run(r, `{"verdict":"approve","summary":"good","findings":[]}`, nil, "bbbb2222")
+
+	// KIN-36: the approved work is published by the runner holding the branch: exactly the reviewed head, no CLI.
+	if err := cp.wf.Schedule(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p := lastAssign(t, cp, runnerID)
+	if p.Step != a.Step || p.Adapter != protocol.AdapterPublish || p.Role != protocol.RolePublisher || p.DiffHead != "bbbb2222" ||
+		p.Prompt != "" || p.Model != "" || p.TestCommand != "" {
+		t.Fatalf("publish assignment %+v", p)
+	}
+	branch := "feature/" + task.ID + "--" + p.Step
+	if err := ex.StartAttempt(ctx, runnerID, p.Step, p.Fence, now, p.Adapter); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.RecordPush(ctx, runnerID, p.Step, p.Fence, protocol.WorkspacePushed{Repository: "acme/app", Branch: branch,
+		HeadSHA: "bbbb2222"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.CompleteAttempt(ctx, runnerID, p.Step, p.Fence, now); err != nil {
+		t.Fatal(err)
+	}
+	var payload []byte
+	if err := cp.inst.DB.QueryRowContext(ctx, "SELECT payload FROM outbox_events WHERE topic = ?",
+		workflowapp.TopicOpenPullRequest).Scan(&payload); err != nil {
+		t.Fatalf("pull request message: %v", err)
+	}
+	opener := &fakeOpener{}
+	cp.wf.PullRequests = workflowPullRequests{gh: opener}
+	for range 2 { // at-least-once: a redelivery reuses the pull request
+		if err := cp.wf.HandleOpenPullRequest(ctx, messaging.Delivery{Topic: workflowapp.TopicOpenPullRequest, Payload: payload}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	arts, err := cp.wf.TaskChangeSet(ctx, task.ID)
+	if err != nil || len(arts) != 1 || arts[0].State != workflow.ArtifactOpen || arts[0].PRNumber != 12 || arts[0].HeadSHA != "bbbb2222" ||
+		arts[0].Branch != branch || arts[0].PRBase != "dev" || len(opener.heads) != 2 || opener.heads[0] != "acme/app "+branch {
+		t.Fatalf("change set %+v %v (opened %v)", arts, err, opener.heads)
+	}
 	d := cp.detail(t, task.ID)
 	if d.Task.State != workflow.TaskVerifying || d.Execution == nil || d.Execution.State != workflow.ExecutionSucceeded {
 		t.Fatalf("after the review: %s", describe(d))

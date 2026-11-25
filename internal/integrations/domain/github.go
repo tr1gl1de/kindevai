@@ -428,3 +428,20 @@ func CIPullRequest(r Repository, e GitHubEvent) int {
 	}
 	return e.PullRequest
 }
+
+// PullRequestInput is a pull request the platform opens (KIN-36): Head (a feature/ branch of the same repository)
+// into Base (the integration branch, never main/master).
+type PullRequestInput struct {
+	Base  string
+	Head  string
+	Title string
+	Body  string
+}
+
+// PullRequestRef is an open pull request; Reused when it was open already.
+type PullRequestRef struct {
+	Number int
+	URL    string
+	Base   string
+	Reused bool
+}

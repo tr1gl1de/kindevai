@@ -89,6 +89,7 @@ func plannerCP(t *testing.T, router plannerRouter) (*controlPlane, string) {
 	apv.Workflow.Runners, apv.Workflow.Dispatcher, apv.Workflow.Agents = pool, runnerDispatcher{ch: channel}, router
 	attachScopeCheck(channel, apv.Approvals, apv.Workflow)
 	wirePlanner(apv.Workflow, inst, msg, integ)
+	wirePublishing(apv.Workflow, inst, msg, integ.GitHub)
 	cp := &controlPlane{inst: inst, wf: apv.Workflow, approvals: apv.Approvals, hub: runnersapp.NewHub()}
 	runnerID, _ := cp.seed(t, "p1")
 	pool.ids = []string{runnerID}

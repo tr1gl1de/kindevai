@@ -67,6 +67,9 @@ type GitHubAPI interface {
 	ReadRepository(ctx context.Context, c AppCredentials, owner, name string) domain.SyncResult
 	// InstallationToken mints (or returns a cached, still valid) installation token restricted to one repository.
 	InstallationToken(ctx context.Context, c AppCredentials, installationID int64, repo string) (domain.Secret, error)
+	// OpenPullRequest opens in.Head into in.Base with the installation token, or returns the open pull request of
+	// the head branch (KIN-36).
+	OpenPullRequest(ctx context.Context, tok domain.Secret, owner, name string, in domain.PullRequestInput) (domain.PullRequestRef, error)
 }
 
 // Inbox stores verified webhook deliveries durably, deduplicated by delivery id (messaging.Inbox).
@@ -648,4 +651,44 @@ func (s *GitHubService) RepositoryToken(ctx context.Context, projectID, fullName
 		return domain.Secret{}, err
 	}
 	return s.API.InstallationToken(ctx, creds, r.GitHub.InstallationID, r.Name)
+}
+
+// PullRequestInput asks to open the pull request of Head (a feature/ branch) of the project's Repository
+// ("owner/name") into its integration branch (KIN-36).
+type PullRequestInput struct {
+	ProjectID  string
+	Repository string
+	Head       string
+	Title      string
+	Body       string
+}
+
+// OpenPullRequest opens the pull request of a published branch into the registered repository's integration branch,
+// or returns the open one of that branch (idempotent). The base is never main/master (domain.ErrProtectedBranch,
+// checked before GitHub is called) and the head must be a feature/ branch; a repository not registered for the
+// project is domain.ErrNotFound, an App not installed on it domain.ErrNotInstalled.
+func (s *GitHubService) OpenPullRequest(ctx context.Context, in PullRequestInput) (domain.PullRequestRef, error) {
+	if !strings.HasPrefix(in.Head, "feature/") || domain.IsProtectedBranch(in.Head) {
+		return domain.PullRequestRef{}, fmt.Errorf("head %q is not a feature branch: %w", in.Head, domain.ErrProtectedBranch)
+	}
+	r, err := s.Store.RepositoryByFullName(ctx, in.Repository)
+	if err != nil {
+		return domain.PullRequestRef{}, err
+	}
+	if r.ProjectID != in.ProjectID {
+		return domain.PullRequestRef{}, domain.ErrNotFound
+	}
+	base := r.IntegrationBranch
+	if base == "" {
+		base = domain.DefaultIntegrationBranch
+	}
+	if err := domain.GuardBranch(base); err != nil {
+		return domain.PullRequestRef{}, fmt.Errorf("integration branch %q: %w", base, err)
+	}
+	tok, err := s.RepositoryToken(ctx, in.ProjectID, in.Repository)
+	if err != nil {
+		return domain.PullRequestRef{}, err
+	}
+	return s.API.OpenPullRequest(ctx, tok, r.Owner, r.Name, domain.PullRequestInput{Base: base, Head: in.Head,
+		Title: in.Title, Body: in.Body})
 }

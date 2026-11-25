@@ -59,6 +59,9 @@ const (
 	// EventTests is the runner's test evidence (KIN-35): the assignment's TestCommand run in the worktree after the
 	// AI CLI ended, sent before the attempt's final workspace.changes and terminal event.
 	EventTests = "execution.tests" // body: TestResult
+	// EventWorkspacePushed reports that a publish attempt (KIN-36) pushed the step's work branch, before its
+	// terminal event.
+	EventWorkspacePushed = "workspace.pushed" // body: WorkspacePushed
 )
 
 // TerminalEvent reports whether kind ends an attempt.
@@ -66,7 +69,7 @@ func TerminalEvent(kind string) bool { return kind == EventCompleted || kind == 
 
 var eventKinds = map[string]bool{EventAccepted: true, EventStarted: true, EventOutput: true, EventOutputDropped: true,
 	EventCompleted: true, EventFailed: true, EventWorkspacePrepared: true, EventWorkspaceChanges: true, EventAgent: true,
-	EventWorkspacePreparing: true, EventTests: true}
+	EventWorkspacePreparing: true, EventTests: true, EventWorkspacePushed: true}
 
 // Limits of the channel. MaxOutputChunk raw bytes of output escape to at most 6× in JSON (\u00XX), so an output
 // event stays below MaxMessageBytes.
@@ -157,6 +160,10 @@ const (
 	AdapterMock   = "mock"
 	AdapterClaude = "claude"
 	AdapterCodex  = "codex"
+	// AdapterPublish pushes the step's reviewed work branch (KIN-36; Role RolePublisher, DiffHead the commit): no
+	// process runs. The runner reports workspace.pushed before execution.completed.
+	AdapterPublish = "publish"
+	RolePublisher  = "publisher"
 )
 
 // CLIAdapter reports an adapter that runs an AI CLI.

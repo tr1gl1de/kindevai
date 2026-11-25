@@ -198,18 +198,11 @@ func (g *Git) FetchBase(ctx context.Context, mirror, repository, base string, to
 			return "", err
 		}
 	}
-	var extra []string
-	if !tok.Empty() && g.base.Scheme == "http" && !loopback(g.base.Hostname()) {
-		return "", ErrInsecureTransport
+	extra, done, err := g.credentials(ctx, tok)
+	if err != nil {
+		return "", err
 	}
-	if !tok.Empty() && g.base.Scheme != "file" {
-		c, err := serve(ctx, credential{scheme: g.base.Scheme, host: g.base.Host, token: tok.Reveal()})
-		if err != nil {
-			return "", err
-		}
-		defer c.close()
-		extra = []string{"credential.helper=" + c.helperConfig(g.helper), "credential.useHttpPath=false"}
-	}
+	defer done()
 	ref := "refs/remotes/origin/" + base
 	if _, err := g.mirrorRun(ctx, mirror, extra, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
 		"--end-of-options", g.URL(repository), "+refs/heads/"+base+":"+ref); err != nil {
@@ -221,6 +214,48 @@ func (g *Git) FetchBase(ctx context.Context, mirror, repository, base string, to
 	}
 	sha := strings.TrimSpace(string(out))
 	return sha, checkSHA(sha)
+}
+
+// credentials serves tok to git through the credential helper for one command: the -c entries to pass and a
+// function that stops serving it. A token is never sent over plain http to a non-loopback host.
+func (g *Git) credentials(ctx context.Context, tok app.Token) (extra []string, done func(), err error) {
+	if !tok.Empty() && g.base.Scheme == "http" && !loopback(g.base.Hostname()) {
+		return nil, nil, ErrInsecureTransport
+	}
+	if tok.Empty() || g.base.Scheme == "file" {
+		return nil, func() {}, nil
+	}
+	c, err := serve(ctx, credential{scheme: g.base.Scheme, host: g.base.Host, token: tok.Reveal()})
+	if err != nil {
+		return nil, nil, err
+	}
+	return []string{"credential.helper=" + c.helperConfig(g.helper), "credential.useHttpPath=false"}, c.close, nil
+}
+
+// Push implements app.Git (KIN-36): it publishes commit sha of the cache to branch of the repository. The target is
+// checked first (a feature/ work branch, never main/master); the update is fast-forward only (never forced), and
+// pushing the commit the branch already points to is a no-op.
+func (g *Git) Push(ctx context.Context, mirror, repository, branch, sha string, tok app.Token) error {
+	if _, _, err := domain.SplitRepository(repository); err != nil {
+		return err
+	}
+	if err := domain.CheckWorkBranch(branch); err != nil {
+		return err
+	}
+	if err := checkSHA(sha); err != nil {
+		return err
+	}
+	if _, err := g.mirrorRun(ctx, mirror, nil, "cat-file", "-e", "--end-of-options", sha+"^{commit}"); err != nil {
+		return fmt.Errorf("commit %s is not in the repository cache: %w", sha, err)
+	}
+	extra, done, err := g.credentials(ctx, tok)
+	if err != nil {
+		return err
+	}
+	defer done()
+	_, err = g.mirrorRun(ctx, mirror, extra, "push", "--quiet", "--no-verify", "--no-follow-tags", "--end-of-options",
+		g.URL(repository), sha+":refs/heads/"+branch)
+	return err
 }
 
 // AddWorktree implements app.Git. A directory left by an earlier attempt of the same branch (its worktree was

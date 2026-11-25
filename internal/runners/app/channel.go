@@ -85,6 +85,12 @@ type TestReporter interface {
 	RecordTests(ctx context.Context, runnerID, step string, fence int64, r protocol.TestResult) error
 }
 
+// PushReporter is implemented by an Executions that stores a publish attempt's push report (KIN-36:
+// workspace.pushed), applied in the event's transaction. Without it the event is only fence-checked.
+type PushReporter interface {
+	RecordPush(ctx context.Context, runnerID, step string, fence int64, p protocol.WorkspacePushed) error
+}
+
 // ScopeChecker evaluates what an attempt reports it changed (workspace.changes) against the step's approved scope
 // (KIN-51), in the event's transaction. runnerID comes from the authenticated session and the attempt's token was
 // checked first. A violation holds the step for a new approval; errors are those of Executions.
@@ -599,6 +605,13 @@ func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Ev
 		}
 		r.Command, r.Output = truncate(redact.Text(r.Command), protocol.MaxTestCommand), truncate(redact.Lines(r.Output), protocol.MaxTestOutput)
 		return tr.RecordTests(ctx, runnerID, e.Step, e.Fence, r)
+	}
+	if r, ok := c.Executions.(PushReporter); ok && e.Kind == protocol.EventWorkspacePushed {
+		var p protocol.WorkspacePushed
+		if err := json.Unmarshal(e.Body, &p); err != nil {
+			p = protocol.WorkspacePushed{} // unreadable: no push the publish could succeed on
+		}
+		return r.RecordPush(ctx, runnerID, e.Step, e.Fence, p)
 	}
 	if r, ok := c.Executions.(AttemptRenewer); ok && e.Kind == protocol.EventWorkspacePreparing {
 		return r.RenewAttempt(ctx, runnerID, e.Step, e.Fence)

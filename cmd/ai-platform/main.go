@@ -163,6 +163,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	attachCheckoutSource(channel, integ.GitHub)                        // KIN-29 worktree base + repository token
 	attachScopeCheck(channel, apv.Approvals, apv.Workflow)             // KIN-51 changed files vs the approved scope
 	wirePlanner(apv.Workflow, inst, msg, integ)                        // KIN-34 planner runs and their context package
+	wirePublishing(apv.Workflow, inst, msg, integ.GitHub)              // KIN-36 push, change set, pull request into dev
 	intake.planWith(apv.Workflow)                                      // KIN-85 intake tasks auto-planned (per project)
 	attachNetwork(gateway, netSvc, logger)
 	wireStrictEgress(apv.Workflow, netSvc.StrictFor) // KIN-31 strict steps only on verified runners

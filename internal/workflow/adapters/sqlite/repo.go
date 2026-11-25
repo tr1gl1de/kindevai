@@ -344,8 +344,8 @@ func (r *Repository) SaveExecution(ctx context.Context, e *domain.Execution) err
 			if _, err := c.ExecContext(ctx, `INSERT INTO step_attempts(step_id, number, runner_id, fence, state, error,
 				started_at, finished_at, agent, work_started_at, work_ended_at, work_incomplete, agent_session, agent_model,
 				agent_version, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, turns,
-				role, review_round, agent_result, test_command, tests, base_sha, head_sha, files, files_total)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				role, review_round, agent_result, test_command, tests, base_sha, head_sha, files, files_total, pushed_branch)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(step_id, number) DO UPDATE SET state = excluded.state, error = excluded.error,
 				finished_at = excluded.finished_at, agent = excluded.agent,
 				agent_session = excluded.agent_session, agent_model = excluded.agent_model,
@@ -354,6 +354,7 @@ func (r *Repository) SaveExecution(ctx context.Context, e *domain.Execution) err
 				cache_write_tokens = excluded.cache_write_tokens, cost_usd = excluded.cost_usd, turns = excluded.turns,
 				agent_result = excluded.agent_result, tests = excluded.tests, base_sha = excluded.base_sha,
 				head_sha = excluded.head_sha, files = excluded.files, files_total = excluded.files_total,
+				pushed_branch = excluded.pushed_branch,
 				work_started_at = coalesce(work_started_at, excluded.work_started_at),
 				work_ended_at = coalesce(work_ended_at, excluded.work_ended_at),
 				work_incomplete = max(work_incomplete, excluded.work_incomplete)`,
@@ -361,7 +362,7 @@ func (r *Repository) SaveExecution(ctx context.Context, e *domain.Execution) err
 				nullTS(a.WorkStart), nullTS(a.WorkEnd), a.WorkIncomplete, a.Report.Session, a.Report.Model, a.Report.Version,
 				max(a.Report.Usage.InputTokens, 0), max(a.Report.Usage.OutputTokens, 0), max(a.Report.Usage.CacheReadTokens, 0),
 				max(a.Report.Usage.CacheWriteTokens, 0), max(a.Report.Usage.CostUSD, 0), max(a.Report.Usage.Turns, 0),
-				a.Role, a.Round, a.Report.Result, a.TestCommand, tests, a.BaseSHA, a.HeadSHA, files, max(a.FilesTotal, 0)); err != nil {
+				a.Role, a.Round, a.Report.Result, a.TestCommand, tests, a.BaseSHA, a.HeadSHA, files, max(a.FilesTotal, 0), a.PushedBranch); err != nil {
 				return fmt.Errorf("saving attempt %d of step %s: %w", a.Number, s.Key, err)
 			}
 		}
@@ -504,7 +505,8 @@ func (r *Repository) ListTasks(ctx context.Context, f app.TaskFilter, limit int)
 const attemptCols = `a.number, a.runner_id, a.fence, a.state, a.error, a.started_at, a.finished_at, a.agent,
 	a.work_started_at, a.work_ended_at, a.work_incomplete, a.agent_session, a.agent_model, a.agent_version,
 	a.input_tokens, a.output_tokens, a.cache_read_tokens, a.cache_write_tokens, a.cost_usd, a.turns, a.role,
-	a.review_round, a.agent_result, a.test_command, a.tests, a.base_sha, a.head_sha, a.files, a.files_total`
+	a.review_round, a.agent_result, a.test_command, a.tests, a.base_sha, a.head_sha, a.files, a.files_total,
+	a.pushed_branch`
 
 func scanAttempt(row scanner, key *string) (domain.Attempt, error) {
 	var a domain.Attempt
@@ -515,7 +517,7 @@ func scanAttempt(row scanner, key *string) (domain.Attempt, error) {
 		&workStart, &workEnd, &a.WorkIncomplete, &a.Report.Session, &a.Report.Model, &a.Report.Version,
 		&a.Report.Usage.InputTokens, &a.Report.Usage.OutputTokens, &a.Report.Usage.CacheReadTokens,
 		&a.Report.Usage.CacheWriteTokens, &a.Report.Usage.CostUSD, &a.Report.Usage.Turns, &a.Role, &a.Round,
-		&a.Report.Result, &a.TestCommand, &tests, &a.BaseSHA, &a.HeadSHA, &files, &a.FilesTotal); err != nil {
+		&a.Report.Result, &a.TestCommand, &tests, &a.BaseSHA, &a.HeadSHA, &files, &a.FilesTotal, &a.PushedBranch); err != nil {
 		return a, fmt.Errorf("reading attempt: %w", err)
 	}
 	if tests.Valid {
@@ -638,4 +640,66 @@ func attemptJSON(a domain.Attempt) (sql.NullString, string, error) {
 		return tests, "", fmt.Errorf("encoding changed files: %w", err)
 	}
 	return tests, string(b), nil
+}
+
+// SaveArtifact implements app.ChangeSets (KIN-36).
+func (r *Repository) SaveArtifact(ctx context.Context, a domain.GitArtifact) error {
+	_, err := db.Conn(ctx, r.db).ExecContext(ctx, `INSERT INTO change_set_artifacts(execution_id, repository, branch,
+		task_id, step_id, base_sha, head_sha, state, pr_number, pr_url, pr_base, error, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(execution_id, repository, branch) DO UPDATE SET step_id = excluded.step_id,
+		base_sha = excluded.base_sha, head_sha = excluded.head_sha, state = excluded.state, pr_number = excluded.pr_number,
+		pr_url = excluded.pr_url, pr_base = excluded.pr_base, error = excluded.error, updated_at = excluded.updated_at`,
+		a.ExecutionID, a.Repository, a.Branch, a.TaskID, a.StepID, a.BaseSHA, a.HeadSHA, a.State, max(a.PRNumber, 0),
+		a.PRURL, a.PRBase, a.Error, ts(a.CreatedAt), ts(a.UpdatedAt))
+	if err != nil {
+		return fmt.Errorf("saving the change set artifact: %w", err)
+	}
+	return nil
+}
+
+const artifactCols = `execution_id, repository, branch, task_id, step_id, base_sha, head_sha, state, pr_number, pr_url,
+	pr_base, error, created_at, updated_at`
+
+func scanArtifact(row scanner) (domain.GitArtifact, error) {
+	var a domain.GitArtifact
+	var created, updated string
+	if err := row.Scan(&a.ExecutionID, &a.Repository, &a.Branch, &a.TaskID, &a.StepID, &a.BaseSHA, &a.HeadSHA, &a.State,
+		&a.PRNumber, &a.PRURL, &a.PRBase, &a.Error, &created, &updated); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return a, domain.ErrNotFound
+		}
+		return a, fmt.Errorf("reading the change set artifact: %w", err)
+	}
+	var err error
+	if a.CreatedAt, err = parseTS(created); err != nil {
+		return a, err
+	}
+	a.UpdatedAt, err = parseTS(updated)
+	return a, err
+}
+
+// Artifact implements app.ChangeSets.
+func (r *Repository) Artifact(ctx context.Context, executionID, repository, branch string) (domain.GitArtifact, error) {
+	return scanArtifact(db.Conn(ctx, r.db).QueryRowContext(ctx, `SELECT `+artifactCols+` FROM change_set_artifacts
+		WHERE execution_id = ? AND repository = ? AND branch = ?`, executionID, repository, branch))
+}
+
+// TaskArtifacts implements app.ChangeSets.
+func (r *Repository) TaskArtifacts(ctx context.Context, taskID string) ([]domain.GitArtifact, error) {
+	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, `SELECT `+artifactCols+` FROM change_set_artifacts
+		WHERE task_id = ? ORDER BY created_at, repository, branch`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("reading the change set: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.GitArtifact
+	for rows.Next() {
+		a, err := scanArtifact(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }

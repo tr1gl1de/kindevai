@@ -13,12 +13,12 @@ import (
 
 // This file implements app.IntakeStore (KIN-27).
 
-const bindingCols = "project_id, short_name, trigger_tag, poll_cursor, last_polled_at"
+const bindingCols = "project_id, short_name, trigger_tag, poll_cursor, last_polled_at, auto_plan"
 
 func scanBinding(row scanner) (domain.Binding, error) {
 	var b domain.Binding
 	var polled sql.NullString
-	if err := row.Scan(&b.ProjectID, &b.ShortName, &b.TriggerTag, &b.Cursor, &polled); err != nil {
+	if err := row.Scan(&b.ProjectID, &b.ShortName, &b.TriggerTag, &b.Cursor, &polled, &b.AutoPlan); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return b, domain.ErrNotFound
 		}
@@ -67,6 +67,13 @@ func (r *Repository) SetTriggerTag(ctx context.Context, projectID, tag string, a
 	res, err := r.conn(ctx).ExecContext(ctx, "UPDATE project_youtrack SET trigger_tag = ?, updated_at = ? WHERE project_id = ?",
 		tag, ts(at), projectID)
 	return affected(res, err, "saving trigger tag")
+}
+
+// SetAutoPlan turns a binding's automatic planning on or off; domain.ErrNotFound when unbound.
+func (r *Repository) SetAutoPlan(ctx context.Context, projectID string, on bool, at time.Time) error {
+	res, err := r.conn(ctx).ExecContext(ctx, "UPDATE project_youtrack SET auto_plan = ?, updated_at = ? WHERE project_id = ?",
+		on, ts(at), projectID)
+	return affected(res, err, "saving auto-planning")
 }
 
 // AdvanceCursor records a successful poll; the cursor never moves back, and a poll of a binding that was replaced

@@ -273,6 +273,17 @@ func (s *Service) Lookup(ctx context.Context, projectID string) (domain.Project,
 // intake) that act on behalf of a user they resolved themselves. Unknown or disabled accounts and unknown projects
 // may not.
 func (s *Service) CanRunAI(ctx context.Context, projectID, userID string) (bool, error) {
+	return s.can(ctx, projectID, userID, domain.Access.CanRunAI)
+}
+
+// CanManageAI reports whether an account may change how AI works in a project (the Owner, the project's admin).
+// Trusted, like CanRunAI.
+func (s *Service) CanManageAI(ctx context.Context, projectID, userID string) (bool, error) {
+	return s.can(ctx, projectID, userID, domain.Access.CanManageAI)
+}
+
+// can checks an account's access to a project; unknown or disabled accounts and unknown projects have none.
+func (s *Service) can(ctx context.Context, projectID, userID string, check func(domain.Access) bool) (bool, error) {
 	if _, err := s.Repo.ByID(ctx, projectID); errors.Is(err, domain.ErrNotFound) {
 		return false, nil
 	} else if err != nil {
@@ -290,7 +301,7 @@ func (s *Service) CanRunAI(ctx context.Context, projectID, userID string) (bool,
 	if err != nil {
 		return false, fmt.Errorf("loading membership: %w", err)
 	}
-	return domain.NewAccess(domain.Actor{UserID: u.ID, Login: u.Login, Owner: u.Owner}, m.Role, member).CanRunAI(), nil
+	return check(domain.NewAccess(domain.Actor{UserID: u.ID, Login: u.Login, Owner: u.Owner}, m.Role, member)), nil
 }
 
 // ValidateRole checks that role is a project role.

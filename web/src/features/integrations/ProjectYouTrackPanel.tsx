@@ -10,7 +10,7 @@ import { formatDateTime } from "../../ui/format";
 import { useNotify } from "../../ui/notify";
 import { fieldError } from "./IntegrationsPage";
 import { StateText } from "./IntakeSettingsSection";
-import { useProjectYouTrack, useRunIssue, useSaveTriggerTag, type IntakeEntry, type ProjectYouTrack } from "./intakeApi";
+import { useProjectYouTrack, useRunIssue, useSaveAutoPlan, useSaveTriggerTag, type IntakeEntry, type ProjectYouTrack } from "./intakeApi";
 
 const knownReasons = ["unknown_user", "not_allowed", "tag_not_allowed", "issue_not_found", "other_project", "invalid_issue", "unavailable"];
 
@@ -37,6 +37,7 @@ export function ProjectYouTrackPanel({ project, isOwner }: { project: Project; i
             </span>
           </p>
           {isOwner && <TriggerTag key={data.data.binding.triggerTag} project={project} current={data.data.binding.triggerTag} />}
+          <AutoPlan project={project} on={data.data.binding.autoPlan} />
           <RunIssue project={project} shortName={data.data.binding.shortName} />
           <Recent data={data.data} />
         </>
@@ -87,6 +88,38 @@ function TriggerTag({ project, current }: { project: Project; current: string })
         </button>
       </div>
     </form>
+  );
+}
+
+/** KIN-85: whether intake tasks go to the AI planner at once; the Owner and the project admin switch it. */
+function AutoPlan({ project, on }: { project: Project; on: boolean }) {
+  const { t } = useTranslation();
+  const notify = useNotify();
+  const save = useSaveAutoPlan(project.id);
+  const [formError, setFormError] = useState<string>();
+  if (project.myRole !== "owner" && project.myRole !== "project_admin") {
+    return <p className="muted">{on ? t("intake.autoPlanOn") : t("intake.autoPlanOff")}</p>;
+  }
+
+  async function toggle(next: boolean) {
+    setFormError(undefined);
+    try {
+      await save.mutateAsync(next);
+      notify(next ? t("intake.autoPlanEnabled") : t("intake.autoPlanDisabled"));
+    } catch (err) {
+      setFormError(errorMessage(t, err));
+    }
+  }
+
+  return (
+    <div className="card form-card inline-form">
+      <FormAlert message={formError} />
+      <label className="check">
+        <input type="checkbox" checked={on} disabled={save.isPending} onChange={(e) => void toggle(e.target.checked)} />
+        <span>{t("intake.autoPlan")}</span>
+      </label>
+      <p className="muted">{t("intake.autoPlanHint")}</p>
+    </div>
   );
 }
 

@@ -47,7 +47,7 @@ func newYouTrackIntake(inst *bootstrap.Installation, msg *messagingModule, integ
 	in := &integrationsapp.Intake{
 		Integrations: integ.Service,
 		Store:        integrationsdb.New(inst.DB),
-		Tasks:        intakeTasks{wf},
+		Tasks:        intakeTasks{wf: wf},
 		Access:       projectsSvc,
 		Users:        intakeUsers{id.Users},
 		Source:       &youtrack.Client{},
@@ -72,8 +72,16 @@ func (m *intakeModule) start(ctx context.Context) (stop func()) {
 	return func() { cancel(); wg.Wait() }
 }
 
-// intakeTasks gives the intake the workflow context's app API.
-type intakeTasks struct{ wf *workflowapp.Service }
+// planWith lets the intake hand new tasks to the planner (KIN-85): planner is the workflow service with the planner
+// step wired (wirePlanner). Call it before msg.start.
+func (m *intakeModule) planWith(planner *workflowapp.Service) {
+	tasks := m.Intake.Tasks.(intakeTasks)
+	tasks.planner = planner
+	m.Intake.Tasks = tasks
+}
+
+// intakeTasks gives the intake the workflow context's app API; planner (nil: not wired) starts planning.
+type intakeTasks struct{ wf, planner *workflowapp.Service }
 
 func (t intakeTasks) TaskForIssue(ctx context.Context, projectID, issueID string) (string, bool, error) {
 	task, err := t.wf.TaskForIssue(ctx, projectID, issueID)
@@ -93,6 +101,14 @@ func (t intakeTasks) CreateIssueTask(ctx context.Context, projectID, issueID, ti
 
 func (t intakeTasks) RetitleTask(ctx context.Context, taskID, title string) (bool, error) {
 	return t.wf.RetitleTask(ctx, taskID, title)
+}
+
+func (t intakeTasks) AutoStartPlanning(ctx context.Context, taskID, requestedBy string) (string, error) {
+	if t.planner == nil {
+		return string(workflowapp.AutoPlanUnavailable), nil
+	}
+	out, err := t.planner.AutoStartPlanning(ctx, taskID, requestedBy)
+	return string(out), err
 }
 
 // workflowProjects gives the workflow context the projects it may plan for, with their registered repositories.

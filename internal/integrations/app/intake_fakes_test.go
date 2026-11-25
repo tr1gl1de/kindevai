@@ -25,16 +25,17 @@ type intakeStore struct {
 	settings *domain.IntakeSettings
 	links    map[string]domain.UserLink // lower-case login
 	records  map[string]domain.IntakeRecord
+	autoPlan map[string]bool
 }
 
 func newIntakeStore(base *store) *intakeStore {
 	return &intakeStore{base: base, tags: map[string]string{}, cursors: map[string]int64{}, polled: map[string]time.Time{},
-		links: map[string]domain.UserLink{}, records: map[string]domain.IntakeRecord{}}
+		links: map[string]domain.UserLink{}, records: map[string]domain.IntakeRecord{}, autoPlan: map[string]bool{}}
 }
 
 func (s *intakeStore) binding(projectID, short string) domain.Binding {
 	b := domain.Binding{ProjectID: projectID, ShortName: short, TriggerTag: cmp.Or(s.tags[projectID], domain.DefaultTriggerTag),
-		Cursor: s.cursors[projectID]}
+		Cursor: s.cursors[projectID], AutoPlan: s.autoPlan[projectID]}
 	if at, ok := s.polled[projectID]; ok {
 		b.LastPolledAt = &at
 	}
@@ -80,6 +81,16 @@ func (s *intakeStore) SetTriggerTag(_ context.Context, projectID, tag string, _ 
 		return domain.ErrNotFound
 	}
 	s.tags[projectID] = tag
+	return nil
+}
+
+func (s *intakeStore) SetAutoPlan(_ context.Context, projectID string, on bool, _ time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.base.bindings[projectID]; !ok {
+		return domain.ErrNotFound
+	}
+	s.autoPlan[projectID] = on
 	return nil
 }
 
@@ -194,6 +205,19 @@ type tasks struct {
 	titles map[string]string // task id -> title
 	issues map[string]string // project/issue -> task id
 	by     map[string]string // task id -> creator
+	// planned lists AutoStartPlanning calls (task/requestedBy); outcome is their answer ("" = started).
+	planned []string
+	outcome string
+}
+
+func (t *tasks) AutoStartPlanning(_ context.Context, taskID, requestedBy string) (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.outcome != "" {
+		return t.outcome, nil
+	}
+	t.planned = append(t.planned, taskID+"/"+requestedBy)
+	return "started", nil
 }
 
 func (t *tasks) TaskForIssue(_ context.Context, projectID, issueID string) (string, bool, error) {
@@ -224,11 +248,15 @@ func (t *tasks) RetitleTask(_ context.Context, id, title string) (bool, error) {
 	return true, nil
 }
 
-// access: user -> projects where the user may start AI.
+// access: user -> projects where the user may start AI ("<project>:admin": also the project's admin).
 type access map[string][]string
 
 func (a access) CanRunAI(_ context.Context, projectID, userID string) (bool, error) {
-	return slices.Contains(a[userID], projectID), nil
+	return slices.Contains(a[userID], projectID) || slices.Contains(a[userID], projectID+":admin"), nil
+}
+
+func (a access) CanManageAI(_ context.Context, projectID, userID string) (bool, error) {
+	return slices.Contains(a[userID], projectID+":admin"), nil
 }
 
 type users map[string]app.UserRef // by id
@@ -463,7 +491,7 @@ func newIntakeEnv(t *testing.T) *intakeEnv {
 		Integrations: e.svc,
 		Store:        e.istore,
 		Tasks:        e.tasks,
-		Access:       access{alice: {"p1"}, "owner1": {"p1", "p2"}},
+		Access:       access{alice: {"p1"}, "adm1": {"p1:admin"}, "owner1": {"p1", "p2"}},
 		Users:        users{alice: {ID: alice, Login: "alice"}, "bob1": {ID: "bob1", Login: "bob"}, "owner1": {ID: "owner1", Login: "owner"}},
 		Source:       e.src,
 		Inbox:        e.in,

@@ -122,3 +122,37 @@ func TestRenderRunnerOutputFull(t *testing.T) {
 		t.Fatalf("en = %q, ru = %q", en, ru)
 	}
 }
+
+// KIN-83: a held CLI's message names the CLI and the runner and tells the Owner what to do, in EN and RU.
+func TestRenderCLIHeld(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		cause, parked string
+		en, ru        []string
+	}{
+		{"auth", "false", []string{"claude is logged out on runner r1", "Log in to claude on runner r1", "3 times in a row"},
+			[]string{"claude на раннере r1 не авторизован", "Войдите в claude на раннере r1", "3 раз подряд"}},
+		{"billing", "true", []string{"refused by its subscription or billing", "Automatic retries have stopped"},
+			[]string{"подписка или оплата", "Автоматические повторы остановлены"}},
+		{"rate_limit", "false", []string{"keeps hitting its usage limit", "bind another CLI"}, []string{"упирается в лимит"}},
+	}
+	for _, c := range cases {
+		a, err := domain.NewAlert("a", domain.Occurrence{Kind: domain.KindCLIHeld, Severity: domain.SeverityCritical,
+			DedupKey: "cli/r1/claude", Subject: "claude @ r1", Details: map[string]string{"runnerId": "r1", "agent": "claude",
+				"cause": c.cause, "strikes": "3", "parked": c.parked}}, t0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		en, ru := domain.RenderAlert(domain.LangEN, a), domain.RenderAlert(domain.LangRU, a)
+		for _, w := range c.en {
+			if !strings.Contains(en, w) || !strings.HasPrefix(en, "Critical: ") {
+				t.Errorf("%s en = %q, want %q", c.cause, en, w)
+			}
+		}
+		for _, w := range c.ru {
+			if !strings.Contains(ru, w) {
+				t.Errorf("%s ru = %q, want %q", c.cause, ru, w)
+			}
+		}
+	}
+}

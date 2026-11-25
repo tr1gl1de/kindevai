@@ -91,6 +91,8 @@ func RenderAlert(l Language, a Alert) string {
 			LangEN: fmt.Sprintf("Runner output storage is full (%s MiB): new output of running executions is dropped until the retention frees space.", mib),
 			LangRU: fmt.Sprintf("Хранилище вывода раннеров заполнено (%s МиБ): новый вывод идущих исполнений отбрасывается, пока очистка не освободит место.", mib),
 		}[l]
+	case KindCLIHeld:
+		body = cliHeld(l, a)
 	default:
 		body = map[Language]string{
 			LangEN: fmt.Sprintf("New alert: %s (%s).", a.Kind, subject),
@@ -98,6 +100,50 @@ func RenderAlert(l Language, a Alert) string {
 		}[l]
 	}
 	return strings.TrimSpace(head + ": " + body)
+}
+
+// cliHeld says which CLI on which runner is held, why, and what the Owner should do (KIN-83).
+func cliHeld(l Language, a Alert) string {
+	agent, runner, strikes := clip(a.Details["agent"]), clip(a.Details["runnerId"]), clip(a.Details["strikes"])
+	parked := a.Details["parked"] == "true"
+	ru := l == LangRU
+	var what, do string
+	switch a.Details["cause"] {
+	case "auth":
+		what = fmt.Sprintf("%s is logged out on runner %s", agent, runner)
+		do = fmt.Sprintf("Log in to %s on runner %s, then mark it ready again on the Agents page.", agent, runner)
+		if ru {
+			what = fmt.Sprintf("%s на раннере %s не авторизован", agent, runner)
+			do = fmt.Sprintf("Войдите в %s на раннере %s и отметьте его готовым на странице «Агенты».", agent, runner)
+		}
+	case "billing":
+		what = fmt.Sprintf("%s on runner %s is refused by its subscription or billing", agent, runner)
+		do = fmt.Sprintf("Check the %s subscription and billing used on runner %s, then mark it ready again on the Agents page.", agent, runner)
+		if ru {
+			what = fmt.Sprintf("%s на раннере %s: подписка или оплата отклоняет запросы", agent, runner)
+			do = fmt.Sprintf("Проверьте подписку и оплату %s на раннере %s и отметьте его готовым на странице «Агенты».", agent, runner)
+		}
+	default:
+		what = fmt.Sprintf("%s on runner %s keeps hitting its usage limit", agent, runner)
+		do = "Check the plan's limits or bind another CLI to the role on the Agents page."
+		if ru {
+			what = fmt.Sprintf("%s на раннере %s раз за разом упирается в лимит", agent, runner)
+			do = "Проверьте лимиты тарифа или назначьте роли другой CLI на странице «Агенты»."
+		}
+	}
+	times := fmt.Sprintf(" (%s times in a row)", strikes)
+	stop := " Steps go to other runners or CLIs meanwhile."
+	if parked {
+		stop = " Automatic retries have stopped; steps go only to other runners or CLIs."
+	}
+	if ru {
+		times = fmt.Sprintf(" (%s раз подряд)", strikes)
+		stop = " Пока шаги идут на другие раннеры или CLI."
+		if parked {
+			stop = " Автоматические повторы остановлены; шаги идут только на другие раннеры или CLI."
+		}
+	}
+	return what + times + "." + stop + " " + do
 }
 
 // RenderApproval is the text of a pending-approval notification. Deciding is possible only in the Mini App or on

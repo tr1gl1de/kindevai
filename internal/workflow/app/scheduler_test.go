@@ -518,10 +518,10 @@ func TestCLILimitBlocksTheTaskUntilTheLimitResets(t *testing.T) {
 	hits := &fakeCLILimits{}
 	e.svc.CLILimits = hits
 	resets := e.clock.Now().Add(time.Hour)
-	if err := e.svc.HoldStepForCLILimit(t.Context(), st.ID, "r1", st.Fence-1, "x", resets, e.clock.Now()); !errors.Is(err, domain.ErrStaleFence) {
+	if err := e.svc.HoldStepForCLILimit(t.Context(), st.ID, "r1", st.Fence-1, "rate_limit", "x", resets, e.clock.Now()); !errors.Is(err, domain.ErrStaleFence) {
 		t.Fatalf("stale hold = %v", err)
 	}
-	if err := e.svc.HoldStepForCLILimit(t.Context(), st.ID, "r1", st.Fence, "cli_limit: rate_limit: usage limit reached",
+	if err := e.svc.HoldStepForCLILimit(t.Context(), st.ID, "r1", st.Fence, "rate_limit", "cli_limit: rate_limit: usage limit reached",
 		resets, e.clock.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -530,7 +530,7 @@ func TestCLILimitBlocksTheTaskUntilTheLimitResets(t *testing.T) {
 		ex.Steps[0].WaitReason != domain.WaitCLILimit || ex.Steps[0].Attempts[0].WorkEnd == nil {
 		t.Fatalf("task %s %+v step %+v", got.State, got.Reason, ex.Steps[0])
 	}
-	if len(hits.got) != 1 || hits.got[0] != "r1 "+resets.UTC().Format(time.RFC3339) {
+	if len(hits.got) != 1 || hits.got[0] != "r1 rate_limit "+resets.UTC().Format(time.RFC3339) {
 		t.Fatalf("cli limit hits %v", hits.got)
 	}
 	e.clock.Add(time.Hour - time.Second)
@@ -578,10 +578,20 @@ func TestAgentReportIsStoredWithTheAttempt(t *testing.T) {
 	}
 }
 
-type fakeCLILimits struct{ got []string }
+// fakeCLILimits is routing's CLI holds: it records the calls and answers with hold (zero: none known).
+type fakeCLILimits struct {
+	got    []string
+	worked []string
+	hold   CLIHold
+}
 
-func (f *fakeCLILimits) CLILimitHit(_ context.Context, runnerID, agent string, until time.Time, _ string) error {
-	f.got = append(f.got, strings.TrimSpace(runnerID+" "+agent)+" "+until.UTC().Format(time.RFC3339))
+func (f *fakeCLILimits) CLILimitHit(_ context.Context, runnerID, agent, cause string, resets time.Time, _ string) (CLIHold, error) {
+	f.got = append(f.got, strings.Join(strings.Fields(runnerID+" "+agent+" "+cause), " ")+" "+resets.UTC().Format(time.RFC3339))
+	return f.hold, nil
+}
+
+func (f *fakeCLILimits) CLIWorked(_ context.Context, runnerID, agent string) error {
+	f.worked = append(f.worked, runnerID+" "+agent)
 	return nil
 }
 

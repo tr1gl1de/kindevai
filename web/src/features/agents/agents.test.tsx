@@ -67,6 +67,18 @@ const settings: AgentSettings = {
       agent: "claude",
       until: "2026-11-25T13:00:00Z",
       reason: "usage limit reached",
+      cause: "rate_limit",
+      strikes: 1,
+      parked: false,
+    },
+    {
+      runnerId: "r-mac",
+      agent: "codex",
+      until: "2026-12-02T13:00:00Z",
+      reason: "not logged in",
+      cause: "auth",
+      strikes: 4,
+      parked: true,
     },
   ],
 };
@@ -93,6 +105,57 @@ describe("agents page (Owner)", () => {
       screen.getByRole("combobox", { name: "Review strategy" }),
     ).toHaveValue("different-from-author");
     await expectAccessible(container);
+  });
+
+  it("marks a logged-out CLI ready again (KIN-83)", async () => {
+    const calls: string[] = [];
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/agents", () => json(settings)),
+      http.post("/api/agents/cooldowns/:runner/:agent/ready", ({ params }) => {
+        calls.push(`ready ${params.runner} ${params.agent}`);
+        return new Response(null, { status: 204 });
+      }),
+    );
+    await renderApp("/agents");
+    const row = (await screen.findByText("not logged in")).closest("tr")!;
+    expect(within(row).getByText("Logged out")).toBeInTheDocument();
+    expect(
+      within(row).getByText("Waiting for you (4 holds in a row)"),
+    ).toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(
+      within(row).getByRole("button", {
+        name: "Codex on r-mac is ready again",
+      }),
+    );
+    await expectStatus("Codex on r-mac is used again.");
+    expect(calls).toEqual(["ready r-mac codex"]);
+  });
+
+  it("treats a hold already lifted as done (KIN-83 review)", async () => {
+    let lifted = false;
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/agents", () =>
+        json(lifted ? { ...settings, cooldowns: [] } : settings),
+      ),
+      http.post("/api/agents/cooldowns/:runner/:agent/ready", () => {
+        lifted = true;
+        return apiError(404, "not_found");
+      }),
+    );
+    await renderApp("/agents");
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Codex on r-mac is ready again",
+      }),
+    );
+    expect(
+      await screen.findByText("No CLI is waiting for a limit"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("disables a CLI and confirms an emergency stop", async () => {

@@ -681,7 +681,7 @@ func TestAgentReportAndCLILimitWaitAreStored(t *testing.T) {
 		t.Fatal(err)
 	}
 	resets := t0.Add(2 * time.Hour)
-	if err := svc.HoldStepForCLILimit(ctx, back, "r1", 1, "cli_limit: rate_limit", resets, t0); err != nil {
+	if err := svc.HoldStepForCLILimit(ctx, back, "r1", 1, "rate_limit", "cli_limit: rate_limit", resets, t0); err != nil {
 		t.Fatal(err)
 	}
 	got, err := repo.Execution(ctx, e.ID)

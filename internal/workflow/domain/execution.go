@@ -647,6 +647,20 @@ func (e *Execution) HoldForCLILimit(stepID, runnerID string, fence int64, msg st
 	return nil
 }
 
+// RetryCLILimitAt sets when a step WAITING for its CLI's limit is retried (the hold routing decided, KIN-83).
+func (e *Execution) RetryCLILimitAt(stepID string, until time.Time) error {
+	s, err := e.step(stepID, "wait")
+	if err != nil {
+		return err
+	}
+	if s.State != StepWaiting || s.WaitReason != WaitCLILimit {
+		return invalidStep(s, "wait")
+	}
+	until = until.UTC()
+	s.WaitUntil = &until
+	return nil
+}
+
 // CLILimitRetryDelay is how long a step held for its CLI's limit waits when the CLI named no reset time;
 // MaxCLILimitWait bounds a reset time the CLI named.
 const (

@@ -59,10 +59,11 @@ type NetworkHolder interface {
 }
 
 // CLILimitHolder is implemented by an Executions that can park a step for its AI CLI's limit (KIN-79): a failure
-// with code protocol.FailureCLILimit (rate/usage limit or logged out) holds the step WAITING(cli_limit) until
-// resetsAt (zero: unknown) instead of failing the attempt. Without it such a failure is an ordinary failure.
+// with code protocol.FailureCLILimit (rate/usage limit, logged out or billing: cause, KIN-83) holds the step
+// WAITING(cli_limit) until resetsAt (zero: unknown) or the hold routing decides, instead of failing the attempt.
+// Without it such a failure is an ordinary failure.
 type CLILimitHolder interface {
-	HoldAttemptForCLILimit(ctx context.Context, runnerID, step string, fence int64, reason string, resetsAt, at time.Time) error
+	HoldAttemptForCLILimit(ctx context.Context, runnerID, step string, fence int64, cause, reason string, resetsAt, at time.Time) error
 }
 
 // AttemptRenewer is implemented by an Executions that extends a claimed step's lease (KIN-71): the runner reports
@@ -574,7 +575,7 @@ func (c *Channel) toWorkflow(ctx context.Context, runnerID string, e protocol.Ev
 			if f.ResetsAt > 0 {
 				resets = time.UnixMilli(f.ResetsAt).UTC()
 			}
-			return h.HoldAttemptForCLILimit(ctx, runnerID, e.Step, e.Fence, reason, resets, at)
+			return h.HoldAttemptForCLILimit(ctx, runnerID, e.Step, e.Fence, truncate(f.Cause, 32), reason, resets, at)
 		}
 		if h, ok := c.Executions.(NetworkHolder); ok && f.Code == protocol.FailureNetwork {
 			return h.HoldAttemptForNetwork(ctx, runnerID, e.Step, e.Fence, reason, at)

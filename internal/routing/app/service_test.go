@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -11,6 +13,7 @@ import (
 
 	auditapp "github.com/tr1gl1de/kindevai/internal/audit/app"
 	"github.com/tr1gl1de/kindevai/internal/platform/auth"
+	"github.com/tr1gl1de/kindevai/internal/platform/messaging"
 	"github.com/tr1gl1de/kindevai/internal/routing/domain"
 )
 
@@ -84,11 +87,54 @@ func (r *memRepo) Cooldowns(_ context.Context, now time.Time) ([]Cooldown, error
 	defer r.mu.Unlock()
 	var out []Cooldown
 	for _, c := range r.cooldowns {
-		if c.Until.After(now) {
+		if c.Active(now) {
 			out = append(out, c)
 		}
 	}
 	return out, nil
+}
+
+func (r *memRepo) Cooldown(_ context.Context, runnerID, agent string) (Cooldown, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c, ok := r.cooldowns[[2]string{runnerID, agent}]
+	return c, ok, nil
+}
+
+func (r *memRepo) DeleteCooldown(_ context.Context, runnerID, agent string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.cooldowns[[2]string{runnerID, agent}]
+	delete(r.cooldowns, [2]string{runnerID, agent})
+	return ok, nil
+}
+
+type memOutbox struct {
+	mu   sync.Mutex
+	msgs []messaging.Message
+}
+
+func (o *memOutbox) Enqueue(_ context.Context, m messaging.Message) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.msgs = append(o.msgs, m)
+	return nil
+}
+
+// events returns the enqueued alert events as "<topic> <cause>/<strikes>/<escalated>/<parked>".
+func (o *memOutbox) events(t *testing.T) []string {
+	t.Helper()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	var out []string
+	for _, m := range o.msgs {
+		var ev CLIHeldEvent
+		if err := json.Unmarshal(m.Payload, &ev); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, fmt.Sprintf("%s %s/%s %s/%d/%t/%t", m.Topic, ev.RunnerID, ev.Agent, ev.Cause, ev.Strikes, ev.Escalated, ev.Parked))
+	}
+	return out
 }
 
 type memTx struct{}
@@ -141,17 +187,20 @@ type env struct {
 	repo  *memRepo
 	audit *memAudit
 	stop  *fakeStopper
+	out   *memOutbox
+	now   *time.Time
 }
 
 func newEnv() env {
-	repo, au, st := newMemRepo(), &memAudit{}, &fakeStopper{}
-	svc := &Service{Repo: repo, Tx: memTx{}, Audit: au, Workflow: st, Now: func() time.Time { return t0 },
+	repo, au, st, out := newMemRepo(), &memAudit{}, &fakeStopper{}, &memOutbox{}
+	now := t0
+	svc := &Service{Repo: repo, Tx: memTx{}, Audit: au, Workflow: st, Outbox: out, Now: func() time.Time { return now },
 		Access: fakeAccess{
 			"owner": {"p1": "owner", "p2": "owner"},
 			"admin": {"p1": "project_admin"},
 			"dev":   {"p1": "developer"},
 		}}
-	return env{svc: svc, repo: repo, audit: au, stop: st}
+	return env{svc: svc, repo: repo, audit: au, stop: st, out: out, now: &now}
 }
 
 func chain(r Route) []string {
@@ -311,21 +360,25 @@ func TestCooldowns(t *testing.T) {
 	t.Parallel()
 	e := newEnv()
 	ctx := t.Context()
-	if err := e.svc.CoolDown(ctx, "r1", "claude", t0.Add(time.Hour), "rate limit"); err != nil {
+	if _, err := e.svc.CoolDown(ctx, "r1", "claude", domain.CauseRateLimit, t0.Add(time.Hour), "rate limit"); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.svc.CoolDown(ctx, "r1", "codex", t0.Add(-time.Minute), "old"); err != nil {
+	if _, err := e.svc.CoolDown(ctx, "r1", "codex", domain.CauseRateLimit, t0.Add(-time.Minute), "old"); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.svc.CoolDown(ctx, "r1", "zcode", t0.Add(time.Hour), ""); err == nil {
+	if _, err := e.svc.CoolDown(ctx, "r1", "zcode", domain.CauseRateLimit, t0.Add(time.Hour), ""); err == nil {
 		t.Fatal("cool-down of an unknown CLI accepted")
 	}
+	*e.now = t0.Add(45 * time.Minute) // codex: a reset in the past waited the default 30 min
 	r, _ := e.svc.Route(ctx, "p1", "implementer", "")
-	if u, ok := r.Cooling("r1", "claude"); !ok || !u.Equal(t0.Add(time.Hour)) {
-		t.Fatalf("claude cooling = %v %v", u, ok)
+	if h, ok := r.Cooling("r1", "claude"); !ok || !h.Until.Equal(t0.Add(time.Hour)) {
+		t.Fatalf("claude cooling = %v %v", h, ok)
 	}
 	if _, ok := r.Cooling("r1", "codex"); ok {
 		t.Fatal("an expired cool-down still counts")
+	}
+	if ev := e.out.events(t); len(ev) != 0 {
+		t.Fatalf("a plain rate limit raised alerts: %v", ev)
 	}
 	s, _ := e.svc.Settings(ctx, owner)
 	if len(s.Cooldowns) != 1 || s.Cooldowns[0].Reason != "rate limit" {
@@ -333,20 +386,118 @@ func TestCooldowns(t *testing.T) {
 	}
 }
 
-// Review finding: the runner's cool-down reason is untrusted text: control characters are dropped, and a reset in
-// the past stores nothing.
+// Review finding: the runner's cool-down reason is untrusted text: control characters are dropped; an unknown cause
+// counts as a rate limit.
 func TestCooldownSanitizesTheRunnersText(t *testing.T) {
 	t.Parallel()
 	e := newEnv()
 	ctx := t.Context()
-	if err := e.svc.CoolDown(ctx, "r1", "claude", t0.Add(time.Hour), "limit\n\x1b[31mreset\x00 soon "); err != nil {
+	if _, err := e.svc.CoolDown(ctx, "r1", "claude", "", t0.Add(time.Hour), "limit\n\x1b[31mreset\x00 soon "); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.svc.CoolDown(ctx, "r1", "codex", t0.Add(-time.Hour), "past"); err != nil {
-		t.Fatal(err)
-	}
-	cs, _ := e.repo.Cooldowns(ctx, t0.Add(-2*time.Hour))
-	if len(cs) != 1 || cs[0].Reason != "limit [31mreset soon" {
+	cs, _ := e.repo.Cooldowns(ctx, t0)
+	if len(cs) != 1 || cs[0].Reason != "limit [31mreset soon" || cs[0].Cause != domain.CauseRateLimit {
 		t.Fatalf("cooldowns %+v", cs)
+	}
+}
+
+// Acceptance (KIN-83): a logged-out CLI backs off 30 min, 2 h, 6 h and is then parked until the Owner marks it
+// ready; its alert names the runner and CLI from the first hold and escalates at the third hold in a row.
+func TestLoggedOutCLIBacksOffEscalatesAndParks(t *testing.T) {
+	t.Parallel()
+	e := newEnv()
+	ctx := t.Context()
+	for _, d := range []time.Duration{30 * time.Minute, 2 * time.Hour, 6 * time.Hour} {
+		h, err := e.svc.CoolDown(ctx, "r1", "claude", domain.CauseAuth, time.Time{}, "not logged in")
+		if err != nil || h.Parked || !h.Until.Equal(e.now.Add(d)) {
+			t.Fatalf("hold = %+v, %v; want +%v", h, err, d)
+		}
+		// An attempt that was already running fails the same way: not a new strike, no new alert.
+		if again, _ := e.svc.CoolDown(ctx, "r1", "claude", domain.CauseAuth, time.Time{}, "not logged in"); again != h {
+			t.Fatalf("concurrent hold %+v, want %+v", again, h)
+		}
+		*e.now = h.Until.Add(time.Second)
+	}
+	h, _ := e.svc.CoolDown(ctx, "r1", "claude", domain.CauseAuth, time.Time{}, "not logged in")
+	if !h.Parked || h.Strikes != 4 {
+		t.Fatalf("4th hold %+v, want parked", h)
+	}
+	*e.now = e.now.Add(30 * 24 * time.Hour)
+	if err := e.svc.Recovered(ctx, "r1", "claude"); err != nil { // only the Owner lifts a parked hold
+		t.Fatal(err)
+	}
+	r, _ := e.svc.Route(ctx, "p1", "implementer", "")
+	if c, ok := r.Cooling("r1", "claude"); !ok || !c.NeedsOwner() {
+		t.Fatalf("parked CLI routed again: %+v %v", c, ok)
+	}
+	if got, exp := e.out.events(t), []string{
+		"alerts.cli_held r1/claude auth/1/false/false",
+		"alerts.cli_held r1/claude auth/2/false/false",
+		"alerts.cli_held r1/claude auth/3/true/false",
+		"alerts.cli_held r1/claude auth/4/true/true",
+	}; !slices.Equal(got, exp) {
+		t.Fatalf("alerts %v, want %v", got, exp)
+	}
+
+	if err := e.svc.MarkReady(ctx, member, "r1", "claude"); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("a member marked the CLI ready: %v", err)
+	}
+	if err := e.svc.MarkReady(ctx, owner, "r1", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.MarkReady(ctx, owner, "r1", "claude"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("second MarkReady = %v, want not found", err)
+	}
+	r, _ = e.svc.Route(ctx, "p1", "implementer", "")
+	if _, ok := r.Cooling("r1", "claude"); ok {
+		t.Fatal("the CLI is still held after the Owner marked it ready")
+	}
+	if ev := e.out.events(t); ev[len(ev)-1] != "alerts.cli_ready r1/claude /0/false/false" {
+		t.Fatalf("last alert event %v", ev)
+	}
+	if got := e.audit.kinds(); !slices.Equal(got, []string{KindCLIReady}) {
+		t.Fatalf("audit %v", got)
+	}
+	// The streak starts over.
+	if h, _ := e.svc.CoolDown(ctx, "r1", "claude", domain.CauseAuth, time.Time{}, ""); h.Strikes != 1 {
+		t.Fatalf("hold after MarkReady %+v", h)
+	}
+}
+
+// Acceptance (KIN-83): a rate limit repeating EscalateAfter times in a row raises a critical alert; a successful run
+// on the pair forgets the streak and resolves the alert.
+func TestRepeatedRateLimitsEscalateAndRecover(t *testing.T) {
+	t.Parallel()
+	e := newEnv()
+	ctx := t.Context()
+	for range 3 {
+		h, err := e.svc.CoolDown(ctx, "r2", "codex", domain.CauseRateLimit, e.now.Add(time.Hour), "usage limit")
+		if err != nil {
+			t.Fatal(err)
+		}
+		*e.now = h.Until.Add(time.Second)
+	}
+	if got := e.out.events(t); !slices.Equal(got, []string{"alerts.cli_held r2/codex rate_limit/3/true/false"}) {
+		t.Fatalf("alerts %v", got)
+	}
+	*e.now = e.now.Add(-2 * time.Hour) // a success while the hold is active (an attempt older than it): no effect
+	if err := e.svc.Recovered(ctx, "r2", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.out.events(t); len(got) != 1 {
+		t.Fatalf("an older attempt's success ended the hold: %v", got)
+	}
+	*e.now = e.now.Add(2 * time.Hour)
+	if err := e.svc.Recovered(ctx, "r2", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.Recovered(ctx, "r2", "codex"); err != nil { // nothing held: no event
+		t.Fatal(err)
+	}
+	if got := e.out.events(t); len(got) != 2 || got[1] != "alerts.cli_ready r2/codex /0/false/false" {
+		t.Fatalf("alerts %v", got)
+	}
+	if h, _ := e.svc.CoolDown(ctx, "r2", "codex", domain.CauseRateLimit, time.Time{}, ""); h.Strikes != 1 {
+		t.Fatalf("streak survived a success: %+v", h)
 	}
 }

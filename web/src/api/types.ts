@@ -805,6 +805,54 @@ export interface AttemptEvent {
   omitted?: boolean;
 }
 
+/** An instruction file of an attempt's worktree (KIN-29/70): path is the repository's untrusted text. */
+export interface InstructionFile {
+  path: string;
+  sha256: string;
+  size: number;
+  symlink?: boolean;
+}
+
+/** A changed path: A added, M modified, D deleted, T type changed (renames show as D + A). */
+export interface ChangedFile {
+  path: string;
+  status: string;
+}
+
+/** An instruction file whose hash changed during the attempt (no before: added, no after: removed). */
+export interface InstructionChange {
+  path: string;
+  before?: string;
+  after?: string;
+}
+
+export interface WorkspacePrepared {
+  at: string;
+  repository: string;
+  branch: string;
+  base: string;
+  baseSha: string;
+  instructions: InstructionFile[];
+  instructionsTruncated?: boolean;
+}
+
+export interface WorkspaceChanges {
+  at: string;
+  branch: string;
+  baseSha: string;
+  headSha: string;
+  files: ChangedFile[];
+  filesTotal: number;
+  truncated?: boolean;
+  instructionsChanged: InstructionChange[];
+}
+
+/** GET /api/tasks/{id}/steps/{step}/attempts/{fence}/workspace: the latest reports, null where none. */
+export interface AttemptWorkspace {
+  prepared: WorkspacePrepared | null;
+  changes: WorkspaceChanges | null;
+}
+
 export interface AttemptEventPage {
   events: AttemptEvent[];
   next: number;

@@ -179,6 +179,25 @@ func (r *Repository) AddOutput(ctx context.Context, step string, fence, n int64,
 	return domain.OutputStored, nil
 }
 
+// LatestAttemptEvent returns the attempt's applied event of the kind with the highest attempt_seq (ok false: none).
+// The (step_id, fence) index bounds the scan to the attempt's own events.
+func (r *Repository) LatestAttemptEvent(ctx context.Context, step string, fence int64, kind string) (domain.AttemptEvent, bool, error) {
+	e := domain.AttemptEvent{Step: step, Fence: fence, Kind: kind, Outcome: domain.OutcomeApplied}
+	var runnerAt, receivedAt int64
+	err := db.Conn(ctx, r.db).QueryRowContext(ctx, `SELECT runner_id, attempt_seq, body, reason, runner_at, received_at
+		FROM runner_attempt_events WHERE step_id = ? AND fence = ? AND kind = ? AND outcome = 'applied'
+		ORDER BY attempt_seq DESC LIMIT 1`, step, fence, kind).
+		Scan(&e.RunnerID, &e.AttemptSeq, &e.Body, &e.Reason, &runnerAt, &receivedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.AttemptEvent{}, false, nil
+	}
+	if err != nil {
+		return domain.AttemptEvent{}, false, fmt.Errorf("reading the latest attempt event: %w", err)
+	}
+	e.RunnerAt, e.ReceivedAt = time.UnixMilli(runnerAt).UTC(), time.UnixMilli(receivedAt).UTC()
+	return e, true, nil
+}
+
 // AttemptEvents returns the applied events of the attempt (step, fence) after the attempt_seq cursor, in order.
 func (r *Repository) AttemptEvents(ctx context.Context, step string, fence, after int64, limit int) ([]domain.AttemptEvent, error) {
 	rows, err := db.Conn(ctx, r.db).QueryContext(ctx, `SELECT runner_id, attempt_seq, kind, body, reason, runner_at,

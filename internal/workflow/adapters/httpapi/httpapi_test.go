@@ -171,6 +171,19 @@ func (l logOf) AttemptEvents(_ context.Context, _ string, _, after int64, limit 
 	return out, nil
 }
 
+func (l logOf) AttemptWorkspace(_ context.Context, step string, fence int64) (app.AttemptWorkspace, error) {
+	if len(l) == 0 {
+		return app.AttemptWorkspace{}, nil
+	}
+	return app.AttemptWorkspace{
+		Prepared: &app.WorkspacePrepared{Repository: "acme/app", Branch: "feature/t--" + step, Base: "dev", BaseSHA: "b1",
+			Instructions: []app.InstructionFile{{Path: "<img src=x>/AGENTS.md", SHA256: "aa", Size: 12}, {Path: "CLAUDE.md", SHA256: "bb", Symlink: true}}},
+		Changes: &app.WorkspaceChanges{Branch: "feature/t--" + step, BaseSHA: "b1", HeadSHA: "h" + strconv.FormatInt(fence, 10),
+			Files: []app.ChangedFile{{Path: "a.go", Status: "A"}, {Path: "b.go", Status: "D"}}, FilesTotal: 3, Truncated: true,
+			InstructionsChanged: []app.InstructionChange{{Path: "CLAUDE.md", Before: "bb"}}},
+	}, nil
+}
+
 type onePool struct{}
 
 func (onePool) Candidates(context.Context, string) ([]app.Candidate, error) {
@@ -258,5 +271,54 @@ func TestTaskTimeEventsAndRetryAPI(t *testing.T) {
 	}
 	if c := call(t, srv, "owner", "POST", "/api/tasks/"+id+"/retry", `{}`, nil); c != http.StatusConflict {
 		t.Fatalf("retry of a ready task %d", c)
+	}
+}
+
+// An attempt's workspace endpoint serves the latest workspace.prepared and workspace.changes reports as typed data
+// (paths stay text) to whoever may see the task; an attempt without reports has nulls (KIN-70).
+func TestAttemptWorkspaceAPI(t *testing.T) {
+	t.Parallel()
+	srv, svc := newServer(t)
+	svc.Runners = onePool{}
+	ctx := t.Context()
+	var d DetailView
+	call(t, srv, "owner", "POST", "/api/tasks", `{"projectId":"p1","title":"Workspace"}`, &d)
+	id := d.Task.ID
+	call(t, srv, "owner", "POST", "/api/tasks/"+id+"/mock-run", `{"scenario":"success"}`, nil)
+	if err := svc.Schedule(ctx); err != nil {
+		t.Fatal(err)
+	}
+	call(t, srv, "member", "GET", "/api/tasks/"+id, "", &d)
+	s := d.Execution.Steps[0]
+	if err := svc.StartStepAt(ctx, s.ID, "r1", s.Fence, time.Now(), "mock"); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/tasks/" + id + "/steps/" + s.ID + "/attempts/" + strconv.FormatInt(s.Fence, 10) + "/workspace"
+	var raw map[string]any
+	if c := call(t, srv, "member", "GET", path, "", &raw); c != http.StatusOK || raw["prepared"] != nil || raw["changes"] != nil {
+		t.Fatalf("no reports %d %v", c, raw)
+	}
+	svc.Log = logOf{{Seq: 1, Kind: "workspace.prepared"}}
+	var w WorkspaceView
+	if c := call(t, srv, "member", "GET", path, "", &w); c != http.StatusOK || w.Prepared == nil || w.Changes == nil {
+		t.Fatalf("workspace %d %+v", c, w)
+	}
+	p, ch := w.Prepared, w.Changes
+	if p.Repository != "acme/app" || p.Branch != "feature/t--"+s.ID || p.Base != "dev" || p.BaseSHA != "b1" || len(p.Instructions) != 2 ||
+		p.Instructions[0].Path != "<img src=x>/AGENTS.md" || p.Instructions[0].Size != 12 || !p.Instructions[1].Symlink {
+		t.Fatalf("prepared %+v", p)
+	}
+	if ch.HeadSHA != "h"+strconv.FormatInt(s.Fence, 10) || len(ch.Files) != 2 || ch.Files[1].Status != "D" || ch.FilesTotal != 3 ||
+		!ch.Truncated || len(ch.InstructionsChanged) != 1 || ch.InstructionsChanged[0].Before != "bb" || ch.InstructionsChanged[0].After != "" {
+		t.Fatalf("changes %+v", ch)
+	}
+	if c := call(t, srv, "member", "GET", "/api/tasks/"+id+"/steps/"+s.ID+"/attempts/x/workspace", "", nil); c != http.StatusUnprocessableEntity {
+		t.Fatalf("bad fence %d", c)
+	}
+	if c := call(t, srv, "stranger", "GET", path, "", nil); c != http.StatusNotFound {
+		t.Fatalf("stranger workspace %d", c)
+	}
+	if c := call(t, srv, "member", "GET", "/api/tasks/"+id+"/steps/"+s.ID+"/attempts/99/workspace", "", nil); c != http.StatusNotFound {
+		t.Fatalf("unknown attempt %d", c)
 	}
 }

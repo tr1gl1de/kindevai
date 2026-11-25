@@ -13,6 +13,8 @@ const MaxAttemptLogPage = 32
 type AttemptLogRepo interface {
 	// AttemptEvents returns the applied events of the attempt (step, fence) with attempt_seq > after, in order.
 	AttemptEvents(ctx context.Context, step string, fence, after int64, limit int) ([]domain.AttemptEvent, error)
+	// LatestAttemptEvent returns the attempt's applied event of the kind with the highest attempt_seq (ok false: none).
+	LatestAttemptEvent(ctx context.Context, step string, fence int64, kind string) (e domain.AttemptEvent, ok bool, err error)
 }
 
 // AttemptLog reads an attempt's recorded runner events for the task UI (KIN-25): events, output and failures in
@@ -31,4 +33,10 @@ func (l AttemptLog) Events(ctx context.Context, step string, fence, after int64,
 		}
 	}
 	return evs, err
+}
+
+// Latest returns the attempt's newest applied event of the kind (the workspace reports of KIN-29 shown in the task
+// UI, KIN-70: the same records the scope check of KIN-51 reads, no second copy); ok is false when there is none.
+func (l AttemptLog) Latest(ctx context.Context, step string, fence int64, kind string) (domain.AttemptEvent, bool, error) {
+	return l.Repo.LatestAttemptEvent(ctx, step, fence, kind)
 }

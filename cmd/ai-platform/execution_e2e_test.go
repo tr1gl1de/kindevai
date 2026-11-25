@@ -142,7 +142,7 @@ func startCPWithClock(t *testing.T, dataDir, addr string, sources checkoutSource
 	if sources != nil {
 		attachCheckoutSource(channel, sources)
 	}
-	attachScopeCheck(channel, apv.Approvals)
+	attachScopeCheck(channel, apv.Approvals, apv.Workflow)
 	mux := http.NewServeMux()
 	gateway.Register(mux)
 	var (

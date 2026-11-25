@@ -9,11 +9,12 @@ import { ErrorState, FormAlert, Loading, PageHeading } from "../../ui/feedback";
 import { errorMessage } from "../../ui/errors";
 import { formatDateTime } from "../../ui/format";
 import { useNotify } from "../../ui/notify";
-import { RiskBadge, StateBadge } from "../approvals/badges";
+import { StateBadge } from "../approvals/badges";
 import { useProjects } from "../projects/api";
 import { AttemptLog } from "./AttemptLog";
 import { AttemptWorkspace } from "./AttemptWorkspace";
-import { isTerminal, useCancelTask, useMockRun, useRetryTask, useTask, useTaskApprovals } from "./api";
+import { PlanSection } from "./PlanSection";
+import { isTerminal, useCancelTask, useMockRun, usePlanTask, useRetryTask, useTask, useTaskApprovals } from "./api";
 import { AgentTimeValue, AttemptStateBadge, CalendarValue, StepStateBadge, TaskStateBadge } from "./badges";
 import "./tasks.css";
 
@@ -39,7 +40,6 @@ export function TaskPage({ isOwner }: { isOwner: boolean }) {
   return <TaskCard d={q.data} isOwner={isOwner} />;
 }
 
-const shortHash = (h: string) => h.slice(0, 12);
 
 function TaskCard({ d, isOwner }: { d: TaskDetail; isOwner: boolean }) {
   const { t, i18n } = useTranslation();
@@ -86,30 +86,7 @@ function TaskCard({ d, isOwner }: { d: TaskDetail; isOwner: boolean }) {
 
       <TimeSection d={d} />
 
-      <section aria-labelledby="task-plan" className="section">
-        <h2 id="task-plan">{t("tasks.planTitle")}</h2>
-        {d.revision ? (
-          <dl className="details">
-            <dt>{t("tasks.revision")}</dt>
-            <dd>
-              <code>{t("tasks.revisionValue", { number: d.revision.number, hash: shortHash(d.revision.hash) })}</code>
-            </dd>
-            <dt>{t("tasks.risk")}</dt>
-            <dd>
-              <RiskBadge risk={d.revision.risk} />
-            </dd>
-            <dt>{t("tasks.summary")}</dt>
-            <dd>{d.revision.summary}</dd>
-            <dt>{t("tasks.plannedBy")}</dt>
-            <dd>
-              {d.revision.createdBy} · {formatDateTime(d.revision.createdAt, i18n.language)}
-            </dd>
-          </dl>
-        ) : (
-          <p className="muted">{t("tasks.noPlan")}</p>
-        )}
-        {/* KIN-44: the plan discussion chat (Owner / project admin) mounts here, under the revision it discusses. */}
-      </section>
+      <PlanSection d={d} />
 
       {d.canManage && <Actions d={d} />}
 
@@ -149,6 +126,7 @@ function Actions({ d }: { d: TaskDetail }) {
   const notify = useNotify();
   const task = d.task;
   const mock = useMockRun(task.id);
+  const planAI = usePlanTask(task.id);
   const cancel = useCancelTask(task.id);
   const retry = useRetryTask(task.id);
   const [scenario, setScenario] = useState<MockScenario>("success");
@@ -158,7 +136,9 @@ function Actions({ d }: { d: TaskDetail }) {
   const canPlan = task.state === "CREATED";
   const canRetry = task.state === "FAILED" && task.planRevision > 0;
   const canCancel = !isTerminal(task.state);
-  if (!canPlan && !canRetry && !canCancel) return null;
+  const planning = d.planning && ["PREPARING", "QUEUED", "RUNNING"].includes(d.planning.state);
+  const canPlanAI = !planning && ["CREATED", "FAILED", "READY", "AWAITING_APPROVAL", "ANALYZING"].includes(task.state);
+  if (!canPlan && !canRetry && !canCancel && !canPlanAI) return null;
 
   const plan = (e: FormEvent) => {
     e.preventDefault();
@@ -188,6 +168,18 @@ function Actions({ d }: { d: TaskDetail }) {
         </form>
       )}
       <div className="task-actions">
+        {canPlanAI && (
+          <div>
+            <button type="button" className="button primary" disabled={planAI.isPending}
+              onClick={() => {
+                setError(undefined);
+                planAI.mutate(undefined, { onSuccess: () => notify(t("tasks.planAIDone")), onError: fail });
+              }}>
+              {planAI.isPending ? t("tasks.planAIStarting") : d.revision ? t("tasks.replanAI") : t("tasks.planAI")}
+            </button>
+            <p className="muted">{d.revision ? t("tasks.replanAIHint") : t("tasks.planAIHint")}</p>
+          </div>
+        )}
         {canRetry && (
           <div>
             <button type="button" className="button primary" disabled={retry.isPending}

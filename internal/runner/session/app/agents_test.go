@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tr1gl1de/kindevai/internal/protocol"
 	"github.com/tr1gl1de/kindevai/internal/runner/session/domain"
@@ -355,6 +356,38 @@ func TestCLIReportFieldsAreBounded(t *testing.T) {
 	for _, e := range append(ev.ofKind(protocol.EventAgent), ev.ofKind(protocol.EventFailed)...) {
 		if len(e.body) > 4<<10 {
 			t.Fatalf("%s body of %d bytes", e.kind, len(e.body))
+		}
+	}
+}
+
+// KIN-34: the CLI's final answer (the planner's plan) reaches the Control Plane with execution.completed, masked
+// and cut so the event body stays within the channel's limit even when every byte escapes.
+func TestCLIFinalAnswerIsReportedMaskedAndBounded(t *testing.T) {
+	t.Parallel()
+	for name, text := range map[string]string{
+		"plan":    `{"summary":"s","token":"hunter2-proxy-pass"}`,
+		"escapes": strings.Repeat("\x01", 2*protocol.MaxAgentResult),
+		"long":    strings.Repeat(`{"k":"é"}`, protocol.MaxAgentResult),
+	} {
+		x, l, _, ev, ag := newCLIExecutor()
+		x.KnownSecrets = func() []string { return []string{"hunter2-proxy-pass"} }
+		ag.result.Text = text
+		if err := x.Assign(t.Context(), cliAssignment(domain.AgentClaude)); err != nil {
+			t.Fatal(err)
+		}
+		l.proc(0).end(domain.Exit{})
+		waitFor(t, "completed", func() bool { return len(ev.ofKind(protocol.EventCompleted)) == 1 })
+		body := ev.ofKind(protocol.EventCompleted)[0].body
+		var done protocol.Completed
+		if err := json.Unmarshal([]byte(body), &done); err != nil || done.Agent == nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(body) > protocol.MaxBodyBytes || len(done.Agent.Result) > protocol.MaxAgentResult ||
+			strings.Contains(done.Agent.Result, "hunter2-proxy-pass") || !utf8.ValidString(done.Agent.Result) {
+			t.Fatalf("%s: body %d bytes, result %d bytes", name, len(body), len(done.Agent.Result))
+		}
+		if name == "plan" && !strings.Contains(done.Agent.Result, `"summary":"s"`) {
+			t.Fatalf("plan lost: %q", done.Agent.Result)
 		}
 	}
 }

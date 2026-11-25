@@ -52,8 +52,10 @@ type Assignment struct {
 	Agent string
 	Model string
 	Role  string
-	// Prompt is the step's prompt/context package for an AI CLI (KIN-79).
+	// Prompt is the step's prompt/context package for an AI CLI (KIN-79), Resume the native session it continues
+	// ("" for a new one; the planner's repeat and replan on the same runner, KIN-34).
 	Prompt string
+	Resume string
 }
 
 // Dispatcher queues runner commands in the use case's transaction (the runner's ordered command log, KIN-22), so a
@@ -108,11 +110,14 @@ func (s *Service) Schedule(ctx context.Context) error {
 			return nil // maintenance mode: no new executions or step claims (KIN-41)
 		}
 	}
+	var errs []error
+	if err := s.schedulePlanning(ctx); err != nil {
+		errs = append(errs, err)
+	}
 	ready, err := s.Repo.TasksInState(ctx, domain.TaskReady)
 	if err != nil {
-		return err
+		return errors.Join(append(errs, err)...)
 	}
-	var errs []error
 	for _, id := range ready {
 		if _, err := s.StartExecution(ctx, id); err != nil && !errors.Is(err, domain.ErrInvalidTransition) &&
 			!errors.Is(err, domain.ErrConflict) {
@@ -375,6 +380,9 @@ func (s *Service) RenewRunnerLeases(ctx context.Context, runnerID string) error 
 		return err
 	}
 	var errs []error
+	if err := s.renewPlanningLeases(ctx, runnerID); err != nil {
+		errs = append(errs, err)
+	}
 	for _, id := range ids {
 		err := s.Tx.InTx(ctx, func(ctx context.Context) error {
 			e, err := s.Repo.Execution(ctx, id)
@@ -420,6 +428,15 @@ func (s *Service) ReconcileRunner(ctx context.Context, runnerID string, reports 
 	if _, err := s.ExpireLeases(ctx); err != nil {
 		return err
 	}
+	var planning []AttemptReport
+	reports = slices.DeleteFunc(slices.Clone(reports), func(r AttemptReport) bool {
+		_, ok := domain.PlanningRunID(r.StepID)
+		if ok {
+			planning = append(planning, r)
+		}
+		return ok
+	})
+	planErr := s.reconcilePlanning(ctx, runnerID, planning)
 	ids, err := s.Repo.ExecutionsHeldBy(ctx, runnerID)
 	if err != nil {
 		return err
@@ -489,7 +506,7 @@ func (s *Service) ReconcileRunner(ctx context.Context, runnerID string, reports 
 			errs = append(errs, err)
 		}
 	}
-	return errors.Join(errs...)
+	return errors.Join(append(errs, planErr)...)
 }
 
 // Release reasons of ReleaseRunner (KIN-63).

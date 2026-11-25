@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { http } from "msw";
 import { describe, expect, it } from "vitest";
 import type { TelegramLaunch } from "../telegram/webapp";
-import type { Approval, AttemptWorkspace, Me, Project, Step, TaskDetail, TaskList, TaskListItem } from "../../api/types";
+import type { Approval, AttemptWorkspace, Me, PlanningRun, Project, Step, TaskDetail, TaskList, TaskListItem } from "../../api/types";
 import { apiError, json, owner, server } from "../../test/msw";
 import { expectAccessible, expectStatus, fill, renderApp } from "../../test/render";
 import { stages } from "./TaskPage";
@@ -41,7 +41,8 @@ const detail = (over: Partial<TaskDetail> = {}): TaskDetail => ({
   task: { id: "t1", projectId: "p1", title: "Add login", state: "VERIFYING", planRevision: 1,
     createdAt: "2026-11-24T10:00:00Z", updatedAt: "2026-11-24T10:05:00Z" },
   revision: { number: 1, hash: "a".repeat(64), risk: "L1", summary: "Login API and page", createdBy: "mock-planner",
-    createdAt: "2026-11-24T10:00:00Z" },
+    createdAt: "2026-11-24T10:00:00Z", maxParallel: 1, steps: [], contracts: [], migrations: [], tests: [], docs: [] },
+  planning: null,
   execution: {
     id: "e1", planRevision: 1, planHash: "a".repeat(64), state: "SUCCEEDED", createdAt: "2026-11-24T10:00:00Z",
     finishedAt: "2026-11-24T10:05:00Z", agentTime: { ms: 70_000, status: "incomplete" },
@@ -414,5 +415,88 @@ describe("attempt workspace", () => {
     fail = false;
     await user.click(retry);
     expect(await screen.findByRole("table", { name: "Instruction files of attempt 2" })).toBeInTheDocument();
+  });
+});
+
+describe("AI planner (KIN-34)", () => {
+  const run = (over: Partial<PlanningRun> = {}): PlanningRun => ({
+    id: "R1", state: "QUEUED", stepId: "planner_R1", attempt: 1, used: 1, maxAttempts: 2, agent: "claude", model: "opus",
+    runnerId: "r1", hasSession: true, notBefore: null, feedback: "invalid steps[0].repository: repository_not_in_project",
+    revision: 0, issueText: true, articles: ["KIN-A-15"], createdAt: "2026-11-24T10:00:00Z", updatedAt: "2026-11-24T10:01:00Z",
+    ...over,
+  });
+  const planned = detail({
+    task: { ...detail().task, state: "AWAITING_APPROVAL", planRevision: 1 },
+    revision: { ...detail().revision!, risk: "L2", createdBy: "planner/claude", maxParallel: 2,
+      steps: [
+        { key: "api", title: "Login endpoint", repository: "acme/app", role: "implementer", scope: ["internal/login/**"],
+          dependsOn: [], capabilities: ["go"] },
+        { key: "review", title: "Review", repository: "acme/app", role: "reviewer", scope: [], dependsOn: ["api"], capabilities: [] },
+      ],
+      contracts: [], migrations: ["0026 sessions table"], tests: ["login e2e"], docs: [] },
+    planning: run({ state: "SUCCEEDED", revision: 1, used: 0, feedback: undefined }),
+    execution: null,
+  });
+
+  it("starts the planner, shows a refused answer, then the plan's steps, scope and impact", async () => {
+    let current = detail({ task: { ...detail().task, state: "CREATED", planRevision: 0 }, revision: null, execution: null,
+      time: { agentMs: 0, agentStatus: "none", calendarMs: 0, running: false, started: false } });
+    let posted = 0;
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/approvals", () => json([])),
+      http.get("/api/tasks/t1", () => json(current)),
+      http.post("/api/tasks/t1/plan", () => {
+        posted++;
+        current = detail({ ...current, task: { ...current.task, state: "ANALYZING" }, planning: run() });
+        return json(current, 202);
+      }),
+    );
+    const { container } = await renderApp("/tasks/t1");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Plan with AI" }));
+    await expectStatus("The AI planner is analysing the task.");
+    expect(posted).toBe(1);
+    const planner = await screen.findByRole("region", { name: "AI planner" });
+    expect(within(planner).getByText("Waiting for a runner")).toBeInTheDocument();
+    expect(within(planner).getByText(/repository_not_in_project/)).toBeInTheDocument();
+    expect(within(planner).getByText("issue text · articles KIN-A-15")).toBeInTheDocument();
+    expect(within(planner).getByText("1 of 2")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Plan with AI" })).not.toBeInTheDocument();
+    await expectAccessible(container);
+  });
+
+  it("shows the plan revision with steps by role and scope, and offers a replan", async () => {
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/approvals", () => json([])),
+      http.get("/api/tasks/t1", () => json(planned)),
+    );
+    const { container } = await renderApp("/tasks/t1");
+    const table = await screen.findByRole("table", { name: "Plan steps (up to 2 at once)" });
+    expect(within(table).getByText("internal/login/**")).toBeInTheDocument();
+    expect(within(table).getByText("Reviewer")).toBeInTheDocument();
+    expect(within(table).getByText("Nothing (review only)")).toBeInTheDocument();
+    expect(screen.getByText("0026 sessions table")).toBeInTheDocument();
+    expect(screen.getByText("Plan created")).toBeInTheDocument();
+    expect(screen.getByText("The planner's CLI session is kept: the plan discussion continues it.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Replan with AI" })).toBeInTheDocument();
+    await expectAccessible(container);
+  });
+
+  it("is translated to Russian", async () => {
+    server.use(
+      http.get("/api/auth/me", () => json(owner)),
+      http.get("/api/projects", () => json([alpha])),
+      http.get("/api/approvals", () => json([])),
+      http.get("/api/tasks/t1", () => json(planned)),
+    );
+    const { container } = await renderApp("/tasks/t1", "ru");
+    expect(await screen.findByRole("region", { name: "AI-планировщик" })).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: "Шаги плана (одновременно до 2)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Перепланировать с AI" })).toBeInTheDocument();
+    await expectAccessible(container);
   });
 });

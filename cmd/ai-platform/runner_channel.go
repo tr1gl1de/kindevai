@@ -127,19 +127,37 @@ func attachRunnerChannel(h *runnersgw.Handler, ch *runnersapp.Channel) {
 // that does not fit the step's state is rejected.
 type runnerExecutions struct{ wf *workflowapp.Service }
 
+// planning reports a planner attempt (KIN-34): the runner runs it like a step, the workflow's planning runs own it.
+func planning(step string) bool {
+	_, ok := workflow.PlanningRunID(step)
+	return ok
+}
+
 func (r runnerExecutions) CheckAttempt(ctx context.Context, runnerID, step string, fence int64) error {
+	if planning(step) {
+		return attemptError(r.wf.CheckPlanningAttempt(ctx, step, runnerID, fence))
+	}
 	return attemptError(r.wf.CheckFence(ctx, step, runnerID, fence))
 }
 
 func (r runnerExecutions) StartAttempt(ctx context.Context, runnerID, step string, fence int64, at time.Time, agent string) error {
+	if planning(step) {
+		return attemptError(r.wf.StartPlanningAttempt(ctx, step, runnerID, fence))
+	}
 	return attemptError(r.wf.StartStepAt(ctx, step, runnerID, fence, at, agent))
 }
 
 func (r runnerExecutions) CompleteAttempt(ctx context.Context, runnerID, step string, fence int64, at time.Time) error {
+	if planning(step) {
+		return attemptError(r.wf.CompletePlanningAttempt(ctx, step, runnerID, fence))
+	}
 	return attemptError(r.wf.CompleteStepAt(ctx, step, runnerID, fence, at))
 }
 
 func (r runnerExecutions) FailAttempt(ctx context.Context, runnerID, step string, fence int64, reason string, at time.Time) error {
+	if planning(step) {
+		return attemptError(r.wf.FailPlanningAttempt(ctx, step, runnerID, fence, reason))
+	}
 	return attemptError(r.wf.FailStepAt(ctx, step, runnerID, fence, reason, at))
 }
 
@@ -148,6 +166,9 @@ var _ runnersapp.NetworkHolder = runnerExecutions{}
 // HoldAttemptForNetwork parks the step WAITING(network): the runner refused to run it without a verified strict
 // egress sandbox (KIN-31).
 func (r runnerExecutions) HoldAttemptForNetwork(ctx context.Context, runnerID, step string, fence int64, reason string, at time.Time) error {
+	if planning(step) {
+		return attemptError(r.wf.HoldPlanningForNetwork(ctx, step, runnerID, fence, reason))
+	}
 	return attemptError(r.wf.HoldStepForNetwork(ctx, step, runnerID, fence, reason, at))
 }
 
@@ -160,11 +181,18 @@ var (
 // resets (KIN-79).
 func (r runnerExecutions) HoldAttemptForCLILimit(ctx context.Context, runnerID, step string, fence int64, cause, reason string,
 	resetsAt, at time.Time) error {
+	if planning(step) {
+		return attemptError(r.wf.HoldPlanningForCLILimit(ctx, step, runnerID, fence, cause, reason, resetsAt))
+	}
 	return attemptError(r.wf.HoldStepForCLILimit(ctx, step, runnerID, fence, cause, reason, resetsAt, at))
 }
 
 // RecordAgentReport stores the CLI's usage, session, model and version with the attempt (KIN-79).
+// A planner attempt's report also carries its final answer: the plan (KIN-34).
 func (r runnerExecutions) RecordAgentReport(ctx context.Context, runnerID, step string, fence int64, rep protocol.AgentReport) error {
+	if planning(step) {
+		return attemptError(r.wf.RecordPlanningReport(ctx, step, runnerID, fence, agentReport(rep), rep.Result))
+	}
 	return attemptError(r.wf.RecordAgentReport(ctx, step, runnerID, fence, agentReport(rep)))
 }
 

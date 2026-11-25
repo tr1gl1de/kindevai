@@ -161,7 +161,8 @@ func serve(ctx context.Context, args []string, stderr io.Writer, ready chan<- ne
 	netSvc, netHTTP := newNetwork(inst, audit, integ, channel, logger) // KIN-30 network profiles
 	netSvc.Outbox = msg.Outbox                                         // KIN-60 egress check alerts
 	attachCheckoutSource(channel, integ.GitHub)                        // KIN-29 worktree base + repository token
-	attachScopeCheck(channel, apv.Approvals)                           // KIN-51 changed files vs the approved scope
+	attachScopeCheck(channel, apv.Approvals, apv.Workflow)             // KIN-51 changed files vs the approved scope
+	wirePlanner(apv.Workflow, inst, msg, integ)                        // KIN-34 planner runs and their context package
 	attachNetwork(gateway, netSvc, logger)
 	wireStrictEgress(apv.Workflow, netSvc.StrictFor) // KIN-31 strict steps only on verified runners
 	modules = append(modules, netHTTP)

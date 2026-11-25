@@ -792,18 +792,61 @@ export interface Execution {
   usage?: AgentUsage;
 }
 
+/** One step of a plan revision (KIN-34): its role, the scope it may change and the steps it waits for. */
+export interface TaskPlanStep extends PlanStep {
+  role: "implementer" | "reviewer";
+}
+
 export interface TaskRevision {
   number: number;
   hash: string;
   risk: RiskLevel;
   summary: string;
+  maxParallel: number;
+  steps: TaskPlanStep[];
+  /** The plan's declared impact (KIN-34): contract changes, migrations, tests, documentation. */
+  contracts: string[];
+  migrations: string[];
+  tests: string[];
+  docs: string[];
   createdBy: string;
   createdAt: string;
+}
+
+export type PlanningState = "PREPARING" | "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+
+/** The task's latest AI planner run (KIN-34). Its attempts' logs and workspace use stepId and attempt (the fence). */
+export interface PlanningRun {
+  id: string;
+  state: PlanningState;
+  stepId: string;
+  attempt: number;
+  used: number;
+  maxAttempts: number;
+  agent?: string;
+  model?: string;
+  runnerId?: string;
+  /** The plan chat (KIN-43) can continue the planner's CLI session. */
+  hasSession: boolean;
+  waitReason?: WaitReason;
+  waitDetail?: string;
+  notBefore: string | null;
+  /** Why the last answer was refused (the repeat is told so). */
+  feedback?: string;
+  reason?: string;
+  revision: number;
+  issueText: boolean;
+  articles: string[];
+  contextNote?: string;
+  truncated?: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface TaskDetail {
   task: Task;
   revision: TaskRevision | null;
+  planning: PlanningRun | null;
   execution: Execution | null;
   canManage: boolean;
   time: TaskTime;

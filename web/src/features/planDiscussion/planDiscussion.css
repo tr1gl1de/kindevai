@@ -35,6 +35,9 @@
   border: 0;
   background: none;
 }
+.discussion-revision-current {
+  border: 2px solid var(--accent);
+}
 .discussion-revision h3,
 .discussion-revision h4 {
   margin: 0 0 8px;
@@ -50,6 +53,18 @@
   min-height: var(--tap);
   display: inline-flex;
   align-items: center;
+}
+.discussion-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.discussion-status.status-FAILED {
+  border-color: var(--danger);
+}
+.discussion-status.status-PENDING,
+.discussion-status.status-DELIVERED {
+  border-color: var(--warn-border);
 }
 .discussion-status .spinner,
 .discussion-busy .spinner {

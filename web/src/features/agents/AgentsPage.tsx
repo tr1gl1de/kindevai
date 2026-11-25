@@ -2,7 +2,13 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AgentCli, AgentSettings } from "../../api/types";
 import { ConfirmDialog } from "../../ui/ConfirmDialog";
-import { EmptyState, ErrorState, FormAlert, Loading, PageHeading } from "../../ui/feedback";
+import {
+  EmptyState,
+  ErrorState,
+  FormAlert,
+  Loading,
+  PageHeading,
+} from "../../ui/feedback";
 import { errorMessage } from "../../ui/errors";
 import { formatDateTime } from "../../ui/format";
 import { useNotify } from "../../ui/notify";
@@ -20,7 +26,10 @@ export function AgentsPage() {
       {settings.isPending ? (
         <Loading />
       ) : settings.isError ? (
-        <ErrorState message={errorMessage(t, settings.error)} onRetry={() => void settings.refetch()} />
+        <ErrorState
+          message={errorMessage(t, settings.error)}
+          onRetry={() => void settings.refetch()}
+        />
       ) : (
         <>
           <Switches settings={settings.data} />
@@ -48,7 +57,11 @@ function Switches({ settings }: { settings: AgentSettings }) {
     setError(undefined);
     try {
       await toggle.mutateAsync({ agent, enabled });
-      notify(t(enabled ? "agents.enabledNotice" : "agents.disabledNotice", { cli: t(`agents.cli_${agent}`) }));
+      notify(
+        t(enabled ? "agents.enabledNotice" : "agents.disabledNotice", {
+          cli: t(`agents.cli_${agent}`),
+        }),
+      );
     } catch (err) {
       setError(errorMessage(t, err));
     }
@@ -58,7 +71,12 @@ function Switches({ settings }: { settings: AgentSettings }) {
     setError(undefined);
     try {
       const r = await stop.mutateAsync(agent);
-      notify(t("agents.stoppedNotice", { cli: t(`agents.cli_${agent}`), count: r.stopped }));
+      notify(
+        t("agents.stoppedNotice", {
+          cli: t(`agents.cli_${agent}`),
+          count: r.stopped,
+        }),
+      );
     } catch (err) {
       setError(errorMessage(t, err));
     } finally {
@@ -72,7 +90,7 @@ function Switches({ settings }: { settings: AgentSettings }) {
       <p className="muted">{t("agents.clisIntro")}</p>
       <FormAlert message={error} />
       <div className="table-wrap">
-        <table>
+        <table className="agents-table">
           <thead>
             <tr>
               <th scope="col">{t("agents.cliColumn")}</th>
@@ -87,23 +105,38 @@ function Switches({ settings }: { settings: AgentSettings }) {
                 <tr key={s.agent}>
                   <th scope="row">{cli}</th>
                   <td>
-                    <span className="badge">{t(s.enabled ? "agents.enabled" : "agents.disabled")}</span>
+                    <span className="badge">
+                      {t(s.enabled ? "agents.enabled" : "agents.disabled")}
+                    </span>
                     {s.set && s.updatedAt && (
-                      <div className="muted">{t("agents.changedBy", { by: s.updatedBy, at: formatDateTime(s.updatedAt, i18n.language) })}</div>
+                      <div className="muted">
+                        {t("agents.changedBy", {
+                          by: s.updatedBy,
+                          at: formatDateTime(s.updatedAt, i18n.language),
+                        })}
+                      </div>
                     )}
                   </td>
-                  <td className="actions">
-                    <button
-                      type="button"
-                      className="button subtle"
-                      disabled={toggle.isPending}
-                      onClick={() => void flip(s.agent, !s.enabled)}
-                    >
-                      {t(s.enabled ? "agents.disable" : "agents.enable", { cli })}
-                    </button>
-                    <button type="button" className="button danger" onClick={() => setConfirm(s.agent)}>
-                      {t("agents.emergencyStop", { cli })}
-                    </button>
+                  <td>
+                    <div className="row-actions">
+                      <button
+                        type="button"
+                        className="button subtle"
+                        disabled={toggle.isPending}
+                        onClick={() => void flip(s.agent, !s.enabled)}
+                      >
+                        {t(s.enabled ? "agents.disable" : "agents.enable", {
+                          cli,
+                        })}
+                      </button>
+                      <button
+                        type="button"
+                        className="button danger"
+                        onClick={() => setConfirm(s.agent)}
+                      >
+                        {t("agents.emergencyStop", { cli })}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               );
@@ -132,7 +165,9 @@ function Cooldowns({ settings }: { settings: AgentSettings }) {
     <section aria-labelledby="cooldowns-title" className="page-section">
       <h2 id="cooldowns-title">{t("agents.cooldownsTitle")}</h2>
       {settings.cooldowns.length === 0 ? (
-        <EmptyState title={t("agents.noCooldowns")}>{t("agents.noCooldownsText")}</EmptyState>
+        <EmptyState title={t("agents.noCooldowns")}>
+          {t("agents.noCooldownsText")}
+        </EmptyState>
       ) : (
         <div className="table-wrap">
           <table>

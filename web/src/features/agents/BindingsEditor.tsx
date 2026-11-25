@@ -2,7 +2,12 @@ import { useState, type FormEvent } from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { isApiError } from "../../api/client";
-import type { AgentBinding, AgentChoice, AgentCli, BindingStrategy } from "../../api/types";
+import type {
+  AgentBinding,
+  AgentChoice,
+  AgentCli,
+  BindingStrategy,
+} from "../../api/types";
 import { SelectField, TextField } from "../../ui/Field";
 import { FormAlert } from "../../ui/feedback";
 import { errorMessage, validationMessage } from "../../ui/errors";
@@ -11,38 +16,71 @@ import { useResetBinding, useSaveBinding, type AgentScope } from "./api";
 
 export const clis: AgentCli[] = ["claude", "codex"];
 
-const bindingErrors = ["agent_unknown", "model_format", "duplicate_choice", "too_many_fallbacks", "strategy_reviewer_only",
-  "strategy_unknown"] as const;
+const bindingErrors = [
+  "agent_unknown",
+  "model_format",
+  "duplicate_choice",
+  "too_many_fallbacks",
+  "strategy_reviewer_only",
+  "strategy_unknown",
+] as const;
 
 /** Message for a binding validation code from the server. */
 function bindingError(t: TFunction, code: string | undefined): string {
   const known = bindingErrors.find((c) => c === code);
-  return known ? t(`agents.err_${known}`) : (validationMessage(t, code) ?? t("errors.unknown"));
+  return known
+    ? t(`agents.err_${known}`)
+    : (validationMessage(t, code) ?? t("errors.unknown"));
 }
 const maxFallbacks = 4;
 
 /** Role bindings of a scope: one form per role (primary + ordered fallback, reviewer strategy). */
-export function BindingsEditor({ scope, bindings }: { scope: AgentScope; bindings: AgentBinding[] }) {
+export function BindingsEditor({
+  scope,
+  bindings,
+}: {
+  scope: AgentScope;
+  bindings: AgentBinding[];
+}) {
   return (
-    <div className="policy-rules">
+    <div className="bindings">
       {bindings.map((b) => (
-        <BindingForm key={`${b.role}:${JSON.stringify(b)}`} scope={scope} binding={b} />
+        <BindingForm
+          key={`${b.role}:${JSON.stringify(b)}`}
+          scope={scope}
+          binding={b}
+        />
       ))}
     </div>
   );
 }
 
-function BindingForm({ scope, binding }: { scope: AgentScope; binding: AgentBinding }) {
+function BindingForm({
+  scope,
+  binding,
+}: {
+  scope: AgentScope;
+  binding: AgentBinding;
+}) {
   const { t } = useTranslation();
   const notify = useNotify();
   const save = useSaveBinding(scope);
   const reset = useResetBinding(scope);
-  const [chain, setChain] = useState<AgentChoice[]>(() => [binding.primary, ...binding.fallback]);
+  const [chain, setChain] = useState<AgentChoice[]>(() => [
+    binding.primary,
+    ...binding.fallback,
+  ]);
   const [strategy, setStrategy] = useState<BindingStrategy>(binding.strategy);
   const [error, setError] = useState<string>();
-  const [fieldError, setFieldError] = useState<{ index: number; message: string }>();
+  const [fieldError, setFieldError] = useState<{
+    index: number;
+    message: string;
+  }>();
   const role = t(`agents.role_${binding.role}`);
-  const own = scope.projectId === undefined ? binding.source === "global" : binding.source === "project";
+  const own =
+    scope.projectId === undefined
+      ? binding.source === "global"
+      : binding.source === "project";
 
   const update = (i: number, patch: Partial<AgentChoice>) =>
     setChain((c) => c.map((x, j) => (j === i ? { ...x, ...patch } : x)));
@@ -53,7 +91,10 @@ function BindingForm({ scope, binding }: { scope: AgentScope; binding: AgentBind
     setFieldError(undefined);
     const [primary, ...fallback] = chain;
     try {
-      await save.mutateAsync({ role: binding.role, body: { primary: primary!, fallback, strategy } });
+      await save.mutateAsync({
+        role: binding.role,
+        body: { primary: primary!, fallback, strategy },
+      });
       notify(t("agents.bindingSaved", { role }));
     } catch (err) {
       if (isApiError(err, "validation")) {
@@ -65,7 +106,11 @@ function BindingForm({ scope, binding }: { scope: AgentScope; binding: AgentBind
           return;
         }
       }
-      setError(isApiError(err, "validation") ? bindingError(t, err.detail) : errorMessage(t, err));
+      setError(
+        isApiError(err, "validation")
+          ? bindingError(t, err.detail)
+          : errorMessage(t, err),
+      );
     }
   }
 
@@ -80,13 +125,20 @@ function BindingForm({ scope, binding }: { scope: AgentScope; binding: AgentBind
   }
 
   return (
-    <form noValidate className="card" onSubmit={(e) => void submit(e)} aria-labelledby={`binding-${binding.role}`}>
+    <form
+      noValidate
+      className="card binding-form"
+      onSubmit={(e) => void submit(e)}
+      aria-labelledby={`binding-${binding.role}`}
+    >
       <h3 id={`binding-${binding.role}`}>{role}</h3>
       <p className="muted">{t(`agents.source_${binding.source}`)}</p>
       <FormAlert message={error} />
       {chain.map((c, i) => (
         <fieldset key={i} className="choice">
-          <legend>{i === 0 ? t("agents.primary") : t("agents.fallbackN", { n: i })}</legend>
+          <legend>
+            {i === 0 ? t("agents.primary") : t("agents.fallbackN", { n: i })}
+          </legend>
           <SelectField
             label={t("agents.cliLabel")}
             value={c.agent}
@@ -108,14 +160,22 @@ function BindingForm({ scope, binding }: { scope: AgentScope; binding: AgentBind
             onChange={(e) => update(i, { model: e.target.value })}
           />
           {i > 0 && (
-            <button type="button" className="button subtle" onClick={() => setChain((x) => x.filter((_, j) => j !== i))}>
+            <button
+              type="button"
+              className="button subtle"
+              onClick={() => setChain((x) => x.filter((_, j) => j !== i))}
+            >
               {t("agents.removeFallback", { n: i })}
             </button>
           )}
         </fieldset>
       ))}
       {chain.length <= maxFallbacks && (
-        <button type="button" className="button subtle" onClick={() => setChain((x) => [...x, { agent: "codex", model: "" }])}>
+        <button
+          type="button"
+          className="button subtle"
+          onClick={() => setChain((x) => [...x, { agent: "codex", model: "" }])}
+        >
           {t("agents.addFallback")}
         </button>
       )}
@@ -126,17 +186,32 @@ function BindingForm({ scope, binding }: { scope: AgentScope; binding: AgentBind
           value={strategy}
           onChange={(e) => setStrategy(e.target.value as BindingStrategy)}
         >
-          <option value="different-from-author">{t("agents.strategy_different")}</option>
+          <option value="different-from-author">
+            {t("agents.strategy_different")}
+          </option>
           <option value="ordered">{t("agents.strategy_ordered")}</option>
         </SelectField>
       )}
       <div className="form-actions">
-        <button type="submit" className="button primary" disabled={save.isPending}>
-          {save.isPending ? t("form.submitting") : t("agents.saveBinding", { role })}
+        <button
+          type="submit"
+          className="button primary"
+          disabled={save.isPending}
+        >
+          {save.isPending
+            ? t("form.submitting")
+            : t("agents.saveBinding", { role })}
         </button>
         {own && (
-          <button type="button" className="button subtle" disabled={reset.isPending} onClick={() => void doReset()}>
-            {scope.projectId === undefined ? t("agents.resetDefault") : t("agents.resetInherit")}
+          <button
+            type="button"
+            className="button subtle"
+            disabled={reset.isPending}
+            onClick={() => void doReset()}
+          >
+            {scope.projectId === undefined
+              ? t("agents.resetDefault")
+              : t("agents.resetInherit")}
           </button>
         )}
       </div>

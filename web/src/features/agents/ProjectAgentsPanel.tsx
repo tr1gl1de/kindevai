@@ -20,9 +20,17 @@ export function ProjectAgentsPanel({ projectId }: { projectId: string }) {
     setError(undefined);
     try {
       await toggle.mutateAsync({ agent, enabled });
-      notify(t(enabled ? "agents.enabledNotice" : "agents.disabledNotice", { cli: t(`agents.cli_${agent}`) }));
+      notify(
+        t(enabled ? "agents.enabledNotice" : "agents.disabledNotice", {
+          cli: t(`agents.cli_${agent}`),
+        }),
+      );
     } catch (err) {
-      setError(isApiError(err, "disabled_globally") ? t("agents.err_disabled_globally") : errorMessage(t, err));
+      setError(
+        isApiError(err, "disabled_globally")
+          ? t("agents.err_disabled_globally")
+          : errorMessage(t, err),
+      );
     }
   }
 
@@ -33,7 +41,10 @@ export function ProjectAgentsPanel({ projectId }: { projectId: string }) {
       {settings.isPending ? (
         <Loading />
       ) : settings.isError ? (
-        <ErrorState message={errorMessage(t, settings.error)} onRetry={() => void settings.refetch()} />
+        <ErrorState
+          message={errorMessage(t, settings.error)}
+          onRetry={() => void settings.refetch()}
+        />
       ) : (
         <>
           <FormAlert message={error} />
@@ -54,9 +65,17 @@ export function ProjectAgentsPanel({ projectId }: { projectId: string }) {
                   return (
                     <tr key={a.agent}>
                       <th scope="row">{cli}</th>
-                      <td>{t(a.global ? "agents.enabled" : "agents.disabledGlobally")}</td>
                       <td>
-                        <span className="badge">{t(a.effective ? "agents.inUse" : "agents.notInUse")}</span>
+                        {t(
+                          a.global
+                            ? "agents.enabled"
+                            : "agents.disabledGlobally",
+                        )}
+                      </td>
+                      <td>
+                        <span className="badge">
+                          {t(a.effective ? "agents.inUse" : "agents.notInUse")}
+                        </span>
                       </td>
                       <td>
                         {blocked ? (
@@ -66,9 +85,16 @@ export function ProjectAgentsPanel({ projectId }: { projectId: string }) {
                             type="button"
                             className="button subtle"
                             disabled={toggle.isPending}
-                            onClick={() => void flip(a.agent, !a.project.enabled)}
+                            onClick={() =>
+                              void flip(a.agent, !a.project.enabled)
+                            }
                           >
-                            {t(a.project.enabled ? "agents.disableInProject" : "agents.enableInProject", { cli })}
+                            {t(
+                              a.project.enabled
+                                ? "agents.disableInProject"
+                                : "agents.enableInProject",
+                              { cli },
+                            )}
                           </button>
                         )}
                       </td>
@@ -80,7 +106,10 @@ export function ProjectAgentsPanel({ projectId }: { projectId: string }) {
           </div>
           <h3>{t("agents.bindingsTitle")}</h3>
           <p className="muted">{t("agents.projectBindingsIntro")}</p>
-          <BindingsEditor scope={{ projectId }} bindings={settings.data.bindings} />
+          <BindingsEditor
+            scope={{ projectId }}
+            bindings={settings.data.bindings}
+          />
         </>
       )}
     </section>

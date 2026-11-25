@@ -111,3 +111,31 @@ func TestCommandValidate(t *testing.T) {
 		})
 	}
 }
+
+// An execution.agent event at its field bounds fits one message, and an assignment with the largest prompt fits
+// the command body limit when the prompt is plain text (KIN-79).
+func TestAgentMessagesFitTheFrame(t *testing.T) {
+	t.Parallel()
+	esc := func(n int) string { return strings.Repeat("\x01", n) }
+	body, err := json.Marshal(AgentEvent{Kind: "failure", Session: strings.Repeat("s", 128), Model: strings.Repeat("m", 128),
+		Version: strings.Repeat("v", 64), Text: esc(MaxAgentText), Tool: strings.Repeat("t", 128), Input: esc(MaxAgentInput),
+		Usage: &AgentUsage{InputTokens: 1 << 50, OutputTokens: 1 << 50, CacheReadTokens: 1 << 50, CacheWriteTokens: 1 << 50,
+			CostUSD: 1e9, Turns: 1 << 30, DurationMS: 1 << 50}, Code: FailureCLILimit, Cause: "rate_limit",
+		Message: esc(1024), ResetsAt: 1 << 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := Event{Epoch: strings.Repeat("e", MaxIDLen), Seq: 1 << 40, Base: 1<<40 - 1, Step: strings.Repeat("s", MaxIDLen),
+		Fence: 1 << 40, AttemptSeq: 1 << 40, Kind: EventAgent, At: 1 << 50, Body: body}
+	if err := ev.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	raw, _ := json.Marshal(ev)
+	if env, _ := json.Marshal(Envelope{Type: TypeEvent, Payload: raw}); len(env) > MaxMessageBytes {
+		t.Fatalf("worst-case agent event is %d bytes, limit %d", len(env), MaxMessageBytes)
+	}
+	a, _ := json.Marshal(Assign{Step: "s", Fence: 1, Adapter: AdapterClaude, Prompt: strings.Repeat("é", MaxPromptBytes/2)})
+	if len(a) > MaxBodyBytes {
+		t.Fatalf("assignment with the largest prompt is %d bytes, limit %d", len(a), MaxBodyBytes)
+	}
+}

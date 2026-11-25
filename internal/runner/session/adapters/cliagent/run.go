@@ -103,46 +103,68 @@ type Run struct {
 // unless the configured sandbox is verified strict-egress (domain.ErrBypassWithoutSandbox): the CLI is not started.
 // ctx bounds the run: when it ends the run is cancelled.
 func (a *Adapter) Start(ctx context.Context, req domain.AgentRequest, h Hooks) (*Run, error) {
-	if err := req.Check(); err != nil {
+	if err := a.check(req); err != nil {
 		return nil, err
-	}
-	if req.Agent != a.Dialect.Name() {
-		return nil, fmt.Errorf("%w: agent %q on the %s adapter", domain.ErrInvalidAgentRequest, req.Agent, a.Dialect.Name())
 	}
 	c := a.Config
-	if !filepath.IsAbs(c.Binary) || !filepath.IsAbs(c.Home) {
-		return nil, errors.New("the CLI's binary and HOME must be absolute paths")
-	}
-	// Compare resolved paths: a symlink must not place HOME (the CLI's login) or the prompt inside the workspace.
-	// (While agent and runner share a uid the agent can still reach HOME at run time; isolating it is the
-	// sandbox's job, KIN-31.)
-	wd, home, pf, err := resolve(req.Workdir, c.Home, req.PromptFile)
-	if err != nil {
-		return nil, err
-	}
-	if domain.Within(home, wd) {
-		return nil, errors.New("the CLI's HOME lies inside the workspace: its login would be exposed to the agent")
-	}
-	if domain.Within(pf, wd) {
-		return nil, fmt.Errorf("%w: prompt file", domain.ErrInvalidAgentRequest)
-	}
 	strict := c.Sandbox != nil && c.Sandbox.StrictEgress(ctx)
 	perms, err := domain.ChoosePermissions(req.BypassPermissions, strict)
 	if err != nil {
 		return nil, err
 	}
-	prompt, err := openPrompt(pf)
+	prompt, err := openPrompt(req.PromptFile)
 	if err != nil {
 		return nil, err
 	}
 	defer prompt.Close()
-	cmd := Command{Path: c.Binary, Args: a.Dialect.Args(req, perms), Env: a.env(), Dir: req.Workdir}
+	cmd := a.command(req, perms)
 	if c.Sandbox != nil {
 		if cmd, err = c.Sandbox.Wrap(ctx, cmd); err != nil {
 			return nil, fmt.Errorf("wrapping the CLI in the sandbox: %w", err)
 		}
 	}
 	return a.start(ctx, req, cmd, prompt, h)
+}
+
+// Command validates the request and returns the CLI's command in permission mode p (the caller decided p with
+// domain.ChoosePermissions and runs the command with the prompt file on stdin).
+func (a *Adapter) Command(req domain.AgentRequest, p domain.Permissions) (Command, error) {
+	if err := a.check(req); err != nil {
+		return Command{}, err
+	}
+	return a.command(req, p), nil
+}
+
+func (a *Adapter) command(req domain.AgentRequest, p domain.Permissions) Command {
+	return Command{Path: a.Config.Binary, Args: a.Dialect.Args(req, p), Env: a.env(), Dir: req.Workdir}
+}
+
+// check validates the request against the adapter's configuration.
+func (a *Adapter) check(req domain.AgentRequest) error {
+	if err := req.Check(); err != nil {
+		return err
+	}
+	if req.Agent != a.Dialect.Name() {
+		return fmt.Errorf("%w: agent %q on the %s adapter", domain.ErrInvalidAgentRequest, req.Agent, a.Dialect.Name())
+	}
+	c := a.Config
+	if !filepath.IsAbs(c.Binary) || !filepath.IsAbs(c.Home) {
+		return errors.New("the CLI's binary and HOME must be absolute paths")
+	}
+	// Compare resolved paths: a symlink must not place HOME (the CLI's login) or the prompt inside the workspace.
+	// (While agent and runner share a uid the agent can still reach HOME at run time; isolating it is the
+	// sandbox's job, KIN-31.)
+	wd, home, pf, err := resolve(req.Workdir, c.Home, req.PromptFile)
+	if err != nil {
+		return err
+	}
+	if domain.Within(home, wd) {
+		return errors.New("the CLI's HOME lies inside the workspace: its login would be exposed to the agent")
+	}
+	if domain.Within(pf, wd) {
+		return fmt.Errorf("%w: prompt file", domain.ErrInvalidAgentRequest)
+	}
+	return nil
 }
 
 func resolve(paths ...string) (string, string, string, error) {

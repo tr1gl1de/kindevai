@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
+	"unicode/utf8"
 )
 
 var (
@@ -21,8 +23,14 @@ var (
 	ErrUnknownAdapter = errors.New("unknown agent adapter")
 )
 
-// AdapterMock is the mock agent (no real CLI); the CLI adapters come with KIN-32.
+// AdapterMock is the mock agent (no real CLI); AgentClaude and AgentCodex run the AI CLIs (KIN-32/KIN-79).
 const AdapterMock = "mock"
+
+// MaxPrompt bounds an assignment's prompt/context package (protocol.MaxPromptBytes).
+const MaxPrompt = 32 << 10
+
+// DefaultAgentTimeout bounds a CLI run whose assignment names no timeout.
+const DefaultAgentTimeout = 2 * time.Hour
 
 // Mock scenarios (same names as on the wire).
 const (
@@ -55,6 +63,26 @@ type Assignment struct {
 	Base string
 	// Token is the short-lived git credential for Repository (KIN-28/KIN-29), held in memory only.
 	Token Secret
+	// The AI CLI run (KIN-79; Adapter AgentClaude or AgentCodex): the model, the role the step runs as, the
+	// prompt/context package, the native session id to resume, the permission bypass request and the run's timeout
+	// (0: DefaultAgentTimeout).
+	Model             string
+	Role              string
+	Prompt            string
+	Resume            string
+	BypassPermissions bool
+	Timeout           time.Duration
+}
+
+// CLI reports an assignment run by an AI CLI (not the mock agent).
+func (a Assignment) CLI() bool { return a.Adapter == AgentClaude || a.Adapter == AgentCodex }
+
+// AgentTimeout is the CLI run's timeout.
+func (a Assignment) AgentTimeout() time.Duration {
+	if a.Timeout == 0 {
+		return DefaultAgentTimeout
+	}
+	return a.Timeout
 }
 
 // Secret is a credential that never formats in clear (logs, errors, JSON).
@@ -110,14 +138,40 @@ func CheckAssignment(a Assignment, p Policy) error {
 			return bad("scope")
 		}
 	}
-	if a.Adapter != AdapterMock {
+	switch {
+	case a.CLI():
+		if err := checkAgent(a); err != nil {
+			return err
+		}
+	case a.Adapter != AdapterMock:
 		return fmt.Errorf("%w: %q", ErrUnknownAdapter, a.Adapter)
-	}
-	if a.Scenario != "" && !slices.Contains(scenarios, a.Scenario) {
+	case a.Model != "" || a.Prompt != "" || a.Resume != "" || a.BypassPermissions || a.Timeout != 0:
+		return bad("agent fields for the mock agent")
+	case a.Scenario != "" && !slices.Contains(scenarios, a.Scenario):
 		return bad("scenario")
+	}
+	if a.Role != "" && !idRe.MatchString(a.Role) {
+		return bad("role")
 	}
 	if len(p.Projects) > 0 && !slices.Contains(p.Projects, a.Project) {
 		return fmt.Errorf("%w: %s", ErrProjectNotAllowed, a.Project)
+	}
+	return nil
+}
+
+// checkAgent validates a CLI assignment's run fields (the rest is AgentRequest.Check's, before the launch).
+func checkAgent(a Assignment) error {
+	switch {
+	case a.Scenario != "":
+		return bad("scenario")
+	case strings.TrimSpace(a.Prompt) == "" || len(a.Prompt) > MaxPrompt || !utf8.ValidString(a.Prompt):
+		return bad("prompt")
+	case a.Model != "" && !modelRe.MatchString(a.Model):
+		return bad("model")
+	case a.Resume != "" && !sessionRe.MatchString(a.Resume):
+		return bad("session id")
+	case a.Timeout < 0 || a.Timeout > MaxAgentTimeout:
+		return bad("timeout")
 	}
 	return nil
 }
@@ -180,4 +234,15 @@ type Record struct {
 	// Reserved is the highest attempt event sequence number the attempt may have used: a resumed stream continues
 	// after it, so no event number is reused (the Control Plane stores each one once).
 	Reserved int64 `json:"reserved"`
+	// Agent is the AI CLI running the attempt (KIN-79; empty: the mock agent) and Output how far its output files
+	// were reported: after a restart they are read again from the start (for the run's result) and reported only
+	// beyond these offsets.
+	Agent  string        `json:"agent,omitempty"`
+	Output OutputOffsets `json:"output,omitzero"`
+}
+
+// OutputOffsets are byte offsets in an AI CLI's stdout and stderr files.
+type OutputOffsets struct {
+	Stdout int64 `json:"stdout,omitempty"`
+	Stderr int64 `json:"stderr,omitempty"`
 }

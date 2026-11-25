@@ -1402,6 +1402,22 @@ export const en = {
     backupTitle: "Backup and move",
     backupText: "When no steps are running, export the installation on the server. The encryption key is written to a separate file: keep it apart from the archive. The README section \"Backup and restore\" describes the whole move.",
   },
+  // Plan discussion with the AI (KIN-43 API codes; the chat UI is KIN-44).
+  planDiscussion: {
+    status: { PENDING: "Waiting for a runner", DELIVERED: "AI is answering", ANSWERED: "Answered", FAILED: "No answer" },
+    limits: {
+      message_too_long: "The message is longer than {{limit}} characters.",
+      answer_in_flight: "The AI is still answering the previous message (or the task is being planned).",
+      plan_message_limit: "This plan discussion has reached its {{limit}} messages.",
+      hourly_message_limit: "You sent {{limit}} messages in the last hour. Try again in {{minutes}} min.",
+    },
+    notices: {
+      revision_created: "Revision {{revision}} was created from this answer.",
+      plan_rejected: "The proposed plan was not accepted: {{reason}}",
+      plan_outdated: "The proposed plan was written for an older revision and was not applied.",
+      plan_not_applied: "The task no longer takes a new plan; the proposal was not applied.",
+    },
+  },
   audit: {
     title: "Audit log",
     intro: "Security-relevant actions on the platform, newest first. Records cannot be changed or deleted.",
@@ -1444,6 +1460,11 @@ export const en = {
       routing_cli_switched: "CLI enabled or disabled",
       routing_cli_emergency_stop: "CLI emergency stop",
       routing_cli_ready: "CLI marked ready again",
+      plan_discussion_message_sent: "Plan discussion message sent",
+      plan_discussion_answered: "AI answered in the plan discussion",
+      plan_discussion_revision_created: "Plan revision created from the discussion",
+      plan_discussion_limit_hit: "Plan discussion limit reached",
+      plan_discussion_limits_changed: "Plan discussion limits changed",
       routing_role_bound: "Role binding changed",
       routing_role_binding_reset: "Role binding reset",
       network_test_requested: "Test Network requested",

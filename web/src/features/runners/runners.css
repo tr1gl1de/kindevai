@@ -24,7 +24,8 @@
 }
 .machine-head h3 {
   margin: 0;
-  font-size: 1rem;
+  font-size: var(--size-body);
+  line-height: var(--leading-body);
 }
 .volume {
   margin-top: 8px;
@@ -63,7 +64,8 @@
   min-width: 0;
 }
 .volume-detail h3 {
-  font-size: 1rem;
+  font-size: var(--size-body);
+  line-height: var(--leading-body);
   margin: 0 0 4px;
 }
 .volume-detail meter {
@@ -86,7 +88,8 @@ table.compact caption {
   padding: 4px 0;
 }
 table.compact caption h3 {
-  font-size: 1rem;
+  font-size: var(--size-body);
+  line-height: var(--leading-body);
   margin: 0;
 }
 table.compact caption span {
@@ -182,7 +185,8 @@ table.compact td {
   left: 100%;
   transform: translateY(-50%);
   padding-left: 4px;
-  font-size: 0.75rem;
+  font-size: var(--size-caption);
+  line-height: var(--leading-caption);
   color: var(--muted);
 }
 .chart-tooltip {
@@ -194,7 +198,8 @@ table.compact td {
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 2px 8px;
-  font-size: 0.8rem;
+  font-size: var(--size-caption);
+  line-height: var(--leading-caption);
   white-space: nowrap;
   pointer-events: none;
 }
@@ -203,7 +208,8 @@ table.compact td {
   justify-content: space-between;
   gap: 8px;
   margin-right: 40px;
-  font-size: 0.75rem;
+  font-size: var(--size-caption);
+  line-height: var(--leading-caption);
 }
 .history-chart details summary {
   min-height: var(--tap);

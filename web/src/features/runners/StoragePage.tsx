@@ -4,6 +4,7 @@ import { Link } from "react-router";
 import type { SpaceConsumer, StorageForecast, StorageMachine, StorageMachineDetail, StorageVolume } from "../../api/types";
 import { EmptyState, ErrorState, Loading, PageHeading } from "../../ui/feedback";
 import { errorMessage } from "../../ui/errors";
+import { LevelBadge } from "../../ui/Badge";
 import { formatBytes, formatDateTime } from "../../ui/format";
 import { useStorageMachine, useStorageOverview } from "./api";
 import { AvailabilityBadge } from "./AvailabilityBadge";
@@ -101,7 +102,7 @@ function VolumeDetail({ v, d }: { v: StorageVolume; d: StorageMachineDetail }) {
       </h3>
       <meter min={0} max={100} low={75} high={85} optimum={0} value={used} aria-label={t("storage.meterLabel", { role, percent: used })} />
       <p>
-        <span className={`badge level-badge level-${v.level}`}>{t(`storage.level_${v.level}`)}</span>{" "}
+        <LevelBadge level={v.level}>{t(`storage.level_${v.level}`)}</LevelBadge>{" "}
         <span>{t("storage.used", { percent: used })}</span> ·{" "}
         {t("storage.free", { free: formatBytes(v.availableBytes, lng), total: formatBytes(v.totalBytes, lng) })}
       </p>

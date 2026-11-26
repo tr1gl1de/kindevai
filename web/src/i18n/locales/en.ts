@@ -13,6 +13,7 @@ export const en = {
     network: "Network",
     agents: "Agents",
     label: "Main",
+    menu: "Menu",
     overview: "Overview",
     projects: "Projects",
     users: "Users",

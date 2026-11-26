@@ -14,6 +14,7 @@ export const ru: Messages = {
     network: "Сеть",
     agents: "Агенты",
     label: "Основное меню",
+    menu: "Меню",
     overview: "Обзор",
     projects: "Проекты",
     users: "Пользователи",

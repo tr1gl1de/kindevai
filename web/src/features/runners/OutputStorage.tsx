@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 import type { RunnerOutputStorage, StorageMachine } from "../../api/types";
+import { LevelBadge } from "../../ui/Badge";
 import { formatBytes, formatDateTime } from "../../ui/format";
 import "./runners.css";
 
@@ -15,7 +16,7 @@ function Usage({ o }: { o: RunnerOutputStorage }) {
     <>
       <meter min={0} max={100} low={75} high={90} optimum={0} value={pct} aria-label={t("storageOutput.meterLabel", { percent: pct })} />
       <p>
-        <span className={`badge level-badge level-${badgeLevel[o.state]}`}>{t(`storageOutput.state_${o.state}`)}</span>{" "}
+        <LevelBadge level={badgeLevel[o.state]}>{t(`storageOutput.state_${o.state}`)}</LevelBadge>{" "}
         {t("storageOutput.used", { used: formatBytes(o.usedBytes, lng), limit: formatBytes(o.limitBytes, lng), percent: pct })}
       </p>
     </>

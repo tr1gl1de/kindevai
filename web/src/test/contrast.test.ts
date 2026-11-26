@@ -87,6 +87,8 @@ const PAIRS: [string, string[], number][] = [
   ["--danger", SURFACES, UI], // invalid inputs, failed-state badge borders, critical threshold
   ["--warn-border", SURFACES, UI], // warn badges/cards, warning threshold
   ["--border-strong", SURFACES, UI], // input, button and segmented control boundaries, chart axes
+  ["--success", SURFACES, UI], // success badge icons and borders (KIN-120); the badge text names the state
+  ["--info", SURFACES, UI], // info badge icons and borders (KIN-120)
   ["--warn-text", ["--warn-bg"], TEXT], // text on warning surfaces (KIN-114)
   ["--warn-muted", ["--warn-bg"], TEXT], // hints on warning surfaces
   ["--warn-link", ["--warn-bg"], TEXT], // links on warning surfaces, e.g. the maintenance banner

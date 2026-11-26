@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Alert, AlertAction } from "../../api/types";
+import { LevelBadge } from "../../ui/Badge";
 import { EmptyState, ErrorState, FormAlert, Loading, PageHeading } from "../../ui/feedback";
 import { errorMessage } from "../../ui/errors";
 import { formatDateTime } from "../../ui/format";
@@ -35,7 +36,10 @@ export function AlertsPage() {
       ) : list.isError ? (
         <ErrorState message={errorMessage(t, list.error)} onRetry={() => void list.refetch()} />
       ) : list.data.length === 0 ? (
-        <EmptyState title={t(filter === "active" ? "alerts.emptyActive" : "alerts.emptyAll")} />
+        <EmptyState
+          title={t(filter === "active" ? "alerts.emptyActive" : "alerts.emptyAll")}
+          mood={filter === "active" ? "success" : "idle"}
+        />
       ) : (
         <AlertTable items={list.data} />
       )}
@@ -118,7 +122,7 @@ function AlertTable({ items }: { items: Alert[] }) {
             {items.map((a) => (
               <tr key={a.id} id={`alert-${a.id}`}>
                 <td>
-                  <span className={`badge level-badge level-${a.severity}`}>{t(`alerts.severity_${a.severity}`)}</span>
+                  <LevelBadge level={a.severity}>{t(`alerts.severity_${a.severity}`)}</LevelBadge>
                 </td>
                 <td>
                   {text(a)}

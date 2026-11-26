@@ -24,15 +24,38 @@
   --warn-muted: #5c6056;
   --warn-link: #805300;
   --focus: #805300;
+  /* KIN-120: state badge icons and borders (brand success/info), 3:1 on every surface. */
+  --success: #28734d; /* 5.3 / 5.7 / 5.0:1 */
+  --info: #255a91; /* 6.6 / 7.1 / 6.2:1 */
   --radius: 10px;
   --radius-lg: 16px;
   --space: 16px;
   --tap: 44px;
+  /* KIN-120: Brand System v1.0 layout (components.md): 248 px sidebar and 64 px header from 1024 px. */
+  --sidebar: 248px;
+  --header: 64px;
+  /* Brandbook type scale: size/line height pairs, always set together. */
+  --size-h1: 32px;
+  --leading-h1: 40px;
+  --size-h2: 24px;
+  --leading-h2: 32px;
+  --size-h3: 20px;
+  --leading-h3: 28px;
+  --size-body: 16px;
+  --leading-body: 24px;
+  --size-compact: 14px;
+  --leading-compact: 20px;
+  --size-caption: 12px;
+  --leading-caption: 18px;
+  --size-code: 13px;
+  --leading-code: 21px;
+  /* Motion: 120 ms for hover/press, 180 ms for small reveals, 240 ms for panels; off with reduced motion. */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 240ms;
   --font-ui: "Nunito Sans Variable", "Nunito Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
   font-family: var(--font-ui);
-  font-size: 16px;
-  line-height: 1.5;
 }
 
 /* Dark tokens: for the OS dark scheme unless the Telegram Mini App chose light, and whenever it chose dark.
@@ -59,6 +82,8 @@
     --warn-muted: #bdbdae;
     --warn-link: #ffd16a;
     --focus: #ffd16a;
+    --success: #88d2a5;
+    --info: #98c7ff;
   }
 }
 
@@ -83,6 +108,8 @@
   --warn-muted: #bdbdae;
   --warn-link: #ffd16a;
   --focus: #ffd16a;
+  --success: #88d2a5;
+  --info: #98c7ff;
 }
 
 :root[data-theme="light"] {
@@ -99,6 +126,8 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
+  font-size: var(--size-body);
+  line-height: var(--leading-body);
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 
@@ -111,7 +140,26 @@ pre,
 kbd,
 samp {
   font-family: var(--font-mono);
-  font-size: 0.875em;
+  font-size: var(--size-code);
+  line-height: var(--leading-code);
+}
+
+h1 {
+  font-size: var(--size-h1);
+  line-height: var(--leading-h1);
+}
+h2 {
+  font-size: var(--size-h2);
+  line-height: var(--leading-h2);
+}
+h3 {
+  font-size: var(--size-h3);
+  line-height: var(--leading-h3);
+}
+h1,
+h2,
+h3 {
+  overflow-wrap: anywhere;
 }
 
 :focus-visible {
@@ -143,12 +191,22 @@ samp {
   top: var(--space);
 }
 
-/* Layout */
+/* Layout (KIN-120, Brand System components.md): the header spans the top; from 1024 px the navigation is a sticky
+   248 px sidebar under it, below 1024 px a drawer that the Menu button opens between the header and the page. */
+.shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto 1fr;
+  grid-template-areas: "header" "sidebar" "main";
+  min-height: 100vh;
+}
 .topbar {
+  grid-area: header;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 16px;
+  min-height: var(--header);
   padding: 8px var(--space);
   border-bottom: 1px solid var(--border);
   background: var(--surface);
@@ -164,36 +222,120 @@ samp {
   height: 36px;
   width: auto;
 }
-.nav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  flex: 1;
-}
-.nav a {
+.menu-button {
   display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.menu-icon {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+.sidebar {
+  grid-area: sidebar;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.sidebar a {
+  display: flex;
   align-items: center;
   min-height: var(--tap);
   padding: 0 12px;
   border-radius: var(--radius);
   color: var(--text);
   text-decoration: none;
+  transition: background-color var(--motion-fast) ease-out;
 }
-.nav a[aria-current="page"] {
+.sidebar a:hover {
   background: var(--bg);
-  font-weight: 600;
-  box-shadow: inset 0 -3px 0 var(--accent);
+}
+.sidebar a[aria-current="page"] {
+  background: var(--bg);
+  font-weight: 700;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.nav-account {
+  margin-top: 8px;
 }
 .user-area {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  margin-left: auto;
 }
 .content {
-  max-width: 960px;
+  grid-area: main;
+  width: 100%;
+  max-width: 1600px;
   margin: 0 auto;
   padding: var(--space);
+}
+/* Long text stays readable on wide screens (brandbook: 72ch). */
+.content p {
+  max-width: 72ch;
+}
+@media (max-width: 1023.98px) {
+  .sidebar {
+    display: none;
+  }
+  .shell[data-nav="open"] .sidebar {
+    display: flex;
+  }
+}
+@media (min-width: 768px) {
+  .content {
+    padding: 24px;
+  }
+}
+@media (min-width: 1024px) {
+  /* Focused or skipped-to content never ends up under the sticky header (WCAG 2.4.11). */
+  html {
+    scroll-padding-top: var(--header);
+  }
+  /* The sidebar column's fill and divider run the full page height; the sticky nav itself is one screen tall. */
+  .shell {
+    grid-template-columns: var(--sidebar) minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+    grid-template-areas: "header header" "sidebar main";
+    background-image: linear-gradient(
+      to right,
+      var(--surface) calc(var(--sidebar) - 1px),
+      var(--border) calc(var(--sidebar) - 1px) var(--sidebar),
+      transparent var(--sidebar)
+    );
+  }
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    flex-wrap: nowrap;
+    padding: 0 32px 0 var(--space);
+  }
+  .brand {
+    width: calc(var(--sidebar) - 2 * var(--space));
+  }
+  .menu-button {
+    display: none;
+  }
+  .sidebar {
+    display: flex;
+    position: sticky;
+    top: var(--header);
+    max-height: calc(100vh - var(--header));
+    overflow-y: auto;
+    align-self: start;
+    padding: var(--space) 12px;
+    border-bottom: 0;
+    border-right: 1px solid var(--border);
+  }
+  .content {
+    padding: 24px 32px;
+  }
 }
 .content:focus {
   outline: none;
@@ -214,8 +356,8 @@ samp {
 }
 .page-heading {
   margin: 8px 0;
-  font-size: 1.6rem;
-  line-height: 1.25;
+  font-size: var(--size-h1);
+  line-height: var(--leading-h1);
 }
 .page-heading:focus {
   outline: none;
@@ -244,7 +386,8 @@ samp {
 }
 .card h2 {
   margin-top: 0;
-  font-size: 1.1rem;
+  font-size: var(--size-h3);
+  line-height: var(--leading-h3);
 }
 .card.warn {
   background: var(--warn-bg);
@@ -274,17 +417,66 @@ samp {
   flex: 1;
 }
 .badge {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 2px 10px;
   border-radius: 999px;
   border: 1px solid var(--border);
-  font-size: 0.85rem;
+  font-size: var(--size-compact);
+  line-height: var(--leading-compact);
+}
+/* State tones (KIN-120): the text names the state, the icon and colour repeat it. */
+.badge-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+.tone-info {
+  border-color: var(--info);
+}
+.tone-info .badge-icon {
+  color: var(--info);
+}
+.tone-success {
+  border-color: var(--success);
+}
+.tone-success .badge-icon {
+  color: var(--success);
+}
+.tone-warning {
+  border-color: var(--warn-border);
+}
+.tone-warning .badge-icon {
+  color: var(--warn-border);
+}
+.tone-danger {
+  border-color: var(--danger);
+}
+.tone-danger .badge-icon {
+  color: var(--danger);
 }
 .empty-state {
   text-align: center;
   padding: 32px var(--space);
   border: 1px dashed var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
+}
+.empty-state h2 {
+  margin: 8px 0;
+  font-size: var(--size-h3);
+  line-height: var(--leading-h3);
+}
+.empty-state p {
+  margin-inline: auto;
+}
+/* Kibi (KIN-120): decorative, sized to sit above the empty state's heading. */
+.kibi {
+  display: block;
+  width: 96px;
+  height: auto;
+  margin: 0 auto;
+  color: var(--text);
 }
 
 .table-wrap {
@@ -301,6 +493,10 @@ td {
   text-align: left;
   padding: 8px;
   border-bottom: 1px solid var(--border);
+}
+/* Digits line up in columns of counts, sizes and times (brandbook §04). */
+td {
+  font-variant-numeric: tabular-nums;
 }
 
 /* Forms */
@@ -341,7 +537,8 @@ textarea[aria-invalid="true"] {
 .field-hint {
   margin: 0;
   color: var(--muted);
-  font-size: 0.9rem;
+  font-size: var(--size-compact);
+  line-height: var(--leading-compact);
 }
 .field-error {
   margin: 0;
@@ -374,6 +571,9 @@ textarea[aria-invalid="true"] {
   background: var(--bg);
   color: var(--text);
   cursor: pointer;
+  transition:
+    background-color var(--motion-fast) ease-out,
+    border-color var(--motion-fast) ease-out;
 }
 .button.primary {
   background: var(--primary);
@@ -469,7 +669,8 @@ textarea[aria-invalid="true"] {
 }
 .dialog h2 {
   margin-top: 0;
-  font-size: 1.2rem;
+  font-size: var(--size-h3);
+  line-height: var(--leading-h3);
 }
 .dialog-actions {
   display: flex;
@@ -490,11 +691,10 @@ textarea[aria-invalid="true"] {
 @media (max-width: 600px) {
   .topbar {
     padding: 8px 12px;
-    justify-content: space-between;
+    gap: 8px;
   }
-  .nav {
-    order: 3;
-    flex-basis: 100%;
+  .brand-logo {
+    height: 28px;
   }
   .user-area {
     gap: 4px;
@@ -510,9 +710,6 @@ textarea[aria-invalid="true"] {
     overflow: hidden;
     clip-path: inset(50%);
     white-space: nowrap;
-  }
-  .page-heading {
-    font-size: 1.35rem;
   }
 }
 
@@ -539,7 +736,8 @@ textarea[aria-invalid="true"] {
   margin-top: calc(var(--space) * 2);
 }
 .secret-value.link {
-  font-size: 0.95rem;
+  font-size: var(--size-body);
+  line-height: var(--leading-body);
   letter-spacing: 0;
 }
 .secret {
@@ -548,7 +746,8 @@ textarea[aria-invalid="true"] {
 }
 .secret-value {
   display: inline-block;
-  font-size: 1.25rem;
+  font-size: var(--size-h3);
+  line-height: var(--leading-h3);
   letter-spacing: 0.05em;
   padding: 8px 12px;
   background: var(--bg);
@@ -556,11 +755,6 @@ textarea[aria-invalid="true"] {
   border-radius: var(--radius);
   user-select: all;
   word-break: break-all;
-}
-@media (min-width: 601px) {
-  .nav-account {
-    margin-left: auto;
-  }
 }
 
 /* Audit log */
@@ -692,6 +886,9 @@ textarea {
   border-color: var(--danger);
   color: var(--danger-text);
 }
+.level-badge.level-critical .badge-icon {
+  color: inherit;
+}
 /* Network profiles (KIN-30): stacked cards of profiles and test results. */
 .card-list {
   list-style: none;
@@ -721,9 +918,11 @@ textarea {
   --muted: var(--warn-muted);
   --link: var(--warn-link);
   border: 1px solid var(--warn-border);
-  font-size: 0.8rem;
+  font-size: var(--size-caption);
+  line-height: var(--leading-caption);
   text-align: center;
 }
 .small {
-  font-size: 0.85rem;
+  font-size: var(--size-compact);
+  line-height: var(--leading-compact);
 }

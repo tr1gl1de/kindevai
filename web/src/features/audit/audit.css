@@ -1,7 +1,8 @@
 /* Audit log (KIN-48): entry details and the list footer. */
 .audit-details {
   margin: 4px 0 0;
-  font-size: 0.875rem;
+  font-size: var(--size-compact);
+  line-height: var(--leading-compact);
 }
 .audit-details div {
   display: flex;

@@ -531,7 +531,7 @@ function TestNetwork({ profiles }: { profiles: NetworkProfile[] }) {
       <h2 id="test-title">{t("network.test")}</h2>
       <p className="muted">{t("network.testIntro")}</p>
       {active.length === 0 ? (
-        <EmptyState title={t("network.noRunners")} />
+        <EmptyState title={t("network.noRunners")} mood="none" />
       ) : (
         <form noValidate onSubmit={(e) => void onSubmit(e)} aria-label={t("network.test")} className="card form-card">
           <FormAlert message={error} />

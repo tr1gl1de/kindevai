@@ -49,7 +49,7 @@ export function InvitationsSection() {
       <FormAlert message={actionError} />
       {invitations.isPending && <Loading />}
       {invitations.isError && <ErrorState message={errorMessage(t, invitations.error)} onRetry={() => void invitations.refetch()} />}
-      {invitations.data?.length === 0 && <EmptyState title={t("invitations.empty")} />}
+      {invitations.data?.length === 0 && <EmptyState title={t("invitations.empty")} mood="none" />}
       {invitations.data && invitations.data.length > 0 && (
         <div className="table-wrap">
           <table>
@@ -116,7 +116,7 @@ function NewInvitation({ blocked, onCreated }: { blocked: boolean; onCreated: (l
   if (projects.isError) return <ErrorState message={errorMessage(t, projects.error)} onRetry={() => void projects.refetch()} />;
   if (projects.data.length === 0) {
     return (
-      <EmptyState title={t("invitations.noProjects")}>
+      <EmptyState title={t("invitations.noProjects")} mood="none">
         <Link className="button" to="/projects">
           {t("invitations.toProjects")}
         </Link>

@@ -3,6 +3,7 @@ import { Link } from "react-router";
 import type { StorageForecast, StorageMachine, StorageVolume } from "../../api/types";
 import { ErrorState } from "../../ui/feedback";
 import { errorMessage } from "../../ui/errors";
+import { LevelBadge } from "../../ui/Badge";
 import { formatBytes, formatDateTime } from "../../ui/format";
 import { useStorageOverview } from "./api";
 import { AvailabilityBadge } from "./AvailabilityBadge";
@@ -78,7 +79,7 @@ function VolumeRow({ v }: { v: StorageVolume }) {
       </p>
       <meter min={0} max={100} low={75} high={85} optimum={0} value={used} aria-label={t("storage.meterLabel", { role, percent: used })} />
       <p>
-        <span className={`badge level-badge level-${v.level}`}>{t(`storage.level_${v.level}`)}</span>{" "}
+        <LevelBadge level={v.level}>{t(`storage.level_${v.level}`)}</LevelBadge>{" "}
         {t("storage.used", { percent: used })} · {t("storage.free", { free: formatBytes(v.availableBytes, lng), total: formatBytes(v.totalBytes, lng) })}
       </p>
       <p className="muted">

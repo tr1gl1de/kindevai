@@ -7,7 +7,8 @@ textarea {
   min-height: 8rem;
   resize: vertical;
   font-family: var(--font-mono);
-  font-size: 0.85rem;
+  font-size: var(--size-compact);
+  line-height: var(--leading-compact);
 }
 .code-value {
   font-family: var(--font-mono);
@@ -21,6 +22,7 @@ textarea {
 }
 .repo-github p {
   margin: 0;
-  font-size: 0.9rem;
+  font-size: var(--size-compact);
+  line-height: var(--leading-compact);
 }
 } /* closes .policy-rules (its nested rules above were left unclosed) */

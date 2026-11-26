@@ -200,7 +200,7 @@ function Cooldowns({ settings }: { settings: AgentSettings }) {
       <h2 id="cooldowns-title">{t("agents.cooldownsTitle")}</h2>
       <FormAlert message={error} />
       {settings.cooldowns.length === 0 ? (
-        <EmptyState title={t("agents.noCooldowns")}>
+        <EmptyState title={t("agents.noCooldowns")} mood="none">
           {t("agents.noCooldownsText")}
         </EmptyState>
       ) : (

@@ -33,7 +33,10 @@ export function ApprovalsPage() {
       ) : list.isError ? (
         <ErrorState message={errorMessage(t, list.error)} onRetry={() => void list.refetch()} />
       ) : list.data.length === 0 ? (
-        <EmptyState title={t(filter === "pending" ? "approvals.emptyPending" : "approvals.emptyOther")} />
+        <EmptyState
+          title={t(filter === "pending" ? "approvals.emptyPending" : "approvals.emptyOther")}
+          mood={filter === "pending" ? "success" : "idle"}
+        />
       ) : (
         <ApprovalTable items={list.data} />
       )}

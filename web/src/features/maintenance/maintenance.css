@@ -13,7 +13,8 @@
 }
 .maintenance-banner h2 {
   margin: 0 0 4px;
-  font-size: 1rem;
+  font-size: var(--size-body);
+  line-height: var(--leading-body);
 }
 .maintenance-banner p {
   margin: 4px 0;

@@ -1,5 +1,6 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { Kibi, type KibiMood } from "./Kibi";
 
 /** Page heading that receives focus on mount, so route changes are announced and keyboard focus resets. */
 export function PageHeading({ children }: { children: ReactNode }) {
@@ -36,9 +37,20 @@ export function ErrorState({ message, onRetry }: { message: string; onRetry?: ()
   );
 }
 
-export function EmptyState({ title, children }: { title: string; children?: ReactNode }) {
+/** A benign empty list or first use, with Kibi (KIN-120). Errors use ErrorState, which never shows the mascot. */
+export function EmptyState({
+  title,
+  mood = "idle",
+  children,
+}: {
+  title: string;
+  /** "none" for a small empty list inside a page section, so one page does not show Kibi several times. */
+  mood?: KibiMood | "none";
+  children?: ReactNode;
+}) {
   return (
     <section className="empty-state" aria-label={title}>
+      {mood !== "none" && <Kibi mood={mood} />}
       <h2>{title}</h2>
       {children}
     </section>

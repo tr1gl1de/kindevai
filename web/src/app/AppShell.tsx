@@ -99,7 +99,8 @@ function useDrawer() {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
+      // A dialog over the page owns Escape and focus.
+      if (e.key !== "Escape" || e.defaultPrevented || document.querySelector('[role="dialog"], [role="alertdialog"]')) return;
       setOpenOn(null);
       buttonRef.current?.focus();
     };

@@ -26,6 +26,24 @@ describe("navigation drawer", () => {
     expect(menu).toHaveFocus();
   });
 
+  it("leaves Escape to a dialog open over the page", async () => {
+    server.use(http.get("/api/auth/me", () => json(owner)));
+    await renderApp("/");
+    await screen.findByRole("heading", { level: 1, name: "Overview" });
+    const user = userEvent.setup();
+    const menu = screen.getByRole("button", { name: "Menu" });
+    await user.click(menu);
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    document.body.append(dialog);
+    try {
+      await user.keyboard("{Escape}");
+      expect(menu).toHaveAttribute("aria-expanded", "true");
+    } finally {
+      dialog.remove();
+    }
+  });
+
   it("closes after choosing a page", async () => {
     server.use(http.get("/api/auth/me", () => json(owner)));
     await renderApp("/");

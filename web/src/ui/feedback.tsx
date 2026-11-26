@@ -38,10 +38,19 @@ export function ErrorState({ message, onRetry }: { message: string; onRetry?: ()
 }
 
 /** A benign empty list or first use, with Kibi (KIN-120). Errors use ErrorState, which never shows the mascot. */
-export function EmptyState({ title, mood = "idle", children }: { title: string; mood?: KibiMood; children?: ReactNode }) {
+export function EmptyState({
+  title,
+  mood = "idle",
+  children,
+}: {
+  title: string;
+  /** "none" for a small empty list inside a page section, so one page does not show Kibi several times. */
+  mood?: KibiMood | "none";
+  children?: ReactNode;
+}) {
   return (
     <section className="empty-state" aria-label={title}>
-      <Kibi mood={mood} />
+      {mood !== "none" && <Kibi mood={mood} />}
       <h2>{title}</h2>
       {children}
     </section>

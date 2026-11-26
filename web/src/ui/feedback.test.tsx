@@ -21,6 +21,12 @@ describe("Kibi in feedback states", () => {
     expect(kibi(container)[0]).toHaveAttribute("data-mood", "success");
   });
 
+  it("leaves Kibi out of a small empty list inside a page section", async () => {
+    const { container } = await renderWithI18n(<EmptyState title="No invitations" mood="none" />);
+    expect(kibi(container)).toHaveLength(0);
+    expect(screen.getByRole("heading", { name: "No invitations" })).toBeInTheDocument();
+  });
+
   it("never shows Kibi on an error", async () => {
     const { container } = await renderWithI18n(<ErrorState message="Cannot reach the control plane." onRetry={() => {}} />);
     expect(screen.getByRole("alert")).toHaveTextContent("Cannot reach the control plane.");

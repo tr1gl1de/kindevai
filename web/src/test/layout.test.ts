@@ -71,6 +71,9 @@ describe("layout", () => {
     expect(decl(".topbar", "min-height")).toBe("var(--header)");
     expect(decl(".sidebar", "display", DESKTOP)).toBe("flex");
     expect(decl(".menu-button", "display", DESKTOP)).toBe("none");
+    expect(decl(".sidebar", "align-self", DESKTOP)).toBe("start");
+    // Sticky header: focus and anchors land below it (WCAG 2.4.11).
+    expect(decl("html", "scroll-padding-top", DESKTOP)).toBe("var(--header)");
   });
 
   it("hides the navigation drawer below 1024 px until the Menu button opens it", () => {

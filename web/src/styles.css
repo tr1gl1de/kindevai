@@ -293,10 +293,21 @@ h3 {
   }
 }
 @media (min-width: 1024px) {
+  /* Focused or skipped-to content never ends up under the sticky header (WCAG 2.4.11). */
+  html {
+    scroll-padding-top: var(--header);
+  }
+  /* The sidebar column's fill and divider run the full page height; the sticky nav itself is one screen tall. */
   .shell {
     grid-template-columns: var(--sidebar) minmax(0, 1fr);
     grid-template-rows: auto 1fr;
     grid-template-areas: "header header" "sidebar main";
+    background-image: linear-gradient(
+      to right,
+      var(--surface) calc(var(--sidebar) - 1px),
+      var(--border) calc(var(--sidebar) - 1px) var(--sidebar),
+      transparent var(--sidebar)
+    );
   }
   .topbar {
     position: sticky;
@@ -317,6 +328,7 @@ h3 {
     top: var(--header);
     max-height: calc(100vh - var(--header));
     overflow-y: auto;
+    align-self: start;
     padding: var(--space) 12px;
     border-bottom: 0;
     border-right: 1px solid var(--border);

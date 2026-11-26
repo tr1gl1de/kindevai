@@ -1,0 +1,12 @@
+{
+  "en": {
+    "name": "Kindevai",
+    "short_description": "Kindevai: autonomous AI development under human control. Alerts, approvals and the Kindevai Mini App.",
+    "description": "Collective intelligence. Individual care.\n\nKindevai turns YouTrack tasks into code changes made by AI agents on your own runners, under your approval rules.\n\nThis bot sends alerts and approval requests and opens the Kindevai Mini App. To receive them, link your Telegram account on the Account page of your Kindevai site."
+  },
+  "ru": {
+    "name": "Kindevai",
+    "short_description": "Kindevai: автономная AI-разработка под контролем человека. Уведомления, согласования и Mini App.",
+    "description": "Коллективный интеллект. Индивидуальная забота.\n\nKindevai превращает задачи YouTrack в изменения кода. Код пишут AI-агенты на ваших runners по вашим правилам согласования.\n\nБот присылает уведомления и запросы на согласование и открывает Mini App Kindevai. Чтобы получать их, привяжите Telegram-аккаунт на странице «Учётная запись» вашего сайта Kindevai."
+  }
+}

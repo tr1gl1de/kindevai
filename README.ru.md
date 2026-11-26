@@ -31,7 +31,7 @@ Code, ZCode) на внешних runners по правилам согласов�
 | `cmd/ai-runner` | Демон раннера (`enroll`, `fingerprint`, `run`, `version`) |
 | `internal/` | Go-пакеты Control Plane (`internal/runner/...` — раннер, `internal/protocol` — общие wire-сообщения) |
 | `web/` | Dashboard на React + TypeScript (Vite); `web/embed.go` встраивает сборку |
-| `docs/brand/` | Фирменные материалы: логотип Kindevai, знак и wordmark (SVG; светлый, тёмный, монохромный) |
+| `docs/brand/` | Фирменные материалы: логотип Kindevai, знак и wordmark (SVG; светлый, тёмный, монохромный); аватар Telegram-бота, фото Mini App и тексты бота в `telegram/` |
 | `scripts/` | Вспомогательные скрипты (worktree задач, учёт времени, замер нагрузки `measure-cp.sh`) |
 | `.claude/` | Правила, агенты и skills Claude Code для разработки репозитория |
 
@@ -625,6 +625,26 @@ push только для вас, без обхода). После **Refresh** н
    Токен хранится зашифрованным.
 4. Каждый пользователь сам привязывает свой Telegram на странице **Account** (одноразовая ссылка и 6-значный код).
    Алерты приходят привязанным пользователям в Telegram.
+5. По желанию оформите бота в стиле Kindevai. Эти настройки хранит BotFather, платформа их не меняет; файлы лежат в
+   `docs/brand/telegram/`:
+   - `/setuserpic` → ваш бот → отправьте `docs/brand/telegram/bot-avatar-640.png` как фото (Telegram обрезает его по
+     кругу, знак остаётся внутри).
+   - `/setname` → `en.name` (`Kindevai`); `/setabouttext` → `en.short_description` и `/setdescription` → `en.description` из
+     `docs/brand/telegram/bot-profile.json`.
+   - Фото Mini App: `/newapp` (шаг 2) просит картинку 640×360, позже — `/myapps` → ваш Mini App → **Edit Photo** (в некоторых версиях BotFather — в **Edit App**);
+     отправьте `docs/brand/telegram/miniapp-photo-640x360.png`.
+   - BotFather задаёт тексты по умолчанию — для всех языков без собственных. Чтобы пользователи с русским Telegram
+     видели русские, вызовите Bot API сами из корня репозитория (нужны `curl` и `jq`; токен попадает в curl через
+     stdin и не остаётся ни в истории shell, ни в списке процессов; каждый вызов печатает `true`):
+
+     ```bash
+     read -rs BOT_TOKEN; P=docs/brand/telegram/bot-profile.json
+     for f in Name:name ShortDescription:short_description Description:description; do
+       printf 'url = "https://api.telegram.org/bot%s/setMy%s"\n' "$BOT_TOKEN" "${f%%:*}" |
+         curl -sS -K - --data-urlencode language_code=ru \
+           --data-urlencode "${f#*:}=$(jq -er ".ru.${f#*:}" "$P")" | jq -e .ok
+     done
+     ```
 
 ### 7. Добавьте runner
 

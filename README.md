@@ -31,7 +31,7 @@ specification lives in the YouTrack Knowledge Base (project `KIN`, root article 
 | `cmd/ai-runner` | Runner daemon (`enroll`, `fingerprint`, `run`, `version`) |
 | `internal/` | Go packages of the Control Plane (`internal/runner/...`: the runner, `internal/protocol`: shared wire messages) |
 | `web/` | React + TypeScript Dashboard (Vite); `web/embed.go` embeds the build |
-| `docs/brand/` | Brand assets: Kindevai lockup, mark and wordmark (SVG; light, dark, mono) |
+| `docs/brand/` | Brand assets: Kindevai lockup, mark and wordmark (SVG; light, dark, mono); Telegram bot avatar, Mini App photo and bot texts in `telegram/` |
 | `scripts/` | Developer helpers (task worktrees, time tracking, `measure-cp.sh` load measurement) |
 | `.claude/` | Claude Code rules, agents and skills used to develop this repo |
 
@@ -619,6 +619,26 @@ must no longer show the "main/master not protected" warning.
    bot token. The token is stored encrypted.
 4. Each user links their own Telegram account on the **Account** page (a one-time link plus a 6-digit code). Alerts
    reach linked users in Telegram.
+5. Optionally give the bot the Kindevai look. BotFather keeps these settings, so the platform never changes them;
+   the files are in `docs/brand/telegram/`:
+   - `/setuserpic` → your bot → send `docs/brand/telegram/bot-avatar-640.png` as a photo (Telegram crops it to a
+     circle; the mark stays inside).
+   - `/setname` → `en.name` (`Kindevai`); `/setabouttext` → `en.short_description` and `/setdescription` → `en.description` from
+     `docs/brand/telegram/bot-profile.json`.
+   - Mini App photo: `/newapp` (step 2) asks for a 640×360 image, later `/myapps` → your Mini App → **Edit Photo** (in some BotFather versions under **Edit App**);
+     send `docs/brand/telegram/miniapp-photo-640x360.png`.
+   - BotFather sets the default texts, shown in every language without its own. To show the Russian ones to users
+     with Russian Telegram, run the Bot API yourself from the repository root (needs `curl` and `jq`; the token goes
+     to curl through stdin, so it stays out of the shell history and the process list; each call prints `true`):
+
+     ```bash
+     read -rs BOT_TOKEN; P=docs/brand/telegram/bot-profile.json
+     for f in Name:name ShortDescription:short_description Description:description; do
+       printf 'url = "https://api.telegram.org/bot%s/setMy%s"\n' "$BOT_TOKEN" "${f%%:*}" |
+         curl -sS -K - --data-urlencode language_code=ru \
+           --data-urlencode "${f#*:}=$(jq -er ".ru.${f#*:}" "$P")" | jq -e .ok
+     done
+     ```
 
 ### 7. Add a runner
 

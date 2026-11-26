@@ -1,28 +1,36 @@
-/* Design tokens. Telegram Mini App variables win when present, so the UI follows the user's Telegram theme. */
+/* Design tokens: the Kindevai Brand System v1.0 palette (KIN-119) — Cream page, white surfaces, Charcoal text, Honey
+   for the main action, dark amber for state indicators that need 3:1 on Cream. Telegram Mini App variables win when
+   present, so the UI follows the user's Telegram theme. Ratios below are against --bg / --surface / --warn-bg. */
 :root {
   color-scheme: light dark;
-  --bg: var(--tg-theme-bg-color, #ffffff);
-  --surface: var(--tg-theme-secondary-bg-color, #f5f6f8);
-  --text: var(--tg-theme-text-color, #16181d);
-  --muted: var(--tg-theme-hint-color, #5b6270); /* 6.1:1 on --bg */
-  --accent: var(--tg-theme-button-color, #1f5fd6); /* 5.6:1 on white */
-  --accent-text: var(--tg-theme-button-text-color, #ffffff);
-  --link: var(--tg-theme-link-color, #1a56c4);
-  --border: #d5d9e0; /* decorative dividers and outlines only */
-  --border-strong: #767d8a; /* control boundaries, chart axes: 3.8:1 on --surface and --warn-bg (KIN-111) */
-  --danger: #b3261e; /* 6.4:1 on white */
+  --bg: var(--tg-theme-bg-color, #f9f6ec); /* brand Cream */
+  --surface: var(--tg-theme-secondary-bg-color, #ffffff);
+  --text: var(--tg-theme-text-color, #242420); /* brand Charcoal: 14.4:1 */
+  --muted: var(--tg-theme-hint-color, #5c6056); /* 6.0 / 6.4 / 5.6:1 */
+  /* Honey fill of primary buttons and the skip link; Charcoal text on it (9.1:1), never white. */
+  --primary: var(--tg-theme-button-color, #ffb928);
+  --primary-text: var(--tg-theme-button-text-color, #242420);
+  --primary-hover: var(--tg-theme-button-color, #eca91d); /* Telegram: its own button colour, no hover shade */
+  --accent: var(--tg-theme-button-color, #805300); /* current nav/segment/revision, charts: 6.2 / 6.7 / 5.8:1 */
+  --link: var(--tg-theme-link-color, #805300);
+  --border: #d9d5c9; /* decorative dividers and outlines only */
+  --border-strong: #817f74; /* control boundaries, chart axes: 3.7 / 4.0 / 3.5:1 (KIN-111) */
+  --danger: #b42335; /* 6.0:1 */
   --danger-text: #ffffff;
-  --warn-bg: #fff6e0;
-  --warn-border: #a87300; /* 4.1:1 on --bg, 3.8:1 on --surface and --warn-bg (KIN-110) */
+  --warn-bg: #fcefd0;
+  --warn-border: #875700; /* brand warning: 5.7 / 6.2 / 5.4:1 (KIN-110) */
   /* Text, hints and links on --warn-bg. Never Telegram's colours: nothing bounds those against --warn-bg (KIN-114). */
-  --warn-text: #16181d;
-  --warn-muted: #5b6270;
-  --warn-link: #1a56c4;
-  --focus: #1f5fd6;
+  --warn-text: #242420;
+  --warn-muted: #5c6056;
+  --warn-link: #805300;
+  --focus: #805300;
   --radius: 10px;
+  --radius-lg: 16px;
   --space: 16px;
   --tap: 44px;
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-ui: "Nunito Sans Variable", "Nunito Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-family: var(--font-ui);
   font-size: 16px;
   line-height: 1.5;
 }
@@ -32,45 +40,49 @@
    borders) match its text colour (KIN-111). Keep both blocks identical; contrast.test.ts checks it. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: var(--tg-theme-bg-color, #14161a);
-    --surface: var(--tg-theme-secondary-bg-color, #1e2128);
-    --text: var(--tg-theme-text-color, #e9ecf1);
-    --muted: var(--tg-theme-hint-color, #a6adbb);
-    --accent: var(--tg-theme-button-color, #6c9eff);
-    --accent-text: var(--tg-theme-button-text-color, #0b1220);
-    --link: var(--tg-theme-link-color, #8ab4ff);
-    --border: #343944;
-    --border-strong: #7c8494; /* 4.3:1 on --surface, 4.1:1 on --warn-bg */
-    --danger: #ff8a80;
-    --danger-text: #1a0503;
-    --warn-bg: #2b2412;
-    --warn-border: #d9a520; /* 6.9:1 on --warn-bg, 7.2:1 on --surface */
-    --warn-text: #e9ecf1;
-    --warn-muted: #a6adbb;
-    --warn-link: #8ab4ff;
-    --focus: #8ab4ff;
+    --bg: var(--tg-theme-bg-color, #191916);
+    --surface: var(--tg-theme-secondary-bg-color, #242420);
+    --text: var(--tg-theme-text-color, #f9f6ec);
+    --muted: var(--tg-theme-hint-color, #bdbdae);
+    --primary: var(--tg-theme-button-color, #ffb928);
+    --primary-text: var(--tg-theme-button-text-color, #242420);
+    --primary-hover: var(--tg-theme-button-color, #ffd16a);
+    --accent: var(--tg-theme-button-color, #ffb928);
+    --link: var(--tg-theme-link-color, #ffd16a);
+    --border: #46463c;
+    --border-strong: #88887b; /* 4.9 / 4.3 / 4.1:1 */
+    --danger: #ff9aa5;
+    --danger-text: #242420;
+    --warn-bg: #2e2815;
+    --warn-border: #ffd16a;
+    --warn-text: #f9f6ec;
+    --warn-muted: #bdbdae;
+    --warn-link: #ffd16a;
+    --focus: #ffd16a;
   }
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: var(--tg-theme-bg-color, #14161a);
-  --surface: var(--tg-theme-secondary-bg-color, #1e2128);
-  --text: var(--tg-theme-text-color, #e9ecf1);
-  --muted: var(--tg-theme-hint-color, #a6adbb);
-  --accent: var(--tg-theme-button-color, #6c9eff);
-  --accent-text: var(--tg-theme-button-text-color, #0b1220);
-  --link: var(--tg-theme-link-color, #8ab4ff);
-  --border: #343944;
-  --border-strong: #7c8494;
-  --danger: #ff8a80;
-  --danger-text: #1a0503;
-  --warn-bg: #2b2412;
-  --warn-border: #d9a520;
-  --warn-text: #e9ecf1;
-  --warn-muted: #a6adbb;
-  --warn-link: #8ab4ff;
-  --focus: #8ab4ff;
+  --bg: var(--tg-theme-bg-color, #191916);
+  --surface: var(--tg-theme-secondary-bg-color, #242420);
+  --text: var(--tg-theme-text-color, #f9f6ec);
+  --muted: var(--tg-theme-hint-color, #bdbdae);
+  --primary: var(--tg-theme-button-color, #ffb928);
+  --primary-text: var(--tg-theme-button-text-color, #242420);
+  --primary-hover: var(--tg-theme-button-color, #ffd16a);
+  --accent: var(--tg-theme-button-color, #ffb928);
+  --link: var(--tg-theme-link-color, #ffd16a);
+  --border: #46463c;
+  --border-strong: #88887b;
+  --danger: #ff9aa5;
+  --danger-text: #242420;
+  --warn-bg: #2e2815;
+  --warn-border: #ffd16a;
+  --warn-text: #f9f6ec;
+  --warn-muted: #bdbdae;
+  --warn-link: #ffd16a;
+  --focus: #ffd16a;
 }
 
 :root[data-theme="light"] {
@@ -94,6 +106,14 @@ a {
   color: var(--link);
 }
 
+code,
+pre,
+kbd,
+samp {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+}
+
 :focus-visible {
   outline: 3px solid var(--focus);
   outline-offset: 2px;
@@ -113,8 +133,8 @@ a {
   position: absolute;
   left: var(--space);
   top: -100px;
-  background: var(--accent);
-  color: var(--accent-text);
+  background: var(--primary);
+  color: var(--primary-text);
   padding: 8px 12px;
   border-radius: var(--radius);
   z-index: 10;
@@ -133,8 +153,16 @@ a {
   border-bottom: 1px solid var(--border);
   background: var(--surface);
 }
+/* The Kindevai lockup: inline SVG whose Charcoal/Cream strokes take the text colour (BrandLogo.tsx). */
 .brand {
-  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text);
+}
+.brand-logo {
+  display: block;
+  height: 36px;
+  width: auto;
 }
 .nav {
   display: flex;
@@ -211,7 +239,7 @@ a {
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   padding: var(--space);
 }
 .card h2 {
@@ -348,10 +376,14 @@ textarea[aria-invalid="true"] {
   cursor: pointer;
 }
 .button.primary {
-  background: var(--accent);
-  color: var(--accent-text);
-  border-color: var(--accent);
-  font-weight: 600;
+  background: var(--primary);
+  color: var(--primary-text);
+  border-color: var(--primary);
+  font-weight: 700;
+}
+.button.primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+  border-color: var(--primary-hover);
 }
 .button.danger {
   background: var(--danger);

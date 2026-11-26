@@ -1,9 +1,19 @@
-# kindevai — AI Development Platform
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/lockup-dark.svg">
+    <img src="docs/brand/lockup-light.svg" alt="Kindevai" width="320">
+  </picture>
+</p>
+
+# Kindevai
+
+**Collective intelligence. Individual care.** Autonomous AI development platform.
 
 [Русская версия](README.ru.md)
 
-Self-hosted platform that turns YouTrack tasks into code changes executed by AI CLIs (Codex, Claude Code, ZCode)
-on external runners. The project is under active development; the specification lives in the YouTrack Knowledge
+Kindevai is a self-hosted platform that turns YouTrack tasks into code changes executed by AI CLIs (Codex, Claude
+Code, ZCode) on external runners — autonomy under human control, with the owner's
+approval rules in the loop. The project is under active development; the specification lives in the YouTrack Knowledge
 Base (project `KIN`, root article `KIN-A-1`).
 
 ## Architecture at a glance
@@ -22,6 +32,7 @@ Base (project `KIN`, root article `KIN-A-1`).
 | `cmd/ai-runner` | Runner daemon (`enroll`, `fingerprint`, `run`, `version`) |
 | `internal/` | Go packages of the Control Plane (`internal/runner/...`: the runner, `internal/protocol`: shared wire messages) |
 | `web/` | React + TypeScript Dashboard (Vite); `web/embed.go` embeds the build |
+| `docs/brand/` | Brand assets: Kindevai lockup, mark and wordmark (SVG; light, dark, mono) |
 | `scripts/` | Developer helpers (task worktrees, time tracking, `measure-cp.sh` load measurement) |
 | `.claude/` | Claude Code rules, agents and skills used to develop this repo |
 
@@ -730,6 +741,15 @@ All third-party actions and images are pinned by commit SHA / digest.
 3. Package `ghcr.io/tr1gl1de/kindevai`: grant Actions write access only to this repository (dev images go to
    `kindevai-dev`).
 Locally: `make lint vuln build`, `make release-snapshot` (needs GoReleaser).
+
+## Brand
+
+Kindevai Brand System v1.0: write the name as **Kindevai** in text (the lowercase *kindevai* exists only inside the
+logo artwork; identifiers such as `kindevai-runner` keep their spelling). Palette: Honey `#FFB928` (main action),
+Charcoal `#242420` (text), Cream `#F9F6EC` (background), Sage `#899680` (supporting graphics). Use
+`docs/brand/lockup-light.svg` on light backgrounds and `lockup-dark.svg` on dark ones; do not stretch, recolour or
+set the wordmark in a font. The web UI uses Nunito Sans and JetBrains Mono, bundled from Fontsource (SIL Open Font
+License 1.1) — the browser never loads fonts from a third-party CDN.
 
 ## License
 

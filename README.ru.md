@@ -1,9 +1,19 @@
-# kindevai — AI Development Platform
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/lockup-dark.svg">
+    <img src="docs/brand/lockup-light.svg" alt="Kindevai" width="320">
+  </picture>
+</p>
+
+# Kindevai
+
+**Коллективный интеллект. Индивидуальная забота.** Платформа автономной AI-разработки.
 
 [English version](README.md)
 
-Self-hosted платформа, которая превращает задачи YouTrack в изменения кода. Код пишут AI CLI (Codex, Claude Code,
-ZCode) на внешних runners. Проект в активной разработке; спецификация находится в Knowledge Base YouTrack
+Kindevai — self-hosted платформа, которая превращает задачи YouTrack в изменения кода. Код пишут AI CLI (Codex, Claude
+Code, ZCode) на внешних runners — автономность под контролем человека, с правилами
+согласования владельца. Проект в активной разработке; спецификация находится в Knowledge Base YouTrack
 (проект `KIN`, корневая статья `KIN-A-1`).
 
 ## Архитектура кратко
@@ -22,6 +32,7 @@ ZCode) на внешних runners. Проект в активной разра�
 | `cmd/ai-runner` | Демон раннера (`enroll`, `fingerprint`, `run`, `version`) |
 | `internal/` | Go-пакеты Control Plane (`internal/runner/...` — раннер, `internal/protocol` — общие wire-сообщения) |
 | `web/` | Dashboard на React + TypeScript (Vite); `web/embed.go` встраивает сборку |
+| `docs/brand/` | Фирменные материалы: логотип Kindevai, знак и wordmark (SVG; светлый, тёмный, монохромный) |
 | `scripts/` | Вспомогательные скрипты (worktree задач, учёт времени, замер нагрузки `measure-cp.sh`) |
 | `.claude/` | Правила, агенты и skills Claude Code для разработки репозитория |
 
@@ -738,6 +749,15 @@ make clean            # удалить артефакты сборки и тес
 3. Пакет `ghcr.io/tr1gl1de/kindevai`: права записи из Actions только для этого репозитория (dev-образы — в
    `kindevai-dev`).
 Локально: `make lint vuln build`, `make release-snapshot` (нужен GoReleaser).
+
+## Бренд
+
+Kindevai Brand System v1.0: в тексте пишем **Kindevai** (строчное *kindevai* — только внутри логотипа; идентификаторы
+вроде `kindevai-runner` не меняются). Палитра: Honey `#FFB928` (основное действие), Charcoal `#242420` (текст), Cream
+`#F9F6EC` (фон), Sage `#899680` (вспомогательная графика). На светлом фоне — `docs/brand/lockup-light.svg`, на тёмном —
+`lockup-dark.svg`; не растягивать, не перекрашивать и не набирать wordmark шрифтом. Веб-интерфейс использует Nunito
+Sans и JetBrains Mono из пакетов Fontsource (SIL Open Font License 1.1) внутри сборки — браузер не загружает шрифты со
+сторонних CDN.
 
 ## Лицензия
 

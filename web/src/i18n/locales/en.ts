@@ -1,7 +1,7 @@
 // Source of truth for UI strings. Every key added here must also be added to ru.ts (enforced by types and tests).
 export const en = {
   app: {
-    title: "AI Platform",
+    title: "Kindevai",
     skipToContent: "Skip to content",
     loading: "Loading…",
     unreachable: "Cannot reach the control plane. Check that it is running and try again.",
@@ -62,7 +62,7 @@ export const en = {
     not_found: "It no longer exists. Reload the page.",
   },
   setup: {
-    title: "Set up AI Platform",
+    title: "Set up Kindevai",
     intro: "Create the owner account. The one-time setup token is in the file secrets/setup-token in the data directory on the server.",
     token: "Setup token",
     tokenHint: "On the server run: ai-platform setup-token (Docker: docker compose exec cp ai-platform setup-token). Valid for one hour.",

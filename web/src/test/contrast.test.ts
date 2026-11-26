@@ -77,10 +77,12 @@ const PAIRS: [string, string[], number][] = [
   ["--link", SURFACES, TEXT], // links, also inside the maintenance banner
   ["--danger", SURFACES, TEXT], // field errors, stderr lines, over-limit counter
   ["--bg", ["--text"], TEXT], // .notice toast
-  ["--accent-text", ["--accent"], TEXT], // primary buttons, skip link
+  // KIN-119: primary buttons and the skip link are filled with brand Honey (--primary). Their text identifies them, so
+  // the fill needs no 3:1 against the page (WCAG 1.4.11 exempts it); the text on it needs 4.5:1, hovered too.
+  ["--primary-text", ["--primary", "--primary-hover"], TEXT], // primary buttons, skip link
   ["--danger-text", ["--danger"], TEXT], // danger buttons, critical badges
   ["--focus", SURFACES, UI], // focus ring: drawn with a 2px offset, so it sits on the surface, never on the fill
-  ["--accent", SURFACES, UI], // primary button fill, current nav/revision/segment, chart series
+  ["--accent", SURFACES, UI], // current nav/revision/segment, spinner, chart series, secret and warning edges
   ["--danger", SURFACES, UI], // invalid inputs, failed-state badge borders, critical threshold
   ["--warn-border", SURFACES, UI], // warn badges/cards, warning threshold
   ["--border-strong", SURFACES, UI], // input, button and segmented control boundaries, chart axes

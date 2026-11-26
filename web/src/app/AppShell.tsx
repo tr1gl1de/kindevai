@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { NavLink } from "react-router";
+import { BrandLogo } from "../ui/BrandLogo";
 import type { Me } from "../api/types";
 import { useLogout } from "../features/identity/api";
 import { LanguageSwitcher } from "../i18n/LanguageSwitcher";
@@ -18,7 +19,9 @@ export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
         {t("app.skipToContent")}
       </a>
       <header className="topbar">
-        <span className="brand">{t("app.title")}</span>
+        <span className="brand">
+          <BrandLogo />
+        </span>
         <nav aria-label={t("nav.label")} className="nav">
           <NavLink to="/" end>
             {t("nav.overview")}

@@ -2,7 +2,7 @@ import type { Messages } from "./en";
 
 export const ru: Messages = {
   app: {
-    title: "AI Platform",
+    title: "Kindevai",
     skipToContent: "Перейти к содержимому",
     loading: "Загрузка…",
     unreachable: "Нет связи с control plane. Проверьте, что он запущен, и попробуйте снова.",
@@ -62,7 +62,7 @@ export const ru: Messages = {
     not_found: "Этого больше нет. Обновите страницу.",
   },
   setup: {
-    title: "Настройка AI Platform",
+    title: "Настройка Kindevai",
     intro: "Создайте учётную запись владельца. Одноразовый setup token лежит в файле secrets/setup-token в каталоге данных на сервере.",
     token: "Setup token",
     tokenHint: "На сервере выполните: ai-platform setup-token (Docker: docker compose exec cp ai-platform setup-token). Действует один час.",

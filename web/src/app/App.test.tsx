@@ -27,7 +27,8 @@ describe("first-run setup", () => {
     );
     const { container } = await renderApp("/");
     const user = userEvent.setup();
-    expect(await screen.findByRole("heading", { level: 1, name: "Set up AI Platform" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 1, name: "Set up Kindevai" })).toBeInTheDocument();
+    expect(within(screen.getByRole("banner")).getByRole("img", { name: "Kindevai" })).toBeInTheDocument();
     await expectAccessible(container);
 
     await fill(user, screen.getByLabelText("Setup token"), "tok");
@@ -49,6 +50,7 @@ describe("first-run setup", () => {
     await user.click(screen.getByRole("button", { name: "Create owner and finish setup" }));
 
     expect(await screen.findByRole("heading", { level: 1, name: "Projects" })).toBeInTheDocument();
+    expect(within(screen.getByRole("banner")).getByRole("img", { name: "Kindevai" })).toBeInTheDocument();
     expect(setupBody).toEqual({ token: "tok", login: "owner", password: "correct horse battery", platformName: "Acme AI" });
   });
 

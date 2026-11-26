@@ -1,5 +1,8 @@
 // The base stylesheet comes first: feature stylesheets (imported by their components) follow it in the cascade.
 import "./styles.css";
+// KIN-119: brand fonts from the bundle (Fontsource, OFL-1.1), no font CDN. Variable weight axis, Latin + Cyrillic.
+import "@fontsource-variable/nunito-sans/wght.css";
+import "@fontsource-variable/jetbrains-mono/wght.css";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";

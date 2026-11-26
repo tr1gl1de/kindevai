@@ -6,11 +6,11 @@
 textarea {
   min-height: 8rem;
   resize: vertical;
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.85rem;
 }
 .code-value {
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   word-break: break-all;
 }
 .repo-github {

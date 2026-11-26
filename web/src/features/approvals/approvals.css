@@ -3,26 +3,12 @@
   display: grid;
   gap: var(--space);
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-textarea {
+}
+/* KIN-122: one path pattern per line — monospace, like the patterns in the read-only view. */
+.policy-rules textarea {
   min-height: 8rem;
   resize: vertical;
   font-family: var(--font-mono);
   font-size: var(--size-compact);
   line-height: var(--leading-compact);
 }
-.code-value {
-  font-family: var(--font-mono);
-  word-break: break-all;
-}
-.repo-github {
-  font-weight: normal;
-  display: grid;
-  gap: 4px;
-  justify-items: start;
-}
-.repo-github p {
-  margin: 0;
-  font-size: var(--size-compact);
-  line-height: var(--leading-compact);
-}
-} /* closes .policy-rules (its nested rules above were left unclosed) */

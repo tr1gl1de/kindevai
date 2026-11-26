@@ -11,6 +11,7 @@ import { useNotify } from "../../ui/notify";
 import { useAddRepository, useBindYouTrackProject, useProjectIntegrations, useRemoveRepository, useSyncRepository, useUpdateRepository } from "./api";
 import { githubFailure } from "./GitHubSettings";
 import { fieldError } from "./IntegrationsPage";
+import "./integrations.css";
 
 /** Owner-only part of the project page: YouTrack project link and the repository registry. */
 export function ProjectIntegrationsPanel({ project }: { project: Project }) {

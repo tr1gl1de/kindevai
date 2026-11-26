@@ -12,6 +12,7 @@ import { formatDateTime } from "../../ui/format";
 import { useNotify } from "../../ui/notify";
 import { useCheckGitHub, useDisconnectGitHub, useSaveGitHub } from "./api";
 import { fieldError } from "./IntegrationsPage";
+import "./integrations.css";
 
 /** Failure codes of the GitHub client with their own message; others read as "unknown". */
 const knownCodes = [
@@ -193,6 +194,7 @@ export function GitHubSettings({ app }: { app: GitHubApp | null }) {
         <TextAreaField
           ref={register("privateKey")}
           label={t("github.privateKey")}
+          className="code-value"
           hint={setHint(app?.privateKey, t("github.privateKeyHint"))}
           keepHint
           error={errors.privateKey}

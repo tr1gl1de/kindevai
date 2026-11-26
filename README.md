@@ -12,9 +12,8 @@
 [Русская версия](README.ru.md)
 
 Kindevai is a self-hosted platform that turns YouTrack tasks into code changes executed by AI CLIs (Codex, Claude
-Code, ZCode) on external runners — autonomy under human control, with the owner's
-approval rules in the loop. The project is under active development; the specification lives in the YouTrack Knowledge
-Base (project `KIN`, root article `KIN-A-1`).
+Code, ZCode) on external runners, under the owner's approval rules. The project is under active development; the
+specification lives in the YouTrack Knowledge Base (project `KIN`, root article `KIN-A-1`).
 
 ## Architecture at a glance
 

@@ -78,7 +78,8 @@ const PAIRS: [string, string[], number][] = [
   ["--danger", SURFACES, TEXT], // field errors, stderr lines, over-limit counter
   ["--bg", ["--text"], TEXT], // .notice toast
   // KIN-119: primary buttons and the skip link are filled with brand Honey (--primary). Their text identifies them, so
-  // the fill needs no 3:1 against the page (WCAG 1.4.11 exempts it); the text on it needs 4.5:1, hovered too.
+  // the fill needs no 3:1 against the page (WCAG 1.4.11 exempts it); the text on it needs 4.5:1, hovered too. Text
+  // buttons only: an icon-only primary button would need a 3:1 boundary.
   ["--primary-text", ["--primary", "--primary-hover"], TEXT], // primary buttons, skip link
   ["--danger-text", ["--danger"], TEXT], // danger buttons, critical badges
   ["--focus", SURFACES, UI], // focus ring: drawn with a 2px offset, so it sits on the surface, never on the fill

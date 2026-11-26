@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 export function BrandLogo() {
   const { t } = useTranslation();
   return (
-    <svg className="brand-logo" role="img" aria-label={t("app.title")} viewBox="0 0 655 140" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <svg className="brand-logo" role="img" focusable="false" aria-label={t("app.title")} viewBox="0 0 655 140" fill="none" xmlns="http://www.w3.org/2000/svg">
       <g transform="translate(0 0) scale(.65)">
       <g strokeLinejoin="round" strokeLinecap="round">
       <path d="M72 127 83 137 83 162 61 175 40 162 40 138Z M168 127 157 137 157 162 179 175 200 162 200 138Z" fill="#899680"/>

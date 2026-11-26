@@ -121,12 +121,17 @@ describe("stylesheets", () => {
 });
 
 // The style rules opened inside another style rule (at-rules such as @media are transparent), with the selector of
-// the innermost enclosing style rule.
+// the innermost enclosing style rule; an unmatched `}` or a block left open at the end of the sheet is reported too.
+// Strings and url(...) are blanked first so braces inside them do not count.
 function nestedRules(css: string): { parent: string; child: string }[] {
   const out: { parent: string; child: string }[] = [];
   const stack: (string | null)[] = []; // per open block: its selector, or null for an at-rule
   let head = "";
-  for (const ch of css.replace(/\/\*[\s\S]*?\*\//g, "")) {
+  const text = css
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, '""')
+    .replace(/url\([^)]*\)/g, "url()");
+  for (const ch of text) {
     if (ch === "{") {
       const sel = head.trim().replace(/\s+/g, " ");
       const atRule = sel.startsWith("@");
@@ -135,6 +140,7 @@ function nestedRules(css: string): { parent: string; child: string }[] {
       stack.push(atRule ? null : sel);
       head = "";
     } else if (ch === "}") {
+      if (stack.length === 0) out.push({ parent: "<top level>", child: "<unmatched }>" });
       stack.pop();
       head = "";
     } else if (ch === ";") {
@@ -143,6 +149,7 @@ function nestedRules(css: string): { parent: string; child: string }[] {
       head += ch;
     }
   }
+  for (const open of stack) out.push({ parent: open ?? "<at-rule>", child: "<unclosed>" });
   return out;
 }
 

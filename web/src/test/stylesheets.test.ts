@@ -83,6 +83,19 @@ describe("stylesheets", () => {
     }
   });
 
+  // KIN-122: an unclosed `{` turns the rules after it into nested rules of that selector, so they silently apply only
+  // inside it. Native nesting is not a style used here; list a deliberate nested rule as "<sheet> <parent> <child>".
+  it("has no style rule nested inside another style rule", () => {
+    const allowed = new Set<string>([]);
+    const sheets = all.filter((f) => f.endsWith(".css"));
+    const nested = sheets.flatMap((sheet) =>
+      nestedRules(readFileSync(join(src, sheet), "utf8"))
+        .map(({ parent, child }) => `${sheet} ${parent} ${child}`)
+        .filter((n) => !allowed.has(n)),
+    );
+    expect(nested).toEqual([]);
+  });
+
   // KIN-109: before KIN-68 these accents sat in sheets bundled ahead of the base, so the base .badge/.card border
   // shorthand always won. Feature sheets now follow the base, so the accents render; keep them declared.
   it.each([
@@ -98,10 +111,47 @@ describe("stylesheets", () => {
     ["features/planDiscussion/planDiscussion.css", ".discussion-status.status-DELIVERED", "border-color: var(--warn-border)"],
     ["features/planDiscussion/planDiscussion.css", ".discussion-revision-current", "border: 2px solid var(--accent)"],
     ["features/planDiscussion/planDiscussion.css", ".discussion-status", "display: inline-flex"],
+    // KIN-122: these were nested under .policy-rules, so they never applied where their classes are used.
+    ["features/integrations/integrations.css", ".code-value", "font-family: var(--font-mono)"],
+    ["features/integrations/integrations.css", ".repo-github", "display: grid"],
+    ["features/approvals/approvals.css", ".policy-rules textarea", "font-family: var(--font-mono)"],
   ])("%s gives %s the accent %s", (sheet, selector, declaration) => {
     expect(declarations(readFileSync(join(src, sheet), "utf8"), selector)).toContain(declaration);
   });
 });
+
+// The style rules opened inside another style rule (at-rules such as @media are transparent), with the selector of
+// the innermost enclosing style rule; an unmatched `}` or a block left open at the end of the sheet is reported too.
+// Strings and url(...) are blanked first so braces inside them do not count.
+function nestedRules(css: string): { parent: string; child: string }[] {
+  const out: { parent: string; child: string }[] = [];
+  const stack: (string | null)[] = []; // per open block: its selector, or null for an at-rule
+  let head = "";
+  const text = css
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, '""')
+    .replace(/url\([^)]*\)/g, "url()");
+  for (const ch of text) {
+    if (ch === "{") {
+      const sel = head.trim().replace(/\s+/g, " ");
+      const atRule = sel.startsWith("@");
+      const parent = [...stack].reverse().find((s) => s !== null);
+      if (!atRule && parent != null) out.push({ parent, child: sel });
+      stack.push(atRule ? null : sel);
+      head = "";
+    } else if (ch === "}") {
+      if (stack.length === 0) out.push({ parent: "<top level>", child: "<unmatched }>" });
+      stack.pop();
+      head = "";
+    } else if (ch === ";") {
+      head = "";
+    } else {
+      head += ch;
+    }
+  }
+  for (const open of stack) out.push({ parent: open ?? "<at-rule>", child: "<unclosed>" });
+  return out;
+}
 
 // The declarations of the top-level rules whose selector list contains exactly `selector`.
 function declarations(css: string, selector: string): string[] {

@@ -8,3 +8,25 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* KIN-28: machine values (webhook URL, the App private key) in monospace, wrapped anywhere. */
+.code-value {
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+textarea.code-value {
+  font-size: var(--size-compact);
+  line-height: var(--leading-compact);
+}
+/* KIN-28: the GitHub status of a registered repository. */
+.repo-github {
+  font-weight: normal;
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+}
+.repo-github p {
+  margin: 0;
+  font-size: var(--size-compact);
+  line-height: var(--leading-compact);
+}

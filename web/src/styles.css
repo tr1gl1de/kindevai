@@ -1,0 +1,928 @@
+/* Design tokens: the Kindevai Brand System v1.0 palette (KIN-119) — Cream page, white surfaces, Charcoal text, Honey
+   for the main action, dark amber for state indicators that need 3:1 on Cream. Telegram Mini App variables win when
+   present, so the UI follows the user's Telegram theme. Ratios below are against --bg / --surface / --warn-bg. */
+:root {
+  color-scheme: light dark;
+  --bg: var(--tg-theme-bg-color, #f9f6ec); /* brand Cream */
+  --surface: var(--tg-theme-secondary-bg-color, #ffffff);
+  --text: var(--tg-theme-text-color, #242420); /* brand Charcoal: 14.4:1 */
+  --muted: var(--tg-theme-hint-color, #5c6056); /* 6.0 / 6.4 / 5.6:1 */
+  /* Honey fill of primary buttons and the skip link; Charcoal text on it (9.1:1), never white. */
+  --primary: var(--tg-theme-button-color, #ffb928);
+  --primary-text: var(--tg-theme-button-text-color, #242420);
+  --primary-hover: var(--tg-theme-button-color, #eca91d); /* Telegram: its own button colour, no hover shade */
+  --accent: var(--tg-theme-button-color, #805300); /* current nav/segment/revision, charts: 6.2 / 6.7 / 5.8:1 */
+  --link: var(--tg-theme-link-color, #805300);
+  --border: #d9d5c9; /* decorative dividers and outlines only */
+  --border-strong: #817f74; /* control boundaries, chart axes: 3.7 / 4.0 / 3.5:1 (KIN-111) */
+  --danger: #b42335; /* 6.0:1 */
+  --danger-text: #ffffff;
+  --warn-bg: #fcefd0;
+  --warn-border: #875700; /* brand warning: 5.7 / 6.2 / 5.4:1 (KIN-110) */
+  /* Text, hints and links on --warn-bg. Never Telegram's colours: nothing bounds those against --warn-bg (KIN-114). */
+  --warn-text: #242420;
+  --warn-muted: #5c6056;
+  --warn-link: #805300;
+  --focus: #805300;
+  /* KIN-120: state badge icons and borders (brand success/info), 3:1 on every surface. */
+  --success: #28734d; /* 5.3 / 5.7 / 5.0:1 */
+  --info: #255a91; /* 6.6 / 7.1 / 6.2:1 */
+  --radius: 10px;
+  --radius-lg: 16px;
+  --space: 16px;
+  --tap: 44px;
+  /* KIN-120: Brand System v1.0 layout (components.md): 248 px sidebar and 64 px header from 1024 px. */
+  --sidebar: 248px;
+  --header: 64px;
+  /* Brandbook type scale: size/line height pairs, always set together. */
+  --size-h1: 32px;
+  --leading-h1: 40px;
+  --size-h2: 24px;
+  --leading-h2: 32px;
+  --size-h3: 20px;
+  --leading-h3: 28px;
+  --size-body: 16px;
+  --leading-body: 24px;
+  --size-compact: 14px;
+  --leading-compact: 20px;
+  --size-caption: 12px;
+  --leading-caption: 18px;
+  --size-code: 13px;
+  --leading-code: 21px;
+  /* Motion: 120 ms for hover/press, 180 ms for small reveals, 240 ms for panels; off with reduced motion. */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 240ms;
+  --font-ui: "Nunito Sans Variable", "Nunito Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-family: var(--font-ui);
+}
+
+/* Dark tokens: for the OS dark scheme unless the Telegram Mini App chose light, and whenever it chose dark.
+   applyThemeParams sets data-theme from Telegram's background, so the tokens Telegram does not set (warn, danger,
+   borders) match its text colour (KIN-111). Keep both blocks identical; contrast.test.ts checks it. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: var(--tg-theme-bg-color, #191916);
+    --surface: var(--tg-theme-secondary-bg-color, #242420);
+    --text: var(--tg-theme-text-color, #f9f6ec);
+    --muted: var(--tg-theme-hint-color, #bdbdae);
+    --primary: var(--tg-theme-button-color, #ffb928);
+    --primary-text: var(--tg-theme-button-text-color, #242420);
+    --primary-hover: var(--tg-theme-button-color, #ffd16a);
+    --accent: var(--tg-theme-button-color, #ffb928);
+    --link: var(--tg-theme-link-color, #ffd16a);
+    --border: #46463c;
+    --border-strong: #88887b; /* 4.9 / 4.3 / 4.1:1 */
+    --danger: #ff9aa5;
+    --danger-text: #242420;
+    --warn-bg: #2e2815;
+    --warn-border: #ffd16a;
+    --warn-text: #f9f6ec;
+    --warn-muted: #bdbdae;
+    --warn-link: #ffd16a;
+    --focus: #ffd16a;
+    --success: #88d2a5;
+    --info: #98c7ff;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: var(--tg-theme-bg-color, #191916);
+  --surface: var(--tg-theme-secondary-bg-color, #242420);
+  --text: var(--tg-theme-text-color, #f9f6ec);
+  --muted: var(--tg-theme-hint-color, #bdbdae);
+  --primary: var(--tg-theme-button-color, #ffb928);
+  --primary-text: var(--tg-theme-button-text-color, #242420);
+  --primary-hover: var(--tg-theme-button-color, #ffd16a);
+  --accent: var(--tg-theme-button-color, #ffb928);
+  --link: var(--tg-theme-link-color, #ffd16a);
+  --border: #46463c;
+  --border-strong: #88887b;
+  --danger: #ff9aa5;
+  --danger-text: #242420;
+  --warn-bg: #2e2815;
+  --warn-border: #ffd16a;
+  --warn-text: #f9f6ec;
+  --warn-muted: #bdbdae;
+  --warn-link: #ffd16a;
+  --focus: #ffd16a;
+  --success: #88d2a5;
+  --info: #98c7ff;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--size-body);
+  line-height: var(--leading-body);
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+a {
+  color: var(--link);
+}
+
+code,
+pre,
+kbd,
+samp {
+  font-family: var(--font-mono);
+  font-size: var(--size-code);
+  line-height: var(--leading-code);
+}
+
+h1 {
+  font-size: var(--size-h1);
+  line-height: var(--leading-h1);
+}
+h2 {
+  font-size: var(--size-h2);
+  line-height: var(--leading-h2);
+}
+h3 {
+  font-size: var(--size-h3);
+  line-height: var(--leading-h3);
+}
+h1,
+h2,
+h3 {
+  overflow-wrap: anywhere;
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.skip-link {
+  position: absolute;
+  left: var(--space);
+  top: -100px;
+  background: var(--primary);
+  color: var(--primary-text);
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  z-index: 10;
+}
+.skip-link:focus {
+  top: var(--space);
+}
+
+/* Layout (KIN-120, Brand System components.md): the header spans the top; from 1024 px the navigation is a sticky
+   248 px sidebar under it, below 1024 px a drawer that the Menu button opens between the header and the page. */
+.shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto 1fr;
+  grid-template-areas: "header" "sidebar" "main";
+  min-height: 100vh;
+}
+.topbar {
+  grid-area: header;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  min-height: var(--header);
+  padding: 8px var(--space);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+/* The Kindevai lockup: inline SVG whose Charcoal/Cream strokes take the text colour (BrandLogo.tsx). */
+.brand {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text);
+}
+.brand-logo {
+  display: block;
+  height: 36px;
+  width: auto;
+}
+.menu-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.menu-icon {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+.sidebar {
+  grid-area: sidebar;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.sidebar a {
+  display: flex;
+  align-items: center;
+  min-height: var(--tap);
+  padding: 0 12px;
+  border-radius: var(--radius);
+  color: var(--text);
+  text-decoration: none;
+  transition: background-color var(--motion-fast) ease-out;
+}
+.sidebar a:hover {
+  background: var(--bg);
+}
+.sidebar a[aria-current="page"] {
+  background: var(--bg);
+  font-weight: 700;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.nav-account {
+  margin-top: 8px;
+}
+.user-area {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.content {
+  grid-area: main;
+  width: 100%;
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: var(--space);
+}
+/* Long text stays readable on wide screens (brandbook: 72ch). */
+.content p {
+  max-width: 72ch;
+}
+@media (max-width: 1023.98px) {
+  .sidebar {
+    display: none;
+  }
+  .shell[data-nav="open"] .sidebar {
+    display: flex;
+  }
+}
+@media (min-width: 768px) {
+  .content {
+    padding: 24px;
+  }
+}
+@media (min-width: 1024px) {
+  /* Focused or skipped-to content never ends up under the sticky header (WCAG 2.4.11). */
+  html {
+    scroll-padding-top: var(--header);
+  }
+  /* The sidebar column's fill and divider run the full page height; the sticky nav itself is one screen tall. */
+  .shell {
+    grid-template-columns: var(--sidebar) minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+    grid-template-areas: "header header" "sidebar main";
+    background-image: linear-gradient(
+      to right,
+      var(--surface) calc(var(--sidebar) - 1px),
+      var(--border) calc(var(--sidebar) - 1px) var(--sidebar),
+      transparent var(--sidebar)
+    );
+  }
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    flex-wrap: nowrap;
+    padding: 0 32px 0 var(--space);
+  }
+  .brand {
+    width: calc(var(--sidebar) - 2 * var(--space));
+  }
+  .menu-button {
+    display: none;
+  }
+  .sidebar {
+    display: flex;
+    position: sticky;
+    top: var(--header);
+    max-height: calc(100vh - var(--header));
+    overflow-y: auto;
+    align-self: start;
+    padding: var(--space) 12px;
+    border-bottom: 0;
+    border-right: 1px solid var(--border);
+  }
+  .content {
+    padding: 24px 32px;
+  }
+}
+.content:focus {
+  outline: none;
+}
+.center {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: var(--space);
+}
+
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.page-heading {
+  margin: 8px 0;
+  font-size: var(--size-h1);
+  line-height: var(--leading-h1);
+}
+.page-heading:focus {
+  outline: none;
+}
+.breadcrumbs {
+  margin: 0;
+}
+.section {
+  margin-top: 24px;
+}
+.muted {
+  color: var(--muted);
+}
+
+/* Cards and lists */
+.cards {
+  display: grid;
+  gap: var(--space);
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space);
+}
+.card h2 {
+  margin-top: 0;
+  font-size: var(--size-h3);
+  line-height: var(--leading-h3);
+}
+.card.warn {
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  --text: var(--warn-text);
+  --muted: var(--warn-muted);
+  --link: var(--warn-link);
+  border-color: var(--warn-border);
+}
+.project-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.project-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+.project-link {
+  font-weight: 600;
+  min-height: var(--tap);
+  display: inline-flex;
+  align-items: center;
+  flex: 1;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: var(--size-compact);
+  line-height: var(--leading-compact);
+}
+/* State tones (KIN-120): the text names the state, the icon and colour repeat it. */
+.badge-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+.tone-info {
+  border-color: var(--info);
+}
+.tone-info .badge-icon {
+  color: var(--info);
+}
+.tone-success {
+  border-color: var(--success);
+}
+.tone-success .badge-icon {
+  color: var(--success);
+}
+.tone-warning {
+  border-color: var(--warn-border);
+}
+.tone-warning .badge-icon {
+  color: var(--warn-border);
+}
+.tone-danger {
+  border-color: var(--danger);
+}
+.tone-danger .badge-icon {
+  color: var(--danger);
+}
+.empty-state {
+  text-align: center;
+  padding: 32px var(--space);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-lg);
+}
+.empty-state h2 {
+  margin: 8px 0;
+  font-size: var(--size-h3);
+  line-height: var(--leading-h3);
+}
+.empty-state p {
+  margin-inline: auto;
+}
+/* Kibi (KIN-120): decorative, sized to sit above the empty state's heading. */
+.kibi {
+  display: block;
+  width: 96px;
+  height: auto;
+  margin: 0 auto;
+  color: var(--text);
+}
+
+.table-wrap {
+  overflow-x: auto;
+  /* contains absolutely positioned visually-hidden labels, which would otherwise widen the page */
+  position: relative;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th,
+td {
+  text-align: left;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+/* Digits line up in columns of counts, sizes and times (brandbook §04). */
+td {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Forms */
+form {
+  display: grid;
+  gap: var(--space);
+}
+.form-card {
+  margin: var(--space) 0;
+}
+.inline-form {
+  margin-top: var(--space);
+}
+.field {
+  display: grid;
+  gap: 4px;
+}
+.field label {
+  font-weight: 600;
+}
+input,
+select,
+textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  min-height: var(--tap);
+  padding: 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  width: 100%;
+}
+input[aria-invalid="true"],
+select[aria-invalid="true"],
+textarea[aria-invalid="true"] {
+  border: 2px solid var(--danger);
+}
+.field-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--size-compact);
+  line-height: var(--leading-compact);
+}
+.field-error {
+  margin: 0;
+  color: var(--danger);
+  font-weight: 600;
+}
+.field-error::before {
+  content: "⚠ ";
+}
+.form-alert {
+  margin: 0;
+  padding: 12px;
+  border-radius: var(--radius);
+  border: 2px solid var(--danger);
+  color: var(--text);
+}
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.button {
+  font: inherit;
+  min-height: var(--tap);
+  min-width: var(--tap);
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) ease-out,
+    border-color var(--motion-fast) ease-out;
+}
+.button.primary {
+  background: var(--primary);
+  color: var(--primary-text);
+  border-color: var(--primary);
+  font-weight: 700;
+}
+.button.primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+  border-color: var(--primary-hover);
+}
+.button.danger {
+  background: var(--danger);
+  color: var(--danger-text);
+  border-color: var(--danger);
+}
+.button.subtle {
+  background: transparent;
+}
+.button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+/* Feedback */
+.loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  padding: var(--space) 0;
+}
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.error-state {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+.notice {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--space) + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  max-width: calc(100% - 2 * var(--space));
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  background: var(--text);
+  color: var(--bg);
+}
+.notice[data-visible="false"] {
+  padding: 0;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 45%);
+  display: grid;
+  place-items: center;
+  padding: var(--space);
+  z-index: 20;
+}
+.dialog {
+  background: var(--bg);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 20px;
+  max-width: 420px;
+  width: 100%;
+}
+.dialog-wide {
+  max-width: 640px;
+  max-height: calc(100vh - 2 * var(--space));
+  overflow-y: auto;
+}
+.dialog .draft {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.dialog h2 {
+  margin-top: 0;
+  font-size: var(--size-h3);
+  line-height: var(--leading-h3);
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.language-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.language-switcher select {
+  width: auto;
+}
+
+@media (max-width: 600px) {
+  .topbar {
+    padding: 8px 12px;
+    gap: 8px;
+  }
+  .brand-logo {
+    height: 28px;
+  }
+  .user-area {
+    gap: 4px;
+  }
+  .user-area .user {
+    display: none; /* the login is shown on wider screens; sign-out stays reachable */
+  }
+  /* Keep the label for screen readers, save the width on phones. */
+  .language-switcher label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+.narrow {
+  max-width: 480px;
+}
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.secret h2:focus,
+.secret h3:focus {
+  outline: none;
+}
+.page-section {
+  margin-top: calc(var(--space) * 2);
+}
+.secret-value.link {
+  font-size: var(--size-body);
+  line-height: var(--leading-body);
+  letter-spacing: 0;
+}
+.secret {
+  border: 2px solid var(--accent);
+  margin: var(--space) 0;
+}
+.secret-value {
+  display: inline-block;
+  font-size: var(--size-h3);
+  line-height: var(--leading-h3);
+  letter-spacing: 0.05em;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  user-select: all;
+  word-break: break-all;
+}
+
+/* Audit log */
+@media (min-width: 601px) {
+  .filters {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    align-items: start;
+  }
+  .filters .form-actions,
+  .filters .form-alert {
+    grid-column: 1 / -1;
+  }
+}
+/* Runners (KIN-17) */
+.steps {
+  padding-left: 1.25rem;
+}
+.steps li {
+  margin: 0.5rem 0;
+}
+.command {
+  margin: 0.5rem 0;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.fingerprint {
+  word-break: break-all;
+}
+.warning {
+  padding: 8px 12px;
+  border-left: 4px solid var(--accent);
+  background: var(--bg);
+}
+.details {
+  display: grid;
+  grid-template-columns: minmax(8rem, max-content) 1fr;
+  gap: 0.25rem 1rem;
+}
+.details dt {
+  font-weight: 600;
+}
+.details dd {
+  margin: 0;
+  min-width: 0;
+}
+@media (max-width: 480px) {
+  .details {
+    grid-template-columns: 1fr;
+  }
+  .details dd {
+    margin-bottom: 0.5rem;
+  }
+}
+fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+legend {
+  font-weight: 600;
+  padding: 0;
+}
+.check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+}
+.check input {
+  width: 20px;
+  height: 20px;
+}
+
+.narrow > .card {
+  margin-top: 1.5rem;
+}
+
+/* Approval Center (KIN-24) */
+textarea {
+  resize: vertical;
+}
+.filter-group {
+  border: none;
+  padding: 0;
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: var(--space) 0;
+}
+.filter-group .button[aria-pressed="true"] {
+  font-weight: 700;
+  border-width: 2px;
+}
+.risk-L2,
+.risk-L3,
+.approval-pending {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  --text: var(--warn-text);
+  --muted: var(--warn-muted);
+  --link: var(--warn-link);
+}
+.approval-rejected {
+  border-color: var(--danger);
+}
+.paths {
+  margin: 0;
+  padding-left: 1.2em;
+  overflow-wrap: anywhere;
+}
+.level-badge.level-warning,
+.level-badge.level-high {
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  --text: var(--warn-text);
+  --muted: var(--warn-muted);
+  --link: var(--warn-link);
+  border-color: var(--warn-border);
+}
+.level-badge.level-critical {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--danger-text);
+}
+.level-badge.level-critical .badge-icon {
+  color: inherit;
+}
+/* Network profiles (KIN-30): stacked cards of profiles and test results. */
+.card-list {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+.card-list h3 {
+  margin-top: 0;
+}
+/* Alert Center (KIN-40) */
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.nav-count {
+  display: inline-block;
+  min-width: 1.5em;
+  margin-inline-start: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  --text: var(--warn-text);
+  --muted: var(--warn-muted);
+  --link: var(--warn-link);
+  border: 1px solid var(--warn-border);
+  font-size: var(--size-caption);
+  line-height: var(--leading-caption);
+  text-align: center;
+}
+.small {
+  font-size: var(--size-compact);
+  line-height: var(--leading-compact);
+}

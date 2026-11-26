@@ -1,0 +1,40 @@
+[
+  {
+    "kind": "session",
+    "session": "8b3a828a-721f-406b-8805-c5cd68783388",
+    "model": "claude-haiku-5-5",
+    "version": "2.1.331"
+  },
+  {
+    "kind": "failure",
+    "session": "8b3a828a-721f-406b-8805-c5cd68783388",
+    "failure": {
+      "code": "cli_limit",
+      "cause": "auth",
+      "message": "Not logged in · Please run /login"
+    }
+  },
+  {
+    "kind": "failure",
+    "session": "8b3a828a-721f-406b-8805-c5cd68783388",
+    "failure": {
+      "code": "cli_limit",
+      "cause": "auth",
+      "message": "Not logged in · Please run /login"
+    }
+  },
+  {
+    "kind": "result",
+    "session": "8b3a828a-721f-406b-8805-c5cd68783388",
+    "text": "Not logged in · Please run /login",
+    "usage": {
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "cacheReadTokens": 0,
+      "cacheWriteTokens": 0,
+      "costUsd": 0,
+      "turns": 1,
+      "durationMs": 105
+    }
+  }
+]

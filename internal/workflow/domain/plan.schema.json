@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kindevai.dev/schemas/plan/v1.json",
+  "title": "kindevai task plan v1",
+  "description": "The planner's output: a DAG of steps. Unknown fields are refused.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "risk", "maxParallel", "steps"],
+  "properties": {
+    "summary": {"type": "string", "maxLength": 4000, "description": "What the plan changes and why, for the Owner."},
+    "risk": {"enum": ["L0", "L1", "L2", "L3"], "description": "Proposed risk; the policy may only raise it."},
+    "maxParallel": {"type": "integer", "minimum": 1, "maximum": 8, "description": "Steps that may run at once."},
+    "steps": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"$ref": "#/$defs/step"}},
+    "contracts": {"$ref": "#/$defs/impact", "description": "API, protocol or schema contracts the plan changes."},
+    "migrations": {"$ref": "#/$defs/impact", "description": "Database migrations the plan adds."},
+    "tests": {"$ref": "#/$defs/impact", "description": "Tests that prove the acceptance criteria."},
+    "docs": {"$ref": "#/$defs/impact", "description": "Documentation the change affects."}
+  },
+  "$defs": {
+    "impact": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {"type": "string", "minLength": 1, "maxLength": 500, "pattern": "^[^\\n\\t]+$"}
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "title", "repository", "scope", "dependsOn", "capabilities"],
+      "properties": {
+        "key": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$", "description": "Unique step id."},
+        "title": {"type": "string", "minLength": 1, "maxLength": 200},
+        "repository": {"type": "string", "description": "One of the project's repositories (owner/name)."},
+        "role": {"enum": ["implementer", "reviewer"], "description": "Default implementer."},
+        "scope": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"type": "string", "maxLength": 512},
+          "description": "Repository-relative paths or globs the step may change; nothing outside them."
+        },
+        "dependsOn": {"type": "array", "items": {"type": "string"}, "description": "Keys of steps that must succeed first."},
+        "capabilities": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"},
+          "description": "Runner tools the step needs, e.g. go, node, docker."
+        }
+      }
+    }
+  }
+}

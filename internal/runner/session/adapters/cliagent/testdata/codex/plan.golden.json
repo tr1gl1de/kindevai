@@ -1,0 +1,31 @@
+[
+  {
+    "kind": "session",
+    "session": "0199a213-81c0-7800-8aa1-bbab2a035a60"
+  },
+  {
+    "kind": "tool_use",
+    "session": "0199a213-81c0-7800-8aa1-bbab2a035a60",
+    "tool": "command",
+    "input": "bash -lc 'rg -l login'"
+  },
+  {
+    "kind": "text",
+    "session": "0199a213-81c0-7800-8aa1-bbab2a035a60",
+    "text": "{\"summary\": \"Add a login endpoint and a review\", \"risk\": \"L1\", \"maxParallel\": 1, \"steps\": [{\"key\": \"api\", \"title\": \"Login endpoint\", \"repository\": \"acme/app\", \"scope\": [\"internal/login/**\"], \"dependsOn\": [], \"capabilities\": [\"go\"]}, {\"key\": \"review\", \"title\": \"Review the endpoint\", \"repository\": \"acme/app\", \"role\": \"reviewer\", \"scope\": [], \"dependsOn\": [\"api\"], \"capabilities\": []}], \"tests\": [\"login handler unit tests\"], \"docs\": [\"README: login\"]}"
+  },
+  {
+    "kind": "result",
+    "session": "0199a213-81c0-7800-8aa1-bbab2a035a60",
+    "text": "{\"summary\": \"Add a login endpoint and a review\", \"risk\": \"L1\", \"maxParallel\": 1, \"steps\": [{\"key\": \"api\", \"title\": \"Login endpoint\", \"repository\": \"acme/app\", \"scope\": [\"internal/login/**\"], \"dependsOn\": [], \"capabilities\": [\"go\"]}, {\"key\": \"review\", \"title\": \"Review the endpoint\", \"repository\": \"acme/app\", \"role\": \"reviewer\", \"scope\": [], \"dependsOn\": [\"api\"], \"capabilities\": []}], \"tests\": [\"login handler unit tests\"], \"docs\": [\"README: login\"]}",
+    "usage": {
+      "inputTokens": 18000,
+      "outputTokens": 310,
+      "cacheReadTokens": 12000,
+      "cacheWriteTokens": 0,
+      "costUsd": 0,
+      "turns": 1,
+      "durationMs": 0
+    }
+  }
+]

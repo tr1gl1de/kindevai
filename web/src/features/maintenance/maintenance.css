@@ -1,0 +1,21 @@
+/* Maintenance mode banner (KIN-41). */
+.maintenance-banner {
+  margin-bottom: var(--space);
+  padding: 12px var(--space);
+  border: 1px solid var(--warn-border);
+  border-left-width: 4px;
+  border-radius: var(--radius);
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  --text: var(--warn-text);
+  --muted: var(--warn-muted);
+  --link: var(--warn-link);
+}
+.maintenance-banner h2 {
+  margin: 0 0 4px;
+  font-size: var(--size-body);
+  line-height: var(--leading-body);
+}
+.maintenance-banner p {
+  margin: 4px 0;
+}

@@ -1,0 +1,40 @@
+/* Agent Management (KIN-33) */
+.bindings {
+  display: grid;
+  gap: var(--space);
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  align-items: start;
+}
+.binding-form {
+  align-content: start;
+}
+.binding-form h3,
+.binding-form > p {
+  margin: 0;
+}
+.binding-form .choice {
+  display: grid;
+  gap: 4px;
+  justify-items: stretch;
+  margin-bottom: 0.75rem;
+}
+.binding-form .choice > .button {
+  justify-self: start;
+}
+@media (max-width: 600px) {
+  .agents-table thead {
+    display: none;
+  }
+  .agents-table tr {
+    display: grid;
+    gap: 4px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .agents-table th,
+  .agents-table td {
+    display: block;
+    border: 0;
+    padding: 0;
+  }
+}

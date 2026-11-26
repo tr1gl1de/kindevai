@@ -4,7 +4,7 @@
 !.env.example
 *.pem
 *.key
-secrets/
+/secrets/
 
 # --- Platform runtime data (SQLite WAL, encryption key, artifacts) --------
 data/
@@ -27,6 +27,9 @@ go.work.sum
 # --- Frontend (React / TypeScript) ---------------------------------------
 node_modules/
 dist/
+# web/dist holds a committed placeholder; the Vite build goes to web/dist/app
+!/web/dist/
+/web/dist/app/
 build/
 .vite/
 *.tsbuildinfo
@@ -41,6 +44,7 @@ caddy_config/
 # --- Claude Code / AI tooling local state --------------------------------
 .claude/settings.local.json
 .claude/worktrees/
+.worktree.env
 
 # --- OS / editors ---------------------------------------------------------
 .DS_Store
@@ -49,3 +53,6 @@ Thumbs.db
 .vscode/
 *.swp
 *~
+
+# Python bytecode (Claude Code hooks)
+__pycache__/

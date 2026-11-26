@@ -1,0 +1,45 @@
+[
+  {
+    "kind": "session",
+    "session": "6e7f0a1b-2c3d-4e5f-8a9b-0c1d2e3f4a5b",
+    "model": "claude-sonnet-4-5",
+    "version": "2.1.331"
+  },
+  {
+    "kind": "text",
+    "session": "6e7f0a1b-2c3d-4e5f-8a9b-0c1d2e3f4a5b",
+    "text": "Editing the file."
+  },
+  {
+    "kind": "tool_use",
+    "session": "6e7f0a1b-2c3d-4e5f-8a9b-0c1d2e3f4a5b",
+    "tool": "Edit",
+    "input": "{\"file_path\":\"/work/a.go\",\"old_string\":\"a\",\"new_string\":\"b\"}"
+  },
+  {
+    "kind": "retrying",
+    "session": "6e7f0a1b-2c3d-4e5f-8a9b-0c1d2e3f4a5b",
+    "text": "overloaded"
+  },
+  {
+    "kind": "failure",
+    "session": "6e7f0a1b-2c3d-4e5f-8a9b-0c1d2e3f4a5b",
+    "failure": {
+      "code": "cli_error",
+      "message": "error_max_turns"
+    }
+  },
+  {
+    "kind": "result",
+    "session": "6e7f0a1b-2c3d-4e5f-8a9b-0c1d2e3f4a5b",
+    "usage": {
+      "inputTokens": 10,
+      "outputTokens": 20,
+      "cacheReadTokens": 100,
+      "cacheWriteTokens": 5,
+      "costUsd": 0.02,
+      "turns": 1,
+      "durationMs": 4000
+    }
+  }
+]

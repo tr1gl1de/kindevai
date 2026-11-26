@@ -1,0 +1,15 @@
+.git
+.github
+.claude
+.env
+.env.*
+!.env.example
+.worktree.env
+data/
+bin/
+coverage.*
+web/node_modules
+web/dist/app
+web/coverage
+**/*.db
+**/*.db-*

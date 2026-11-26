@@ -1,0 +1,18 @@
+/* Sign-in and setup pages: the centred auth layout. */
+.auth-layout {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+.auth-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px var(--space);
+}
+.auth-card {
+  width: 100%;
+  max-width: 440px;
+  margin: 0 auto;
+  padding: var(--space);
+}
